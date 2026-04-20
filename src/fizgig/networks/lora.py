@@ -1,0 +1,1497 @@
+# LoRA network module
+# reference:
+# https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
+# https://github.com/cloneofsimo/lora/blob/master/lora_diffusion/lora.py
+
+import ast
+import hashlib
+import math
+import os
+import re
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Type, Union
+
+import torch
+import torch.nn as nn
+
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+
+class LoRAModule(torch.nn.Module):
+    """
+    replaces forward method of the original Linear, instead of replacing the original Linear module.
+    """
+
+    def __init__(
+        self,
+        lora_name,
+        org_module: torch.nn.Module,
+        multiplier=1.0,
+        lora_dim=4,
+        alpha=1,
+        dropout=None,
+        rank_dropout=None,
+        module_dropout=None,
+        split_dims: Optional[List[int]] = None,
+    ):
+        """
+        if alpha == 0 or None, alpha is rank (no scaling).
+
+        split_dims is used to mimic the split qkv of multi-head attention.
+        """
+        super().__init__()
+        self.lora_name = lora_name
+
+        if org_module.__class__.__name__ == "Conv2d":
+            in_dim = org_module.in_channels
+            out_dim = org_module.out_channels
+        else:
+            in_dim = org_module.in_features
+            out_dim = org_module.out_features
+
+        self.lora_dim = lora_dim
+        self.split_dims = split_dims
+
+        if split_dims is None:
+            if org_module.__class__.__name__ == "Conv2d":
+                kernel_size = org_module.kernel_size
+                stride = org_module.stride
+                padding = org_module.padding
+                self.lora_down = torch.nn.Conv2d(in_dim, self.lora_dim, kernel_size, stride, padding, bias=False)
+                self.lora_up = torch.nn.Conv2d(self.lora_dim, out_dim, (1, 1), (1, 1), bias=False)
+            else:
+                self.lora_down = torch.nn.Linear(in_dim, self.lora_dim, bias=False)
+                self.lora_up = torch.nn.Linear(self.lora_dim, out_dim, bias=False)
+
+            torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+            torch.nn.init.zeros_(self.lora_up.weight)
+        else:
+            # conv2d not supported for split_dims
+            assert sum(split_dims) == out_dim, "sum of split_dims must be equal to out_dim"
+            assert org_module.__class__.__name__ == "Linear", "split_dims is only supported for Linear"
+            self.lora_down = torch.nn.ModuleList(
+                [torch.nn.Linear(in_dim, self.lora_dim, bias=False) for _ in range(len(split_dims))]
+            )
+            self.lora_up = torch.nn.ModuleList([torch.nn.Linear(self.lora_dim, split_dim, bias=False) for split_dim in split_dims])
+            for lora_down in self.lora_down:
+                torch.nn.init.kaiming_uniform_(lora_down.weight, a=math.sqrt(5))
+            for lora_up in self.lora_up:
+                torch.nn.init.zeros_(lora_up.weight)
+
+        if type(alpha) == torch.Tensor:
+            alpha = alpha.detach().float().numpy()  # without casting, bf16 causes error
+        alpha = self.lora_dim if alpha is None or alpha == 0 else alpha
+        self.scale = alpha / self.lora_dim
+        self.register_buffer("alpha", torch.tensor(alpha))  # for save/load
+
+        # same as microsoft's
+        self.multiplier = multiplier
+        self.org_module = org_module  # remove in applying
+        self.dropout = dropout
+        self.rank_dropout = rank_dropout
+        self.module_dropout = module_dropout
+
+    def apply_to(self):
+        self.org_forward = self.org_module.forward
+        self.org_module.forward = self.forward
+        del self.org_module
+
+    def forward(self, x):
+        org_forwarded = self.org_forward(x)
+
+        # module dropout
+        if self.module_dropout is not None and self.training:
+            if torch.rand(1) < self.module_dropout:
+                return org_forwarded
+
+        if self.split_dims is None:
+            lx = self.lora_down(x)
+
+            # normal dropout
+            if self.dropout is not None and self.training:
+                lx = torch.nn.functional.dropout(lx, p=self.dropout)
+
+            # rank dropout
+            if self.rank_dropout is not None and self.training:
+                mask = torch.rand((lx.size(0), self.lora_dim), device=lx.device) > self.rank_dropout
+                if len(lx.size()) == 3:
+                    mask = mask.unsqueeze(1)  # for Text Encoder
+                elif len(lx.size()) == 4:
+                    mask = mask.unsqueeze(-1).unsqueeze(-1)  # for Conv2d
+                lx = lx * mask
+
+                # scaling for rank dropout: treat as if the rank is changed
+                scale = self.scale * (1.0 / (1.0 - self.rank_dropout))  # redundant for readability
+            else:
+                scale = self.scale
+
+            lx = self.lora_up(lx)
+
+            return org_forwarded + lx * self.multiplier * scale
+        else:
+            lxs = [lora_down(x) for lora_down in self.lora_down]
+
+            # normal dropout
+            if self.dropout is not None and self.training:
+                lxs = [torch.nn.functional.dropout(lx, p=self.dropout) for lx in lxs]
+
+            # rank dropout
+            if self.rank_dropout is not None and self.training:
+                masks = [torch.rand((lx.size(0), self.lora_dim), device=lx.device) > self.rank_dropout for lx in lxs]
+                for i in range(len(lxs)):
+                    if len(lxs[i].size()) == 3:
+                        masks[i] = masks[i].unsqueeze(1)
+                    elif len(lxs[i].size()) == 4:
+                        masks[i] = masks[i].unsqueeze(-1).unsqueeze(-1)
+                    lxs[i] = lxs[i] * masks[i]
+
+                # scaling for rank dropout: treat as if the rank is changed
+                scale = self.scale * (1.0 / (1.0 - self.rank_dropout))  # redundant for readability
+            else:
+                scale = self.scale
+
+            lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
+
+            return org_forwarded + torch.cat(lxs, dim=-1) * self.multiplier * scale
+
+
+class LoRAInfModule(LoRAModule):
+    def __init__(
+        self,
+        lora_name,
+        org_module: torch.nn.Module,
+        multiplier=1.0,
+        lora_dim=4,
+        alpha=1,
+        **kwargs,
+    ):
+        # no dropout for inference
+        super().__init__(lora_name, org_module, multiplier, lora_dim, alpha)
+
+        self.org_module_ref = [org_module]  # for reference
+        self.enabled = True
+        self.network: LoRANetwork = None
+
+    def set_network(self, network):
+        self.network = network
+
+    def merge_to(self, sd, dtype, device, non_blocking=False):
+        # extract weight from org_module
+        org_sd = self.org_module.state_dict()
+        weight = org_sd["weight"]
+        org_dtype = weight.dtype
+        org_device = weight.device
+        weight = weight.to(device, dtype=torch.float, non_blocking=non_blocking)  # for calculation
+
+        if dtype is None:
+            dtype = org_dtype
+        if device is None:
+            device = org_device
+
+        if self.split_dims is None:
+            # get up/down weight
+            down_weight = sd["lora_down.weight"].to(device, dtype=torch.float, non_blocking=non_blocking)
+            up_weight = sd["lora_up.weight"].to(device, dtype=torch.float, non_blocking=non_blocking)
+
+            # merge weight
+            if len(weight.size()) == 2:
+                # linear
+                weight = weight + self.multiplier * (up_weight @ down_weight) * self.scale
+            elif down_weight.size()[2:4] == (1, 1):
+                # conv2d 1x1
+                weight = (
+                    weight
+                    + self.multiplier
+                    * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
+                    * self.scale
+                )
+            else:
+                # conv2d 3x3
+                conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
+                weight = weight + self.multiplier * conved * self.scale
+
+            # set weight to org_module
+            org_sd["weight"] = weight.to(org_device, dtype=dtype)  # back to CPU without non_blocking
+            self.org_module.load_state_dict(org_sd)
+        else:
+            # split_dims
+            total_dims = sum(self.split_dims)
+            for i in range(len(self.split_dims)):
+                # get up/down weight
+                down_weight = sd[f"lora_down.{i}.weight"].to(device, torch.float, non_blocking=non_blocking)  # (rank, in_dim)
+                up_weight = sd[f"lora_up.{i}.weight"].to(device, torch.float, non_blocking=non_blocking)  # (split dim, rank)
+
+                # pad up_weight -> (total_dims, rank)
+                padded_up_weight = torch.zeros((total_dims, up_weight.size(0)), device=device, dtype=torch.float)
+                padded_up_weight[sum(self.split_dims[:i]) : sum(self.split_dims[: i + 1])] = up_weight
+
+                # merge weight
+                weight = weight + self.multiplier * (up_weight @ down_weight) * self.scale
+
+            # set weight to org_module
+            org_sd["weight"] = weight.to(org_device, dtype)  # back to CPU without non_blocking
+            self.org_module.load_state_dict(org_sd)
+
+    # return weight for merge
+    def get_weight(self, multiplier=None):
+        if multiplier is None:
+            multiplier = self.multiplier
+
+        # get up/down weight from module
+        up_weight = self.lora_up.weight.to(torch.float)
+        down_weight = self.lora_down.weight.to(torch.float)
+
+        # pre-calculated weight
+        if len(down_weight.size()) == 2:
+            # linear
+            weight = self.multiplier * (up_weight @ down_weight) * self.scale
+        elif down_weight.size()[2:4] == (1, 1):
+            # conv2d 1x1
+            weight = (
+                self.multiplier
+                * (up_weight.squeeze(3).squeeze(2) @ down_weight.squeeze(3).squeeze(2)).unsqueeze(2).unsqueeze(3)
+                * self.scale
+            )
+        else:
+            # conv2d 3x3
+            conved = torch.nn.functional.conv2d(down_weight.permute(1, 0, 2, 3), up_weight).permute(1, 0, 2, 3)
+            weight = self.multiplier * conved * self.scale
+
+        return weight
+
+    def default_forward(self, x):
+        if self.split_dims is None:
+            lx = self.lora_down(x)
+            lx = self.lora_up(lx)
+            return self.org_forward(x) + lx * self.multiplier * self.scale
+        else:
+            lxs = [lora_down(x) for lora_down in self.lora_down]
+            lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
+            return self.org_forward(x) + torch.cat(lxs, dim=-1) * self.multiplier * self.scale
+
+    def compute_delta(self, x: torch.Tensor) -> torch.Tensor:
+        """Return just the LoRA contribution (base output NOT added) for a given
+        input x. Used by the extractor's activation-capture hook so it works
+        uniformly across standard LoRA and LyCORIS variants."""
+        if self.split_dims is None:
+            lx = self.lora_down(x)
+            lx = self.lora_up(lx)
+            return lx * self.multiplier * self.scale
+        lxs = [lora_down(x) for lora_down in self.lora_down]
+        lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
+        return torch.cat(lxs, dim=-1) * self.multiplier * self.scale
+
+    def forward(self, x):
+        if not self.enabled:
+            return self.org_forward(x)
+        return self.default_forward(x)
+
+
+# ---------------------------------------------------------------------------
+# LyCORIS modules: LoKR (Kronecker-product) and LoHa (Hadamard-product)
+#
+# Quacks like LoRAInfModule — same `.lora_name` / `.enabled` / `.multiplier`
+# / `.apply_to()` interface, so LoRANetwork's set_module_*_by_pattern, Repair
+# Studio sliders, and the profiler all work unchanged. Parameters are named to
+# match the file's key suffixes (lokr_w1, lokr_w2, hada_w1_a, ...) so
+# load_state_dict populates them directly.
+# ---------------------------------------------------------------------------
+
+def _lokr_forward_update(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
+                        a: int, b: int, c: int, d: int) -> torch.Tensor:
+    """Compute kron(w1, w2) @ x efficiently via the identity
+       kron(A, B) @ vec(X) = vec(B @ X @ A.T)   (column-major vec)
+
+    Shapes:  x (..., N=b·d)  →  out (..., M=a·c)
+    """
+    orig = x.shape[:-1]
+    # x viewed as column-major vec(X) with X of shape (d, b).
+    # Row-major x.reshape(b, d) gives X.T; transpose gives X of shape (d, b).
+    X = x.reshape(*orig, b, d).transpose(-1, -2)              # (..., d, b)
+    Y = w2 @ X @ w1.transpose(-1, -2)                          # (..., c, a)
+    return Y.transpose(-1, -2).reshape(*orig, a * c)           # (..., M=a·c)
+
+
+class LoKRInfModule(torch.nn.Module):
+    """Inference-time LoKR module. Stores w1 (a,b) and w2 (c,d) — or their
+    low-rank factors w1_a (a,k1) w1_b (k1,b) / w2_a (c,k2) w2_b (k2,d) —
+    and applies update = multiplier · scale · kron(w1, w2) @ x additively.
+
+    Scale handling: if alpha looks like a sentinel (very large, e.g. 1e10
+    used by Comfy-Realtime-Lora refined exports to mean "scale is already
+    baked into the weights"), scale = 1.0. Otherwise scale = alpha / dim
+    following the standard LyCORIS convention.
+    """
+
+    _ALPHA_SENTINEL_THRESHOLD = 1e6  # alpha >= this → treat as "scale = 1.0"
+
+    def __init__(self, lora_name: str, org_module: torch.nn.Module,
+                 multiplier: float, alpha: float,
+                 a: int, b: int, c: int, d: int,
+                 k1: Optional[int] = None, k2: Optional[int] = None):
+        super().__init__()
+        self.lora_name = lora_name
+        self.a, self.b, self.c, self.d = a, b, c, d
+        self.k1, self.k2 = k1, k2
+        self.w1_decomposed = k1 is not None
+        self.w2_decomposed = k2 is not None
+
+        # Placeholder parameters — real values come from load_state_dict().
+        if self.w1_decomposed:
+            self.lokr_w1_a = torch.nn.Parameter(torch.zeros(a, k1))
+            self.lokr_w1_b = torch.nn.Parameter(torch.zeros(k1, b))
+        else:
+            self.lokr_w1 = torch.nn.Parameter(torch.zeros(a, b))
+        if self.w2_decomposed:
+            self.lokr_w2_a = torch.nn.Parameter(torch.zeros(c, k2))
+            self.lokr_w2_b = torch.nn.Parameter(torch.zeros(k2, d))
+        else:
+            self.lokr_w2 = torch.nn.Parameter(torch.zeros(c, d))
+
+        # Alpha as a buffer (matches standard LoRA convention; saves in state_dict).
+        self.register_buffer("alpha", torch.tensor(float(alpha)))
+        if alpha >= self._ALPHA_SENTINEL_THRESHOLD:
+            self.scale = 1.0  # refined-export sentinel → scale baked in
+        else:
+            # LyCORIS convention: scale = alpha / dim, dim = min of active rank dims
+            dim_candidates = []
+            if self.w1_decomposed and k1 is not None:
+                dim_candidates.append(k1)
+            if self.w2_decomposed and k2 is not None:
+                dim_candidates.append(k2)
+            if not dim_candidates:
+                # No decomposition — use a safe dim of 1 so scale = alpha (LyCORIS default).
+                dim_candidates.append(1)
+            dim = max(1, min(dim_candidates))
+            self.scale = float(alpha) / dim
+
+        self.multiplier = float(multiplier)
+        self.enabled = True
+
+        # LoRAInfModule compat fields so profiler / extractor code that queries
+        # them doesn't crash when given a LoKR module.
+        self.lora_dim = k1 if k1 is not None else a
+        self.org_module = org_module
+        self.org_module_ref = [org_module]
+        self.split_dims = None
+
+    def apply_to(self):
+        self.org_forward = self.org_module.forward
+        self.org_module.forward = self.forward
+        del self.org_module
+
+    def _w1(self) -> torch.Tensor:
+        return self.lokr_w1_a @ self.lokr_w1_b if self.w1_decomposed else self.lokr_w1
+
+    def _w2(self) -> torch.Tensor:
+        return self.lokr_w2_a @ self.lokr_w2_b if self.w2_decomposed else self.lokr_w2
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        org = self.org_forward(x)
+        if not self.enabled or self.multiplier == 0.0:
+            return org
+        update = _lokr_forward_update(x, self._w1(), self._w2(),
+                                      self.a, self.b, self.c, self.d)
+        return org + self.multiplier * self.scale * update
+
+    def compute_delta(self, x: torch.Tensor) -> torch.Tensor:
+        """LoKR contribution for input x (base NOT included)."""
+        update = _lokr_forward_update(x, self._w1(), self._w2(),
+                                      self.a, self.b, self.c, self.d)
+        return self.multiplier * self.scale * update
+
+    # Inference merge — materializes kron(w1, w2) once and adds to base weight.
+    # Not fast but only done once per LoRA load via pipeline.load_lora.
+    def merge_to(self, sd, dtype, device, non_blocking=False):
+        org_sd = self.org_module.state_dict()
+        weight = org_sd["weight"]
+        org_dtype, org_device = weight.dtype, weight.device
+        w = weight.to(device, dtype=torch.float, non_blocking=non_blocking)
+        w1 = self._w1().to(device, dtype=torch.float)
+        w2 = self._w2().to(device, dtype=torch.float)
+        kron = torch.kron(w1, w2)  # (a·c, b·d) = (out, in)
+        if kron.shape != w.shape:
+            logger.warning(f"{self.lora_name}: kron shape {list(kron.shape)} != weight shape {list(w.shape)}, skipping merge")
+            return
+        w = w + self.multiplier * self.scale * kron
+        org_sd["weight"] = w.to(org_device, dtype=org_dtype if dtype is None else dtype)
+        self.org_module.load_state_dict(org_sd)
+
+
+class LoHaInfModule(torch.nn.Module):
+    """Inference-time LoHa module. Stores w1 = w1_a @ w1_b and w2 = w2_a @ w2_b,
+    applies update = multiplier · scale · (W1 ⊙ W2) @ x additively.
+
+    Unlike LoKR, LoHa can't avoid materializing W1 and W2 each forward (the
+    Hadamard product doesn't factor). Per-call cost is modest (~2× standard
+    LoRA forward) and peak VRAM stays the same as standard LoRA because the
+    materialized tensors are released after the update is added to org output.
+    """
+
+    _ALPHA_SENTINEL_THRESHOLD = 1e6
+
+    def __init__(self, lora_name: str, org_module: torch.nn.Module,
+                 multiplier: float, alpha: float,
+                 out_dim: int, in_dim: int, r1: int, r2: int):
+        super().__init__()
+        self.lora_name = lora_name
+        self.out_dim, self.in_dim = out_dim, in_dim
+        self.r1, self.r2 = r1, r2
+
+        self.hada_w1_a = torch.nn.Parameter(torch.zeros(out_dim, r1))
+        self.hada_w1_b = torch.nn.Parameter(torch.zeros(r1, in_dim))
+        self.hada_w2_a = torch.nn.Parameter(torch.zeros(out_dim, r2))
+        self.hada_w2_b = torch.nn.Parameter(torch.zeros(r2, in_dim))
+
+        self.register_buffer("alpha", torch.tensor(float(alpha)))
+        if alpha >= self._ALPHA_SENTINEL_THRESHOLD:
+            self.scale = 1.0
+        else:
+            self.scale = float(alpha) / max(1, min(r1, r2))
+
+        self.multiplier = float(multiplier)
+        self.enabled = True
+        self.lora_dim = min(r1, r2)
+        self.org_module = org_module
+        self.org_module_ref = [org_module]
+        self.split_dims = None
+
+    def apply_to(self):
+        self.org_forward = self.org_module.forward
+        self.org_module.forward = self.forward
+        del self.org_module
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        org = self.org_forward(x)
+        if not self.enabled or self.multiplier == 0.0:
+            return org
+        W1 = self.hada_w1_a @ self.hada_w1_b    # (out_dim, in_dim)
+        W2 = self.hada_w2_a @ self.hada_w2_b    # (out_dim, in_dim)
+        W = W1 * W2                              # Hadamard product — same shape
+        # x @ W.T: for x of shape (..., in_dim), produces (..., out_dim).
+        return org + self.multiplier * self.scale * (x @ W.transpose(-1, -2))
+
+    def compute_delta(self, x: torch.Tensor) -> torch.Tensor:
+        """LoHa contribution for input x (base NOT included)."""
+        W1 = self.hada_w1_a @ self.hada_w1_b
+        W2 = self.hada_w2_a @ self.hada_w2_b
+        W = W1 * W2
+        return self.multiplier * self.scale * (x @ W.transpose(-1, -2))
+
+    def merge_to(self, sd, dtype, device, non_blocking=False):
+        org_sd = self.org_module.state_dict()
+        weight = org_sd["weight"]
+        org_dtype, org_device = weight.dtype, weight.device
+        w = weight.to(device, dtype=torch.float, non_blocking=non_blocking)
+        W1 = (self.hada_w1_a.to(device, torch.float) @ self.hada_w1_b.to(device, torch.float))
+        W2 = (self.hada_w2_a.to(device, torch.float) @ self.hada_w2_b.to(device, torch.float))
+        W = W1 * W2
+        if W.shape != w.shape:
+            logger.warning(f"{self.lora_name}: loha W shape {list(W.shape)} != weight shape {list(w.shape)}, skipping merge")
+            return
+        w = w + self.multiplier * self.scale * W
+        org_sd["weight"] = w.to(org_device, dtype=org_dtype if dtype is None else dtype)
+        self.org_module.load_state_dict(org_sd)
+
+
+# ---------------------------------------------------------------------------
+# Hash utilities for safetensors metadata
+# ---------------------------------------------------------------------------
+
+def _addnet_hash_legacy(b: BytesIO) -> str:
+    """Old model hash used by sd-webui-additional-networks for .safetensors format files"""
+    m = hashlib.sha256()
+    b.seek(0x100000)
+    m.update(b.read(0x10000))
+    return m.hexdigest()[0:8]
+
+
+def _addnet_hash_safetensors(b: BytesIO) -> str:
+    """New model hash used by sd-webui-additional-networks for .safetensors format files"""
+    hash_sha256 = hashlib.sha256()
+    blksize = 1024 * 1024
+
+    b.seek(0)
+    header = b.read(8)
+    n = int.from_bytes(header, "little")
+
+    offset = n + 8
+    b.seek(offset)
+    for chunk in iter(lambda: b.read(blksize), b""):
+        hash_sha256.update(chunk)
+
+    return hash_sha256.hexdigest()
+
+
+def _precalculate_safetensors_hashes(tensors, metadata):
+    """Precalculate the model hashes needed by sd-webui-additional-networks to
+    save time on indexing the model later."""
+    import safetensors.torch
+
+    # Only retain training metadata for hash calculation (meant to be immutable)
+    metadata = {k: v for k, v in metadata.items() if k.startswith("ss_")}
+
+    raw_bytes = safetensors.torch.save(tensors, metadata)
+    b = BytesIO(raw_bytes)
+
+    model_hash = _addnet_hash_safetensors(b)
+    legacy_hash = _addnet_hash_legacy(b)
+    return model_hash, legacy_hash
+
+
+# ---------------------------------------------------------------------------
+# Network creation functions
+# ---------------------------------------------------------------------------
+
+def create_network(
+    target_replace_modules: List[str],
+    prefix: str,
+    multiplier: float,
+    network_dim: Optional[int],
+    network_alpha: Optional[float],
+    vae: nn.Module,
+    text_encoders: List[nn.Module],
+    unet: nn.Module,
+    neuron_dropout: Optional[float] = None,
+    module_class: Type[object] = None,
+    module_kwargs: Optional[Dict[str, Any]] = None,
+    **kwargs,
+):
+    """Architecture-independent network creation."""
+    if network_dim is None:
+        network_dim = 4  # default
+    if network_alpha is None:
+        network_alpha = 1.0
+
+    # extract dim/alpha for conv2d, and block dim
+    conv_dim = kwargs.get("conv_dim", None)
+    conv_alpha = kwargs.get("conv_alpha", None)
+    if conv_dim is not None:
+        conv_dim = int(conv_dim)
+        if conv_alpha is None:
+            conv_alpha = 1.0
+        else:
+            conv_alpha = float(conv_alpha)
+
+    # rank/module dropout
+    rank_dropout = kwargs.get("rank_dropout", None)
+    if rank_dropout is not None:
+        rank_dropout = float(rank_dropout)
+    module_dropout = kwargs.get("module_dropout", None)
+    if module_dropout is not None:
+        module_dropout = float(module_dropout)
+
+    # verbose
+    verbose = kwargs.get("verbose", False)
+    if verbose is not None:
+        verbose = True if verbose == "True" else False
+
+    # regular expression for module selection: exclude and include
+    exclude_patterns = kwargs.get("exclude_patterns", None)
+    if exclude_patterns is not None and isinstance(exclude_patterns, str):
+        exclude_patterns = ast.literal_eval(exclude_patterns)
+    include_patterns = kwargs.get("include_patterns", None)
+    if include_patterns is not None and isinstance(include_patterns, str):
+        include_patterns = ast.literal_eval(include_patterns)
+
+    if module_class is None:
+        module_class = LoRAModule
+
+    network = LoRANetwork(
+        target_replace_modules,
+        prefix,
+        text_encoders,
+        unet,
+        multiplier=multiplier,
+        lora_dim=network_dim,
+        alpha=network_alpha,
+        dropout=neuron_dropout,
+        rank_dropout=rank_dropout,
+        module_dropout=module_dropout,
+        conv_lora_dim=conv_dim,
+        conv_alpha=conv_alpha,
+        module_class=module_class,
+        module_kwargs=module_kwargs,
+        exclude_patterns=exclude_patterns,
+        include_patterns=include_patterns,
+        verbose=verbose,
+    )
+
+    loraplus_lr_ratio = kwargs.get("loraplus_lr_ratio", None)
+    loraplus_lr_ratio = float(loraplus_lr_ratio) if loraplus_lr_ratio is not None else None
+    if loraplus_lr_ratio is not None:
+        network.set_loraplus_lr_ratio(loraplus_lr_ratio)
+
+    return network
+
+
+class LoRANetwork(torch.nn.Module):
+    # only supports U-Net (DiT), Text Encoders are not supported
+
+    def __init__(
+        self,
+        target_replace_modules: List[str],
+        prefix: str,
+        text_encoders: Optional[Union[List[nn.Module], nn.Module]],
+        unet: nn.Module,
+        multiplier: float = 1.0,
+        lora_dim: int = 4,
+        alpha: float = 1,
+        dropout: Optional[float] = None,
+        rank_dropout: Optional[float] = None,
+        module_dropout: Optional[float] = None,
+        conv_lora_dim: Optional[int] = None,
+        conv_alpha: Optional[float] = None,
+        module_class: Type[object] = LoRAModule,
+        module_kwargs: Optional[Dict[str, Any]] = None,
+        modules_dim: Optional[Dict[str, int]] = None,
+        modules_alpha: Optional[Dict[str, int]] = None,
+        exclude_patterns: Optional[List[str]] = None,
+        include_patterns: Optional[List[str]] = None,
+        verbose: Optional[bool] = False,
+    ) -> None:
+        super().__init__()
+        self.multiplier = multiplier
+
+        self.lora_dim = lora_dim
+        self.alpha = alpha
+        self.conv_lora_dim = conv_lora_dim
+        self.conv_alpha = conv_alpha
+        self.dropout = dropout
+        self.rank_dropout = rank_dropout
+        self.module_dropout = module_dropout
+        self.target_replace_modules = target_replace_modules
+        self.prefix = prefix
+        self.module_kwargs = module_kwargs or {}
+
+        self.loraplus_lr_ratio = None
+
+        if modules_dim is not None:
+            logger.info("create LoRA network from weights")
+        else:
+            logger.info(f"create LoRA network. base dim (rank): {lora_dim}, alpha: {alpha}")
+            logger.info(
+                f"neuron dropout: p={self.dropout}, rank dropout: p={self.rank_dropout}, module dropout: p={self.module_dropout}"
+            )
+
+        # compile regular expression if specified
+        exclude_re_patterns = []
+        if exclude_patterns is not None:
+            for pattern in exclude_patterns:
+                try:
+                    re_pattern = re.compile(pattern)
+                except re.error as e:
+                    logger.error(f"Invalid exclude pattern '{pattern}': {e}")
+                    continue
+                exclude_re_patterns.append(re_pattern)
+
+        include_re_patterns = []
+        if include_patterns is not None:
+            for pattern in include_patterns:
+                try:
+                    re_pattern = re.compile(pattern)
+                except re.error as e:
+                    logger.error(f"Invalid include pattern '{pattern}': {e}")
+                    continue
+                include_re_patterns.append(re_pattern)
+
+        # create module instances
+        def create_modules(
+            is_unet: bool,
+            pfx: str,
+            root_module: torch.nn.Module,
+            target_replace_mods: Optional[List[str]] = None,
+            filter: Optional[str] = None,
+            default_dim: Optional[int] = None,
+        ) -> List[LoRAModule]:
+            loras = []
+            skipped = []
+            for name, module in root_module.named_modules():
+                if target_replace_mods is None or module.__class__.__name__ in target_replace_mods:
+                    if target_replace_mods is None:  # dirty hack for all modules
+                        module = root_module  # search all modules
+
+                    for child_name, child_module in module.named_modules():
+                        is_linear = child_module.__class__.__name__ == "Linear"
+                        is_conv2d = child_module.__class__.__name__ == "Conv2d"
+                        is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
+
+                        if is_linear or is_conv2d:
+                            original_name = (name + "." if name else "") + child_name
+                            lora_name = f"{pfx}.{original_name}".replace(".", "_")
+
+                            # exclude/include filter
+                            excluded = False
+                            for pattern in exclude_re_patterns:
+                                if pattern.fullmatch(original_name):
+                                    excluded = True
+                                    break
+                            included = False
+                            for pattern in include_re_patterns:
+                                if pattern.fullmatch(original_name):
+                                    included = True
+                                    break
+                            if excluded and not included:
+                                if verbose:
+                                    logger.info(f"exclude: {original_name}")
+                                continue
+
+                            # filter by name (not used in the current implementation)
+                            if filter is not None and filter not in lora_name:
+                                continue
+
+                            dim = None
+                            alpha = None
+
+                            if modules_dim is not None:
+                                if lora_name in modules_dim:
+                                    dim = modules_dim[lora_name]
+                                    alpha = modules_alpha[lora_name]
+                            else:
+                                if is_linear or is_conv2d_1x1:
+                                    dim = default_dim if default_dim is not None else self.lora_dim
+                                    alpha = self.alpha
+                                elif self.conv_lora_dim is not None:
+                                    dim = self.conv_lora_dim
+                                    alpha = self.conv_alpha
+
+                            if dim is None or dim == 0:
+                                if is_linear or is_conv2d_1x1 or (self.conv_lora_dim is not None):
+                                    skipped.append(lora_name)
+                                continue
+
+                            lora = module_class(
+                                lora_name,
+                                child_module,
+                                self.multiplier,
+                                dim,
+                                alpha,
+                                dropout=dropout,
+                                rank_dropout=rank_dropout,
+                                module_dropout=module_dropout,
+                                **self.module_kwargs,
+                            )
+                            loras.append(lora)
+
+                    if target_replace_mods is None:
+                        break  # all modules are searched
+            return loras, skipped
+
+        self.text_encoder_loras: List[Union[LoRAModule, LoRAInfModule]] = []
+
+        # create LoRA for U-Net / DiT
+        self.unet_loras: List[Union[LoRAModule, LoRAInfModule]]
+        self.unet_loras, skipped_un = create_modules(True, prefix, unet, target_replace_modules)
+
+        logger.info(f"create LoRA for U-Net/DiT: {len(self.unet_loras)} modules.")
+        if verbose:
+            for lora in self.unet_loras:
+                logger.info(f"\t{lora.lora_name:50} {lora.lora_dim}, {lora.alpha}")
+
+        skipped = skipped_un
+        if verbose and len(skipped) > 0:
+            logger.warning(
+                f"because dim (rank) is 0, {len(skipped)} LoRA modules are skipped / dim (rank)が0の為、次の{len(skipped)}個のLoRAモジュールはスキップされます:"
+            )
+            for name in skipped:
+                logger.info(f"\t{name}")
+
+        # assertion
+        names = set()
+        for lora in self.text_encoder_loras + self.unet_loras:
+            assert lora.lora_name not in names, f"duplicated lora name: {lora.lora_name}"
+            names.add(lora.lora_name)
+
+    def prepare_network(self, args):
+        """
+        called after the network is created
+        """
+        pass
+
+    def set_multiplier(self, multiplier):
+        self.multiplier = multiplier
+        for lora in self.text_encoder_loras + self.unet_loras:
+            lora.multiplier = self.multiplier
+
+    def set_enabled(self, is_enabled):
+        for lora in self.text_encoder_loras + self.unet_loras:
+            lora.enabled = is_enabled
+
+    def set_module_enabled_by_pattern(self, pattern: str, enabled: bool, target: str = "unet"):
+        """Enable/disable LoRA modules whose lora_name matches the regex pattern.
+
+        Args:
+            pattern: Regex pattern to match against lora_name.
+            enabled: True to enable matching modules, False to disable.
+            target: "unet", "text_encoder", or "all".
+        """
+        import re
+        regex = re.compile(pattern)
+        targets = []
+        if target in ("unet", "all"):
+            targets.extend(self.unet_loras)
+        if target in ("text_encoder", "all"):
+            targets.extend(self.text_encoder_loras)
+
+        count = 0
+        for lora in targets:
+            if regex.search(lora.lora_name):
+                lora.enabled = enabled
+                count += 1
+        return count
+
+    def set_module_multiplier_by_pattern(self, pattern: str, multiplier: float, target: str = "unet"):
+        """Set multiplier on LoRA modules whose lora_name matches the regex pattern.
+
+        Args:
+            pattern: Regex pattern to match against lora_name.
+            multiplier: Multiplier value to set.
+            target: "unet", "text_encoder", or "all".
+        """
+        import re
+        regex = re.compile(pattern)
+        targets = []
+        if target in ("unet", "all"):
+            targets.extend(self.unet_loras)
+        if target in ("text_encoder", "all"):
+            targets.extend(self.text_encoder_loras)
+
+        count = 0
+        for lora in targets:
+            if regex.search(lora.lora_name):
+                lora.multiplier = multiplier
+                count += 1
+        return count
+
+    def load_weights(self, file):
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import load_file
+
+            weights_sd = load_file(file)
+        else:
+            weights_sd = torch.load(file, map_location="cpu")
+
+        info = self.load_state_dict(weights_sd, False)
+        return info
+
+    def apply_to(
+        self,
+        text_encoders: Optional[nn.Module],
+        unet: Optional[nn.Module],
+        apply_text_encoder: bool = True,
+        apply_unet: bool = True,
+    ):
+        if apply_text_encoder:
+            logger.info(f"enable LoRA for text encoder: {len(self.text_encoder_loras)} modules")
+        else:
+            self.text_encoder_loras = []
+
+        if apply_unet:
+            logger.info(f"enable LoRA for U-Net: {len(self.unet_loras)} modules")
+        else:
+            self.unet_loras = []
+
+        if len(self.text_encoder_loras) == 0 and len(self.unet_loras) == 0:
+            # Diagnostic dump to help identify the mismatch source
+            unet_classes = set()
+            if unet is not None:
+                for _n, _m in unet.named_modules():
+                    unet_classes.add(_m.__class__.__name__)
+            target_list = getattr(self, "target_replace_modules", [])
+            target_matches = [c for c in target_list if c in unet_classes]
+            logger.error(
+                "No LoRA modules found.\n"
+                "  target_replace_modules: %s\n"
+                "  matches found in DiT:   %s\n"
+                "Likely cause: the LoRA's weight keys don't match Fizgig's lora_unet_<block>_<linear> naming, "
+                "OR the DiT's block classes were renamed, OR the LoRA was trained against a different model.",
+                target_list or "<unknown>",
+                target_matches or "NONE — no DoubleStreamBlock/SingleStreamBlock found in DiT!",
+            )
+            raise RuntimeError("No LoRA modules found")
+
+        for lora in self.text_encoder_loras + self.unet_loras:
+            lora.apply_to()
+            self.add_module(lora.lora_name, lora)
+
+    def is_mergeable(self):
+        return True
+
+    def merge_to(self, text_encoders, unet, weights_sd, dtype=None, device=None, non_blocking=False):
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = []
+            for lora in self.text_encoder_loras + self.unet_loras:
+                sd_for_lora = {}
+                for key in weights_sd.keys():
+                    if key.startswith(lora.lora_name):
+                        sd_for_lora[key[len(lora.lora_name) + 1 :]] = weights_sd[key]
+                if len(sd_for_lora) == 0:
+                    logger.info(f"no weight for {lora.lora_name}")
+                    continue
+
+                futures.append(executor.submit(lora.merge_to, sd_for_lora, dtype, device, non_blocking))
+
+        for future in futures:
+            future.result()
+
+        logger.info("weights are merged")
+
+    def set_loraplus_lr_ratio(self, loraplus_lr_ratio):
+        self.loraplus_lr_ratio = loraplus_lr_ratio
+        logger.info(f"LoRA+ UNet LR Ratio: {self.loraplus_lr_ratio}")
+
+    def prepare_optimizer_params(self, unet_lr: float = 1e-4, **kwargs):
+        self.requires_grad_(True)
+
+        all_params = []
+        lr_descriptions = []
+
+        def assemble_params(loras, lr, loraplus_ratio):
+            param_groups = {"lora": {}, "plus": {}}
+            for lora in loras:
+                for name, param in lora.named_parameters():
+                    if loraplus_ratio is not None and "lora_up" in name:
+                        param_groups["plus"][f"{lora.lora_name}.{name}"] = param
+                    else:
+                        param_groups["lora"][f"{lora.lora_name}.{name}"] = param
+
+            if loraplus_ratio is not None and len(param_groups["plus"]) == 0:
+                logger.warning("LoRA+ is not effective for this network type (no 'lora_up' parameters found)")
+
+            params = []
+            descriptions = []
+            for key in param_groups.keys():
+                param_data = {"params": param_groups[key].values()}
+
+                if len(param_data["params"]) == 0:
+                    continue
+
+                if lr is not None:
+                    if key == "plus":
+                        param_data["lr"] = lr * loraplus_ratio
+                    else:
+                        param_data["lr"] = lr
+
+                if param_data.get("lr", None) == 0 or param_data.get("lr", None) is None:
+                    logger.info("NO LR skipping!")
+                    continue
+
+                params.append(param_data)
+                descriptions.append("plus" if key == "plus" else "")
+
+            return params, descriptions
+
+        if self.unet_loras:
+            params, descriptions = assemble_params(self.unet_loras, unet_lr, self.loraplus_lr_ratio)
+            all_params.extend(params)
+            lr_descriptions.extend(["unet" + (" " + d if d else "") for d in descriptions])
+
+        return all_params, lr_descriptions
+
+    def enable_gradient_checkpointing(self):
+        # not supported
+        pass
+
+    def prepare_grad_etc(self, unet):
+        self.requires_grad_(True)
+
+    def on_epoch_start(self, unet):
+        self.train()
+
+    def on_step_start(self):
+        pass
+
+    def get_trainable_params(self):
+        return self.parameters()
+
+    def save_weights(self, file, dtype, metadata):
+        if metadata is not None and len(metadata) == 0:
+            metadata = None
+
+        state_dict = self.state_dict()
+
+        if dtype is not None:
+            for key in list(state_dict.keys()):
+                v = state_dict[key]
+                v = v.detach().clone().to("cpu").to(dtype)
+                state_dict[key] = v
+
+        if os.path.splitext(file)[1] == ".safetensors":
+            from safetensors.torch import save_file
+
+            # Precalculate model hashes to save time on indexing
+            if metadata is None:
+                metadata = {}
+            model_hash, legacy_hash = _precalculate_safetensors_hashes(state_dict, metadata)
+            metadata["sshs_model_hash"] = model_hash
+            metadata["sshs_legacy_hash"] = legacy_hash
+
+            save_file(state_dict, file, metadata)
+        else:
+            torch.save(state_dict, file)
+
+    def backup_weights(self):
+        loras: List[LoRAInfModule] = self.text_encoder_loras + self.unet_loras
+        for lora in loras:
+            org_module = lora.org_module_ref[0]
+            if not hasattr(org_module, "_lora_org_weight"):
+                sd = org_module.state_dict()
+                org_module._lora_org_weight = sd["weight"].detach().clone()
+                org_module._lora_restored = True
+
+    def restore_weights(self):
+        loras: List[LoRAInfModule] = self.text_encoder_loras + self.unet_loras
+        for lora in loras:
+            org_module = lora.org_module_ref[0]
+            if not org_module._lora_restored:
+                sd = org_module.state_dict()
+                sd["weight"] = org_module._lora_org_weight
+                org_module.load_state_dict(sd)
+                org_module._lora_restored = True
+
+    def pre_calculation(self):
+        loras: List[LoRAInfModule] = self.text_encoder_loras + self.unet_loras
+        for lora in loras:
+            org_module = lora.org_module_ref[0]
+            sd = org_module.state_dict()
+
+            org_weight = sd["weight"]
+            lora_weight = lora.get_weight().to(org_weight.device, dtype=org_weight.dtype)
+            sd["weight"] = org_weight + lora_weight
+            assert sd["weight"].shape == org_weight.shape
+            org_module.load_state_dict(sd)
+
+            org_module._lora_restored = False
+            lora.enabled = False
+
+    def apply_max_norm_regularization(self, max_norm_value, device):
+        downkeys = []
+        upkeys = []
+        alphakeys = []
+        norms = []
+        keys_scaled = 0
+
+        state_dict = self.state_dict()
+
+        # guard: only supported for LoRA (lora_down/lora_up parameterization)
+        if not any("lora_down" in k and "weight" in k for k in state_dict.keys()):
+            logger.warning("max_norm_regularization is only supported for LoRA")
+            return 0, 0.0, 0.0
+
+        for key in state_dict.keys():
+            if "lora_down" in key and "weight" in key:
+                downkeys.append(key)
+                upkeys.append(key.replace("lora_down", "lora_up"))
+                alphakeys.append(key.replace("lora_down.weight", "alpha"))
+
+        for i in range(len(downkeys)):
+            down = state_dict[downkeys[i]].to(device)
+            up = state_dict[upkeys[i]].to(device)
+            alpha = state_dict[alphakeys[i]].to(device)
+            dim = down.shape[0]
+            scale = alpha / dim
+
+            if up.shape[2:] == (1, 1) and down.shape[2:] == (1, 1):
+                updown = (up.squeeze(2).squeeze(2) @ down.squeeze(2).squeeze(2)).unsqueeze(2).unsqueeze(3)
+            elif up.shape[2:] == (3, 3) or down.shape[2:] == (3, 3):
+                updown = torch.nn.functional.conv2d(down.permute(1, 0, 2, 3), up).permute(1, 0, 2, 3)
+            else:
+                updown = up @ down
+
+            updown *= scale
+
+            norm = updown.norm().clamp(min=max_norm_value / 2)
+            desired = torch.clamp(norm, max=max_norm_value)
+            ratio = desired.cpu() / norm.cpu()
+            sqrt_ratio = ratio**0.5
+            if ratio != 1:
+                keys_scaled += 1
+                state_dict[upkeys[i]] *= sqrt_ratio
+                state_dict[downkeys[i]] *= sqrt_ratio
+            scalednorm = updown.norm() * ratio
+            norms.append(scalednorm.item())
+
+        return keys_scaled, sum(norms) / len(norms), max(norms)
+
+
+# =====================================================================================
+# LoRA format compatibility — PEFT / diffusers → Fizgig/kohya conversion
+# =====================================================================================
+
+def detect_lora_format(weights_sd: Dict[str, torch.Tensor]) -> str:
+    """Detect the naming convention of a LoRA state dict.
+
+    Returns one of:
+      - "kohya"   : kohya-style (lora_unet_*, .lora_down/up, .alpha) — what Fizgig emits
+      - "peft"    : PEFT/diffusers style (diffusion_model.*.lora_A/B.weight)
+      - "lokr"    : LoKR (Kronecker-product) — uses .lokr_w1 / .lokr_w2
+      - "loha"    : LoHa (Hadamard-product) — uses .hada_w1_a / .hada_w2_a etc.
+      - "glora"   : GLoRA — uses .glora_a / .glora_b / .glora_c / .glora_d
+      - "unknown" : no supported signature matched
+
+    LoKR/LoHa/GLoRA are low-rank parametrizations different from standard LoRA;
+    Fizgig's LoRAInfModule only implements the standard `up @ down` form, so
+    these variants are detected here for the loader to reject cleanly.
+    """
+    has_kohya = False
+    has_peft = False
+    for k in weights_sd.keys():
+        kl = k.lower()
+        # Check exotic formats first — they often have a 'diffusion_model.' prefix
+        # too (e.g. lycoris-exports from ComfyUI-Realtime-Lora), so detecting these
+        # before peft avoids mis-classification.
+        if ".lokr_w1" in kl or ".lokr_w2" in kl:
+            return "lokr"
+        if ".hada_w1_a" in kl or ".hada_w2_a" in kl or ".hada_w1_b" in kl or ".hada_w2_b" in kl:
+            return "loha"
+        if ".glora_a" in kl or ".glora_b" in kl or ".glora_c" in kl or ".glora_d" in kl:
+            return "glora"
+        if k.startswith("lora_unet_") and (".lora_down" in k or ".lora_up" in k or ".alpha" in k or ".lora_A" in k or ".lora_B" in k):
+            has_kohya = True
+        if k.startswith("diffusion_model.") and (".lora_A." in k or ".lora_B." in k):
+            has_peft = True
+        if k.startswith("transformer.") and (".lora_A." in k or ".lora_B." in k):
+            has_peft = True  # AI-Toolkit-style flux-diffusers variant
+    if has_kohya and not has_peft:
+        return "kohya"
+    if has_peft and not has_kohya:
+        return "peft"
+    if has_kohya and has_peft:
+        return "kohya"  # mixed — loader can consume kohya keys
+    return "unknown"
+
+
+def peft_to_kohya(weights_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Convert a PEFT/diffusers-format LoRA (or LyCORIS-prefixed LoKR/LoHa) state
+    dict to Fizgig/kohya module-name convention.
+
+    Key mapping (standard LoRA):
+      diffusion_model.double_blocks.0.img_attn.proj.lora_A.weight
+        → lora_unet_double_blocks_0_img_attn_proj.lora_down.weight
+      diffusion_model.double_blocks.0.img_attn.proj.lora_B.weight
+        → lora_unet_double_blocks_0_img_attn_proj.lora_up.weight
+
+    LyCORIS suffixes (LoKR / LoHa) are kept as-is — only the prefix is stripped
+    and dots flattened:
+      diffusion_model.double_blocks.0.img_attn.proj.lokr_w1
+        → lora_unet_double_blocks_0_img_attn_proj.lokr_w1
+
+    For standard LoRA: synthesizes `.alpha` tensor = rank where absent (PEFT
+    convention, producing scale = 1.0). For LyCORIS: preserves the file's
+    `.alpha` exactly (LyCORIS tools set it to an explicit value or a sentinel
+    like 1e10 meaning "scale = 1.0 already baked in").
+
+    Handles two common prefix variants seen in the wild:
+      - `diffusion_model.` (ComfyUI LoRA export, Colorful-style)
+      - `transformer.`     (AI-Toolkit flux-diffusers variant)
+    """
+    converted: Dict[str, torch.Tensor] = {}
+    ranks: Dict[str, int] = {}  # lora_name → rank for standard-LoRA alpha synthesis
+
+    # Candidate prefixes we'll strip
+    prefixes = ("diffusion_model.", "transformer.")
+
+    # LyCORIS suffixes kept verbatim (just strip prefix + flatten dots in module path)
+    LYCORIS_SUFFIXES = (
+        ".lokr_w1", ".lokr_w2", ".lokr_w1_a", ".lokr_w1_b", ".lokr_w2_a", ".lokr_w2_b",
+        ".hada_w1_a", ".hada_w1_b", ".hada_w2_a", ".hada_w2_b",
+    )
+
+    for key, tensor in weights_sd.items():
+        # Strip one recognized prefix; skip keys that don't have one
+        stripped = None
+        for pfx in prefixes:
+            if key.startswith(pfx):
+                stripped = key[len(pfx):]
+                break
+        if stripped is None:
+            # Not a LoRA weight in a format we convert — preserve as-is (rare)
+            converted[key] = tensor
+            continue
+
+        # LyCORIS suffix? Preserve it verbatim.
+        lycoris_match = None
+        for suf in LYCORIS_SUFFIXES:
+            if stripped.endswith(suf):
+                lycoris_match = suf
+                break
+        if lycoris_match is not None:
+            module_path = stripped[: -len(lycoris_match)]
+            flat = module_path.replace(".", "_")
+            lora_name = f"lora_unet_{flat}"
+            converted[f"{lora_name}{lycoris_match}"] = tensor
+            continue
+
+        # Map standard-LoRA lora_A/B/alpha suffixes
+        if stripped.endswith(".lora_A.weight"):
+            module_path = stripped[: -len(".lora_A.weight")]
+            matrix_name = "lora_down"
+        elif stripped.endswith(".lora_B.weight"):
+            module_path = stripped[: -len(".lora_B.weight")]
+            matrix_name = "lora_up"
+        elif stripped.endswith(".alpha"):
+            module_path = stripped[: -len(".alpha")]
+            matrix_name = "alpha"
+        else:
+            # Unrecognized suffix — skip (could be biases or other non-LoRA aux data)
+            continue
+
+        # Flatten dots to underscores inside the module path, prepend lora_unet_
+        flat = module_path.replace(".", "_")
+        lora_name = f"lora_unet_{flat}"
+
+        if matrix_name == "alpha":
+            converted[f"{lora_name}.alpha"] = tensor
+        else:
+            new_key = f"{lora_name}.{matrix_name}.weight"
+            converted[new_key] = tensor
+            if matrix_name == "lora_down":
+                # lora_down shape = (rank, in_dim) — first dim IS the rank
+                ranks[lora_name] = int(tensor.shape[0])
+
+    # Synthesize alpha tensors where not already present (standard LoRA only).
+    # LyCORIS modules always ship their own alpha; don't fabricate one for them.
+    for lora_name, rank in ranks.items():
+        alpha_key = f"{lora_name}.alpha"
+        if alpha_key not in converted:
+            converted[alpha_key] = torch.tensor(float(rank))
+
+    logger.info(
+        f"[peft→kohya] converted {len(weights_sd)} keys → {len(converted)} "
+        f"({len(ranks)} LoRA modules, alphas synthesized where absent)"
+    )
+    return converted
+
+
+class UnsupportedLoRAFormat(RuntimeError):
+    """Raised when a LoRA file uses a low-rank parametrization Fizgig can't load
+    (LoKR / LoHa / GLoRA). Fizgig's LoRAInfModule only implements standard LoRA
+    (`up @ down`); these variants use Kronecker / Hadamard / four-matrix
+    decompositions that would need separate module classes."""
+
+
+def ensure_kohya_lora_state_dict(weights_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    """Convert the state dict to kohya module-name convention if needed.
+    Pass-through for already-kohya files. Raises UnsupportedLoRAFormat for
+    GLoRA (4-matrix form, not yet implemented)."""
+    fmt = detect_lora_format(weights_sd)
+    if fmt == "peft":
+        logger.info("PEFT/diffusers-format LoRA detected — converting key names to kohya convention.")
+        return peft_to_kohya(weights_sd)
+    if fmt in ("lokr", "loha"):
+        # LyCORIS files almost always use a diffusion_model. prefix in the wild;
+        # run them through peft_to_kohya to strip the prefix and flatten dots.
+        # The LyCORIS suffixes (.lokr_w1, .hada_w1_a, etc.) are preserved verbatim.
+        has_prefix = any(k.startswith("diffusion_model.") or k.startswith("transformer.")
+                         for k in weights_sd.keys())
+        if has_prefix:
+            logger.info(f"{fmt.upper()} LoRA with diffusion_model prefix detected — flattening to kohya module names.")
+            return peft_to_kohya(weights_sd)
+        return weights_sd
+    if fmt == "glora":
+        raise UnsupportedLoRAFormat(
+            "This LoRA uses the 'GLoRA' parametrization (four matrices A/B/C/D), "
+            "which Fizgig doesn't implement yet. LoKR and LoHa are supported; "
+            "GLoRA is a follow-up. Re-extract as a standard LoRA, LoKR, or LoHa."
+        )
+    return weights_sd
+
+
+def _build_dit_linear_map(
+    unet: nn.Module,
+    target_replace_modules: Optional[List[str]],
+    prefix: str = "lora_unet",
+) -> Dict[str, nn.Module]:
+    """Map kohya-style lora_name → target Linear/Conv2d module in the DiT.
+
+    Replicates the naming logic from `LoRANetwork.create_modules` so we can
+    look up a specific Linear from a LyCORIS module name without rescanning.
+    """
+    result: Dict[str, nn.Module] = {}
+    if unet is None:
+        return result
+    for name, module in unet.named_modules():
+        if target_replace_modules is None or module.__class__.__name__ in target_replace_modules:
+            for child_name, child_module in module.named_modules():
+                if child_module.__class__.__name__ in ("Linear", "Conv2d"):
+                    original_name = (name + "." if name else "") + child_name
+                    lora_name = f"{prefix}.{original_name}".replace(".", "_")
+                    result[lora_name] = child_module
+    return result
+
+
+def _append_lycoris_modules(
+    network: "LoRANetwork",
+    weights_sd: Dict[str, torch.Tensor],
+    target_replace_modules: List[str],
+    unet: Optional[nn.Module],
+    for_inference: bool,
+    multiplier: float,
+) -> None:
+    """Scan the state dict for LoKR/LoHa modules and append them to
+    network.unet_loras. Must be called BEFORE network.apply_to() so they get
+    patched in with the rest (apply_to iterates unet_loras)."""
+    if not for_inference:
+        # LyCORIS training modules are out of scope for Fizgig currently.
+        return
+    if unet is None:
+        return
+
+    # Group state-dict keys by module name (the part before the first dot).
+    by_module: Dict[str, Dict[str, torch.Tensor]] = {}
+    for key, tensor in weights_sd.items():
+        if "." not in key:
+            continue
+        lora_name, _, suffix = key.partition(".")
+        if not lora_name.startswith("lora_unet_"):
+            continue
+        by_module.setdefault(lora_name, {})[suffix] = tensor
+
+    linear_map = _build_dit_linear_map(unet, target_replace_modules)
+    existing_names = {m.lora_name for m in network.unet_loras}
+    added_lokr = 0
+    added_loha = 0
+
+    for lora_name, keys in by_module.items():
+        # Skip if standard LoRA already created this module.
+        if lora_name in existing_names:
+            continue
+
+        # Detect variant.
+        has_lokr = any(k.startswith("lokr_w") for k in keys)
+        has_loha = any(k.startswith("hada_") for k in keys)
+        if not (has_lokr or has_loha):
+            continue  # standard LoRA without lora_down — skip; or non-LoRA key
+
+        org_module = linear_map.get(lora_name)
+        if org_module is None:
+            logger.warning(f"LyCORIS module {lora_name} has no matching Linear in DiT — skipping")
+            continue
+
+        # Extract alpha (LyCORIS convention: scalar tensor).
+        alpha_tensor = keys.get("alpha")
+        alpha_val = float(alpha_tensor.item()) if alpha_tensor is not None else 1.0
+
+        org_out = getattr(org_module, "out_features", None) or getattr(org_module, "out_channels", None)
+        org_in = getattr(org_module, "in_features", None) or getattr(org_module, "in_channels", None)
+
+        if has_lokr:
+            # Resolve w1 shape — either direct (a,b) or decomposed ((a,k1),(k1,b)).
+            if "lokr_w1" in keys:
+                a, b = keys["lokr_w1"].shape
+                k1 = None
+            elif "lokr_w1_a" in keys and "lokr_w1_b" in keys:
+                a = keys["lokr_w1_a"].shape[0]
+                k1 = keys["lokr_w1_a"].shape[1]
+                b = keys["lokr_w1_b"].shape[1]
+            else:
+                logger.warning(f"LoKR {lora_name}: missing w1 (or w1_a/w1_b pair) — skipping")
+                continue
+            # Same for w2.
+            if "lokr_w2" in keys:
+                c, d = keys["lokr_w2"].shape
+                k2 = None
+            elif "lokr_w2_a" in keys and "lokr_w2_b" in keys:
+                c = keys["lokr_w2_a"].shape[0]
+                k2 = keys["lokr_w2_a"].shape[1]
+                d = keys["lokr_w2_b"].shape[1]
+            else:
+                logger.warning(f"LoKR {lora_name}: missing w2 (or w2_a/w2_b pair) — skipping")
+                continue
+
+            if a * c != org_out or b * d != org_in:
+                logger.warning(
+                    f"LoKR {lora_name}: kron({a}x{b}, {c}x{d}) = {a*c}x{b*d} "
+                    f"doesn't match Linear {org_out}x{org_in} — skipping"
+                )
+                continue
+
+            module = LoKRInfModule(lora_name, org_module, multiplier, alpha_val,
+                                   a=a, b=b, c=c, d=d, k1=k1, k2=k2)
+            network.unet_loras.append(module)
+            existing_names.add(lora_name)
+            added_lokr += 1
+
+        elif has_loha:
+            required = ("hada_w1_a", "hada_w1_b", "hada_w2_a", "hada_w2_b")
+            missing = [k for k in required if k not in keys]
+            if missing:
+                logger.warning(f"LoHa {lora_name}: missing {missing} — skipping")
+                continue
+            out_dim = keys["hada_w1_a"].shape[0]
+            r1 = keys["hada_w1_a"].shape[1]
+            in_dim = keys["hada_w1_b"].shape[1]
+            r2 = keys["hada_w2_a"].shape[1]
+            if out_dim != org_out or in_dim != org_in:
+                logger.warning(
+                    f"LoHa {lora_name}: shape ({out_dim}, {in_dim}) doesn't match "
+                    f"Linear ({org_out}, {org_in}) — skipping"
+                )
+                continue
+
+            module = LoHaInfModule(lora_name, org_module, multiplier, alpha_val,
+                                   out_dim=out_dim, in_dim=in_dim, r1=r1, r2=r2)
+            network.unet_loras.append(module)
+            existing_names.add(lora_name)
+            added_loha += 1
+
+    if added_lokr:
+        logger.info(f"Appended {added_lokr} LoKR modules to network.")
+    if added_loha:
+        logger.info(f"Appended {added_loha} LoHa modules to network.")
+
+
+# Create network from weights for inference, weights are not loaded here (because can be merged)
+def create_network_from_weights(
+    target_replace_modules: List[str],
+    multiplier: float,
+    weights_sd: Dict[str, torch.Tensor],
+    text_encoders: Optional[List[nn.Module]] = None,
+    unet: Optional[nn.Module] = None,
+    for_inference: bool = False,
+    module_class: Optional[Type[object]] = None,
+    module_kwargs: Optional[Dict[str, Any]] = None,
+    **kwargs,
+) -> LoRANetwork:
+    # Scan standard-LoRA dims/alphas (LyCORIS modules are detected separately below).
+    modules_dim = {}
+    modules_alpha = {}
+    for key, value in weights_sd.items():
+        if "." not in key:
+            continue
+
+        lora_name = key.split(".")[0]
+        if "alpha" in key:
+            modules_alpha[lora_name] = value
+        elif "lora_down" in key:
+            dim = value.shape[0]
+            modules_dim[lora_name] = dim
+
+    if module_class is None:
+        module_class = LoRAInfModule if for_inference else LoRAModule
+
+    network = LoRANetwork(
+        target_replace_modules,
+        "lora_unet",
+        text_encoders,
+        unet,
+        multiplier=multiplier,
+        modules_dim=modules_dim,
+        modules_alpha=modules_alpha,
+        module_class=module_class,
+        module_kwargs=module_kwargs,
+    )
+
+    # Append LoKR / LoHa modules found in the state dict. A single file can
+    # mix variants (uncommon but permitted) — each module is dispatched by
+    # its own key suffix.
+    _append_lycoris_modules(
+        network, weights_sd, target_replace_modules, unet, for_inference, multiplier
+    )
+
+    return network

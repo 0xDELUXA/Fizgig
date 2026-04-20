@@ -1,0 +1,13 @@
+{
+    "youtube_urls": {
+        "start": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "image_prep": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "captions": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "samples": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "training": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "profiler": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "repair_studio": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "extract": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "preferences": "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    }
+}

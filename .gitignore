@@ -1,0 +1,50 @@
+# Internal dev docs
+CLAUDE.md
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Local config (created on first run)
+prefs.json
+last_used.json
+.last_used.json
+
+# User presets (session-specific)
+presets/.last_train_settings.json
+
+# Dataset TOMLs (auto-generated)
+dataset/*
+!dataset/.gitkeep
+
+# Diagnostic dumps
+repair_studio_last_preview.log
+
+# Training output / cache (large files)
+output_loras/*
+!output_loras/.gitkeep
+cache/*
+!cache/.gitkeep
+profiles/*
+!profiles/.gitkeep
+
+# Pause state
+.fizgig_paused.json
+
+# Model files (user-provided)
+*.safetensors
+*.ckpt
+*.bin
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+nul

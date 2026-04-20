@@ -1,0 +1,48 @@
+# Fizgig - Independent Klein 9B LoRA Trainer
+
+# PyTorch with CUDA 12.8 (supports RTX 30xx / 40xx / 50xx Blackwell)
+# Requires NVIDIA driver 555+ on Windows, 550+ on Linux.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.10.0
+torchvision==0.25.0
+
+# Training framework
+accelerate==1.6.0
+diffusers==0.32.1
+safetensors==0.4.5
+einops==0.7.0
+
+# Text encoder (Qwen3)
+transformers==4.54.1
+tokenizers==0.21.4
+sentencepiece==0.2.1
+
+# Optimizers
+bitsandbytes==0.48.2
+
+# Dataset config
+toml==0.10.2
+voluptuous==0.15.2
+
+# Image processing
+pillow==11.3.0
+numpy==2.2.6
+opencv-python==4.10.0.84
+
+# Logging and monitoring
+tensorboard==2.20.0
+tqdm==4.67.1
+
+# HuggingFace
+huggingface-hub==0.34.3
+
+# Face detection (for data preparation)
+insightface>=0.7.0
+onnxruntime>=1.15.0
+
+# AI Captioning (Florence-2)
+timm>=0.9.0
+
+# Misc
+pyyaml==6.0.3
+packaging==25.0  # Explicit — used by src/fizgig/training/trainer.py for Version parsing

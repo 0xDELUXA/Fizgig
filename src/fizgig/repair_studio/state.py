@@ -92,7 +92,7 @@ class SliderState:
         """Return a new SliderState with random perturbations to num_mutations blocks.
 
         active_blocks: set of block_ids the LoRA touches (skip others).
-        intensity: 0.0 = tiny nudges (±0.2), 1.0 = wild swings (±3.0).
+        intensity: 0.0 = tiny nudges (±0.1), 1.0 = bold moves (±2.0).
         """
         import random
         new = self.copy()
@@ -102,8 +102,8 @@ class SliderState:
         chosen = random.sample(candidates, min(num_mutations, len(candidates)))
         for bid in chosen:
             bs = new.blocks[bid]
-            # 0.0 → ±0.2, 0.5 → ±0.9, 1.0 → ±3.0 (exponential ramp)
-            magnitude = 0.2 + intensity * intensity * 2.8
+            # 0.0 → ±0.1, 0.5 → ±1.05, 1.0 → ±2.0 (linear ramp)
+            magnitude = 0.1 + intensity * 1.9
             delta = random.uniform(-magnitude, magnitude)
             bs.primary_strength = max(-3.0, min(3.0, bs.primary_strength + delta))
             # Chance of toggling enable scales with intensity (0% at 0, 25% at max)

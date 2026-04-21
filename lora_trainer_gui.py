@@ -5609,31 +5609,48 @@ class LoRATrainerGUI:
 
         ttk.Label(setup_card, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=2)
         self.explorer_prompt_var = tk.StringVar()
-        ttk.Entry(setup_card, textvariable=self.explorer_prompt_var).grid(
-            row=r, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
+        prompt_frame = ttk.Frame(setup_card)
+        prompt_frame.grid(row=r, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
+        prompt_frame.columnconfigure(0, weight=1)
+        ttk.Entry(prompt_frame, textvariable=self.explorer_prompt_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(prompt_frame, text="Apply",
+                   command=self._explorer_apply_prompt).pack(side=tk.LEFT, padx=(6, 0))
+        r += 1
+        tk.Label(setup_card, text="Change prompt and click Apply to regenerate with new text.",
+                 font=(FONT_FAMILY, 8, "italic"),
+                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
+            row=r, column=1, columnspan=2, sticky=tk.W, padx=4, pady=(0, 4))
         r += 1
 
         params_frame = ttk.Frame(setup_card)
         params_frame.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(6, 2))
         ttk.Label(params_frame, text="Seed:").pack(side=tk.LEFT, padx=(0, 4))
         self.explorer_seed_var = tk.StringVar(value="42")
-        ttk.Entry(params_frame, textvariable=self.explorer_seed_var, width=8).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Entry(params_frame, textvariable=self.explorer_seed_var, width=8).pack(side=tk.LEFT, padx=(0, 2))
+        tk.Button(params_frame, text="\u21bb", font=(FONT_FAMILY, 9),
+                  bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
+                  activebackground=COLORS["bg_surface"], activeforeground=COLORS["text_primary"],
+                  relief="flat", bd=0, padx=4, pady=0, cursor="hand2",
+                  command=self._explorer_randomize_seed
+                  ).pack(side=tk.LEFT, padx=(0, 16))
         ttk.Label(params_frame, text="Res:").pack(side=tk.LEFT, padx=(0, 4))
         self.explorer_res_var = tk.StringVar(value="512")
         ttk.Combobox(params_frame, textvariable=self.explorer_res_var,
-                     values=["256", "384", "512"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 16))
+                     values=["256", "384", "512", "768", "1024"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 16))
         ttk.Label(params_frame, text="Intensity:").pack(side=tk.LEFT, padx=(0, 4))
         self.explorer_intensity_var = tk.DoubleVar(value=0.5)
         ttk.Scale(params_frame, from_=0.0, to=1.0, variable=self.explorer_intensity_var,
                   orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT, padx=(0, 4))
-        self._explorer_intensity_lbl = ttk.Label(params_frame, text="0.50", width=4)
+        self._explorer_intensity_lbl = ttk.Label(params_frame, text="\u00b11.05", width=5)
         self._explorer_intensity_lbl.pack(side=tk.LEFT, padx=(0, 16))
-        self.explorer_intensity_var.trace_add("write", lambda *_: self._explorer_intensity_lbl.configure(
-            text=f"{self.explorer_intensity_var.get():.2f}"))
+        def _update_intensity_lbl(*_):
+            mag = 0.1 + self.explorer_intensity_var.get() * 1.9
+            self._explorer_intensity_lbl.configure(text=f"\u00b1{mag:.1f}")
+        self.explorer_intensity_var.trace_add("write", _update_intensity_lbl)
         ttk.Label(params_frame, text="Mutations:").pack(side=tk.LEFT, padx=(0, 4))
         self.explorer_mutations_var = tk.StringVar(value="3")
         ttk.Combobox(params_frame, textvariable=self.explorer_mutations_var,
-                     values=["1", "2", "3", "4", "5"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
+                     values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
         self.explorer_hold_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(params_frame, text="Hold Mode (lock picked blocks)",
                         variable=self.explorer_hold_var).pack(side=tk.LEFT)
@@ -5675,8 +5692,10 @@ class LoRATrainerGUI:
         self._explorer_undo_btn = ttk.Button(btn_row, text="Undo",
                                               command=self._explorer_undo, state="disabled")
         self._explorer_undo_btn.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btn_row, text="Reset to Default",
-                   command=self._explorer_reset_baseline).pack(side=tk.LEFT)
+        ttk.Button(btn_row, text="Restart",
+                   command=self._explorer_restart).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Unload",
+                   command=self._explorer_full_reset).pack(side=tk.LEFT)
 
         # Collapsed slider state display
         state_frame = tk.Frame(baseline_right, bg=COLORS["bg_deep"])
@@ -5699,6 +5718,16 @@ class LoRATrainerGUI:
             "4 random mutations of the current baseline. Click your favourite to evolve.",
         )
 
+        gallery_btn_row = tk.Frame(gallery_card, bg=COLORS["bg_surface"])
+        gallery_btn_row.pack(anchor=tk.W, pady=(0, 8))
+        self._explorer_roll_btn = ttk.Button(gallery_btn_row, text="Re-roll",
+                                              command=self._explorer_reroll, state="disabled")
+        self._explorer_roll_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._explorer_progress_var = tk.StringVar(value="")
+        tk.Label(gallery_btn_row, textvariable=self._explorer_progress_var,
+                 font=(FONT_FAMILY, 10, "bold"),
+                 fg=COLORS["accent_hover"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+
         self._explorer_gallery_frame = tk.Frame(gallery_card, bg=COLORS["bg_surface"])
         self._explorer_gallery_frame.pack(fill=tk.X)
 
@@ -5716,19 +5745,17 @@ class LoRATrainerGUI:
                 lbl.bind("<Button-1>", lambda e, i=idx: self._explorer_pick(i))
                 lbl.bind("<Enter>", lambda e, h=holder: h.configure(highlightbackground=COLORS["accent"]))
                 lbl.bind("<Leave>", lambda e, h=holder: h.configure(highlightbackground=COLORS["border"]))
+                # Seed cycle button overlaid in top-right corner
+                seed_btn = tk.Button(holder, text="\u21bb", font=(FONT_FAMILY, 10, "bold"),
+                                     bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
+                                     activebackground=COLORS["bg_surface"],
+                                     activeforeground=COLORS["text_primary"],
+                                     relief="flat", bd=0, padx=4, pady=2, cursor="hand2",
+                                     command=lambda: self._explorer_cycle_seed())
+                seed_btn.place(relx=1.0, x=-4, y=4, anchor="ne")
                 self._explorer_gallery_labels.append(lbl)
         self._explorer_gallery_frame.columnconfigure(0, weight=1)
         self._explorer_gallery_frame.columnconfigure(1, weight=1)
-
-        gallery_btn_row = tk.Frame(gallery_card, bg=COLORS["bg_surface"])
-        gallery_btn_row.pack(anchor=tk.W, pady=(8, 4))
-        self._explorer_roll_btn = ttk.Button(gallery_btn_row, text="Re-roll",
-                                              command=self._explorer_reroll, state="disabled")
-        self._explorer_roll_btn.pack(side=tk.LEFT, padx=(0, 8))
-        self._explorer_progress_var = tk.StringVar(value="")
-        tk.Label(gallery_btn_row, textvariable=self._explorer_progress_var,
-                 font=(FONT_FAMILY, 10, "bold"),
-                 fg=COLORS["accent_hover"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
 
         self._add_youtube_help_button(outer, "explorer")
 
@@ -5908,10 +5935,20 @@ class LoRATrainerGUI:
         for i, img in enumerate(variant_images):
             self._explorer_show_variant(i, img)
 
-        self._explorer_roll_btn.configure(state="normal")
         self._explorer_save_btn.configure(state="normal")
         self._explorer_progress_var.set("")
-        self.explorer_status_var.set("Pick a favourite or re-roll.")
+
+        # Check if all blocks are locked (Hold Mode complete)
+        active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
+        unlocked = active - self._explorer_locked_blocks
+        if self.explorer_hold_var.get() and not unlocked:
+            self._explorer_roll_btn.configure(state="disabled")
+            self.explorer_status_var.set(
+                f"All {len(active)} blocks locked! Exploration complete. Save your LoRA, Restart, or Undo.")
+        else:
+            self._explorer_roll_btn.configure(state="normal")
+            locked_msg = f" ({len(self._explorer_locked_blocks)}/{len(active)} blocks locked)" if self._explorer_locked_blocks else ""
+            self.explorer_status_var.set(f"Pick a favourite or re-roll.{locked_msg}")
 
     def _explorer_on_error(self, err):
         self._explorer_generating = False
@@ -6006,6 +6043,72 @@ class LoRATrainerGUI:
         # Roll new variants from the new baseline
         self._explorer_generate_baseline_and_roll()
 
+    def _explorer_cycle_seed(self):
+        """New random seed, regenerate all variants + baseline with current slider states."""
+        if self._explorer_generating or self._explorer_baseline_state is None:
+            return
+        import random
+        new_seed = random.randint(1, 99999)
+        self.explorer_seed_var.set(str(new_seed))
+        # Update baseline and all variant states to the new seed
+        self._explorer_baseline_state.seed = new_seed
+        for vs in self._explorer_variant_states:
+            vs.seed = new_seed
+        # Regenerate with same slider states but new seed
+        self._explorer_generating = True
+        self._explorer_roll_btn.configure(state="disabled")
+        self._explorer_progress_var.set("Cycling seed...")
+        self.master.update_idletasks()
+
+        import threading
+        thread = threading.Thread(
+            target=self._explorer_seed_cycle_worker,
+            args=(self._explorer_baseline_state, list(self._explorer_variant_states)),
+            daemon=True,
+        )
+        thread.start()
+
+    def _explorer_seed_cycle_worker(self, baseline_state, variant_states):
+        """Background: regenerate baseline + existing variants at a new seed."""
+        try:
+            engine = self._explorer_engine
+            if engine is None:
+                return
+            # Generate baseline at new seed
+            engine._invalidate_activation_cache()
+            engine._changed_blocks = set(baseline_state.blocks.keys())
+            baseline_img = engine.generate_preview(baseline_state)
+            # Generate each variant at new seed (same slider states)
+            variant_images = []
+            for i, vs in enumerate(variant_states):
+                self.master.after(0, lambda i=i: self._explorer_progress_var.set(
+                    f"Seed cycling variant {i + 1}/4..."))
+                engine._invalidate_activation_cache()
+                engine._changed_blocks = set(vs.blocks.keys())
+                img = engine.generate_preview(vs)
+                variant_images.append(img)
+            self.master.after(0, lambda: self._explorer_on_results(
+                baseline_state, baseline_img, variant_states, variant_images))
+        except Exception:
+            import traceback
+            self.master.after(0, lambda: self._explorer_on_error(traceback.format_exc()))
+
+    def _explorer_randomize_seed(self):
+        """Randomize seed and regenerate (same as Apply but for seed)."""
+        import random
+        self.explorer_seed_var.set(str(random.randint(1, 99999)))
+        if self._explorer_baseline_state is not None and not self._explorer_generating:
+            self._explorer_generate_baseline_and_roll()
+
+    def _explorer_apply_prompt(self):
+        """Apply a new prompt — invalidates prompt cache and regenerates."""
+        if self._explorer_generating or self._explorer_baseline_state is None:
+            return
+        if self._explorer_engine is not None:
+            self._explorer_engine._prompt_cache_key = None
+            self._explorer_engine._prompt_cache = None
+        self._explorer_generate_baseline_and_roll()
+
     def _explorer_reroll(self):
         """Re-roll: generate 4 new mutations from the same baseline."""
         if self._explorer_generating or self._explorer_baseline_state is None:
@@ -6028,31 +6131,75 @@ class LoRATrainerGUI:
         locked_msg = f" ({len(self._explorer_locked_blocks)} locked)" if self._explorer_locked_blocks else ""
         self.explorer_status_var.set(f"Undone{locked_msg}. Click Re-roll to generate new variants.")
 
-    def _explorer_reset_baseline(self):
-        """Reset baseline to all-sliders-at-1.0."""
+    def _explorer_restart(self):
+        """Unlock all blocks and restart exploration — ask whether from defaults or current baseline."""
+        if self._explorer_generating or self._explorer_baseline_state is None:
+            return
+        choice = messagebox.askyesnocancel(
+            "Restart Exploration",
+            "Unlock all blocks and restart.\n\n"
+            "Yes = restart from default values\n"
+            "No = restart from current baseline (keep slider positions)\n"
+            "Cancel = don't restart",
+        )
+        if choice is None:
+            return  # Cancel
+
+        # Push current state to undo stack
+        self._explorer_history.append(
+            (self._explorer_baseline_state.copy(), self._explorer_baseline_image,
+             set(self._explorer_locked_blocks)))
+        self._explorer_undo_btn.configure(state="normal")
+        self._explorer_locked_blocks.clear()
+
+        if choice:
+            # Yes = reset to default values
+            from fizgig.repair_studio.state import SliderState
+            self._explorer_baseline_state = SliderState.default_klein9b()
+            try:
+                base_strength = float(self.explorer_strength_var.get())
+            except ValueError:
+                base_strength = 1.0
+            for bid, bs in self._explorer_baseline_state.blocks.items():
+                bs.primary_strength = base_strength
+            self._explorer_baseline_state.prompt = self.explorer_prompt_var.get()
+            self._explorer_baseline_state.seed = int(self.explorer_seed_var.get() or 42)
+            res = int(self.explorer_res_var.get() or 512)
+            self._explorer_baseline_state.preview_width = res
+            self._explorer_baseline_state.preview_height = res
+            self.explorer_status_var.set("Restarted from defaults — all blocks unlocked.")
+        else:
+            # No = keep current baseline, just unlock
+            self.explorer_status_var.set("All blocks unlocked — continuing from current baseline.")
+
+        self._explorer_roll_btn.configure(state="normal")
+        self._explorer_generate_baseline_and_roll()
+
+    def _explorer_full_reset(self):
+        """Unload LoRA and pipeline, return to initial state."""
         if self._explorer_generating:
             return
-        from fizgig.repair_studio.state import SliderState
-        if self._explorer_baseline_state is not None:
-            self._explorer_history.append(
-                (self._explorer_baseline_state.copy(), self._explorer_baseline_image,
-                 set(self._explorer_locked_blocks)))
-            self._explorer_undo_btn.configure(state="normal")
+        if self._explorer_engine is not None:
+            try:
+                self._explorer_engine.reset()
+            except Exception:
+                pass
+            self._explorer_engine = None
+        self._explorer_baseline_state = None
+        self._explorer_baseline_image = None
+        self._explorer_history.clear()
         self._explorer_locked_blocks.clear()
-        self._explorer_baseline_state = SliderState.default_klein9b()
-        try:
-            base_strength = float(self.explorer_strength_var.get())
-        except ValueError:
-            base_strength = 1.0
-        for bid, bs in self._explorer_baseline_state.blocks.items():
-            bs.primary_strength = base_strength
-        self._explorer_baseline_state.prompt = self.explorer_prompt_var.get()
-        self._explorer_baseline_state.seed = int(self.explorer_seed_var.get() or 42)
-        res = int(self.explorer_res_var.get() or 512)
-        self._explorer_baseline_state.preview_width = res
-        self._explorer_baseline_state.preview_height = res
-        self.explorer_status_var.set("Baseline reset to default. Click Re-roll to explore.")
-        self._explorer_generate_baseline_and_roll()
+        self._explorer_variant_states.clear()
+        self._explorer_variant_images.clear()
+        self._explorer_thumbnails.clear()
+        self._explorer_baseline_label.configure(image="", text="(no baseline yet)")
+        for lbl in self._explorer_gallery_labels:
+            lbl.configure(image="", text="(variant)")
+        self._explorer_roll_btn.configure(state="disabled")
+        self._explorer_save_btn.configure(state="disabled")
+        self._explorer_undo_btn.configure(state="disabled")
+        self._explorer_progress_var.set("")
+        self.explorer_status_var.set("Load a LoRA to begin exploring.")
 
     def _explorer_save(self):
         """Save the current baseline as a baked LoRA."""

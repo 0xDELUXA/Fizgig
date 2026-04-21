@@ -511,7 +511,7 @@ h1 {{ font-size: 22px; margin-bottom: 4px; }}
 .slider-row label {{ font-size: 13px; color: #BDC3C7; white-space: nowrap; }}
 .slider-row input[type=range] {{ flex: 1; accent-color: #3498DB; }}
 .slider-label {{ font-size: 14px; font-weight: bold; color: #ECF0F1; min-width: 80px; text-align: center; }}
-.blocks-container {{ display: flex; align-items: flex-end; gap: 2px; height: 320px; margin-bottom: 8px; padding: 0 4px; }}
+.blocks-container {{ display: flex; align-items: flex-end; gap: 2px; height: 320px; margin-bottom: 0; padding: 0 4px; }}
 .block-col {{ flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; min-width: 0; }}
 .block-bar {{ width: 100%; border-radius: 3px 3px 0 0; transition: height 0.3s ease; min-height: 2px; }}
 .block-bar.style_composition {{ background: #5B9BD5; }}
@@ -520,7 +520,9 @@ h1 {{ font-size: 22px; margin-bottom: 4px; }}
 .block-bar.ident_details_overlap {{ background: #B8A547; }}
 .block-bar.details {{ background: #ED7D31; }}
 .block-bar:hover {{ filter: brightness(1.3); }}
-.block-label {{ font-size: 8px; color: #777; writing-mode: vertical-rl; text-orientation: mixed; margin-top: 4px; white-space: nowrap; max-height: 60px; overflow: hidden; }}
+.labels-container {{ display: flex; gap: 2px; padding: 0 4px; height: 40px; }}
+.label-col {{ flex: 1; display: flex; align-items: flex-start; justify-content: center; min-width: 0; overflow: hidden; }}
+.block-label {{ font-size: 10px; color: #999; transform: rotate(-45deg); transform-origin: top left; white-space: nowrap; margin-top: 4px; margin-left: 10px; }}
 .separator {{ width: 1px; background: #555; height: 100%; margin: 0 1px; flex-shrink: 0; }}
 .section-label {{ display: flex; gap: 2px; margin-bottom: 4px; padding: 0 4px; }}
 .section-label span {{ flex: 1; text-align: center; font-size: 11px; font-weight: 600; padding: 4px 0; border-radius: 4px; }}
@@ -582,6 +584,7 @@ h1 {{ font-size: 22px; margin-bottom: 4px; }}
 
 <div class="section-label" id="sectionLabels"></div>
 <div class="blocks-container" id="blocks"></div>
+<div class="labels-container" id="blockLabels"></div>
 
 <div class="summary" id="summary"></div>
 <div class="tooltip" id="tooltip"></div>
@@ -602,9 +605,9 @@ function init() {{
     const catBar = document.getElementById('catBar');
     catBar.innerHTML = `
         <span class="cat-comp">Style+Comp ${{DATA.categoryPcts.style_composition}}%</span>
-        <span class="cat-sio">↔ ${{DATA.categoryPcts.style_ident_overlap}}%</span>
+        <span class="cat-sio">Style/ID ${{DATA.categoryPcts.style_ident_overlap}}%</span>
         <span class="cat-ident">Identity ${{DATA.categoryPcts.identity}}%</span>
-        <span class="cat-ido">↔ ${{DATA.categoryPcts.ident_details_overlap}}%</span>
+        <span class="cat-ido">ID/Detail ${{DATA.categoryPcts.ident_details_overlap}}%</span>
         <span class="cat-details">Details ${{DATA.categoryPcts.details}}%</span>
     `;
 
@@ -617,31 +620,39 @@ function init() {{
 
 function buildBlocks() {{
     const container = document.getElementById('blocks');
-    const labels = document.getElementById('sectionLabels');
+    const sectionLabels = document.getElementById('sectionLabels');
+    const blockLabels = document.getElementById('blockLabels');
     container.innerHTML = '';
-    labels.innerHTML = '';
+    sectionLabels.innerHTML = '';
+    blockLabels.innerHTML = '';
 
     let prevCat = null;
     let catCounts = {{ style_composition: 0, style_ident_overlap: 0, identity: 0, ident_details_overlap: 0, details: 0 }};
     DATA.blocks.forEach(b => catCounts[b.category]++);
 
     // Section labels (5 categories — empty sections are auto-hidden via flex:0)
-    labels.innerHTML = `
+    sectionLabels.innerHTML = `
         <span class="sl-comp" style="flex:${{catCounts.style_composition}}; ${{catCounts.style_composition?'':'display:none;'}}">Style+Comp</span>
-        <span class="sl-sio" style="flex:${{catCounts.style_ident_overlap}}; ${{catCounts.style_ident_overlap?'':'display:none;'}}">↔</span>
+        <span class="sl-sio" style="flex:${{catCounts.style_ident_overlap}}; ${{catCounts.style_ident_overlap?'':'display:none;'}}">Style/ID</span>
         <span class="sl-ident" style="flex:${{catCounts.identity}}; ${{catCounts.identity?'':'display:none;'}}">Identity</span>
-        <span class="sl-ido" style="flex:${{catCounts.ident_details_overlap}}; ${{catCounts.ident_details_overlap?'':'display:none;'}}">↔</span>
+        <span class="sl-ido" style="flex:${{catCounts.ident_details_overlap}}; ${{catCounts.ident_details_overlap?'':'display:none;'}}">ID/Detail</span>
         <span class="sl-details" style="flex:${{catCounts.details}}; ${{catCounts.details?'':'display:none;'}}">Details</span>
     `;
 
     DATA.blocks.forEach((block, i) => {{
         if (prevCat && block.category !== prevCat) {{
+            // Separator in bars
             const sep = document.createElement('div');
             sep.className = 'separator';
             container.appendChild(sep);
+            // Matching spacer in labels
+            const sepL = document.createElement('div');
+            sepL.style.cssText = 'width:1px; flex-shrink:0; margin:0 1px;';
+            blockLabels.appendChild(sepL);
         }}
         prevCat = block.category;
 
+        // Bar column (no label inside — keeps heights consistent)
         const col = document.createElement('div');
         col.className = 'block-col';
 
@@ -651,13 +662,17 @@ function buildBlocks() {{
         bar.addEventListener('mouseenter', (e) => showTooltip(e, block));
         bar.addEventListener('mouseleave', hideTooltip);
 
+        col.appendChild(bar);
+        container.appendChild(col);
+
+        // Label in separate container below
+        const lblCol = document.createElement('div');
+        lblCol.className = 'label-col';
         const lbl = document.createElement('div');
         lbl.className = 'block-label';
         lbl.textContent = block.name.replace('single ', 's').replace('double ', 'd');
-
-        col.appendChild(bar);
-        col.appendChild(lbl);
-        container.appendChild(col);
+        lblCol.appendChild(lbl);
+        blockLabels.appendChild(lblCol);
     }});
 }}
 
@@ -834,24 +849,41 @@ function buildSummary() {{
     }}
 
     let infoHtml = `
-        <div><strong>Style+Composition</strong> (double 0-7 + single 0): ${{DATA.categoryPcts.style_composition}}%</div>
-        <div><strong>↔ overlap</strong> (single 1 — style+comp ∩ identity): ${{DATA.categoryPcts.style_ident_overlap}}%</div>
-        <div><strong>Identity</strong> (single 2-11, face signal): ${{DATA.categoryPcts.identity}}%</div>
-        <div><strong>↔ overlap</strong> (single 12-16 — identity ∩ details): ${{DATA.categoryPcts.ident_details_overlap}}%</div>
-        <div><strong>Details</strong> (single 17-23): ${{DATA.categoryPcts.details}}%</div>
+        <div style="margin-bottom:12px;"><strong>Where this LoRA's energy lives:</strong></div>
+        <div><span class="cat-comp">■</span> <strong>Style+Composition ${{DATA.categoryPcts.style_composition}}%</strong> — overall look, colour palette, artistic style</div>
+        <div><span class="cat-sio">■</span> <strong>Style↔Identity overlap ${{DATA.categoryPcts.style_ident_overlap}}%</strong> — where style meets subject</div>
+        <div><span class="cat-ident">■</span> <strong>Identity ${{DATA.categoryPcts.identity}}%</strong> — face, body, subject recognition</div>
+        <div><span class="cat-ido">■</span> <strong>Identity↔Details overlap ${{DATA.categoryPcts.ident_details_overlap}}%</strong> — fine features of the subject</div>
+        <div><span class="cat-details">■</span> <strong>Details ${{DATA.categoryPcts.details}}%</strong> — textures, hair, skin, fabric detail</div>
         <br>
-        <div>Overlap regions belong to two categories — Identity extraction/training uses single 1-16 (includes both ↔ regions).</div>
-        <div><strong>Top Active (activation)</strong> = what this LoRA <em>does</em> during inference.</div>
-        <div><strong>Top Weight-Norm (static)</strong> = what this LoRA <em>packs into storage</em>. Divergence = interesting.</div>
+        <div style="color:#95A5A6; font-size:12px; line-height:1.6;">
+            <strong>Most Active Blocks</strong> shows which blocks contribute most during image generation — this is what the LoRA actually <em>does</em> when you use it.<br>
+            <strong>Highest Weight Norms</strong> shows which blocks have the largest stored weights — this is where the LoRA packs the most learned information.<br>
+            When these two lists differ, it means some blocks store a lot but don't activate strongly (or vice versa) — a sign the LoRA may benefit from repair or extraction.
+        </div>
     `;
+
+    // Find blocks that appear in BOTH lists (activate AND store)
+    const activeNames = new Set(DATA.topBlocks.map(b => b.name));
+    const staticNames = new Set(staticTop.map(b => b.name));
+    const bothNames = [...activeNames].filter(n => staticNames.has(n));
+    let bothHtml = '';
+    if (bothNames.length) {{
+        bothHtml = `<div style="margin-top:16px; padding:10px 14px; background:#252936; border-radius:6px; border-left:3px solid #3498DB;">
+            <strong style="color:#3498DB;">Key blocks</strong>
+            <span style="color:#95A5A6; font-size:12px;"> — high in both activation and stored weight (the LoRA's core signal):</span><br>
+            <span style="font-size:14px; font-weight:600; color:#ECF0F1;">${{bothNames.join(' &nbsp;·&nbsp; ')}}</span>
+        </div>`;
+    }}
 
     summary.innerHTML = `
         <h2>Summary</h2>
         <div class="summary-grid">
-            <div><h3>Top Active (activation)</h3><div class="top-blocks">${{topHtml}}</div></div>
-            <div><h3>Top Weight-Norm (static)</h3><div class="top-blocks">${{staticHtml}}</div></div>
+            <div><h3>Most Active Blocks</h3><div class="top-blocks">${{topHtml}}</div></div>
+            <div><h3>Highest Weight Norms</h3><div class="top-blocks">${{staticHtml}}</div></div>
             <div class="info-section">${{infoHtml}}</div>
         </div>
+        ${{bothHtml}}
     `;
 }}
 

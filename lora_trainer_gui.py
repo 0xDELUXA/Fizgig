@@ -7450,6 +7450,9 @@ class LoRATrainerGUI:
 
     def _repair_preview_worker(self, snapshot):
         try:
+            if self.repair_engine is None:
+                self._repair_preview_in_flight = False
+                return
             print(f"[repair] worker: generating baseline at "
                   f"{snapshot.preview_width}x{snapshot.preview_height}")
             baseline = self.repair_engine.generate_baseline(snapshot)

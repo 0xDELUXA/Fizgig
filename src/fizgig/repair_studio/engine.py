@@ -217,22 +217,56 @@ class RepairEngine:
 
     def reset(self) -> None:
         """Full unload — drops pipeline, primary, donor. Next ensure_pipeline reloads from disk."""
+        import gc
+        import torch
+        from fizgig.utils.device import clean_memory_on_device
+
+        import gc
+        import torch
+
+        # Invalidate caches first (drops large GPU tensors from turbo cache).
+        self._invalidate_baseline_cache()
+        self._invalidate_activation_cache()
+
+        # Drop LoRA networks BEFORE the pipeline — their forward-hook closures
+        # capture `org_forward` (a bound method on the DiT's Linear layers),
+        # creating circular references that prevent GC from freeing the DiT.
+        # Explicitly clear the module lists to break the cycles.
+        for net in (self.primary_network, self.donor_network):
+            if net is not None:
+                try:
+                    for lora in net.unet_loras:
+                        lora.org_forward = None
+                    net.unet_loras.clear()
+                    for lora in net.text_encoder_loras:
+                        lora.org_forward = None
+                    net.text_encoder_loras.clear()
+                except Exception:
+                    pass
+        self.primary_network = None
+        self.donor_network = None
+
+        # Force GC to break any remaining ref cycles before pipeline unload.
+        gc.collect()
+
         if self.pipeline is not None:
             try:
                 self.pipeline.unload_models()
             except Exception:
                 logger.exception("Pipeline unload raised; continuing")
         self.pipeline = None
-        self.primary_network = None
-        self.donor_network = None
+
         self.primary_path = None
         self.donor_path = None
         self.primary_block_ids = set()
         self.donor_block_ids = set()
         self.primary_hash = None
-        self._invalidate_baseline_cache()
-        self._invalidate_activation_cache()
         self._changed_blocks.clear()
+
+        # Final GC + CUDA cache flush.
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
     # Activation cache (v2 Turbo Preview)

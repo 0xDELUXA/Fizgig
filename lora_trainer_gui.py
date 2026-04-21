@@ -1419,6 +1419,41 @@ class LoRATrainerGUI:
         )
         ttk.Button(row, text="Browse…", command=self._browse_image_folder).pack(side=tk.LEFT)
 
+        # Setup prompt — shown when model paths are not configured yet
+        self._setup_prompt_frame = tk.Frame(container, bg=COLORS["warning"],
+                                             highlightbackground=COLORS["warning"],
+                                             highlightthickness=1, bd=0)
+        setup_inner = tk.Frame(self._setup_prompt_frame, bg="#2A2200")
+        setup_inner.pack(fill=tk.X, padx=1, pady=1)
+        tk.Label(setup_inner, text="\u26a0  Model files not configured",
+                 font=(FONT_FAMILY, 12, "bold"),
+                 fg=COLORS["warning"], bg="#2A2200").pack(anchor=tk.W, padx=20, pady=(12, 4))
+        tk.Label(setup_inner,
+                 text="Head to the Preferences tab to set your model paths before training or using the tools. "
+                      "Each model row has a Download link that opens the correct HuggingFace page.",
+                 font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_primary"], bg="#2A2200",
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
+        ttk.Button(setup_inner, text="Open Preferences",
+                   command=lambda: self.notebook.select(self.prefs_tab)).pack(
+            anchor=tk.W, padx=20, pady=(4, 12))
+
+        def _check_model_paths(*_args):
+            model_keys = ["base_dit", "distilled_dit", "vae", "text_encoder"]
+            any_empty = any(not self.prefs_vars[k].get().strip() for k in model_keys)
+            if any_empty:
+                self._setup_prompt_frame.pack(fill=tk.X, pady=(20, 0),
+                                               before=tools_card)
+            else:
+                self._setup_prompt_frame.pack_forget()
+
+        # Re-check whenever a model path changes
+        for _mk in ("base_dit", "distilled_dit", "vae", "text_encoder"):
+            self.prefs_vars[_mk].trace_add("write", _check_model_paths)
+
+        # Initial check (deferred so tools_card exists)
+        self.master.after(100, _check_model_paths)
+
         # Tools card — highlights the post-training workbench tabs
         tools_card = tk.Frame(container, bg=COLORS["bg_surface"],
                               highlightbackground=COLORS["border"],

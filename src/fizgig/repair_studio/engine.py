@@ -88,6 +88,10 @@ class RepairEngine:
         self._act_cache: Optional[dict] = None       # timestep_idx → ActivationCacheEntry
         self._act_cache_key: Optional[tuple] = None   # (primary_path, donor_path, seed, prompt, w, h)
 
+        # Prompt encoding cache — avoids reloading TE + re-encoding on slider-only changes
+        self._prompt_cache_key: Optional[tuple] = None   # (prompt, primary_path)
+        self._prompt_cache: Optional[tuple] = None       # (ctx_vec, neg_ctx_vec)
+
         # Cache the last-generated baseline keyed on (primary_path, seed,
         # prompt, w, h) — only regenerate baseline when these change.
         self._baseline_cache_key = None
@@ -262,6 +266,8 @@ class RepairEngine:
         self.donor_block_ids = set()
         self.primary_hash = None
         self._changed_blocks.clear()
+        self._prompt_cache_key = None
+        self._prompt_cache = None
 
         # Final GC + CUDA cache flush.
         gc.collect()
@@ -344,12 +350,6 @@ class RepairEngine:
             logger.info("[REPAIR] %s", msg)
             log_lines.append(msg)
 
-        # Phase boundary 1: release any leftover allocator state from the
-        # previous preview before we spike for the TE encode. Critical on
-        # 16 GB cards where fragmented buffers can push the encode peak
-        # over the budget.
-        clean_memory_on_device(self.pipeline.device)
-
         self.apply_state(state)
 
         pipeline = self.pipeline
@@ -382,24 +382,29 @@ class RepairEngine:
         width = (state.preview_width // 16) * 16
         height = (state.preview_height // 16) * 16
 
-        # TE back on GPU for encode (we offload it in ensure_pipeline for memory).
-        try:
-            pipeline.reload_text_encoder()
-        except Exception:
-            logger.exception("reload_text_encoder failed")
-
-        # Encode prompt — use the pipeline helper (trainer-style fp8 autocast handling inside).
+        # Encode prompt — cached to avoid reloading TE on slider-only changes.
         prompt = state.prompt or ""
-        ctx_vec, neg_ctx_vec = pipeline.encode_prompt(prompt, " ")
-
-        # Free TE for the DiT forward.
-        try:
-            pipeline.unload_text_encoder()
-        except Exception:
-            pass
-        # Phase boundary 2: reclaim TE's GPU footprint before the DiT forward
-        # starts allocating activations (relevant on 16 GB cards at max swap).
-        clean_memory_on_device(device)
+        prompt_key = (prompt, self.primary_path)
+        if self._prompt_cache_key == prompt_key and self._prompt_cache is not None:
+            ctx_vec, neg_ctx_vec = self._prompt_cache
+            dlog("Prompt cache hit — skipping TE reload")
+        else:
+            # Phase boundary 1: release allocator state before TE spike.
+            clean_memory_on_device(device)
+            try:
+                pipeline.reload_text_encoder()
+            except Exception:
+                logger.exception("reload_text_encoder failed")
+            ctx_vec, neg_ctx_vec = pipeline.encode_prompt(prompt, " ")
+            try:
+                pipeline.unload_text_encoder()
+            except Exception:
+                pass
+            # Phase boundary 2: reclaim TE footprint before DiT forward.
+            clean_memory_on_device(device)
+            self._prompt_cache_key = prompt_key
+            self._prompt_cache = (ctx_vec, neg_ctx_vec)
+            dlog("Prompt encoded and cached")
 
         def _stats(t):
             tf = t.detach().float()
@@ -453,14 +458,8 @@ class RepairEngine:
             and self._act_cache_key == cache_key
             and self._changed_blocks
         )
-        if can_use_cache:
-            try:
-                free_vram_gb = _torch.cuda.mem_get_info()[0] / (1024 ** 3)
-                if free_vram_gb < 2.0:
-                    dlog(f"Turbo skipped: only {free_vram_gb:.1f} GB VRAM free")
-                    can_use_cache = False
-            except Exception:
-                pass
+        # No VRAM pre-check — the try/except around forward_cached() handles
+        # OOM gracefully by falling back to full forward.
 
         resume_point = self._compute_resume_point() if can_use_cache else None
         if resume_point:

@@ -77,6 +77,16 @@ class SliderState:
             preview_height=int(d.get("preview_height", 512)),
         )
 
+    def copy(self) -> "SliderState":
+        """Fast deep copy without JSON serialization."""
+        return SliderState(
+            blocks={bid: BlockState(bs.primary_enabled, bs.primary_strength,
+                                    bs.donor_enabled, bs.donor_strength)
+                    for bid, bs in self.blocks.items()},
+            seed=self.seed, prompt=self.prompt,
+            preview_width=self.preview_width, preview_height=self.preview_height,
+        )
+
     def diff_blocks(self, other: "SliderState") -> List[str]:
         """Block ids whose primary/donor enable or strength differs from `other`.
         Used by the UI to feed RepairEngine.mark_blocks_changed (v2 hook)."""

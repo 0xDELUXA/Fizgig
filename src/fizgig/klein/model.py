@@ -727,18 +727,9 @@ class KleinDiT(nn.Module):
             guidance_emb = timestep_embedding(guidance, 256)
             vec = vec + self.guidance_in(guidance_emb)
 
-        double_block_mod_img = self.double_stream_modulation_img(vec)
-        double_block_mod_txt = self.double_stream_modulation_txt(vec)
-        single_block_mod, _ = self.single_stream_modulation(vec)
-
-        img_emb = self.img_in(x)
-        txt_emb = self.txt_in(ctx)
-        pe_x = self.pe_embedder(x_ids)
-        pe_ctx = self.pe_embedder(ctx_ids)
-
         attn_params = AttentionParams.create(self.attn_mode, self.split_attn)
 
-        # --- Determine execution plan ---
+        # --- Determine execution plan (before computing modulations) ---
         if resume_from is None:
             run_double_from = 0
             run_single_from = 0
@@ -748,6 +739,28 @@ class KleinDiT(nn.Module):
         else:  # "single"
             run_double_from = num_double  # skip all doubles
             run_single_from = resume_from[1]
+
+        # --- Compute modulations + embeddings only when needed ---
+        if run_double_from < num_double:
+            double_block_mod_img = self.double_stream_modulation_img(vec)
+            double_block_mod_txt = self.double_stream_modulation_txt(vec)
+        else:
+            double_block_mod_img = None
+            double_block_mod_txt = None
+
+        if run_single_from < num_single or run_double_from < num_double:
+            single_block_mod, _ = self.single_stream_modulation(vec)
+        else:
+            single_block_mod = None
+
+        if run_double_from == 0:
+            img_emb = self.img_in(x)
+            txt_emb = self.txt_in(ctx)
+        else:
+            img_emb = txt_emb = None  # not needed — restoring from cache
+
+        pe_x = self.pe_embedder(x_ids)
+        pe_ctx = self.pe_embedder(ctx_ids)
 
         # --- Double-stream blocks ---
         if run_double_from == 0:

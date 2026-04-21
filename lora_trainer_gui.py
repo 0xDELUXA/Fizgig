@@ -7400,7 +7400,13 @@ class LoRATrainerGUI:
                 self.master.after_cancel(self._repair_preview_after_id)
             except Exception:
                 pass
-        delay = 100 if force else 400
+        turbo_on = getattr(self, "repair_turbo_var", None) and self.repair_turbo_var.get()
+        if force:
+            delay = 100
+        elif turbo_on:
+            delay = 150
+        else:
+            delay = 400
         print(f"[repair] schedule preview: force={force} in_flight={self._repair_preview_in_flight} "
               f"delay={delay}ms dirty={self._repair_preview_dirty}")
         self._repair_preview_after_id = self.master.after(delay, self._run_preview_async)
@@ -7435,7 +7441,7 @@ class LoRATrainerGUI:
 
         # Snapshot for thread (dataclass copy via JSON round-trip)
         from fizgig.repair_studio.state import SliderState
-        snapshot = SliderState.from_json(self.repair_state.to_json())
+        snapshot = self.repair_state.copy()
 
         # Clear the dirty flag NOW; any param change after this point will
         # set it again and trigger a re-fire when this preview completes.

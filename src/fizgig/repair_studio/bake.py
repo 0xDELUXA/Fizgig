@@ -64,6 +64,81 @@ def _module_alpha(mod_keys: Dict[str, torch.Tensor], fallback_rank: int) -> floa
         return float(fallback_rank)
 
 
+_ALPHA_SENTINEL_THRESHOLD = 1e8  # Comfy-Realtime-Lora sentinel: alpha > 1e8 means scale=1.0
+
+
+def _materialize_lycoris_module(mod_keys: Dict[str, torch.Tensor]) -> Optional[Dict[str, torch.Tensor]]:
+    """Convert a single LoKR or LoHa module to standard lora_up/lora_down via SVD.
+
+    Returns a new dict with lora_up.weight, lora_down.weight, alpha — or None
+    if the module isn't a recognised LyCORIS variant.
+    """
+    # --- LoKR ---
+    if mod_keys.get("lokr_w1") is not None or mod_keys.get("lokr_w1_a") is not None:
+        if mod_keys.get("lokr_w1_a") is not None:
+            w1 = (mod_keys["lokr_w1_a"].float() @ mod_keys["lokr_w1_b"].float())
+        else:
+            w1 = mod_keys["lokr_w1"].float()
+        if mod_keys.get("lokr_w2_a") is not None:
+            w2 = (mod_keys["lokr_w2_a"].float() @ mod_keys["lokr_w2_b"].float())
+        else:
+            w2 = mod_keys["lokr_w2"].float()
+        alpha_t = mod_keys.get("alpha")
+        dim = w1.shape[0] * w2.shape[0]
+        alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
+        scale = 1.0 if alpha > _ALPHA_SENTINEL_THRESHOLD else alpha / max(dim, 1)
+        W = torch.kron(w1, w2) * scale
+
+    # --- LoHa ---
+    elif mod_keys.get("hada_w1_a") is not None:
+        W1 = mod_keys["hada_w1_a"].float() @ mod_keys["hada_w1_b"].float()
+        W2 = mod_keys["hada_w2_a"].float() @ mod_keys["hada_w2_b"].float()
+        alpha_t = mod_keys.get("alpha")
+        dim = W1.shape[0]
+        alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
+        scale = 1.0 if alpha > _ALPHA_SENTINEL_THRESHOLD else alpha / max(dim, 1)
+        W = (W1 * W2) * scale
+
+    else:
+        return None
+
+    # SVD the dense delta to a standard LoRA at a reasonable rank
+    # Use min(64, min_dim) — preserves most information without bloating
+    min_dim = min(W.shape)
+    target_rank = min(64, min_dim)
+
+    try:
+        U, S, Vt = torch.linalg.svd(W, full_matrices=False)
+    except Exception:
+        return None
+
+    R = min(target_rank, S.shape[0])
+    sqrt_S = torch.sqrt(S[:R])
+    lora_up = (U[:, :R] * sqrt_S.unsqueeze(0)).to(torch.float16)
+    lora_down = (sqrt_S.unsqueeze(1) * Vt[:R, :]).to(torch.float16)
+
+    return {
+        "lora_up.weight": lora_up,
+        "lora_down.weight": lora_down,
+        "alpha": torch.tensor(float(R), dtype=torch.float16),
+    }
+
+
+def _materialize_lycoris_modules(modules: Dict[str, Dict[str, torch.Tensor]]) -> int:
+    """In-place: replace any LoKR/LoHa modules with SVD-materialized standard LoRA.
+    Returns the number of modules converted."""
+    count = 0
+    for mod_name, mod_keys in list(modules.items()):
+        # Skip if already standard LoRA
+        if mod_keys.get("lora_up.weight") is not None:
+            continue
+        result = _materialize_lycoris_module(mod_keys)
+        if result is not None:
+            modules[mod_name] = result
+            count += 1
+    return count
+
+
 def _bake_single_contribution(
     mod_keys: Dict[str, torch.Tensor],
     multiplier: float,
@@ -103,11 +178,9 @@ def save_repaired_lora(
     sd_p_raw: Dict[str, torch.Tensor] = load_file(primary_path)
     sd_p = ensure_kohya_lora_state_dict(sd_p_raw)
     fmt_p = detect_lora_format(sd_p)
-    if fmt_p != "kohya":
+    if fmt_p == "glora":
         raise UnsupportedLoRAFormat(
-            f"Primary LoRA format is {fmt_p.upper()}; bake currently supports "
-            f"standard LoRA only. LyCORIS primaries (LoKR/LoHa) aren't bake-able yet "
-            f"— save the slider config as a preset instead, or extract as a standard LoRA."
+            f"Primary LoRA format is GLoRA (4-matrix form); not supported for bake."
         )
 
     # Metadata from the primary file.
@@ -126,14 +199,24 @@ def save_repaired_lora(
         sd_d_raw = load_file(donor_path)
         sd_d = ensure_kohya_lora_state_dict(sd_d_raw)
         fmt_d = detect_lora_format(sd_d)
-        if fmt_d != "kohya":
+        if fmt_d == "glora":
             raise UnsupportedLoRAFormat(
-                f"Donor LoRA format is {fmt_d.upper()}; bake currently supports "
-                f"standard LoRA donors only. LyCORIS donor bake is Phase E."
+                f"Donor LoRA format is GLoRA (4-matrix form); not supported for bake."
             )
 
     modules_p = _group_by_module(sd_p)
     modules_d = _group_by_module(sd_d) if sd_d is not None else {}
+
+    # Materialize any LyCORIS modules (LoKR/LoHa) to standard LoRA via SVD
+    lycoris_converted = 0
+    if fmt_p in ("lokr", "loha"):
+        lycoris_converted += _materialize_lycoris_modules(modules_p)
+        logger.info("Bake: materialized %d LyCORIS primary modules to standard LoRA via SVD", lycoris_converted)
+    if sd_d is not None and fmt_d in ("lokr", "loha"):
+        n = _materialize_lycoris_modules(modules_d)
+        lycoris_converted += n
+        logger.info("Bake: materialized %d LyCORIS donor modules to standard LoRA via SVD", n)
+
     all_modules = sorted(set(modules_p) | set(modules_d))
 
     sd_out: Dict[str, torch.Tensor] = {}
@@ -246,6 +329,8 @@ def save_repaired_lora(
     if combined_ranks:
         metadata["ss_repair_studio_combined_ranks"] = json.dumps(
             {k: v for k, v in sorted(combined_ranks.items())}, separators=(",", ":"))
+    if lycoris_converted:
+        metadata["ss_repair_studio_lycoris_svd"] = str(lycoris_converted)
 
     save_file(sd_out, out_path, metadata=metadata)
 

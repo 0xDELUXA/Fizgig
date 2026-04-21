@@ -5825,6 +5825,15 @@ class LoRATrainerGUI:
                     return
             self._explorer_engine.load_primary(path)
             n_active = len(self._explorer_engine.primary_block_ids)
+            # Detect format for user info
+            from safetensors.torch import load_file as _lf
+            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
+            _fmt = _df(_ek(_lf(path)))
+            if _fmt in ("lokr", "loha"):
+                messagebox.showinfo("LyCORIS LoRA loaded",
+                    f"This is a {_fmt.upper()} LoRA. Preview works normally.\n\n"
+                    f"If you save, blocks will be converted to standard LoRA via SVD "
+                    f"(slight approximation).")
             self.explorer_status_var.set(
                 f"Loaded: {os.path.basename(path)} ({n_active}/32 blocks). Click Re-roll to start exploring.")
             # Initialize baseline state with user-specified LoRA strength
@@ -7988,9 +7997,18 @@ class LoRATrainerGUI:
         try:
             self.repair_status_var.set("Loading primary LoRA…")
             self.master.update_idletasks()
+            # Detect format for user info
+            from safetensors.torch import load_file as _lf
+            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
+            _fmt = _df(_ek(_lf(path)))
             self.repair_engine.load_primary(path)
             self._refresh_block_slider_activity()
             n_active = len(self.repair_engine.primary_block_ids)
+            if _fmt in ("lokr", "loha"):
+                messagebox.showinfo("LyCORIS LoRA loaded",
+                    f"This is a {_fmt.upper()} LoRA. Live preview works normally.\n\n"
+                    f"If you save, blocks will be converted to standard LoRA via SVD "
+                    f"(slight approximation).")
             # Look up a matching Profiler sidecar by content hash and render
             # the inline info panel if one exists.
             self._find_repair_profile_match()
@@ -8022,7 +8040,15 @@ class LoRATrainerGUI:
         try:
             self.repair_status_var.set("Loading donor LoRA…")
             self.master.update_idletasks()
+            from safetensors.torch import load_file as _lf
+            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
+            _fmt_d = _df(_ek(_lf(path)))
             self.repair_engine.load_donor(path)
+            if _fmt_d in ("lokr", "loha"):
+                messagebox.showinfo("LyCORIS donor loaded",
+                    f"This donor is a {_fmt_d.upper()} LoRA. Live preview works normally.\n\n"
+                    f"If you save with blended blocks, they will be converted to standard "
+                    f"LoRA via SVD (slight approximation).")
             self._repair_donor_loaded = True
             # Show donor sub-rows + master section toggles + enable the "Donor" master target radio
             for vars_ in self.repair_block_vars.values():

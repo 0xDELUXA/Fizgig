@@ -6812,6 +6812,12 @@ class LoRATrainerGUI:
         res_combo.bind("<<ComboboxSelected>>", lambda e: self._on_preview_param_changed())
         ttk.Button(params_frame, text="Regenerate",
                    command=self._force_regenerate_preview).pack(side=tk.RIGHT)
+        # Turbo Preview toggle
+        self.repair_turbo_var = tk.BooleanVar(value=False)
+        turbo_chk = ttk.Checkbutton(params_frame, text="Turbo Preview",
+                                     variable=self.repair_turbo_var,
+                                     command=self._on_turbo_toggled)
+        turbo_chk.pack(side=tk.RIGHT, padx=(0, 16))
         r += 1
 
         # Preset row
@@ -7242,6 +7248,7 @@ class LoRATrainerGUI:
 
         if self.repair_engine is None:
             self.repair_engine = RepairEngine()
+        self.repair_engine._turbo_enabled = self.repair_turbo_var.get()
 
         # Auto-detect fp8 + model_version from filename, mirroring profiler.
         dit_basename = os.path.basename(dit_path).lower()
@@ -7372,6 +7379,12 @@ class LoRATrainerGUI:
             self.repair_engine._invalidate_baseline_cache()
         self._repair_preview_dirty = True
         self._schedule_preview(force=True)
+
+    def _on_turbo_toggled(self):
+        """Sync Turbo Preview checkbox to the engine and invalidate cache on toggle."""
+        if self.repair_engine is not None:
+            self.repair_engine._turbo_enabled = self.repair_turbo_var.get()
+            self.repair_engine._invalidate_activation_cache()
 
     def _force_regenerate_preview(self):
         if self.repair_engine is not None:

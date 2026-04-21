@@ -80,8 +80,13 @@ class RepairEngine:
         # to any matching Profiler report sidecar in profiles_dir.
         self.primary_hash: Optional[str] = None
 
-        # v2 hook — set by UI before generate_preview; v1 ignores.
+        # v2 hook — set by UI before generate_preview.
         self._changed_blocks: set = set()
+
+        # v2 Turbo Preview — activation cache
+        self._turbo_enabled: bool = False
+        self._act_cache: Optional[dict] = None       # timestep_idx → ActivationCacheEntry
+        self._act_cache_key: Optional[tuple] = None   # (primary_path, donor_path, seed, prompt, w, h)
 
         # Cache the last-generated baseline keyed on (primary_path, seed,
         # prompt, w, h) — only regenerate baseline when these change.
@@ -152,6 +157,7 @@ class RepairEngine:
         from fizgig.profiler.visualize import compute_lora_hash
         self.primary_hash = compute_lora_hash(path)
         self._invalidate_baseline_cache()
+        self._invalidate_activation_cache()
         logger.info("Repair Studio primary loaded: %s (blocks: %d, hash: %s)",
                     path, len(self.primary_block_ids),
                     self.primary_hash[:12] + "…" if self.primary_hash else "?")
@@ -195,6 +201,7 @@ class RepairEngine:
         self.donor_network = network
         self.donor_path = path
         self.donor_block_ids = _extract_block_ids_from_network(network)
+        self._invalidate_activation_cache()
         logger.info("Repair Studio donor loaded: %s (%d modules, %d blocks)",
                     path, len(network.unet_loras), len(self.donor_block_ids))
 
@@ -205,6 +212,7 @@ class RepairEngine:
             self.donor_network = None
             self.donor_path = None
             self.donor_block_ids = set()
+            self._invalidate_activation_cache()
             logger.info("Donor unloaded (chain remains; reset() for full cleanup)")
 
     def reset(self) -> None:
@@ -223,7 +231,29 @@ class RepairEngine:
         self.donor_block_ids = set()
         self.primary_hash = None
         self._invalidate_baseline_cache()
+        self._invalidate_activation_cache()
         self._changed_blocks.clear()
+
+    # ------------------------------------------------------------------
+    # Activation cache (v2 Turbo Preview)
+    # ------------------------------------------------------------------
+
+    def _invalidate_activation_cache(self):
+        """Release all cached activation tensors."""
+        self._act_cache = None
+        self._act_cache_key = None
+
+    def _compute_resume_point(self) -> Optional[tuple]:
+        """From _changed_blocks, find the earliest block to resume from."""
+        if not self._changed_blocks:
+            return None
+        doubles = sorted(int(b.split("_")[1]) for b in self._changed_blocks if b.startswith("double_"))
+        singles = sorted(int(b.split("_")[1]) for b in self._changed_blocks if b.startswith("single_"))
+        if doubles:
+            return ("double", doubles[0])
+        if singles:
+            return ("single", singles[0])
+        return None
 
     # ------------------------------------------------------------------
     # State application
@@ -377,18 +407,88 @@ class RepairEngine:
         dlog(f"timesteps ({len(timesteps)}): {[round(t, 4) for t in timesteps]}")
 
         pipeline.dit.eval()
-        # Manual step-by-step to log each step
         import torch as _torch
+
+        # --- v2 Turbo: determine if activation cache is usable ---
+        cache_key = (self.primary_path, self.donor_path, state.seed,
+                     state.prompt, width, height)
+        can_use_cache = (
+            self._turbo_enabled
+            and pipeline.is_distilled
+            and self._act_cache is not None
+            and self._act_cache_key == cache_key
+            and self._changed_blocks
+        )
+        if can_use_cache:
+            try:
+                free_vram_gb = _torch.cuda.mem_get_info()[0] / (1024 ** 3)
+                if free_vram_gb < 2.0:
+                    dlog(f"Turbo skipped: only {free_vram_gb:.1f} GB VRAM free")
+                    can_use_cache = False
+            except Exception:
+                pass
+
+        resume_point = self._compute_resume_point() if can_use_cache else None
+        if resume_point:
+            dlog(f"Turbo resume from {resume_point[0]}_{resume_point[1]}")
+        elif self._turbo_enabled and pipeline.is_distilled:
+            dlog("Turbo: populating cache (first run or invalidated)")
+
+        from fizgig.klein.model import ActivationCacheEntry
+
         if pipeline.is_distilled:
             guidance_vec = _torch.full((x.shape[0],), guidance_scale, device=x.device, dtype=x.dtype)
+            new_cache = {}
+            turbo_fallback = False
+
             for si, (t_curr, t_prev) in enumerate(zip(timesteps[:-1], timesteps[1:])):
                 t_vec = _torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=x.device)
-                with _torch.no_grad(), _torch.autocast(device_type=x.device.type, dtype=x.dtype):
-                    pred = pipeline.dit(x=x, x_ids=x_ids, timesteps=t_vec, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+
+                # Decide whether to use cached forward for this step
+                use_cached = (
+                    self._turbo_enabled
+                    and not turbo_fallback
+                    and (can_use_cache or (not can_use_cache and self._turbo_enabled))
+                )
+
+                if use_cached:
+                    step_resume = resume_point if can_use_cache else None
+                    step_cached = self._act_cache.get(si) if can_use_cache else None
+                    new_entry = ActivationCacheEntry(
+                        double_outputs=[None] * 8,
+                        transition_img=None, transition_pe=None,
+                        single_outputs=[None] * 24,
+                    )
+                    try:
+                        if hasattr(pipeline.dit, 'prepare_block_swap_before_forward'):
+                            pipeline.dit.prepare_block_swap_before_forward()
+                        with _torch.no_grad(), _torch.autocast(device_type=x.device.type, dtype=x.dtype):
+                            pred = pipeline.dit.forward_cached(
+                                x=x, x_ids=x_ids, timesteps=t_vec,
+                                ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec,
+                                resume_from=step_resume, cached=step_cached,
+                                new_cache=new_entry,
+                            )
+                        new_cache[si] = new_entry
+                    except Exception:
+                        logger.warning("Turbo cache error at step %d; falling back to full forward", si, exc_info=True)
+                        self._invalidate_activation_cache()
+                        turbo_fallback = True
+                        with _torch.no_grad(), _torch.autocast(device_type=x.device.type, dtype=x.dtype):
+                            pred = pipeline.dit(x=x, x_ids=x_ids, timesteps=t_vec, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+                else:
+                    with _torch.no_grad(), _torch.autocast(device_type=x.device.type, dtype=x.dtype):
+                        pred = pipeline.dit(x=x, x_ids=x_ids, timesteps=t_vec, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+
                 dlog(f"step {si}: t_curr={t_curr:.4f} t_prev={t_prev:.4f} dt={(t_prev - t_curr):+.4f}")
                 dlog(f"  pred: {_stats(pred)}")
                 x = x + (t_prev - t_curr) * pred
                 dlog(f"  x after step: {_stats(x)}")
+
+            # Store cache for next preview
+            if self._turbo_enabled and not turbo_fallback and new_cache:
+                self._act_cache = new_cache
+                self._act_cache_key = cache_key
         else:
             x = denoise_cfg(
                 pipeline.dit, x, x_ids, ctx, ctx_ids, neg_ctx, neg_ctx_ids,

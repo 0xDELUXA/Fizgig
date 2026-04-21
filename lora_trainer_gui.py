@@ -784,6 +784,10 @@ class LoRATrainerGUI:
         self.repair_studio_tab.bind("<Button-1>", self.remove_focus)
         self.notebook.add(self.repair_studio_tab, text="Repair Studio")
 
+        self.explorer_tab = ttk.Frame(self.notebook)
+        self.explorer_tab.bind("<Button-1>", self.remove_focus)
+        self.notebook.add(self.explorer_tab, text="LoRA the Explorer")
+
         self.extract_tab = ttk.Frame(self.notebook)
         self.extract_tab.bind("<Button-1>", self.remove_focus)
         self.notebook.add(self.extract_tab, text="Extract")
@@ -803,6 +807,7 @@ class LoRATrainerGUI:
         self.create_samples_settings()
         self.create_profiler_tab()
         self.create_repair_studio_tab()
+        self.create_explorer_tab()
         self.create_extract_tab()
         self.create_prefs_tab()
 
@@ -859,9 +864,11 @@ class LoRATrainerGUI:
                 self.refresh_caption_images()
                 self.caption_images_loaded = True
 
-        # When leaving Repair Studio, unload pipeline to free VRAM for other tools
+        # When leaving Repair Studio or Explorer, unload pipeline to free VRAM
         if tab_text != "Repair Studio":
             self._unload_repair_studio_models()
+        if tab_text != "LoRA the Explorer":
+            self._unload_explorer_models()
 
     def remove_focus(self, event):
         """Remove focus from active widget when clicking background"""
@@ -5538,6 +5545,555 @@ class LoRATrainerGUI:
         self._log(f"Face crops created: {face_crops_created} | No face: {no_face}\n")
         self._log(f"Total files in output: {len(self._get_image_files(output_folder))}\n")
 
+
+    # region LoRA the Explorer Tab
+
+    def create_explorer_tab(self):
+        """LoRA the Explorer — evolutionary LoRA discovery via human-guided selection."""
+        scrollable_frame, _ = self.create_scrollable_frame(self.explorer_tab)
+        outer = tk.Frame(scrollable_frame, bg=COLORS["bg_deep"])
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        self._add_tab_banner(
+            outer, "LoRA the Explorer",
+            "Like Michelangelo chipping away at marble — the beauty is already inside "
+            "the LoRA, you just need to find it. The computer randomly adjusts blocks and shows you 4 variants. "
+            "Pick your favourite and it becomes the new baseline. With Hold Mode on, picked blocks lock in "
+            "and future mutations only touch what's left — sculpting the LoRA until every block is dialled in.",
+        )
+
+        # State
+        self._explorer_engine = None
+        self._explorer_baseline_state = None
+        self._explorer_baseline_image = None
+        self._explorer_history = []  # stack of (SliderState, PIL.Image) for undo
+        self._explorer_variant_states = []  # 4 SliderState objects
+        self._explorer_variant_images = []  # 4 PIL.Image objects
+        self._explorer_generating = False
+        self._explorer_thumbnails = {}  # keep refs to prevent GC
+        self._explorer_locked_blocks = set()  # Hold Mode: blocks locked at their current value
+
+        # Card 1: Setup
+        setup_card = self._start_section_card(
+            outer, "Setup",
+            "Load a LoRA and configure the exploration parameters.",
+        )
+        setup_card.columnconfigure(1, weight=1)
+
+        r = 0
+        ttk.Label(setup_card, text="DiT:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self.explorer_dit_var = tk.StringVar(value="distilled")
+        dit_frame = ttk.Frame(setup_card)
+        dit_frame.grid(row=r, column=1, sticky=tk.W, pady=2)
+        ttk.Radiobutton(dit_frame, text="Distilled (4-step, fast)",
+                        variable=self.explorer_dit_var, value="distilled",
+                        style="Surface.TRadiobutton").pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Radiobutton(dit_frame, text="Base (50-step, precise)",
+                        variable=self.explorer_dit_var, value="base",
+                        style="Surface.TRadiobutton").pack(side=tk.LEFT)
+        r += 1
+
+        ttk.Label(setup_card, text="LoRA:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self.explorer_lora_var = tk.StringVar()
+        ttk.Entry(setup_card, textvariable=self.explorer_lora_var).grid(
+            row=r, column=1, sticky=tk.EW, padx=4, pady=2)
+        btn_frame = ttk.Frame(setup_card)
+        btn_frame.grid(row=r, column=2, pady=2)
+        ttk.Button(btn_frame, text="Browse",
+                   command=lambda: self._browse_repair_lora(self.explorer_lora_var)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_frame, text="Load", command=self._explorer_load_lora).pack(side=tk.LEFT, padx=2)
+        ttk.Label(btn_frame, text="Strength:").pack(side=tk.LEFT, padx=(12, 4))
+        self.explorer_strength_var = tk.StringVar(value="1.0")
+        ttk.Entry(btn_frame, textvariable=self.explorer_strength_var, width=5).pack(side=tk.LEFT)
+        r += 1
+
+        ttk.Label(setup_card, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self.explorer_prompt_var = tk.StringVar()
+        ttk.Entry(setup_card, textvariable=self.explorer_prompt_var).grid(
+            row=r, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
+        r += 1
+
+        params_frame = ttk.Frame(setup_card)
+        params_frame.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(6, 2))
+        ttk.Label(params_frame, text="Seed:").pack(side=tk.LEFT, padx=(0, 4))
+        self.explorer_seed_var = tk.StringVar(value="42")
+        ttk.Entry(params_frame, textvariable=self.explorer_seed_var, width=8).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Label(params_frame, text="Res:").pack(side=tk.LEFT, padx=(0, 4))
+        self.explorer_res_var = tk.StringVar(value="512")
+        ttk.Combobox(params_frame, textvariable=self.explorer_res_var,
+                     values=["256", "384", "512"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Label(params_frame, text="Intensity:").pack(side=tk.LEFT, padx=(0, 4))
+        self.explorer_intensity_var = tk.DoubleVar(value=0.5)
+        ttk.Scale(params_frame, from_=0.0, to=1.0, variable=self.explorer_intensity_var,
+                  orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT, padx=(0, 4))
+        self._explorer_intensity_lbl = ttk.Label(params_frame, text="0.50", width=4)
+        self._explorer_intensity_lbl.pack(side=tk.LEFT, padx=(0, 16))
+        self.explorer_intensity_var.trace_add("write", lambda *_: self._explorer_intensity_lbl.configure(
+            text=f"{self.explorer_intensity_var.get():.2f}"))
+        ttk.Label(params_frame, text="Mutations:").pack(side=tk.LEFT, padx=(0, 4))
+        self.explorer_mutations_var = tk.StringVar(value="3")
+        ttk.Combobox(params_frame, textvariable=self.explorer_mutations_var,
+                     values=["1", "2", "3", "4", "5"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
+        self.explorer_hold_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(params_frame, text="Hold Mode (lock picked blocks)",
+                        variable=self.explorer_hold_var).pack(side=tk.LEFT)
+        r += 1
+
+        self.explorer_status_var = tk.StringVar(value="Load a LoRA to begin exploring.")
+        tk.Label(setup_card, textvariable=self.explorer_status_var,
+                 font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=COLORS["bg_surface"]).grid(
+            row=r, column=0, columnspan=3, sticky=tk.W, pady=(6, 0))
+
+        # Card 2: Baseline
+        baseline_card = self._start_section_card(
+            outer, "Current Baseline",
+            "Your current best. Pick a favourite below to evolve it, or save it as a LoRA.",
+        )
+        baseline_inner = tk.Frame(baseline_card, bg=COLORS["bg_surface"])
+        baseline_inner.pack(fill=tk.X)
+
+        # Baseline image
+        self._explorer_baseline_holder = tk.Frame(baseline_inner, bg="#000000",
+                                                   width=512, height=512)
+        self._explorer_baseline_holder.pack(side=tk.LEFT, padx=(0, 16), pady=4)
+        self._explorer_baseline_holder.pack_propagate(False)
+        self._explorer_baseline_label = tk.Label(self._explorer_baseline_holder,
+                                                  text="(no baseline yet)",
+                                                  fg=COLORS["text_muted"], bg="#000000")
+        self._explorer_baseline_label.pack(expand=True)
+
+        # Baseline info + buttons
+        baseline_right = tk.Frame(baseline_inner, bg=COLORS["bg_surface"])
+        baseline_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        btn_row = tk.Frame(baseline_right, bg=COLORS["bg_surface"])
+        btn_row.pack(anchor=tk.W, pady=(4, 8))
+        self._explorer_save_btn = ttk.Button(btn_row, text="Save Baseline as LoRA...",
+                                              command=self._explorer_save, state="disabled")
+        self._explorer_save_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._explorer_undo_btn = ttk.Button(btn_row, text="Undo",
+                                              command=self._explorer_undo, state="disabled")
+        self._explorer_undo_btn.pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(btn_row, text="Reset to Default",
+                   command=self._explorer_reset_baseline).pack(side=tk.LEFT)
+
+        # Collapsed slider state display
+        state_frame = tk.Frame(baseline_right, bg=COLORS["bg_deep"])
+        state_frame.pack(anchor=tk.W, fill=tk.BOTH, expand=True, pady=(0, 4))
+        self._explorer_state_text = tk.Text(state_frame, height=14, width=60,
+                                             bg=COLORS["bg_deep"], fg=COLORS["text_secondary"],
+                                             font=(FONT_FAMILY, 8), wrap="word",
+                                             state="disabled", relief="flat",
+                                             highlightthickness=1,
+                                             highlightbackground=COLORS["border"])
+        state_scroll = ttk.Scrollbar(state_frame, orient="vertical",
+                                      command=self._explorer_state_text.yview)
+        self._explorer_state_text.configure(yscrollcommand=state_scroll.set)
+        self._explorer_state_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        state_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Card 3: Gallery
+        gallery_card = self._start_section_card(
+            outer, "Variants",
+            "4 random mutations of the current baseline. Click your favourite to evolve.",
+        )
+
+        self._explorer_gallery_frame = tk.Frame(gallery_card, bg=COLORS["bg_surface"])
+        self._explorer_gallery_frame.pack(fill=tk.X)
+
+        # 2x2 grid of clickable images
+        self._explorer_gallery_labels = []
+        for row_idx in range(2):
+            for col_idx in range(2):
+                idx = row_idx * 2 + col_idx
+                holder = tk.Frame(self._explorer_gallery_frame, bg="#000000",
+                                  highlightbackground=COLORS["border"], highlightthickness=2)
+                holder.grid(row=row_idx, column=col_idx, padx=6, pady=6, sticky=tk.NSEW)
+                lbl = tk.Label(holder, text=f"(variant {idx + 1})",
+                               fg=COLORS["text_muted"], bg="#000000", cursor="hand2")
+                lbl.pack(expand=True, fill=tk.BOTH)
+                lbl.bind("<Button-1>", lambda e, i=idx: self._explorer_pick(i))
+                lbl.bind("<Enter>", lambda e, h=holder: h.configure(highlightbackground=COLORS["accent"]))
+                lbl.bind("<Leave>", lambda e, h=holder: h.configure(highlightbackground=COLORS["border"]))
+                self._explorer_gallery_labels.append(lbl)
+        self._explorer_gallery_frame.columnconfigure(0, weight=1)
+        self._explorer_gallery_frame.columnconfigure(1, weight=1)
+
+        gallery_btn_row = tk.Frame(gallery_card, bg=COLORS["bg_surface"])
+        gallery_btn_row.pack(anchor=tk.W, pady=(8, 4))
+        self._explorer_roll_btn = ttk.Button(gallery_btn_row, text="Re-roll",
+                                              command=self._explorer_reroll, state="disabled")
+        self._explorer_roll_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._explorer_progress_var = tk.StringVar(value="")
+        tk.Label(gallery_btn_row, textvariable=self._explorer_progress_var,
+                 font=(FONT_FAMILY, 10, "bold"),
+                 fg=COLORS["accent_hover"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+
+        self._add_youtube_help_button(outer, "explorer")
+
+    # ------------------------------------------------------------------
+    # Explorer actions
+    # ------------------------------------------------------------------
+
+    def _explorer_ensure_engine(self):
+        """Lazy-load engine + pipeline for the Explorer. Returns True on success."""
+        if self._explorer_engine is not None and self._explorer_engine.pipeline is not None and self._explorer_engine.pipeline.is_loaded:
+            return True
+
+        dit_choice = self.explorer_dit_var.get()
+        dit_pref_key = "base_dit" if dit_choice == "base" else "distilled_dit"
+        dit_path = self.prefs_vars[dit_pref_key].get() if dit_pref_key in self.prefs_vars else ""
+        vae_path = self._get_path("VAE_MODEL")
+        te_path = self._get_path("TEXT_ENCODER")
+
+        for path, name in [(dit_path, "DiT"), (vae_path, "VAE"), (te_path, "Text Encoder")]:
+            if not path or not os.path.exists(path):
+                messagebox.showerror("Error", f"{name} not found:\n{path}\n\nCheck Preferences tab.")
+                return False
+
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.engine import RepairEngine
+
+        if self._explorer_engine is None:
+            self._explorer_engine = RepairEngine()
+        self._explorer_engine._turbo_enabled = True  # always use Turbo for Explorer
+
+        dit_basename = os.path.basename(dit_path).lower()
+        model_version = "klein-base-9b" if "base" in dit_basename else "klein-9b"
+        is_fp8_model = "fp8" in dit_basename
+        try:
+            self.explorer_status_var.set(f"Loading models ({model_version})...")
+            self.master.update_idletasks()
+            self._explorer_engine.ensure_pipeline(
+                dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+                model_version=model_version, device="cuda",
+                fp8_scaled=False if is_fp8_model else True,
+                blocks_to_swap=self._get_inference_blocks_to_swap(),
+            )
+            self.explorer_status_var.set("Models loaded.")
+            return True
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Failed to load models:\n{traceback.format_exc()}")
+            self.explorer_status_var.set("Error loading models.")
+            return False
+
+    def _explorer_load_lora(self):
+        path = self.explorer_lora_var.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showerror("Error", "Pick a valid LoRA file first.")
+            return
+        if not self._explorer_ensure_engine():
+            return
+        try:
+            self.explorer_status_var.set("Loading LoRA...")
+            self.master.update_idletasks()
+            # Reset if something was already loaded
+            if self._explorer_engine.primary_network is not None:
+                self._explorer_engine.reset()
+                self._explorer_engine = None
+                if not self._explorer_ensure_engine():
+                    return
+            self._explorer_engine.load_primary(path)
+            n_active = len(self._explorer_engine.primary_block_ids)
+            self.explorer_status_var.set(
+                f"Loaded: {os.path.basename(path)} ({n_active}/32 blocks). Click Re-roll to start exploring.")
+            # Initialize baseline state with user-specified LoRA strength
+            from fizgig.repair_studio.state import SliderState
+            self._explorer_baseline_state = SliderState.default_klein9b()
+            try:
+                base_strength = float(self.explorer_strength_var.get())
+            except ValueError:
+                base_strength = 1.0
+            for bid, bs in self._explorer_baseline_state.blocks.items():
+                bs.primary_strength = base_strength
+            self._explorer_baseline_state.prompt = self.explorer_prompt_var.get()
+            self._explorer_baseline_state.seed = int(self.explorer_seed_var.get() or 42)
+            res = int(self.explorer_res_var.get() or 512)
+            self._explorer_baseline_state.preview_width = res
+            self._explorer_baseline_state.preview_height = res
+            self._explorer_history.clear()
+            self._explorer_locked_blocks.clear()
+            self._explorer_baseline_image = None
+            self._explorer_undo_btn.configure(state="disabled")
+            self._explorer_save_btn.configure(state="disabled")
+            self._explorer_roll_btn.configure(state="normal")
+            # Generate initial baseline image
+            self._explorer_generate_baseline_and_roll()
+        except Exception as ex:
+            from fizgig.networks.lora import UnsupportedLoRAFormat
+            if isinstance(ex, UnsupportedLoRAFormat):
+                messagebox.showerror("Unsupported LoRA format", str(ex))
+            else:
+                import traceback
+                messagebox.showerror("Error", f"Failed to load LoRA:\n{traceback.format_exc()}")
+            self.explorer_status_var.set("Error loading LoRA.")
+
+    def _explorer_generate_baseline_and_roll(self):
+        """Generate baseline image then 4 variants in a background thread."""
+        if self._explorer_generating or self._explorer_engine is None:
+            return
+        self._explorer_generating = True
+        self._explorer_roll_btn.configure(state="disabled")
+        self._explorer_progress_var.set("Generating baseline...")
+        self.master.update_idletasks()
+
+        # Sync prompt/seed/res into baseline state
+        state = self._explorer_baseline_state
+        state.prompt = self.explorer_prompt_var.get()
+        state.seed = int(self.explorer_seed_var.get() or 42)
+        res = int(self.explorer_res_var.get() or 512)
+        state.preview_width = res
+        state.preview_height = res
+
+        # Generate mutations (exclude locked blocks in Hold Mode)
+        active = self._explorer_engine.primary_block_ids - self._explorer_locked_blocks
+        intensity = self.explorer_intensity_var.get()
+        n_muts = int(self.explorer_mutations_var.get() or 3)
+        variant_states = [state.mutate(active, num_mutations=n_muts, intensity=intensity) for _ in range(4)]
+
+        import threading
+        thread = threading.Thread(
+            target=self._explorer_worker,
+            args=(state, variant_states),
+            daemon=True,
+        )
+        thread.start()
+
+    def _explorer_worker(self, baseline_state, variant_states):
+        """Background: generate baseline + 4 variants."""
+        try:
+            engine = self._explorer_engine
+            if engine is None:
+                return
+
+            # Generate baseline (full forward, populates activation cache)
+            engine._changed_blocks = set(baseline_state.blocks.keys())
+            baseline_img = engine.generate_preview(baseline_state)
+
+            # Generate 4 variants — each runs a full forward (invalidate activation
+            # cache between variants so they don't contaminate each other).
+            # The prompt cache is still shared, saving ~300-500ms per variant.
+            variant_images = []
+            for i, vs in enumerate(variant_states):
+                self.master.after(0, lambda i=i: self._explorer_progress_var.set(
+                    f"Generating variant {i + 1}/4..."))
+                engine._invalidate_activation_cache()
+                engine._changed_blocks = set(vs.blocks.keys())
+                img = engine.generate_preview(vs)
+                variant_images.append(img)
+
+            self.master.after(0, lambda: self._explorer_on_results(
+                baseline_state, baseline_img, variant_states, variant_images))
+        except Exception:
+            import traceback
+            err = traceback.format_exc()
+            self.master.after(0, lambda: self._explorer_on_error(err))
+
+    def _explorer_on_results(self, baseline_state, baseline_img, variant_states, variant_images):
+        """Main-thread callback: update UI with results."""
+        self._explorer_baseline_state = baseline_state
+        self._explorer_baseline_image = baseline_img
+        self._explorer_variant_states = variant_states
+        self._explorer_variant_images = variant_images
+        self._explorer_generating = False
+
+        # Update baseline display
+        self._explorer_show_baseline(baseline_img)
+        self._explorer_update_state_text(baseline_state)
+
+        # Update gallery
+        for i, img in enumerate(variant_images):
+            self._explorer_show_variant(i, img)
+
+        self._explorer_roll_btn.configure(state="normal")
+        self._explorer_save_btn.configure(state="normal")
+        self._explorer_progress_var.set("")
+        self.explorer_status_var.set("Pick a favourite or re-roll.")
+
+    def _explorer_on_error(self, err):
+        self._explorer_generating = False
+        self._explorer_roll_btn.configure(state="normal")
+        self._explorer_progress_var.set("")
+        self.explorer_status_var.set("Error — see console.")
+        print(err)
+
+    def _explorer_show_baseline(self, pil_img):
+        """Display a PIL image in the baseline holder."""
+        from PIL import ImageTk
+        holder = self._explorer_baseline_holder
+        w, h = holder.winfo_width(), holder.winfo_height()
+        if w < 10:
+            w, h = 512, 512
+        resized = pil_img.copy()
+        resized.thumbnail((w, h))
+        tk_img = ImageTk.PhotoImage(resized)
+        self._explorer_thumbnails["baseline"] = tk_img
+        self._explorer_baseline_label.configure(image=tk_img, text="")
+
+    def _explorer_show_variant(self, idx, pil_img):
+        """Display a PIL image in gallery slot idx (0-3)."""
+        from PIL import ImageTk
+        lbl = self._explorer_gallery_labels[idx]
+        parent = lbl.master
+        w = parent.winfo_width()
+        if w < 10:
+            w = 256
+        resized = pil_img.copy()
+        resized.thumbnail((w, w))
+        tk_img = ImageTk.PhotoImage(resized)
+        self._explorer_thumbnails[f"variant_{idx}"] = tk_img
+        lbl.configure(image=tk_img, text="")
+
+    def _explorer_update_state_text(self, state):
+        """Show the baseline's slider state as read-only text, with lock indicators."""
+        lines = []
+        for bid in sorted(state.blocks.keys(),
+                          key=lambda b: (b.split("_")[0], int(b.split("_")[1]))):
+            bs = state.blocks[bid]
+            if not bs.primary_enabled or bs.primary_strength != 1.0:
+                en = "ON" if bs.primary_enabled else "OFF"
+                lock = " [LOCKED]" if bid in self._explorer_locked_blocks else ""
+                lines.append(f"{bid}: {en} @ {bs.primary_strength:+.2f}{lock}")
+        if not lines:
+            lines = ["All blocks at default (1.0)"]
+        self._explorer_state_text.configure(state="normal")
+        self._explorer_state_text.delete("1.0", tk.END)
+        self._explorer_state_text.insert("1.0", "\n".join(lines))
+        self._explorer_state_text.configure(state="disabled")
+
+    def _explorer_pick(self, idx):
+        """User picked variant idx as the new baseline."""
+        if self._explorer_generating or idx >= len(self._explorer_variant_images):
+            return
+        # Push current baseline to undo stack
+        if self._explorer_baseline_state is not None and self._explorer_baseline_image is not None:
+            self._explorer_history.append(
+                (self._explorer_baseline_state.copy(), self._explorer_baseline_image,
+                 set(self._explorer_locked_blocks)))
+            self._explorer_undo_btn.configure(state="normal")
+
+        picked_state = self._explorer_variant_states[idx]
+
+        # Hold Mode: lock any blocks that differ from the default strength
+        if self.explorer_hold_var.get() and self._explorer_baseline_state is not None:
+            newly_changed = set(picked_state.diff_blocks(self._explorer_baseline_state))
+            self._explorer_locked_blocks |= newly_changed
+
+        # New baseline = the picked variant
+        self._explorer_baseline_state = picked_state
+        self._explorer_baseline_image = self._explorer_variant_images[idx]
+
+        # Check if all active blocks are locked (Hold Mode complete)
+        active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
+        unlocked = active - self._explorer_locked_blocks
+        if self.explorer_hold_var.get() and not unlocked:
+            self._explorer_show_baseline(self._explorer_baseline_image)
+            self._explorer_update_state_text(self._explorer_baseline_state)
+            self.explorer_status_var.set(
+                f"All {len(active)} blocks locked! Exploration complete. Save your LoRA or Undo to continue.")
+            self._explorer_roll_btn.configure(state="disabled")
+            return
+
+        locked_msg = f" ({len(self._explorer_locked_blocks)} blocks locked)" if self._explorer_locked_blocks else ""
+        self._explorer_show_baseline(self._explorer_baseline_image)
+        self._explorer_update_state_text(self._explorer_baseline_state)
+        self.explorer_status_var.set(
+            f"Variant {idx + 1} selected as new baseline{locked_msg}. Generating new mutations...")
+
+        # Roll new variants from the new baseline
+        self._explorer_generate_baseline_and_roll()
+
+    def _explorer_reroll(self):
+        """Re-roll: generate 4 new mutations from the same baseline."""
+        if self._explorer_generating or self._explorer_baseline_state is None:
+            return
+        self._explorer_generate_baseline_and_roll()
+
+    def _explorer_undo(self):
+        """Pop the history stack and restore the previous baseline + locked blocks."""
+        if not self._explorer_history or self._explorer_generating:
+            return
+        prev_state, prev_img, prev_locked = self._explorer_history.pop()
+        self._explorer_baseline_state = prev_state
+        self._explorer_baseline_image = prev_img
+        self._explorer_locked_blocks = prev_locked
+        self._explorer_show_baseline(prev_img)
+        self._explorer_update_state_text(prev_state)
+        self._explorer_roll_btn.configure(state="normal")
+        if not self._explorer_history:
+            self._explorer_undo_btn.configure(state="disabled")
+        locked_msg = f" ({len(self._explorer_locked_blocks)} locked)" if self._explorer_locked_blocks else ""
+        self.explorer_status_var.set(f"Undone{locked_msg}. Click Re-roll to generate new variants.")
+
+    def _explorer_reset_baseline(self):
+        """Reset baseline to all-sliders-at-1.0."""
+        if self._explorer_generating:
+            return
+        from fizgig.repair_studio.state import SliderState
+        if self._explorer_baseline_state is not None:
+            self._explorer_history.append(
+                (self._explorer_baseline_state.copy(), self._explorer_baseline_image,
+                 set(self._explorer_locked_blocks)))
+            self._explorer_undo_btn.configure(state="normal")
+        self._explorer_locked_blocks.clear()
+        self._explorer_baseline_state = SliderState.default_klein9b()
+        try:
+            base_strength = float(self.explorer_strength_var.get())
+        except ValueError:
+            base_strength = 1.0
+        for bid, bs in self._explorer_baseline_state.blocks.items():
+            bs.primary_strength = base_strength
+        self._explorer_baseline_state.prompt = self.explorer_prompt_var.get()
+        self._explorer_baseline_state.seed = int(self.explorer_seed_var.get() or 42)
+        res = int(self.explorer_res_var.get() or 512)
+        self._explorer_baseline_state.preview_width = res
+        self._explorer_baseline_state.preview_height = res
+        self.explorer_status_var.set("Baseline reset to default. Click Re-roll to explore.")
+        self._explorer_generate_baseline_and_roll()
+
+    def _explorer_save(self):
+        """Save the current baseline as a baked LoRA."""
+        if self._explorer_engine is None or self._explorer_baseline_state is None:
+            return
+        primary_path = self._explorer_engine.primary_path
+        if not primary_path:
+            return
+        stem = os.path.splitext(os.path.basename(primary_path))[0]
+        default_name = f"{stem}_explored.safetensors"
+        out = filedialog.asksaveasfilename(
+            title="Save Explored LoRA",
+            defaultextension=".safetensors",
+            filetypes=[("SafeTensors", "*.safetensors")],
+            initialfile=default_name,
+        )
+        if not out:
+            return
+        from fizgig.repair_studio.bake import save_repaired_lora
+        from fizgig.networks.lora import UnsupportedLoRAFormat
+        try:
+            summary = save_repaired_lora(primary_path, self._explorer_baseline_state, out)
+            messagebox.showinfo("Explored LoRA saved",
+                                f"Saved: {out}\n\nKeys: {summary['keys_in']} -> {summary['keys_out']}")
+        except UnsupportedLoRAFormat as ex:
+            messagebox.showerror("Unsupported LoRA format", str(ex))
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Save failed:\n{traceback.format_exc()}")
+
+    def _unload_explorer_models(self):
+        """Unload Explorer pipeline when leaving the tab."""
+        if self._explorer_engine is not None and self._explorer_engine.pipeline is not None:
+            try:
+                self._explorer_engine.reset()
+            except Exception:
+                pass
+            self._explorer_engine = None
+            self.explorer_status_var.set("Models unloaded (tab switch). Load a LoRA to resume.")
+
+    # endregion
 
     # region Extract Tab
 

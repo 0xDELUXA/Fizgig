@@ -87,6 +87,30 @@ class SliderState:
             preview_width=self.preview_width, preview_height=self.preview_height,
         )
 
+    def mutate(self, active_blocks: set, num_mutations: int = 3,
+               intensity: float = 0.5) -> "SliderState":
+        """Return a new SliderState with random perturbations to num_mutations blocks.
+
+        active_blocks: set of block_ids the LoRA touches (skip others).
+        intensity: 0.0 = tiny nudges (±0.2), 1.0 = wild swings (±3.0).
+        """
+        import random
+        new = self.copy()
+        candidates = [bid for bid in new.blocks if bid in active_blocks]
+        if not candidates:
+            return new
+        chosen = random.sample(candidates, min(num_mutations, len(candidates)))
+        for bid in chosen:
+            bs = new.blocks[bid]
+            # 0.0 → ±0.2, 0.5 → ±0.9, 1.0 → ±3.0 (exponential ramp)
+            magnitude = 0.2 + intensity * intensity * 2.8
+            delta = random.uniform(-magnitude, magnitude)
+            bs.primary_strength = max(-3.0, min(3.0, bs.primary_strength + delta))
+            # Chance of toggling enable scales with intensity (0% at 0, 25% at max)
+            if random.random() < 0.25 * intensity:
+                bs.primary_enabled = not bs.primary_enabled
+        return new
+
     def diff_blocks(self, other: "SliderState") -> List[str]:
         """Block ids whose primary/donor enable or strength differs from `other`.
         Used by the UI to feed RepairEngine.mark_blocks_changed (v2 hook)."""

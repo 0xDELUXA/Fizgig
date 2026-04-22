@@ -21,7 +21,8 @@
 - **Fix broken LoRAs without retraining** — overbaked identity? crushed style? Adjust per-block sliders with live side-by-side preview and save a repaired `.safetensors` in seconds.
 - **Explore variations like a game** — the computer proposes random mutations, you pick favourites, and the LoRA evolves through selection. Hold Mode locks your picks and narrows the search until every block is sculpted.
 - **See exactly what a LoRA does** — the Profiler shows which transformer blocks carry style, identity, and detail signal, so you know what to fix before you touch a slider.
-- **Train with intelligence** — adaptive learning rate adjusts itself based on loss, gradient clipping, and weight-norm growth. Context LoRA lets you train on top of an existing frozen LoRA so they coexist at inference.
+- **Train with intelligence** — adaptive learning rate adjusts itself based on loss, gradient clipping, and weight-norm growth. Auto VRAM detection and OOM guidance mean less guessing.
+- **Make LoRAs work together** — Context LoRA training loads an existing LoRA as a frozen layer, so the new one learns to coexist. Train a face on top of a style and they stop fighting at inference. Train an outfit on top of a character and the clothes drape correctly. Fix compatibility between two LoRAs that conflict.
 
 ---
 

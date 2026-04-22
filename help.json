@@ -1,14 +1,14 @@
 {
     "youtube_urls": {
         "start": "https://youtu.be/sH-kGR8yzBU",
-        "image_prep": "https://youtu.be/sH-kGR8yzBU",
-        "captions": "https://youtu.be/sH-kGR8yzBU",
-        "samples": "https://youtu.be/sH-kGR8yzBU",
-        "training": "https://youtu.be/sH-kGR8yzBU",
-        "profiler": "https://youtu.be/sH-kGR8yzBU",
-        "repair_studio": "https://youtu.be/sH-kGR8yzBU",
-        "explorer": "https://youtu.be/sH-kGR8yzBU",
-        "extract": "https://youtu.be/sH-kGR8yzBU",
-        "preferences": "https://youtu.be/sH-kGR8yzBU"
+        "image_prep": "https://youtu.be/sH-kGR8yzBU?t=69",
+        "captions": "https://youtu.be/sH-kGR8yzBU?t=182",
+        "samples": "https://youtu.be/sH-kGR8yzBU?t=312",
+        "training": "https://youtu.be/sH-kGR8yzBU?t=364",
+        "profiler": "https://youtu.be/sH-kGR8yzBU?t=611",
+        "repair_studio": "https://youtu.be/sH-kGR8yzBU?t=655",
+        "explorer": "https://youtu.be/sH-kGR8yzBU?t=902",
+        "extract": "https://youtu.be/sH-kGR8yzBU?t=1106",
+        "preferences": "https://youtu.be/sH-kGR8yzBU?t=1217"
     }
 }

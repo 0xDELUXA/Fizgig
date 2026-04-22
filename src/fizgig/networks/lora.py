@@ -1153,10 +1153,13 @@ def detect_lora_format(weights_sd: Dict[str, torch.Tensor]) -> str:
             return "glora"
         if k.startswith("lora_unet_") and (".lora_down" in k or ".lora_up" in k or ".alpha" in k or ".lora_A" in k or ".lora_B" in k):
             has_kohya = True
-        if k.startswith("diffusion_model.") and (".lora_A." in k or ".lora_B." in k):
+        # OneTrainer legacy format: lora_transformer_ prefix with lora_down/lora_up
+        if k.startswith("lora_transformer_") and (".lora_down" in k or ".lora_up" in k or ".alpha" in k):
+            has_kohya = True
+        if k.startswith("diffusion_model.") and (".lora_A." in k or ".lora_B." in k or ".lora_down" in k or ".lora_up" in k):
             has_peft = True
-        if k.startswith("transformer.") and (".lora_A." in k or ".lora_B." in k):
-            has_peft = True  # AI-Toolkit-style flux-diffusers variant
+        if k.startswith("transformer.") and (".lora_A." in k or ".lora_B." in k or ".lora_down" in k or ".lora_up" in k):
+            has_peft = True  # AI-Toolkit / OneTrainer OMI format
     if has_kohya and not has_peft:
         return "kohya"
     if has_peft and not has_kohya:
@@ -1186,9 +1189,10 @@ def peft_to_kohya(weights_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor
     `.alpha` exactly (LyCORIS tools set it to an explicit value or a sentinel
     like 1e10 meaning "scale = 1.0 already baked in").
 
-    Handles two common prefix variants seen in the wild:
+    Handles common prefix variants seen in the wild:
       - `diffusion_model.` (ComfyUI LoRA export, Colorful-style)
-      - `transformer.`     (AI-Toolkit flux-diffusers variant)
+      - `transformer.`     (AI-Toolkit, OneTrainer OMI format)
+      - `lora_transformer_` (OneTrainer legacy-diffusers format — dots already flattened)
     """
     converted: Dict[str, torch.Tensor] = {}
     ranks: Dict[str, int] = {}  # lora_name → rank for standard-LoRA alpha synthesis
@@ -1227,16 +1231,25 @@ def peft_to_kohya(weights_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor
             converted[f"{lora_name}{lycoris_match}"] = tensor
             continue
 
-        # Map standard-LoRA lora_A/B/alpha suffixes
+        # Map standard-LoRA suffixes: lora_A/B (PEFT) or lora_down/up (OneTrainer/kohya)
         if stripped.endswith(".lora_A.weight"):
             module_path = stripped[: -len(".lora_A.weight")]
             matrix_name = "lora_down"
         elif stripped.endswith(".lora_B.weight"):
             module_path = stripped[: -len(".lora_B.weight")]
             matrix_name = "lora_up"
+        elif stripped.endswith(".lora_down.weight"):
+            module_path = stripped[: -len(".lora_down.weight")]
+            matrix_name = "lora_down"
+        elif stripped.endswith(".lora_up.weight"):
+            module_path = stripped[: -len(".lora_up.weight")]
+            matrix_name = "lora_up"
         elif stripped.endswith(".alpha"):
             module_path = stripped[: -len(".alpha")]
             matrix_name = "alpha"
+        elif stripped.endswith(".dora_scale"):
+            # DoRA scale — skip (not supported but don't error)
+            continue
         else:
             # Unrecognized suffix — skip (could be biases or other non-LoRA aux data)
             continue
@@ -1280,6 +1293,19 @@ def ensure_kohya_lora_state_dict(weights_sd: Dict[str, torch.Tensor]) -> Dict[st
     Pass-through for already-kohya files. Raises UnsupportedLoRAFormat for
     GLoRA (4-matrix form, not yet implemented)."""
     fmt = detect_lora_format(weights_sd)
+
+    # OneTrainer legacy-diffusers format: lora_transformer_ prefix → rename to lora_unet_
+    if fmt == "kohya" and any(k.startswith("lora_transformer_") for k in weights_sd.keys()):
+        renamed = {}
+        for k, v in weights_sd.items():
+            if k.startswith("lora_transformer_"):
+                renamed["lora_unet_" + k[len("lora_transformer_"):]] = v
+            else:
+                renamed[k] = v
+        n_renamed = sum(1 for k in weights_sd if k.startswith("lora_transformer_"))
+        logger.info("OneTrainer legacy format detected — renamed %d lora_transformer_ keys to lora_unet_", n_renamed)
+        weights_sd = renamed
+
     if fmt == "peft":
         logger.info("PEFT/diffusers-format LoRA detected — converting key names to kohya convention.")
         return peft_to_kohya(weights_sd)

@@ -5638,22 +5638,58 @@ class LoRATrainerGUI:
         ttk.Combobox(params_frame, textvariable=self.explorer_res_var,
                      values=["256", "384", "512", "768", "1024"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 16))
         ttk.Label(params_frame, text="Intensity:").pack(side=tk.LEFT, padx=(0, 4))
-        self.explorer_intensity_var = tk.DoubleVar(value=0.5)
+        self.explorer_intensity_var = tk.DoubleVar(value=0.46)
         ttk.Scale(params_frame, from_=0.0, to=1.0, variable=self.explorer_intensity_var,
                   orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT, padx=(0, 4))
-        self._explorer_intensity_lbl = ttk.Label(params_frame, text="\u00b11.05", width=5)
+        self._explorer_intensity_lbl = ttk.Label(params_frame, text="\u00b11.5", width=5)
         self._explorer_intensity_lbl.pack(side=tk.LEFT, padx=(0, 16))
+        self._explorer_intensity_debounce_id = None
         def _update_intensity_lbl(*_):
-            mag = 0.1 + self.explorer_intensity_var.get() * 1.9
+            mag = 0.2 + self.explorer_intensity_var.get() * 2.8
             self._explorer_intensity_lbl.configure(text=f"\u00b1{mag:.1f}")
+            # Debounced re-roll when intensity changes
+            if self._explorer_baseline_state is not None and not self._explorer_generating:
+                if self._explorer_intensity_debounce_id is not None:
+                    try:
+                        self.master.after_cancel(self._explorer_intensity_debounce_id)
+                    except Exception:
+                        pass
+                self._explorer_intensity_debounce_id = self.master.after(
+                    750, self._explorer_reroll)
         self.explorer_intensity_var.trace_add("write", _update_intensity_lbl)
         ttk.Label(params_frame, text="Mutations:").pack(side=tk.LEFT, padx=(0, 4))
-        self.explorer_mutations_var = tk.StringVar(value="3")
+        self.explorer_mutations_var = tk.StringVar(value="5")
         ttk.Combobox(params_frame, textvariable=self.explorer_mutations_var,
                      values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
         self.explorer_hold_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(params_frame, text="Hold Mode (lock picked blocks)",
+        ttk.Checkbutton(params_frame, text="Hold Mode",
                         variable=self.explorer_hold_var).pack(side=tk.LEFT)
+        r += 1
+
+        struct_frame = ttk.Frame(setup_card)
+        struct_frame.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
+        ttk.Label(struct_frame, text="Structure change:").pack(side=tk.LEFT, padx=(0, 4))
+        self.explorer_structure_var = tk.DoubleVar(value=0.07)
+        ttk.Scale(struct_frame, from_=0.0, to=1.0, variable=self.explorer_structure_var,
+                  orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT, padx=(0, 4))
+        self._explorer_structure_lbl = ttk.Label(struct_frame, text="7%", width=5)
+        self._explorer_structure_lbl.pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(struct_frame, text="How much structural change to allow (composition/style anchor)",
+                 font=(FONT_FAMILY, 8, "italic"),
+                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+        self._explorer_structure_debounce_id = None
+        def _update_structure_lbl(*_):
+            val = self.explorer_structure_var.get()
+            self._explorer_structure_lbl.configure(text=f"{int(val * 100)}%")
+            if self._explorer_baseline_state is not None and not self._explorer_generating:
+                if self._explorer_structure_debounce_id is not None:
+                    try:
+                        self.master.after_cancel(self._explorer_structure_debounce_id)
+                    except Exception:
+                        pass
+                self._explorer_structure_debounce_id = self.master.after(
+                    750, self._explorer_reroll)
+        self.explorer_structure_var.trace_add("write", _update_structure_lbl)
         r += 1
 
         self.explorer_status_var = tk.StringVar(value="Load a LoRA to begin exploring.")
@@ -5852,6 +5888,7 @@ class LoRATrainerGUI:
             self._explorer_baseline_state.preview_height = res
             self._explorer_history.clear()
             self._explorer_locked_blocks.clear()
+
             self._explorer_baseline_image = None
             self._explorer_undo_btn.configure(state="disabled")
             self._explorer_save_btn.configure(state="disabled")
@@ -5884,11 +5921,24 @@ class LoRATrainerGUI:
         state.preview_width = res
         state.preview_height = res
 
-        # Generate mutations (exclude locked blocks in Hold Mode)
+        # Generate mutations (exclude locked blocks in Hold Mode, but double_0
+        # is never locked — it's always available as a structural anchor)
         active = self._explorer_engine.primary_block_ids - self._explorer_locked_blocks
+        # Ensure double_0 is always in the active set if the LoRA has it
+        if "double_0" in self._explorer_engine.primary_block_ids:
+            active.add("double_0")
         intensity = self.explorer_intensity_var.get()
-        n_muts = int(self.explorer_mutations_var.get() or 3)
-        variant_states = [state.mutate(active, num_mutations=n_muts, intensity=intensity) for _ in range(4)]
+        structure = self.explorer_structure_var.get()
+        n_muts = int(self.explorer_mutations_var.get() or 5)
+        # Variants 1 & 2: force-include double_0 for structural variation
+        variant_states = []
+        for vi in range(4):
+            # Variants 1 & 2 get structure applied via double_0 anchor
+            # Variants 3 & 4 get normal mutations (structure=0 for them)
+            vs_structure = structure if vi < 2 else 0.0
+            vs = state.mutate(active, num_mutations=n_muts, intensity=intensity,
+                              structure=vs_structure)
+            variant_states.append(vs)
 
         import threading
         thread = threading.Thread(
@@ -5948,8 +5998,9 @@ class LoRATrainerGUI:
         self._explorer_progress_var.set("")
 
         # Check if all blocks are locked (Hold Mode complete)
+        # double_0 is never locked so exclude it from the check
         active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
-        unlocked = active - self._explorer_locked_blocks
+        unlocked = active - self._explorer_locked_blocks - {"double_0"}
         if self.explorer_hold_var.get() and not unlocked:
             self._explorer_roll_btn.configure(state="disabled")
             self.explorer_status_var.set(
@@ -6026,6 +6077,7 @@ class LoRATrainerGUI:
         # Hold Mode: lock any blocks that differ from the default strength
         if self.explorer_hold_var.get() and self._explorer_baseline_state is not None:
             newly_changed = set(picked_state.diff_blocks(self._explorer_baseline_state))
+            newly_changed.discard("double_0")  # double_0 is never locked
             self._explorer_locked_blocks |= newly_changed
 
         # New baseline = the picked variant
@@ -6033,8 +6085,9 @@ class LoRATrainerGUI:
         self._explorer_baseline_image = self._explorer_variant_images[idx]
 
         # Check if all active blocks are locked (Hold Mode complete)
+        # double_0 is never locked so exclude it from the check
         active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
-        unlocked = active - self._explorer_locked_blocks
+        unlocked = active - self._explorer_locked_blocks - {"double_0"}
         if self.explorer_hold_var.get() and not unlocked:
             self._explorer_show_baseline(self._explorer_baseline_image)
             self._explorer_update_state_text(self._explorer_baseline_state)
@@ -6160,6 +6213,7 @@ class LoRATrainerGUI:
              set(self._explorer_locked_blocks)))
         self._explorer_undo_btn.configure(state="normal")
         self._explorer_locked_blocks.clear()
+        self._explorer_walk_index = 0
 
         if choice:
             # Yes = reset to default values
@@ -6198,6 +6252,7 @@ class LoRATrainerGUI:
         self._explorer_baseline_image = None
         self._explorer_history.clear()
         self._explorer_locked_blocks.clear()
+        self._explorer_walk_index = 0
         self._explorer_variant_states.clear()
         self._explorer_variant_images.clear()
         self._explorer_thumbnails.clear()

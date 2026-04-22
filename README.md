@@ -52,7 +52,7 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 Distil any Klein LoRA down to a lower rank with block and timestep targeting. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
 
 ### Compatibility
-- **Formats** — loads kohya, PEFT, and LyCORIS (LoKR / LoHa) LoRAs. PEFT keys auto-converted on load. LyCORIS files work for preview, profiling, and extraction; bake converts them to standard LoRA via SVD.
+- **Formats** — loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / LoHa) LoRAs. All formats auto-converted on load. LyCORIS files work for preview, profiling, and extraction; bake converts them to standard LoRA via SVD.
 - **Output** — kohya-style `.safetensors` that drop straight into ComfyUI Klein nodes.
 - **YouTube help** — every tab links to the relevant section of the walkthrough video.
 

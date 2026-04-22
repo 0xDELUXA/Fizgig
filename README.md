@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="logo.jpg" alt="Fizgig" width="500">
-</p>
-
 <h1 align="center">Fizgig — Klein 9B LoRA Studio</h1>
 
 <p align="center">

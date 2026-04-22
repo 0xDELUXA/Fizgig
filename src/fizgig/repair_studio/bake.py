@@ -118,8 +118,8 @@ def _materialize_lycoris_module(mod_keys: Dict[str, torch.Tensor]) -> Optional[D
     lora_down = (sqrt_S.unsqueeze(1) * Vt[:R, :]).to(torch.float16)
 
     return {
-        "lora_up.weight": lora_up,
-        "lora_down.weight": lora_down,
+        "lora_up.weight": lora_up.contiguous(),
+        "lora_down.weight": lora_down.contiguous(),
         "alpha": torch.tensor(float(R), dtype=torch.float16),
     }
 
@@ -332,6 +332,8 @@ def save_repaired_lora(
     if lycoris_converted:
         metadata["ss_repair_studio_lycoris_svd"] = str(lycoris_converted)
 
+    # safetensors requires contiguous tensors
+    sd_out = {k: v.contiguous() if v.is_floating_point() else v for k, v in sd_out.items()}
     save_file(sd_out, out_path, metadata=metadata)
 
     summary = {

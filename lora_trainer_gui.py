@@ -7319,7 +7319,8 @@ class LoRATrainerGUI:
             outer,
             "Repair Studio",
             "Tweak each block's contribution live with side-by-side preview. "
-            "Optional donor LoRA blends in via rank concatenation. Save the repaired result as a new .safetensors.",
+            "Optional donor LoRA blends in via rank concatenation. Save the repaired result as a new .safetensors. "
+            "Turbo Preview is on by default for faster updates — turn it off if VRAM is tight.",
         )
 
         # Card 1: Setup (DiT, Primary, Donor, Preview params, Preset)
@@ -7525,7 +7526,7 @@ class LoRATrainerGUI:
         ttk.Button(params_frame, text="Regenerate",
                    command=self._force_regenerate_preview).pack(side=tk.RIGHT)
         # Turbo Preview toggle
-        self.repair_turbo_var = tk.BooleanVar(value=False)
+        self.repair_turbo_var = tk.BooleanVar(value=True)
         turbo_chk = ttk.Checkbutton(params_frame, text="Turbo Preview",
                                      variable=self.repair_turbo_var,
                                      command=self._on_turbo_toggled)

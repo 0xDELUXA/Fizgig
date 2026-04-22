@@ -5574,6 +5574,7 @@ class LoRATrainerGUI:
         self._explorer_generating = False
         self._explorer_thumbnails = {}  # keep refs to prevent GC
         self._explorer_locked_blocks = set()  # Hold Mode: blocks locked at their current value
+        self._explorer_last_pick_blocks = set()  # blocks changed in the most recent pick
 
         # Card 1: Setup
         setup_card = self._start_section_card(
@@ -5890,6 +5891,7 @@ class LoRATrainerGUI:
             self._explorer_baseline_state.preview_height = res
             self._explorer_history.clear()
             self._explorer_locked_blocks.clear()
+            self._explorer_last_pick_blocks.clear()
 
             self._explorer_baseline_image = None
             self._explorer_undo_btn.configure(state="disabled")
@@ -5932,14 +5934,22 @@ class LoRATrainerGUI:
         intensity = self.explorer_intensity_var.get()
         structure = self.explorer_structure_var.get()
         n_muts = int(self.explorer_mutations_var.get() or 5)
-        # Variants 1 & 2: force-include double_0 for structural variation
+        # Variant 1 & 2: structural (double_0 anchor)
+        # Variant 3: pure random
+        # Variant 4: random but avoids last pick's blocks (protects recent changes)
         variant_states = []
         for vi in range(4):
-            # Variants 1 & 2 get structure applied via double_0 anchor
-            # Variants 3 & 4 get normal mutations (structure=0 for them)
             vs_structure = structure if vi < 2 else 0.0
-            vs = state.mutate(active, num_mutations=n_muts, intensity=intensity,
-                              structure=vs_structure)
+            if vi == 3 and self._explorer_last_pick_blocks:
+                # Variant 4: exclude last pick's changed blocks
+                protected_active = active - self._explorer_last_pick_blocks
+                if len(protected_active) < 2:
+                    protected_active = active  # fallback if too few left
+                vs = state.mutate(protected_active, num_mutations=n_muts,
+                                  intensity=intensity, structure=vs_structure)
+            else:
+                vs = state.mutate(active, num_mutations=n_muts, intensity=intensity,
+                                  structure=vs_structure)
             variant_states.append(vs)
 
         import threading
@@ -6076,9 +6086,15 @@ class LoRATrainerGUI:
 
         picked_state = self._explorer_variant_states[idx]
 
+        # Track which blocks changed in this pick (for variant 4 protection)
+        if self._explorer_baseline_state is not None:
+            self._explorer_last_pick_blocks = set(picked_state.diff_blocks(self._explorer_baseline_state))
+        else:
+            self._explorer_last_pick_blocks = set()
+
         # Hold Mode: lock any blocks that differ from the default strength
         if self.explorer_hold_var.get() and self._explorer_baseline_state is not None:
-            newly_changed = set(picked_state.diff_blocks(self._explorer_baseline_state))
+            newly_changed = set(self._explorer_last_pick_blocks)
             newly_changed.discard("double_0")  # double_0 is never locked
             self._explorer_locked_blocks |= newly_changed
 

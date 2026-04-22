@@ -1858,6 +1858,14 @@ class LoRATrainerGUI:
 
         self.scaled_check = ttk.Checkbutton(fp8_frame, text="FP8 Scaled", variable=self.scaled_var, state=tk.DISABLED if not self.fp8_var.get() else tk.NORMAL, style="Surface.TCheckbutton")
         self.scaled_check.pack(side=tk.LEFT)
+        tk.Label(memory_content,
+                 text="Converts a bf16 model to fp8 at load time. If your Base DiT is already fp8 "
+                      "(e.g. flux-2-klein-base-9b-fp8), leave this unchecked — Fizgig detects "
+                      "pre-quantised fp8 files automatically.",
+                 font=(FONT_FAMILY, 8, "italic"),
+                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT).grid(
+            row=3, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         # FP8 Text Encoder
         self.fp8_text_encoder_label = tk.Label(
@@ -1867,11 +1875,11 @@ class LoRATrainerGUI:
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_surface"]
         )
-        self.fp8_text_encoder_label.grid(row=3, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.fp8_text_encoder_label.grid(row=4, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
         self.fp8_text_encoder_var = tk.BooleanVar(value=self.settings["FP8_TEXT_ENCODER"])
         self.fp8_text_encoder_check = ttk.Checkbutton(memory_content, text="Enable FP8 T5/LLM", variable=self.fp8_text_encoder_var, style="Surface.TCheckbutton")
-        self.fp8_text_encoder_check.grid(row=3, column=1, sticky=tk.W, padx=5, pady=4)
+        self.fp8_text_encoder_check.grid(row=4, column=1, sticky=tk.W, padx=5, pady=4)
 
         # === Timestep & Noise Schedule Section (Collapsed by default) ===
         timestep_section = CollapsibleFrame(outer,"Timestep & Noise Schedule", default_expanded=False)

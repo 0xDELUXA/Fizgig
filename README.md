@@ -93,11 +93,12 @@ Fizgig doesn't bundle model weights — they're ~40 GB combined and licensing va
 | Model | File | Size | Source |
 |---|---|---|---|
 | Base DiT | `flux-2-klein-base-9b.safetensors` | ~17 GB bf16 | [black-forest-labs/FLUX.2-klein-dev](https://huggingface.co/black-forest-labs/FLUX.2-klein-dev) |
+| Base DiT (fp8) | `flux-2-klein-base-9b-fp8.safetensors` | ~9.5 GB fp8 | [black-forest-labs/FLUX.2-klein-base-9b-fp8](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8) |
 | Distilled DiT | `flux-2-klein-9b-fp8.safetensors` | ~9 GB fp8 | [Comfy-Org/flux2_ComfyUI_repackaged](https://huggingface.co/Comfy-Org/flux2_ComfyUI_repackaged) |
 | VAE / AE | `ae.safetensors` | ~320 MB | [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev/blob/main/ae.safetensors) (from root, **not** the `vae/` subfolder) |
 | Text Encoder | Qwen3-8B single-file safetensors | ~15 GB | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) |
 
-Training runs on the **Base DiT**. The **Distilled DiT** is used for fast 4-step previews during training, the Profiler, the Repair Studio, and the Explorer — so you want both if you'll use the workbench features.
+Training runs on the **Base DiT**. You can use either the bf16 or fp8 version — if using the fp8 Base, uncheck "FP8 Base" on the Training tab (Fizgig auto-detects pre-quantised files). The **Distilled DiT** is used for fast 4-step previews during training, the Profiler, the Repair Studio, and the Explorer — so you want both if you'll use the workbench features.
 
 Three smaller models auto-download on first use: InsightFace (`buffalo_l`, ~300 MB, during install), Florence-2 (~500 MB–1.5 GB, first AI caption), Helsinki-NLP/opus-mt-en-zh (~300 MB, first bilingual translation).
 

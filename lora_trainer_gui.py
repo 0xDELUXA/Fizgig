@@ -6915,7 +6915,8 @@ class LoRATrainerGUI:
         next_row = 0
         next_row = self._add_pref_row(
             models_card, next_row, "Base DiT:", "base_dit",
-            "Klein 9B Base model (for training & precise profiling)",
+            "Klein 9B Base model (for training & precise profiling). "
+            "An fp8 version (~9.5GB) is also available — see the GitHub README for the link.",
             download_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-dev",
             download_note="~17GB bf16 — Black Forest Labs on HuggingFace (flux-2-klein-base-9b.safetensors)",
         )

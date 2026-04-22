@@ -5588,7 +5588,7 @@ class LoRATrainerGUI:
         ttk.Radiobutton(dit_frame, text="Distilled (4-step, fast)",
                         variable=self.explorer_dit_var, value="distilled",
                         style="Surface.TRadiobutton").pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Radiobutton(dit_frame, text="Base (50-step, precise)",
+        ttk.Radiobutton(dit_frame, text="Base (20-step, precise)",
                         variable=self.explorer_dit_var, value="base",
                         style="Surface.TRadiobutton").pack(side=tk.LEFT)
         r += 1
@@ -7467,7 +7467,7 @@ class LoRATrainerGUI:
         ttk.Radiobutton(choice_frame, text="Distilled (4-step, fast)",
                         variable=self.repair_dit_choice_var, value="distilled",
                         style="Surface.TRadiobutton").pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Radiobutton(choice_frame, text="Base (50-step, precise but slow)",
+        ttk.Radiobutton(choice_frame, text="Base (20-step, precise but slow)",
                         variable=self.repair_dit_choice_var, value="base",
                         style="Surface.TRadiobutton").pack(side=tk.LEFT)
         r += 1

@@ -5558,10 +5558,10 @@ class LoRATrainerGUI:
             outer, "LoRA the Explorer",
             "Like Michelangelo chipping away at marble — the beauty is already inside "
             "the LoRA, you just need to find it. The computer randomly adjusts blocks and shows you 4 variants. "
-            "Pick your favourite and it becomes the new baseline. With Hold Mode on, picked blocks lock in "
-            "and future mutations only touch what's left — sculpting until every block is dialled in. "
-            "Once you find a direction you like, reduce Structure change to keep the composition stable. "
-            "Turn off Hold Mode to keep exploring freely without locking blocks.",
+            "Pick your favourite and it becomes the new baseline. "
+            "With Hold off (default), you can explore freely — each pick builds on the last but nothing locks. "
+            "Turn Hold on to lock picked blocks and sculpt progressively until every block is dialled in. "
+            "Reduce Structure change once you find a direction you like to keep the composition stable.",
         )
 
         # State
@@ -5664,7 +5664,7 @@ class LoRATrainerGUI:
         self.explorer_mutations_var = tk.StringVar(value="5")
         ttk.Combobox(params_frame, textvariable=self.explorer_mutations_var,
                      values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
-        self.explorer_hold_var = tk.BooleanVar(value=True)
+        self.explorer_hold_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(params_frame, text="Hold Mode",
                         variable=self.explorer_hold_var).pack(side=tk.LEFT)
         r += 1

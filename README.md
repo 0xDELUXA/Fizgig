@@ -74,7 +74,7 @@ Distil any Klein LoRA down to a lower rank with block and timestep targeting. Fa
 
 Double-click `install_fizgig.bat`. The installer creates a venv, installs CUDA 12.8 PyTorch + all dependencies, pre-downloads InsightFace face-detection models, and verifies that CUDA is visible to PyTorch.
 
-Launch with `run_fizgig.bat` when install completes.
+Launch with `run_fizgig.bat` when install completes. To update later, double-click `update_fizgig.bat`.
 
 ### Linux / macOS
 

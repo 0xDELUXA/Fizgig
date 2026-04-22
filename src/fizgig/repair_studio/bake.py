@@ -87,7 +87,8 @@ def _materialize_lycoris_module(mod_keys: Dict[str, torch.Tensor]) -> Optional[D
         dim = w1.shape[0] * w2.shape[0]
         alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
         scale = 1.0 if alpha > _ALPHA_SENTINEL_THRESHOLD else alpha / max(dim, 1)
-        W = torch.kron(w1, w2) * scale
+        from fizgig.utils.device import gpu_kron
+        W = gpu_kron(w1, w2) * scale
 
     # --- LoHa ---
     elif mod_keys.get("hada_w1_a") is not None:
@@ -108,7 +109,8 @@ def _materialize_lycoris_module(mod_keys: Dict[str, torch.Tensor]) -> Optional[D
     target_rank = min(64, min_dim)
 
     try:
-        U, S, Vt = torch.linalg.svd(W, full_matrices=False)
+        from fizgig.utils.device import gpu_svd
+        U, S, Vt = gpu_svd(W)
     except Exception:
         return None
 

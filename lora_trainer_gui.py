@@ -5870,9 +5870,11 @@ class LoRATrainerGUI:
             _fmt = _df(_ek(_lf(path)))
             if _fmt in ("lokr", "loha"):
                 messagebox.showinfo("LyCORIS LoRA loaded",
-                    f"This is a {_fmt.upper()} LoRA. Preview works normally.\n\n"
-                    f"If you save, blocks will be converted to standard LoRA via SVD "
-                    f"(slight approximation).")
+                    f"This is a {_fmt.upper()} LoRA (LyCORIS format). "
+                    f"Preview and profiling work normally.\n\n"
+                    f"If you save, each block will be converted to standard LoRA via SVD. "
+                    f"This may take a minute or two for large LoRAs (GPU-accelerated when available). "
+                    f"The result is a slight approximation of the original.")
             self.explorer_status_var.set(
                 f"Loaded: {os.path.basename(path)} ({n_active}/32 blocks). Click Re-roll to start exploring.")
             # Initialize baseline state with user-specified LoRA strength
@@ -8125,9 +8127,11 @@ class LoRATrainerGUI:
             self.repair_engine.load_donor(path)
             if _fmt_d in ("lokr", "loha"):
                 messagebox.showinfo("LyCORIS donor loaded",
-                    f"This donor is a {_fmt_d.upper()} LoRA. Live preview works normally.\n\n"
+                    f"This donor is a {_fmt_d.upper()} LoRA (LyCORIS format). "
+                    f"Live preview works normally.\n\n"
                     f"If you save with blended blocks, they will be converted to standard "
-                    f"LoRA via SVD (slight approximation).")
+                    f"LoRA via SVD. This may take a minute or two for large LoRAs "
+                    f"(GPU-accelerated when available).")
             self._repair_donor_loaded = True
             # Show donor sub-rows + master section toggles + enable the "Donor" master target radio
             for vars_ in self.repair_block_vars.values():

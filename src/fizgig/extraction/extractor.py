@@ -169,7 +169,8 @@ class LoRAExtractor:
                 alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
                 # Sentinel detection (Comfy-Realtime-Lora)
                 scale = 1.0 if alpha > 1e8 else alpha / max(dim, 1)
-                W = torch.kron(w1, w2) * scale * mult
+                from fizgig.utils.device import gpu_kron
+                W = gpu_kron(w1, w2) * scale * mult
             elif mod_keys.get("hada_w1_a") is not None:
                 # LoHa
                 W1 = mod_keys["hada_w1_a"].float() @ mod_keys["hada_w1_b"].float()
@@ -199,7 +200,8 @@ class LoRAExtractor:
                 continue
 
             try:
-                U, S, Vt = torch.linalg.svd(W_source, full_matrices=False)
+                from fizgig.utils.device import gpu_svd
+                U, S, Vt = gpu_svd(W_source)
             except Exception as e:
                 logger.warning(f"SVD failed for {mod_name}: {e}")
                 continue
@@ -353,17 +355,18 @@ class LoRAExtractor:
             with torch.no_grad():
                 cls_name = type(lora).__name__
                 if cls_name in ("LoRAInfModule", "LoRAModule"):
-                    src_up = lora.lora_up.weight.float().cpu()
-                    src_down = lora.lora_down.weight.float().cpu()
-                    W_source = src_up @ src_down * lora.scale * lora.multiplier
+                    src_up = lora.lora_up.weight.float()
+                    src_down = lora.lora_down.weight.float()
+                    W_source = (src_up @ src_down * lora.scale * lora.multiplier).cpu()
                 elif cls_name == "LoKRInfModule":
-                    w1 = (lora.lokr_w1_a @ lora.lokr_w1_b).float().cpu() if lora.w1_decomposed else lora.lokr_w1.float().cpu()
-                    w2 = (lora.lokr_w2_a @ lora.lokr_w2_b).float().cpu() if lora.w2_decomposed else lora.lokr_w2.float().cpu()
-                    W_source = torch.kron(w1, w2) * lora.scale * lora.multiplier
+                    w1 = (lora.lokr_w1_a @ lora.lokr_w1_b).float() if lora.w1_decomposed else lora.lokr_w1.float()
+                    w2 = (lora.lokr_w2_a @ lora.lokr_w2_b).float() if lora.w2_decomposed else lora.lokr_w2.float()
+                    from fizgig.utils.device import gpu_kron
+                    W_source = gpu_kron(w1.cpu(), w2.cpu()) * lora.scale * lora.multiplier
                 elif cls_name == "LoHaInfModule":
-                    W1 = (lora.hada_w1_a.float() @ lora.hada_w1_b.float()).cpu()
-                    W2 = (lora.hada_w2_a.float() @ lora.hada_w2_b.float()).cpu()
-                    W_source = (W1 * W2) * lora.scale * lora.multiplier
+                    W1 = (lora.hada_w1_a.float() @ lora.hada_w1_b.float())
+                    W2 = (lora.hada_w2_a.float() @ lora.hada_w2_b.float())
+                    W_source = ((W1 * W2) * lora.scale * lora.multiplier).cpu()
                 else:
                     skipped_variants.append((lora.lora_name, cls_name))
                     continue
@@ -414,7 +417,8 @@ class LoRAExtractor:
                 W_weighted = W_source
 
             try:
-                U, S, Vt = torch.linalg.svd(W_weighted, full_matrices=False)
+                from fizgig.utils.device import gpu_svd
+                U, S, Vt = gpu_svd(W_weighted)
             except Exception as e:
                 logger.warning(f"SVD failed for {lora_name}: {e}")
                 continue

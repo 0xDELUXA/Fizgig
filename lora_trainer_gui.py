@@ -542,7 +542,7 @@ PRESETS = {
         "TIMESTEP_SAMPLING": "flux2_shift",
         "DISCRETE_FLOW_SHIFT": "0",
         "WEIGHTING_SCHEME": "none",
-        "BLOCKS_SWAP": 12,
+        "BLOCKS_SWAP": "auto",
         # Model paths come from Preferences at runtime — leave blank in the preset.
         "VAE_MODEL": "",
         "TEXT_ENCODER": "",
@@ -678,7 +678,7 @@ class LoRATrainerGUI:
             "MAX_TRAIN_EPOCHS": 12,
             "SAVE_EVERY_N_EPOCHS": 1,
             "SEED": 42,
-            "BLOCKS_SWAP": 0,  # Klein valid range 0-16; 0 = no swap
+            "BLOCKS_SWAP": "auto",  # Klein valid range 0-16; "auto" detects from GPU
             "RESUME_TRAINING": "",
             "OPTIMIZER_TYPE": "adamw8bit",
             "OPTIMIZER_ARGS": "",
@@ -1815,6 +1815,7 @@ class LoRATrainerGUI:
         # Blocks Swap dropdown — labeled VRAM presets first, then leftover numbers (Klein 9B max=16)
         ttk.Label(memory_content, text="Blocks Swap:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=4)
         blocks_swap_options = [
+            "Auto (detect from GPU)",
             "0  (No swap — 32GB+ VRAM)",
             "4  (Light — 24GB)",
             "8  (Moderate — 16GB)",
@@ -1822,16 +1823,18 @@ class LoRATrainerGUI:
             "16 (Very conservative — 8-10GB)",
             "1", "2", "3", "5", "6", "7", "9", "10", "11", "13", "14", "15",
         ]
-        # Dynamic width: longest entry + small padding (mirrors the preset combobox sizing)
         _bs_max_len = max(len(v) for v in blocks_swap_options)
         self.entries["BLOCKS_SWAP"] = ttk.Combobox(memory_content, values=blocks_swap_options, width=_bs_max_len + 2)
         self.entries["BLOCKS_SWAP"].grid(row=0, column=1, sticky=tk.W, padx=5, pady=4)
-        # Pre-select the labeled preset that matches the current settings value, if any
         try:
-            _bs_int = int(self.settings.get("BLOCKS_SWAP", 0))
-            _label_map = {0: blocks_swap_options[0], 4: blocks_swap_options[1], 8: blocks_swap_options[2],
-                          12: blocks_swap_options[3], 16: blocks_swap_options[4]}
-            self.entries["BLOCKS_SWAP"].set(_label_map.get(_bs_int, str(_bs_int)))
+            _bs_val = self.settings.get("BLOCKS_SWAP", "auto")
+            if str(_bs_val).lower() == "auto":
+                self.entries["BLOCKS_SWAP"].set(blocks_swap_options[0])
+            else:
+                _bs_int = int(_bs_val)
+                _label_map = {0: blocks_swap_options[1], 4: blocks_swap_options[2], 8: blocks_swap_options[3],
+                              12: blocks_swap_options[4], 16: blocks_swap_options[5]}
+                self.entries["BLOCKS_SWAP"].set(_label_map.get(_bs_int, str(_bs_int)))
         except (ValueError, TypeError):
             self.entries["BLOCKS_SWAP"].set(blocks_swap_options[0])
 
@@ -2571,11 +2574,33 @@ class LoRATrainerGUI:
             self._adaptive_reset_btn.config(state=btn_state)
 
     def _parse_blocks_swap(self) -> int:
-        """Extract integer from the BLOCKS_SWAP combobox value (handles labeled presets)."""
+        """Extract integer from the BLOCKS_SWAP combobox value.
+        'Auto' resolves to a value based on GPU VRAM (training needs more headroom than inference)."""
         import re as _re
         raw = self.entries["BLOCKS_SWAP"].get().strip()
+        if raw.lower().startswith("auto"):
+            return self._auto_training_blocks_swap()
         m = _re.match(r'\d+', raw)
         return int(m.group()) if m else 0
+
+    def _auto_training_blocks_swap(self) -> int:
+        """Pick training block swap based on GPU VRAM."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                if vram_gb >= 30:
+                    return 0   # 32 GB+ (5090, A100) — no swap needed
+                if vram_gb >= 20:
+                    return 4   # 24 GB (RTX 3090 / 4090)
+                if vram_gb >= 14:
+                    return 8   # 16 GB cards
+                if vram_gb >= 10:
+                    return 12  # 12 GB cards
+                return 16      # <10 GB — maximum swap
+        except Exception:
+            pass
+        return 8  # safe fallback
 
     def _get_inference_blocks_to_swap(self) -> int:
         """Parse the leading int from the Preferences inference_blocks_to_swap
@@ -8952,6 +8977,19 @@ class LoRATrainerGUI:
             self.console_output.see(tk.END)
         self.console_output.configure(state="disabled")
 
+        # Detect CUDA OOM and suggest increasing block swap
+        if "CUDA out of memory" in line or "OutOfMemoryError" in line:
+            if not getattr(self, "_oom_warning_shown", False):
+                self._oom_warning_shown = True
+                current_swap = self._parse_blocks_swap()
+                messagebox.showwarning("Out of Memory",
+                    f"CUDA ran out of memory during training.\n\n"
+                    f"Current Block Swap: {current_swap}\n\n"
+                    f"Try increasing Block Swap on the Training tab "
+                    f"(Memory & FP8 section) to move more blocks to CPU. "
+                    f"If set to Auto, switch to a manual value like "
+                    f"{min(current_swap + 4, 16)}.")
+
     def _browse_context_lora(self):
         """File picker for the Context LoRA, filtered to .safetensors."""
         path = filedialog.askopenfilename(
@@ -9180,6 +9218,9 @@ class LoRATrainerGUI:
         if not self.validate_inputs():
             return
 
+        # Reset OOM warning flag for this run
+        self._oom_warning_shown = False
+
         # Auto-uncheck FP8 Base if the Base DiT file is already fp8-quantised
         base_dit_path = self.prefs_vars.get("base_dit", tk.StringVar()).get()
         if "fp8" in os.path.basename(base_dit_path).lower() and self.fp8_var.get():
@@ -9227,7 +9268,10 @@ class LoRATrainerGUI:
 
         # Validate blocks swap
         try:
+            is_auto = self.entries["BLOCKS_SWAP"].get().strip().lower().startswith("auto")
             blocks_swap = self._parse_blocks_swap()
+            if is_auto:
+                self.update_console(f"Block Swap: Auto detected → {blocks_swap} (based on GPU VRAM)\n")
             if blocks_swap > config["blocks_swap_max"]:
                 messagebox.showwarning(
                     "Warning",

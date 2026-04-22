@@ -31,7 +31,7 @@
 32 live sliders — one per transformer block — with side-by-side Distilled preview. See the effect of every change instantly. Optional donor-LoRA blending via rank concatenation lets you mix blocks from two LoRAs. Quick-set `[0]` `[1]` `[±]` buttons on every slider. **Turbo Preview** caches activations and prompt encodings — up to 97% faster on late-block changes. Click the tweaked preview to pop it out into a resizable window. Saves a baked `.safetensors` that works in ComfyUI at strength 1.0.
 
 ### LoRA the Explorer
-Evolutionary LoRA discovery. The computer randomly mutates blocks and shows you 4 variants — pick your favourite and it becomes the new baseline. **Hold Mode** locks picked blocks so the search space narrows with each selection, sculpting the LoRA until every block is dialled in. Seed cycling verifies variants across different seeds. Adjustable intensity and mutation count for fine or bold exploration.
+Evolutionary LoRA discovery. The computer randomly mutates blocks and shows you 4 variants — pick your favourite and it becomes the new baseline. **Hold Mode** locks picked blocks so the search space narrows with each selection, sculpting the LoRA until every block is dialled in. A **Structure** slider controls how much the composition/style anchor (double_0) changes each round — dial it up for dramatic structural variation, dial it down once you've found a direction. Seed cycling verifies variants across different seeds.
 
 ### Profiler
 Per-block activation profile with a colour-coded 5-bucket HTML report. Identifies which blocks carry style, identity, and detail signal — and where they overlap. Writes a JSON sidecar that the Repair Studio reads automatically, showing you the profiler's findings inline when you load the same LoRA.

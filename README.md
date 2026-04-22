@@ -26,7 +26,7 @@ Fizgig is self-contained: no external CLI, no wrapper. Training, inference, prof
 - **AI captions** — Florence-2 bulk captioning + optional English → Chinese bilingual translation via Helsinki-NLP.
 - **Image Prep** — batch resize, PNG conversion, face-crop derivatives via InsightFace.
 - **Profiler** — per-block activation profile with a 5-bucket HTML report, and a JSON sidecar the Repair Studio reads inline.
-- **Repair Studio** — 32 live sliders per LoRA block with side-by-side Distilled preview, optional donor-LoRA blending (rank-concatenation bake), quick-set `[0]` `[1]` `[±]` buttons on every slider. **Turbo Preview** caches activations and prompt encodings for near-instant updates when tweaking individual blocks — up to 97% faster on late-block changes. Auto-unloads models when you switch tabs to free VRAM.
+- **Repair Studio** — 32 live sliders per LoRA block with side-by-side Distilled preview, optional donor-LoRA blending (rank-concatenation bake), quick-set `[0]` `[1]` `[±]` buttons on every slider. **Turbo Preview** caches activations and prompt encodings for near-instant updates when tweaking individual blocks — up to 97% faster on late-block changes. Click the tweaked preview to pop it out into a resizable window for a closer look. Auto-unloads models when you switch tabs to free VRAM.
 - **Extract** — distill any Klein LoRA down to lower rank with block + timestep targeting. Fast presets run pure weight SVD with no pipeline loaded; activation-weighted presets use GPU forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
 - **Output** — saves kohya-style weight keys. Drop straight into ComfyUI, no conversion step.
 - **YouTube help** — every tab has a help button linking to a video walkthrough.

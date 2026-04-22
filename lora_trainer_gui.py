@@ -7572,10 +7572,15 @@ class LoRATrainerGUI:
                                                anchor=tk.CENTER, background="#1c1c1c")
         self.repair_baseline_label.pack(fill=tk.BOTH, expand=True)
         self.repair_tweaked_label = ttk.Label(tweaked_holder, text="(no preview yet)",
-                                              anchor=tk.CENTER, background="#1c1c1c")
+                                              anchor=tk.CENTER, background="#1c1c1c",
+                                              cursor="hand2")
         self.repair_tweaked_label.pack(fill=tk.BOTH, expand=True)
+        self.repair_tweaked_label.bind("<Button-1>", lambda e: self._repair_popout_preview())
         self.repair_base_holder = base_holder
         self.repair_tweaked_holder = tweaked_holder
+        self._repair_popout_window = None
+        self._repair_popout_label = None
+        self._repair_popout_tk_img = None
 
         # Redraw on resize. Debounced so a drag doesn't spam Lanczos.
         def _mk_config_cb(which):
@@ -8217,6 +8222,7 @@ class LoRATrainerGUI:
             self.repair_pil_images["tweaked"] = tweaked_img
             self._repair_redraw_preview("baseline")
             self._repair_redraw_preview("tweaked")
+            self._repair_update_popout()
             self.repair_status_var.set("Ready.")
             print(f"[repair] preview displayed: baseline={baseline_img.size} tweaked={tweaked_img.size}")
         finally:
@@ -8227,6 +8233,80 @@ class LoRATrainerGUI:
                 self._repair_preview_dirty = False
                 print("[repair] dirty flag set during preview — refiring")
                 self._schedule_preview(force=True)
+
+    def _repair_popout_preview(self):
+        """Open (or raise) a resizable pop-out window showing the tweaked preview."""
+        if self._repair_popout_window is not None:
+            try:
+                if self._repair_popout_window.winfo_exists():
+                    self._repair_popout_window.lift()
+                    self._repair_update_popout()
+                    return
+            except Exception:
+                pass
+            self._repair_popout_window = None
+
+        pil_img = self.repair_pil_images.get("tweaked")
+        if pil_img is None:
+            return
+
+        win = tk.Toplevel(self.master)
+        win.title("Repair Studio \u2014 Tweaked Preview")
+        win.configure(bg="#000000")
+        win.geometry(f"{pil_img.width}x{pil_img.height}")
+        win.minsize(128, 128)
+
+        lbl = tk.Label(win, bg="#000000")
+        lbl.pack(fill=tk.BOTH, expand=True)
+
+        self._repair_popout_window = win
+        self._repair_popout_label = lbl
+
+        def _on_close():
+            self._repair_popout_window = None
+            self._repair_popout_label = None
+            self._repair_popout_tk_img = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        def _on_resize(event):
+            if event.widget == win:
+                self._repair_update_popout()
+
+        win.bind("<Configure>", _on_resize)
+        self._repair_update_popout()
+
+    def _repair_update_popout(self):
+        """Push the current tweaked PIL image to the pop-out window, scaled to fit."""
+        if self._repair_popout_window is None or self._repair_popout_label is None:
+            return
+        try:
+            if not self._repair_popout_window.winfo_exists():
+                self._repair_popout_window = None
+                return
+        except Exception:
+            self._repair_popout_window = None
+            return
+
+        pil_img = self.repair_pil_images.get("tweaked")
+        if pil_img is None:
+            return
+
+        from PIL import ImageTk
+        w = self._repair_popout_window.winfo_width()
+        h = self._repair_popout_window.winfo_height()
+        if w < 10 or h < 10:
+            return
+
+        # Scale to fit window, preserving aspect ratio (upscale allowed)
+        img_w, img_h = pil_img.size
+        scale = min(w / img_w, h / img_h)
+        new_w = max(1, int(img_w * scale))
+        new_h = max(1, int(img_h * scale))
+        resized = pil_img.resize((new_w, new_h), resample=3)  # LANCZOS=3
+        self._repair_popout_tk_img = ImageTk.PhotoImage(resized)
+        self._repair_popout_label.configure(image=self._repair_popout_tk_img)
 
     def _save_repaired_lora_action(self):
         if self.repair_engine is None or self.repair_engine.primary_network is None:
@@ -8320,6 +8400,15 @@ class LoRATrainerGUI:
             self.repair_status_var.set("Models unloaded (tab switch). Load a LoRA to resume.")
 
     def _reset_repair_session(self):
+        # Close pop-out preview window if open
+        if self._repair_popout_window is not None:
+            try:
+                self._repair_popout_window.destroy()
+            except Exception:
+                pass
+            self._repair_popout_window = None
+            self._repair_popout_label = None
+            self._repair_popout_tk_img = None
         if self.repair_engine is not None:
             try:
                 self.repair_engine.reset()

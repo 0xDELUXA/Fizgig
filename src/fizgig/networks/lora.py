@@ -749,7 +749,7 @@ class LoRANetwork(torch.nn.Module):
                             if modules_dim is not None:
                                 if lora_name in modules_dim:
                                     dim = modules_dim[lora_name]
-                                    alpha = modules_alpha[lora_name]
+                                    alpha = modules_alpha.get(lora_name, dim)
                             else:
                                 if is_linear or is_conv2d_1x1:
                                     dim = default_dim if default_dim is not None else self.lora_dim

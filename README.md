@@ -28,6 +28,7 @@ Fizgig is self-contained: no external CLI, no wrapper. Training, inference, prof
 - **Image Prep** — batch resize, PNG conversion, face-crop derivatives via InsightFace.
 - **Profiler** — per-block activation profile with a 5-bucket HTML report, and a JSON sidecar the Repair Studio reads inline.
 - **Repair Studio** — 32 live sliders per LoRA block with side-by-side Distilled preview, optional donor-LoRA blending (rank-concatenation bake), quick-set `[0]` `[1]` `[±]` buttons on every slider. **Turbo Preview** caches activations and prompt encodings for near-instant updates when tweaking individual blocks — up to 97% faster on late-block changes. Click the tweaked preview to pop it out into a resizable window for a closer look. Auto-unloads models when you switch tabs to free VRAM.
+- **LoRA the Explorer** — evolutionary LoRA discovery. The computer randomly mutates blocks and shows you 4 variants — pick your favourite and it becomes the new baseline. **Hold Mode** locks picked blocks so the search space narrows with each selection, sculpting the LoRA until every block is dialled in. Seed cycling lets you verify variants across different seeds.
 - **Extract** — distill any Klein LoRA down to lower rank with block + timestep targeting. Fast presets run pure weight SVD with no pipeline loaded; activation-weighted presets use GPU forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
 - **Output** — saves kohya-style weight keys. Drop straight into ComfyUI, no conversion step.
 - **YouTube help** — every tab has a help button linking to a video walkthrough.
@@ -93,6 +94,7 @@ The unnumbered tabs are post-training tools:
 
 - **Profiler** — analyze any Klein LoRA (your own or a download).
 - **Repair Studio** — live-tweak a LoRA's per-block contributions with side-by-side preview; bake to a new `.safetensors`.
+- **LoRA the Explorer** — evolutionary discovery via human-guided selection; pick favourites from random mutations.
 - **Extract** — distill to a lower rank with optional block / timestep targeting.
 - **Preferences** — model paths, output directories, inference block-swap for 16 GB cards.
 

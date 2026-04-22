@@ -9180,6 +9180,13 @@ class LoRATrainerGUI:
         if not self.validate_inputs():
             return
 
+        # Auto-uncheck FP8 Base if the Base DiT file is already fp8-quantised
+        base_dit_path = self.prefs_vars.get("base_dit", tk.StringVar()).get()
+        if "fp8" in os.path.basename(base_dit_path).lower() and self.fp8_var.get():
+            self.fp8_var.set(False)
+            self.scaled_var.set(False)
+            self.toggle_scaled()
+
         # Snapshot current settings for the "Load Last Train" button
         self._save_last_train_settings()
 

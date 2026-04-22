@@ -13,6 +13,11 @@
   <a href="https://buymeacoffee.com/lorasandlenses"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"></a>
 </p>
 
+<p align="center">
+  <a href="https://youtu.be/sH-kGR8yzBU"><img src="https://img.youtube.com/vi/sH-kGR8yzBU/maxresdefault.jpg" alt="Watch the walkthrough" width="600"></a><br>
+  <em>Watch the full walkthrough on YouTube</em>
+</p>
+
 ---
 
 Fizgig is self-contained: no external CLI, no wrapper. Training, inference, profiling, extraction, and the live Repair Studio all run through the bundled `src/fizgig/` pipelines.

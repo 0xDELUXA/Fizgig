@@ -42,6 +42,8 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 - **Context LoRA** — load an existing LoRA as a frozen active layer during training, so the new LoRA learns to coexist at inference. No other trainer does this.
 - **Pause / Resume** — graceful epoch-boundary pause that frees VRAM and resumes with full optimizer state and no quality regression.
 - **Model Area targeting** — train only Identity blocks, Style blocks, Details blocks, or the full model.
+- **Auto VRAM management** — block swap auto-detects from GPU VRAM, OOM detection suggests fixes. Supports both bf16 and fp8 Base DiT.
+- **Diffusers LoRA support** — OneTrainer LoRAs with split Q/K/V keys auto-fused on load.
 
 ### Dataset Prep
 - **Florence-2 AI captioning** — bulk-generate detailed captions with one click.
@@ -54,6 +56,7 @@ Distil any Klein LoRA down to a lower rank with block and timestep targeting. Fa
 ### Compatibility
 - **Formats** — loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / LoHa) LoRAs. All formats auto-converted on load. LyCORIS files work for preview, profiling, and extraction; bake converts them to standard LoRA via SVD.
 - **Output** — kohya-style `.safetensors` that drop straight into ComfyUI Klein nodes.
+- **LyCORIS bake** — LoKR and LoHa LoRAs can be saved/baked via GPU-accelerated SVD materialization.
 - **YouTube help** — every tab links to the relevant section of the walkthrough video.
 
 ---

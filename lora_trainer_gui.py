@@ -7894,10 +7894,11 @@ class LoRATrainerGUI:
         ("details", "Details"),
     ]
 
-    def _repair_quickset_buttons(self, parent, var, row, col_start):
-        """Create [0] [1] [±] quick-set buttons for a repair slider.
+    def _repair_quickset_buttons(self, parent, var, row, col_start, balance_cb=None):
+        """Create [0] [1] [±] [⚖] quick-set buttons for a repair slider.
 
-        Returns a list of 3 tk.Button widgets (for greying in _refresh_block_slider_activity).
+        Returns a list of button widgets (for greying in _refresh_block_slider_activity).
+        balance_cb: optional callback for the balance button (sets complement on the other target).
         """
         btn_font = (FONT_FAMILY, 8)
         btn_kw = dict(bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
@@ -7911,7 +7912,12 @@ class LoRATrainerGUI:
         bn = tk.Button(parent, text="\u00b1",
                        command=lambda: var.set(-var.get() or 0.0), **btn_kw)
         bn.grid(row=row, column=col_start + 2, padx=1, pady=1)
-        return [b0, b1, bn]
+        btns = [b0, b1, bn]
+        if balance_cb is not None:
+            bb = tk.Button(parent, text="\u2696", command=balance_cb, **btn_kw)
+            bb.grid(row=row, column=col_start + 3, padx=1, pady=1)
+            btns.append(bb)
+        return btns
 
     def _build_repair_master_controls(self, parent):
         """Target radio + 5 category master sliders + 5 donor category toggles."""
@@ -7962,7 +7968,8 @@ class LoRATrainerGUI:
             val_lbl = ttk.Label(parent, text="1.00", width=5, anchor=tk.E)
             val_lbl.grid(row=r, column=2, padx=(4, 4), pady=1)
             self.repair_master_strength_labels[cat] = val_lbl
-            self._repair_quickset_buttons(parent, var, r, 3)
+            self._repair_quickset_buttons(parent, var, r, 3,
+                balance_cb=lambda c=cat: self._repair_balance_master(c))
 
             def _mk_trace(_var, _lbl, _cat):
                 def _cb(*_a):
@@ -7974,6 +7981,48 @@ class LoRATrainerGUI:
             r += 1
 
         # Donor category toggles now live in the Per-Block Sliders card (created in create_repair_studio_tab)
+
+    def _repair_balance_master(self, category: str):
+        """Balance master slider: set the other target's category to 1.0 - current value."""
+        if self.repair_engine is None or self.repair_engine.donor_network is None:
+            return
+        target = self.repair_master_target_var.get()
+        current = self.repair_master_strength_vars[category].get()
+        if current < 0 or current > 1.0:
+            return
+        complement = 1.0 - current
+        # Set the other target's blocks
+        other_key = "donor_strength" if target == "primary" else "primary_strength"
+        affected = [bid for bid in self.repair_block_vars
+                    if self._repair_category_for_block(bid) == category]
+        self._repair_master_mutating = True
+        try:
+            for bid in affected:
+                self.repair_block_vars[bid][other_key].set(complement)
+                if other_key == "donor_strength":
+                    self.repair_block_vars[bid]["donor_enabled"].set(True)
+        finally:
+            self._repair_master_mutating = False
+        if self.repair_engine is not None and self.repair_engine.primary_network is not None:
+            self.repair_engine.mark_blocks_changed(affected)
+            self._schedule_preview()
+
+    def _repair_balance_block(self, block_id: str, source: str):
+        """Balance a single block: set the other side to 1.0 - current value."""
+        if self.repair_engine is None or self.repair_engine.donor_network is None:
+            return
+        v = self.repair_block_vars[block_id]
+        if source == "primary":
+            current = v["primary_strength"].get()
+            if current < 0 or current > 1.0:
+                return
+            v["donor_strength"].set(1.0 - current)
+            v["donor_enabled"].set(True)
+        else:
+            current = v["donor_strength"].get()
+            if current < 0 or current > 1.0:
+                return
+            v["primary_strength"].set(1.0 - current)
 
     def _on_master_strength_changed(self, category: str, value: float):
         """Mirror master slider value to per-block strength vars for affected blocks."""
@@ -8135,11 +8184,12 @@ class LoRATrainerGUI:
 
         val_lbl_p = ttk.Label(rowf, text="1.00", width=5, anchor=tk.E)
         val_lbl_p.grid(row=0, column=4, padx=(2, 2))
-        btns_p = self._repair_quickset_buttons(rowf, primary_strength, 0, 5)
+        btns_p = self._repair_quickset_buttons(rowf, primary_strength, 0, 5,
+            balance_cb=lambda b=block_id: self._repair_balance_block(b, "primary"))
 
         # Donor row (hidden until donor is loaded)
         donor_rowf = ttk.Frame(rowf)
-        donor_rowf.grid(row=1, column=0, columnspan=8, sticky=tk.EW, padx=(20, 0))
+        donor_rowf.grid(row=1, column=0, columnspan=9, sticky=tk.EW, padx=(20, 0))
         donor_rowf.columnconfigure(2, weight=1)
         donor_rowf.grid_remove()
         chk_d = ttk.Checkbutton(donor_rowf, variable=donor_enabled,
@@ -8153,7 +8203,8 @@ class LoRATrainerGUI:
         scale_d.grid(row=0, column=2, sticky=tk.EW, padx=2)
         val_lbl_d = ttk.Label(donor_rowf, text="1.00", width=5, anchor=tk.E)
         val_lbl_d.grid(row=0, column=3, padx=(2, 2))
-        btns_d = self._repair_quickset_buttons(donor_rowf, donor_strength, 0, 4)
+        btns_d = self._repair_quickset_buttons(donor_rowf, donor_strength, 0, 4,
+            balance_cb=lambda b=block_id: self._repair_balance_block(b, "donor"))
 
         # Bind variable traces to mirror into self.repair_state and live-update labels
         def _mk_strength_trace(var, lbl, bid, which):

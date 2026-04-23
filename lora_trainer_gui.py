@@ -9436,7 +9436,7 @@ class LoRATrainerGUI:
     def _show_auto_dismiss_info(self, title, message, timeout_ms=6000):
         """Show a non-blocking info popup that auto-closes after timeout_ms.
         Won't freeze training if the user walks away."""
-        dlg = tk.Toplevel(self.root)
+        dlg = tk.Toplevel(self.master)
         dlg.title(title)
         dlg.resizable(False, False)
         dlg.attributes("-topmost", True)

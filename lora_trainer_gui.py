@@ -1934,8 +1934,8 @@ class LoRATrainerGUI:
         self.entries["TIMESTEP_SAMPLING"] = self.ts_sampling_combo
         ts_row += 1
 
-        # Discrete Flow Shift
-        self.ts_flow_shift_label = tk.Label(ts_content, text="Discrete Flow Shift:",
+        # Discrete Flow Shift (not used by Klein 9B — uses flux2_shift automatic)
+        self.ts_flow_shift_label = tk.Label(ts_content, text="Discrete Flow Shift (not Klein 9B):",
                                             font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         self.ts_flow_shift_label.grid(row=ts_row, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
@@ -2000,8 +2000,8 @@ class LoRATrainerGUI:
         ttk.Separator(ts_content, orient="horizontal").grid(row=ts_row, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
         ts_row += 1
 
-        # Weighting Scheme
-        self.ts_weighting_label = tk.Label(ts_content, text="Weighting Scheme:",
+        # Weighting Scheme (not used by Klein 9B)
+        self.ts_weighting_label = tk.Label(ts_content, text="Weighting Scheme (not Klein 9B):",
                                            font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         self.ts_weighting_label.grid(row=ts_row, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
@@ -2804,7 +2804,7 @@ class LoRATrainerGUI:
         # Attention Mechanism
         ttk.Label(parent, text="Attention Mechanism:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
         self.attention_var = tk.StringVar(value=self.settings["ATTENTION_MECHANISM"])
-        attention_options = ["none", "sdpa", "flash_attn", "sage_attn", "xformers", "flash3", "split_attn"]
+        attention_options = ["sdpa", "flash_attn", "xformers", "flash3", "split_attn"]
         self.entries["ATTENTION_MECHANISM"] = ttk.Combobox(parent, textvariable=self.attention_var, values=attention_options, state="readonly")
         self.entries["ATTENTION_MECHANISM"].grid(row=row, column=1, sticky=tk.EW, padx=5, pady=2)
         row += 1

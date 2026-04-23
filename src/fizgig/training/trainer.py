@@ -377,6 +377,7 @@ class KleinTrainer:
         self.default_discrete_flow_shift = None  # use FLUX.2 dynamic shift
         self.model_version_info: Optional[KleinModelInfo] = None
         self.dit_dtype = torch.bfloat16
+        self.context_network = None
 
     # ------------------------------------------------------------------
     # Architecture properties (hardcoded to Klein 9B)
@@ -1237,6 +1238,11 @@ class KleinTrainer:
         transformer = accelerator.unwrap_model(transformer)
         transformer.switch_block_swap_for_inference()
 
+        # Disable context LoRA during sampling — the trainable LoRA learns to
+        # work standalone, so samples should show just the trainable contribution.
+        if self.context_network is not None:
+            self.context_network.set_enabled(False)
+
         save_dir = os.path.join(args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
 
@@ -1272,6 +1278,10 @@ class KleinTrainer:
         torch.set_rng_state(rng_state)
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state)
+
+        # Re-enable context LoRA for training forward passes
+        if self.context_network is not None:
+            self.context_network.set_enabled(True)
 
         transformer.switch_block_swap_for_training()
         clean_memory_on_device(accelerator.device)
@@ -1561,7 +1571,7 @@ class KleinTrainer:
         # Context LoRA — load + apply BEFORE the trainable network so the trainable
         # network's wrapped forward includes the context LoRA's contribution. Frozen
         # (no grads), kept on the model throughout training.
-        context_network = None
+        self.context_network = None
         if getattr(args, "context_lora_path", None):
             from safetensors.torch import load_file as _ctx_load_file
             from fizgig.networks.lora_klein import create_arch_network_from_weights as _ctx_create
@@ -1572,24 +1582,24 @@ class KleinTrainer:
             ctx_weights = _ctx_load_file(args.context_lora_path)
             # Auto-convert PEFT/diffusers-format Context LoRAs to Fizgig/kohya format
             ctx_weights = _ctx_ensure_kohya(ctx_weights)
-            context_network = _ctx_create(
+            self.context_network = _ctx_create(
                 multiplier=float(args.context_lora_strength),
                 weights_sd=ctx_weights,
                 unet=transformer,
                 for_inference=True,
             )
-            context_network.apply_to(
+            self.context_network.apply_to(
                 text_encoders=None, unet=transformer,
                 apply_text_encoder=False, apply_unet=True,
             )
-            ctx_info = context_network.load_state_dict(ctx_weights, strict=False)
+            ctx_info = self.context_network.load_state_dict(ctx_weights, strict=False)
             logger.info(
                 f"  context LoRA loaded: {len(ctx_info.missing_keys)} missing, "
                 f"{len(ctx_info.unexpected_keys)} unexpected keys"
             )
-            context_network.to(accelerator.device, dtype=dit_dtype)
-            context_network.requires_grad_(False)
-            context_network.eval()
+            self.context_network.to(accelerator.device, dtype=dit_dtype)
+            self.context_network.requires_grad_(False)
+            self.context_network.eval()
 
         network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
 

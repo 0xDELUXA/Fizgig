@@ -8064,10 +8064,6 @@ class LoRATrainerGUI:
             key = "primary_strength" if target == "primary" else "donor_strength"
             for bid in affected:
                 self.repair_block_vars[bid][key].set(value)
-            # Auto-enable donor blocks when adjusting donor master slider
-            if target == "donor":
-                for bid in affected:
-                    self.repair_block_vars[bid]["donor_enabled"].set(True)
         finally:
             self._repair_master_mutating = False
         # Fire one preview for the whole batch.
@@ -8184,8 +8180,8 @@ class LoRATrainerGUI:
         # Primary checkbox + label + slider + value
         primary_enabled = tk.BooleanVar(value=True)
         primary_strength = tk.DoubleVar(value=1.0)
-        donor_enabled = tk.BooleanVar(value=False)
-        donor_strength = tk.DoubleVar(value=1.0)
+        donor_enabled = tk.BooleanVar(value=True)
+        donor_strength = tk.DoubleVar(value=0.0)
 
         chk_p = ttk.Checkbutton(rowf, variable=primary_enabled,
                                 command=lambda b=block_id: self._on_block_changed(b))
@@ -8531,7 +8527,8 @@ class LoRATrainerGUI:
         # Hide donor sub-rows + master section toggles + revert donor master radio
         for vars_ in self.repair_block_vars.values():
             vars_["donor_rowf"].grid_remove()
-            vars_["donor_enabled"].set(False)
+            vars_["donor_enabled"].set(True)
+            vars_["donor_strength"].set(0.0)
         # donor toggles removed — donor blocks managed via master sliders
         self._repair_master_donor_radio.state(["disabled"])
         if self.repair_master_target_var.get() == "donor":
@@ -9143,8 +9140,8 @@ class LoRATrainerGUI:
             v["donor_tag_lbl"].configure(foreground=d_color)
             v["donor_lbl"].configure(foreground=d_color if d_active else grey_fg)
             if donor_ids is not None and not d_active:
-                v["donor_enabled"].set(False)
-                v["donor_strength"].set(1.0)
+                v["donor_enabled"].set(True)
+                v["donor_strength"].set(0.0)
 
     # ---------------- Presets (built-in + user JSON) -----------------
 

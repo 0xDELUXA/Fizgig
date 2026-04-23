@@ -5633,7 +5633,6 @@ class LoRATrainerGUI:
         btn_frame.grid(row=r, column=2, pady=2)
         ttk.Button(btn_frame, text="Browse",
                    command=lambda: self._browse_repair_lora(self.explorer_lora_var)).pack(side=tk.LEFT, padx=2)
-        ttk.Button(btn_frame, text="Load", command=self._explorer_load_lora).pack(side=tk.LEFT, padx=2)
         ttk.Label(btn_frame, text="Strength:").pack(side=tk.LEFT, padx=(12, 4))
         self.explorer_strength_var = tk.StringVar(value="1.0")
         ttk.Entry(btn_frame, textvariable=self.explorer_strength_var, width=5).pack(side=tk.LEFT)
@@ -5641,17 +5640,8 @@ class LoRATrainerGUI:
 
         ttk.Label(setup_card, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=2)
         self.explorer_prompt_var = tk.StringVar()
-        prompt_frame = ttk.Frame(setup_card)
-        prompt_frame.grid(row=r, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
-        prompt_frame.columnconfigure(0, weight=1)
-        ttk.Entry(prompt_frame, textvariable=self.explorer_prompt_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(prompt_frame, text="Apply",
-                   command=self._explorer_apply_prompt).pack(side=tk.LEFT, padx=(6, 0))
-        r += 1
-        tk.Label(setup_card, text="Change prompt and click Apply to regenerate with new text.",
-                 font=(FONT_FAMILY, 8, "italic"),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
-            row=r, column=1, columnspan=2, sticky=tk.W, padx=4, pady=(0, 4))
+        ttk.Entry(setup_card, textvariable=self.explorer_prompt_var).grid(
+            row=r, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
         r += 1
 
         params_frame = ttk.Frame(setup_card)
@@ -5727,7 +5717,13 @@ class LoRATrainerGUI:
                  text="Increase Structure if variants look too similar to baseline.",
                  font=(FONT_FAMILY, 8, "italic"),
                  fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
-        self.explorer_status_var = tk.StringVar(value="Load a LoRA to begin exploring.")
+        self._explorer_start_btn = tk.Button(
+            status_row, text="Start", font=(FONT_FAMILY, 11, "bold"),
+            fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF", activebackground="#256F46",
+            relief="flat", bd=0, padx=24, pady=6, cursor="hand2",
+            command=self._explorer_start)
+        self._explorer_start_btn.pack(side=tk.RIGHT, padx=(8, 0))
+        self.explorer_status_var = tk.StringVar(value="Set a LoRA path and prompt, then click Start.")
         tk.Label(status_row, textvariable=self.explorer_status_var,
                  font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=COLORS["bg_surface"]).pack(side=tk.RIGHT)
@@ -6212,6 +6208,17 @@ class LoRATrainerGUI:
         self.explorer_seed_var.set(str(random.randint(1, 99999)))
         if self._explorer_baseline_state is not None and not self._explorer_generating:
             self._explorer_generate_baseline_and_roll()
+
+    def _explorer_start(self):
+        """Start button: load LoRA if not loaded, or regenerate with current settings."""
+        if self._explorer_generating:
+            return
+        if self._explorer_engine is None or self._explorer_engine.primary_network is None:
+            # Not loaded yet — load the LoRA
+            self._explorer_load_lora()
+        else:
+            # Already loaded — invalidate prompt cache and regenerate
+            self._explorer_apply_prompt()
 
     def _explorer_apply_prompt(self):
         """Apply a new prompt — invalidates prompt cache and regenerates."""

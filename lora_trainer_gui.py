@@ -5660,10 +5660,10 @@ class LoRATrainerGUI:
         ttk.Combobox(params_frame, textvariable=self.explorer_res_var,
                      values=["256", "384", "512", "768", "1024"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 16))
         ttk.Label(params_frame, text="Intensity:").pack(side=tk.LEFT, padx=(0, 4))
-        self.explorer_intensity_var = tk.DoubleVar(value=0.46)
+        self.explorer_intensity_var = tk.DoubleVar(value=0.964)
         ttk.Scale(params_frame, from_=0.0, to=1.0, variable=self.explorer_intensity_var,
                   orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT, padx=(0, 4))
-        self._explorer_intensity_lbl = ttk.Label(params_frame, text="\u00b11.5", width=5)
+        self._explorer_intensity_lbl = ttk.Label(params_frame, text="\u00b12.9", width=5)
         self._explorer_intensity_lbl.pack(side=tk.LEFT, padx=(0, 16))
         self._explorer_intensity_debounce_id = None
         def _update_intensity_lbl(*_):
@@ -5691,10 +5691,10 @@ class LoRATrainerGUI:
         struct_frame = ttk.Frame(setup_card)
         struct_frame.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
         ttk.Label(struct_frame, text="Structure change:").pack(side=tk.LEFT, padx=(0, 4))
-        self.explorer_structure_var = tk.DoubleVar(value=0.40)
+        self.explorer_structure_var = tk.DoubleVar(value=1.0)
         ttk.Scale(struct_frame, from_=0.0, to=1.0, variable=self.explorer_structure_var,
                   orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT, padx=(0, 4))
-        self._explorer_structure_lbl = ttk.Label(struct_frame, text="40%", width=5)
+        self._explorer_structure_lbl = ttk.Label(struct_frame, text="100%", width=5)
         self._explorer_structure_lbl.pack(side=tk.LEFT, padx=(0, 8))
         self._explorer_structure_debounce_id = None
         def _update_structure_lbl(*_):

@@ -7553,13 +7553,18 @@ class LoRATrainerGUI:
         # Card 5: Actions
         actions_card = self._start_section_card(outer, "Actions", None)
         action_row = tk.Frame(actions_card, bg=COLORS["bg_surface"])
-        action_row.pack(anchor=tk.W)
+        action_row.pack(fill=tk.X)
         ttk.Button(action_row, text="Save Repaired LoRA…",
                    command=self._save_repaired_lora_action, style="Primary.TButton").pack(side=tk.LEFT, padx=(0, 12))
         ttk.Button(action_row, text="Reset All Sliders",
                    command=self._reset_repair_sliders).pack(side=tk.LEFT, padx=(0, 12))
         ttk.Button(action_row, text="Reset Session (unload models)",
                    command=self._reset_repair_session).pack(side=tk.LEFT)
+        tk.Button(action_row, text="Explore this in LoRA the Explorer \u2192",
+                  font=(FONT_FAMILY, 10, "bold"),
+                  fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF", activebackground="#256F46",
+                  relief="flat", bd=0, padx=16, pady=6, cursor="hand2",
+                  command=self._repair_explore_in_explorer).pack(side=tk.RIGHT)
 
         self._add_youtube_help_button(outer, "repair_studio")
 
@@ -8578,6 +8583,82 @@ class LoRATrainerGUI:
                 pass
             self.repair_engine = None
             self.repair_status_var.set("Models unloaded (tab switch). Load a LoRA to resume.")
+
+    def _repair_explore_in_explorer(self):
+        """Send current Repair Studio slider state to the Explorer for evolutionary discovery."""
+        if self.repair_engine is None or self.repair_engine.primary_network is None:
+            messagebox.showerror("Error", "Load a primary LoRA first.")
+            return
+
+        from fizgig.repair_studio.state import SliderState
+
+        # Capture current state
+        lora_path = self.repair_engine.primary_path
+        current_state = self.repair_state.copy()
+        prompt = self.repair_prompt_var.get()
+        seed = self.repair_seed_var.get()
+        res = self.repair_res_var.get()
+
+        # Reset Repair Studio (frees VRAM)
+        self._reset_repair_session()
+
+        # Set up Explorer fields
+        self.explorer_lora_var.set(lora_path)
+        self.explorer_prompt_var.set(prompt)
+        self.explorer_seed_var.set(seed)
+        self.explorer_res_var.set(res)
+
+        # Switch to Explorer tab
+        self.notebook.select(self.explorer_tab)
+
+        # Load LoRA in Explorer
+        if not self._explorer_ensure_engine():
+            return
+        try:
+            self.explorer_status_var.set("Loading from Repair Studio...")
+            self.master.update_idletasks()
+            if self._explorer_engine.primary_network is not None:
+                self._explorer_engine.reset()
+                self._explorer_engine = None
+                if not self._explorer_ensure_engine():
+                    return
+            self._explorer_engine.load_primary(lora_path)
+
+            # Set the Explorer baseline to the Repair Studio's slider state
+            self._explorer_baseline_state = current_state
+            self._explorer_baseline_state.prompt = prompt
+            self._explorer_baseline_state.seed = int(seed or 42)
+            r = int(res or 512)
+            self._explorer_baseline_state.preview_width = r
+            self._explorer_baseline_state.preview_height = r
+            self._explorer_history.clear()
+            self._explorer_locked_blocks.clear()
+            self._explorer_last_pick_blocks.clear()
+            self._explorer_baseline_image = None
+            self._explorer_undo_btn.configure(state="disabled")
+            self._explorer_save_btn.configure(state="disabled")
+            self._explorer_refine_btn.configure(state="disabled")
+            self._explorer_roll_btn.configure(state="normal")
+
+            # Set low intensity + structure for refinement (subtle variants)
+            self.explorer_intensity_var.set(0.25)   # ±0.9
+            self.explorer_structure_var.set(0.15)    # 15%
+
+            n_active = len(self._explorer_engine.primary_block_ids)
+            self.explorer_status_var.set(
+                f"Loaded from Repair Studio: {os.path.basename(lora_path)} ({n_active}/32 blocks). "
+                f"Refining with low intensity. Generating variants...")
+            self._explorer_generate_baseline_and_roll()
+
+            self.master.after(500, lambda: messagebox.showinfo(
+                "Refinement Mode",
+                "Your Repair Studio slider state is now the Explorer baseline.\n\n"
+                "Intensity and Structure have been set low so variants are subtle "
+                "refinements of your current settings. Increase them if you want "
+                "bolder exploration."))
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Failed to load in Explorer:\n{traceback.format_exc()}")
 
     def _reset_repair_session(self):
         # Close pop-out preview window if open

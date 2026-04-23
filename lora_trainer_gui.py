@@ -8487,6 +8487,8 @@ class LoRATrainerGUI:
             return  # not loaded yet — user will click Start
         # Path changed — auto-swap
         if self.repair_engine.primary_path != path:
+            # Remember donor path before reset clears it
+            donor_path = self.repair_donor_var.get().strip()
             self._reset_repair_session()
             # Force GC + CUDA flush between unload and reload to prevent OOM
             import gc, torch
@@ -8494,6 +8496,9 @@ class LoRATrainerGUI:
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             self._load_repair_primary()
+            # Reload donor if one was set
+            if donor_path and os.path.exists(donor_path):
+                self._load_repair_donor()
             self._repair_reset_start_button()
 
     def _browse_and_load_donor(self):

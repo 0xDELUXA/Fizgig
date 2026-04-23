@@ -43,6 +43,9 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 - **Proven presets** for rank 4–16, single subject through multi-character — or build your own.
 - **Adaptive LR** — bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
 - **Context LoRA** — load an existing LoRA as a frozen active layer during training, so the new LoRA learns to coexist at inference. No other trainer does this.
+
+> **⚠️ Context LoRA note:** Training sample previews in context mode often don't reflect the final quality of the trained LoRA. The samples can look distorted even when the LoRA itself is excellent. Always evaluate the output LoRA in ComfyUI for accurate results. This is a known issue being worked on.
+
 - **Pause / Resume** — graceful epoch-boundary pause that frees VRAM and resumes with full optimizer state and no quality regression.
 - **Model Area targeting** — train only Identity blocks, Style blocks, Details blocks, or the full model.
 - **Auto VRAM management** — block swap auto-detects from GPU VRAM, OOM detection suggests fixes. Supports both bf16 and fp8 Base DiT.

@@ -1709,6 +1709,11 @@ class LoRATrainerGUI:
                        "Pair with same context+strength at inference.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
             row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
+        ttk.Label(training_content,
+                  text="⚠ Context LoRAs usually look better in ComfyUI than in training samples — "
+                       "don't worry if previews look rough, test the output LoRA in ComfyUI.",
+                  foreground="#E67E22", font=(FONT_FAMILY, 8, "italic")).grid(
+            row=16, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)

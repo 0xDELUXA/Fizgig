@@ -6950,7 +6950,7 @@ class LoRATrainerGUI:
         next_row = self._add_pref_row(
             models_card, next_row, "Distilled DiT:", "distilled_dit",
             "Klein 9B Distilled model (for Repair Studio previews, fast profiling & diagnostics)",
-            download_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8",
+            download_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/tree/main",
             download_note="~9GB fp8 quantised — Black Forest Labs (flux-2-klein-9b-fp8.safetensors)",
         )
         next_row = self._add_pref_row(

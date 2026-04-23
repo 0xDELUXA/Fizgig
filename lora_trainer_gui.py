@@ -2804,9 +2804,14 @@ class LoRATrainerGUI:
         # Attention Mechanism
         ttk.Label(parent, text="Attention Mechanism:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
         self.attention_var = tk.StringVar(value=self.settings["ATTENTION_MECHANISM"])
-        attention_options = ["sdpa", "flash_attn", "xformers", "flash3", "split_attn"]
+        attention_options = ["sdpa", "flash3"]
         self.entries["ATTENTION_MECHANISM"] = ttk.Combobox(parent, textvariable=self.attention_var, values=attention_options, state="readonly")
         self.entries["ATTENTION_MECHANISM"].grid(row=row, column=1, sticky=tk.EW, padx=5, pady=2)
+        row += 1
+        ttk.Label(parent, text="sdpa works on all GPUs. flash3 requires pip install flash-attn and an "
+                  "NVIDIA Hopper/Blackwell GPU (H100, RTX 5090, etc.).",
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
+            row=row, column=0, columnspan=3, sticky=tk.W, padx=5)
         row += 1
 
         # Logging

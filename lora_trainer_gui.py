@@ -5658,7 +5658,7 @@ class LoRATrainerGUI:
         ttk.Label(params_frame, text="Res:").pack(side=tk.LEFT, padx=(0, 4))
         self.explorer_res_var = tk.StringVar(value="512")
         ttk.Combobox(params_frame, textvariable=self.explorer_res_var,
-                     values=["256", "384", "512", "768", "1024"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 16))
+                     values=["256", "384", "512", "768"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 16))
         ttk.Label(params_frame, text="Intensity:").pack(side=tk.LEFT, padx=(0, 4))
         self.explorer_intensity_var = tk.DoubleVar(value=0.964)
         ttk.Scale(params_frame, from_=0.0, to=1.0, variable=self.explorer_intensity_var,
@@ -5682,7 +5682,7 @@ class LoRATrainerGUI:
         ttk.Label(params_frame, text="Mutations:").pack(side=tk.LEFT, padx=(0, 4))
         self.explorer_mutations_var = tk.StringVar(value="8")
         ttk.Combobox(params_frame, textvariable=self.explorer_mutations_var,
-                     values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
+                     values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "12", "14", "16"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
         self.explorer_hold_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(params_frame, text="Hold Mode",
                         variable=self.explorer_hold_var).pack(side=tk.LEFT)

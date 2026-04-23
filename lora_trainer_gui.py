@@ -9433,6 +9433,23 @@ class LoRATrainerGUI:
                     f"If set to Auto, switch to a manual value like "
                     f"{min(current_swap + 4, 16)}.")
 
+    def _show_auto_dismiss_info(self, title, message, timeout_ms=6000):
+        """Show a non-blocking info popup that auto-closes after timeout_ms.
+        Won't freeze training if the user walks away."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        pad = tk.Frame(dlg, bg=COLORS["bg_surface"], padx=24, pady=16)
+        pad.pack(fill=tk.BOTH, expand=True)
+        tk.Label(pad, text="⚠  " + title, font=(FONT_FAMILY, 12, "bold"),
+                 bg=COLORS["bg_surface"], fg="#E67E22").pack(anchor=tk.W)
+        tk.Label(pad, text=message, font=(FONT_FAMILY, 10),
+                 bg=COLORS["bg_surface"], fg=COLORS["fg_primary"],
+                 wraplength=400, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 12))
+        ttk.Button(pad, text="OK", command=dlg.destroy).pack(anchor=tk.E)
+        dlg.after(timeout_ms, lambda: dlg.destroy() if dlg.winfo_exists() else None)
+
     def _browse_context_lora(self):
         """File picker for the Context LoRA, filtered to .safetensors."""
         path = filedialog.askopenfilename(
@@ -9663,6 +9680,17 @@ class LoRATrainerGUI:
 
         # Reset OOM warning flag for this run
         self._oom_warning_shown = False
+
+        # Show a non-blocking reminder when training with a context LoRA
+        ctx_path = self.entries.get("CONTEXT_LORA_PATH")
+        if ctx_path and ctx_path.get().strip():
+            self._show_auto_dismiss_info(
+                "Context LoRA",
+                "Context LoRAs usually look better in ComfyUI than in training "
+                "sample previews — don't worry if previews look rough.\n\n"
+                "Test the output LoRA in ComfyUI for accurate results.",
+                timeout_ms=8000,
+            )
 
         # Auto-uncheck FP8 Base if the Base DiT file is already fp8-quantised
         base_dit_path = self.prefs_vars.get("base_dit", tk.StringVar()).get()

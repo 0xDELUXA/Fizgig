@@ -745,7 +745,7 @@ class LoRATrainerGUI:
         if self.last_used.get("lora_output_dir"):
             self.settings["LORA_OUTPUT_DIR"] = self.last_used["lora_output_dir"]
 
-        self.optimizer_types = ["adamw", "adamw8bit", "adafactor", "torch.optim.AdamW", "bitsandbytes.optim.AdEMAMix8bit", "bitsandbytes.optim.PagedAdEMAMix8bit", "came"]
+        self.optimizer_types = ["adamw", "adamw8bit", "adafactor", "bitsandbytes.optim.AdEMAMix8bit", "bitsandbytes.optim.PagedAdEMAMix8bit"]
 
         self.setup_styles()
 
@@ -9701,14 +9701,6 @@ class LoRATrainerGUI:
             except Exception as e:
                 self.update_console(f"Warning: Could not clear cache: {e}\n")
 
-        # Check for unsupported optimizer
-        optimizer_type = self.entries["OPTIMIZER_TYPE"].get()
-        if optimizer_type == "came":
-            messagebox.showwarning(
-                "Warning",
-                "The 'came' optimizer is not supported in the current version. Please select another optimizer like 'adamw' or 'adamw8bit'."
-            )
-            return
 
         # Get current architecture
         arch = self.architecture_var.get()

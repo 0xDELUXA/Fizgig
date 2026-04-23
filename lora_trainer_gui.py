@@ -6446,6 +6446,23 @@ class LoRATrainerGUI:
         if not lora_path:
             return
 
+        # Warn if LyCORIS — saving will require SVD materialization
+        try:
+            from safetensors.torch import load_file as _lf
+            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
+            _fmt = _df(_ek(_lf(lora_path)))
+            if _fmt in ("lokr", "loha"):
+                proceed = messagebox.askyesno(
+                    "LyCORIS LoRA",
+                    f"This is a {_fmt.upper()} LoRA. Preview and editing work normally, "
+                    f"but saving will require SVD conversion (may take a minute).\n\n"
+                    f"Consider using the Extract tab to convert to standard LoRA first "
+                    f"for faster saves.\n\nContinue anyway?")
+                if not proceed:
+                    return
+        except Exception:
+            pass
+
         baseline = self._explorer_baseline_state
 
         # Set the LoRA path in Repair Studio
@@ -8823,6 +8840,24 @@ class LoRATrainerGUI:
         if self.repair_engine is None or self.repair_engine.primary_network is None:
             messagebox.showerror("Error", "Load a primary LoRA first.")
             return
+
+        # Warn if LyCORIS — saving from Explorer will require SVD
+        lora_path = self.repair_engine.primary_path
+        try:
+            from safetensors.torch import load_file as _lf
+            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
+            _fmt = _df(_ek(_lf(lora_path)))
+            if _fmt in ("lokr", "loha"):
+                proceed = messagebox.askyesno(
+                    "LyCORIS LoRA",
+                    f"This is a {_fmt.upper()} LoRA. Explorer preview works normally, "
+                    f"but saving will require SVD conversion (may take a minute).\n\n"
+                    f"Consider using the Extract tab to convert to standard LoRA first "
+                    f"for faster saves.\n\nContinue anyway?")
+                if not proceed:
+                    return
+        except Exception:
+            pass
 
         # Warn if donor is loaded — Explorer only supports primary
         if self.repair_engine.donor_network is not None:

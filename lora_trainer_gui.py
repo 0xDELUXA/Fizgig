@@ -7614,14 +7614,6 @@ class LoRATrainerGUI:
         setup_card.columnconfigure(1, weight=1)
         self._build_repair_top_controls(setup_card)
 
-        # Status line (visible always — not in a card so it reads as a headline status)
-        self.repair_status_var = tk.StringVar(value="Idle. Load a primary LoRA to start.")
-        status_wrap = tk.Frame(outer, bg=COLORS["bg_deep"])
-        status_wrap.pack(fill=tk.X, padx=36, pady=(0, 12))
-        tk.Label(status_wrap, textvariable=self.repair_status_var,
-                 font=(FONT_FAMILY, 10, "bold"),
-                 fg=COLORS["accent_hover"], bg=COLORS["bg_deep"]).pack(anchor=tk.W)
-
         # Profile-match info panel (populated when a matching Profiler sidecar
         # exists for the primary's content hash). Packs directly into outer so
         # pack_forget/pack(before=…) slots it cleanly between Status and Preview.
@@ -7765,10 +7757,8 @@ class LoRATrainerGUI:
         ttk.Entry(parent, textvariable=self.repair_primary_var).grid(
             row=r, column=1, sticky=tk.EW, padx=4, pady=2)
         ttk.Button(parent, text="Browse",
-                   command=lambda: self._browse_repair_lora(self.repair_primary_var)).grid(
-            row=r, column=2, padx=4, pady=2)
-        ttk.Button(parent, text="Load",
-                   command=self._load_repair_primary).grid(row=r, column=3, padx=4, pady=2, sticky=tk.W)
+                   command=self._browse_and_load_primary).grid(
+            row=r, column=2, columnspan=2, padx=4, pady=2, sticky=tk.W)
         r += 1
 
         # Donor LoRA
@@ -7776,48 +7766,45 @@ class LoRATrainerGUI:
         self.repair_donor_var = tk.StringVar()
         ttk.Entry(parent, textvariable=self.repair_donor_var).grid(
             row=r, column=1, sticky=tk.EW, padx=4, pady=2)
-        ttk.Button(parent, text="Browse",
-                   command=lambda: self._browse_repair_lora(self.repair_donor_var)).grid(
-            row=r, column=2, padx=4, pady=2)
         donor_btn_frame = ttk.Frame(parent)
-        donor_btn_frame.grid(row=r, column=3, padx=4, pady=2, sticky=tk.W)
-        ttk.Button(donor_btn_frame, text="Load",
-                   command=self._load_repair_donor).pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Button(donor_btn_frame, text="Unload",
+        donor_btn_frame.grid(row=r, column=2, columnspan=2, padx=4, pady=2, sticky=tk.W)
+        ttk.Button(donor_btn_frame, text="Browse",
+                   command=self._browse_and_load_donor).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Button(donor_btn_frame, text="Unload Donor",
                    command=self._unload_repair_donor).pack(side=tk.LEFT)
         r += 1
 
-        # Preview row: prompt + seed + resolution + regenerate
+        # Prompt row
         ttk.Label(parent, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
         self.repair_prompt_var = tk.StringVar(value="")
         prompt_entry = ttk.Entry(parent, textvariable=self.repair_prompt_var)
         prompt_entry.grid(row=r, column=1, sticky=tk.EW, padx=4, pady=2)
-        prompt_entry.bind("<FocusOut>", lambda e: self._on_preview_param_changed())
-        prompt_entry.bind("<Return>", lambda e: self._on_preview_param_changed())
-        # sticky=EW so params_frame fills col 2+3 — lets us right-align Regenerate
-        # so its right edge matches Donor's Unload right edge above.
+        self.repair_prompt_var.trace_add("write", lambda *_: self._repair_mark_update_needed())
         params_frame = ttk.Frame(parent)
         params_frame.grid(row=r, column=2, columnspan=2, sticky=tk.EW, padx=4, pady=2)
         ttk.Label(params_frame, text="Seed:").pack(side=tk.LEFT, padx=(0, 4))
         self.repair_seed_var = tk.StringVar(value="42")
         seed_entry = ttk.Entry(params_frame, textvariable=self.repair_seed_var, width=10)
-        seed_entry.pack(side=tk.LEFT, padx=(0, 12))
-        seed_entry.bind("<FocusOut>", lambda e: self._on_preview_param_changed())
-        seed_entry.bind("<Return>", lambda e: self._on_preview_param_changed())
+        seed_entry.pack(side=tk.LEFT, padx=(0, 2))
+        self.repair_seed_var.trace_add("write", lambda *_: self._repair_mark_update_needed())
+        tk.Button(params_frame, text="\u21bb", font=(FONT_FAMILY, 9),
+                  bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
+                  activebackground=COLORS["bg_surface"], activeforeground=COLORS["text_primary"],
+                  relief="flat", bd=0, padx=4, pady=0, cursor="hand2",
+                  command=self._repair_randomize_seed
+                  ).pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(params_frame, text="Res:").pack(side=tk.LEFT, padx=(0, 4))
         self.repair_res_var = tk.StringVar(value="512")
         res_combo = ttk.Combobox(params_frame, textvariable=self.repair_res_var,
                                  values=["256", "384", "512", "768"], state="readonly", width=6)
         res_combo.pack(side=tk.LEFT)
         res_combo.bind("<<ComboboxSelected>>", lambda e: self._on_preview_param_changed())
-        ttk.Button(params_frame, text="Regenerate",
-                   command=self._force_regenerate_preview).pack(side=tk.RIGHT)
         # Turbo Preview toggle
         self.repair_turbo_var = tk.BooleanVar(value=True)
         turbo_chk = ttk.Checkbutton(params_frame, text="Turbo Preview",
                                      variable=self.repair_turbo_var,
                                      command=self._on_turbo_toggled)
-        turbo_chk.pack(side=tk.RIGHT, padx=(0, 16))
+        turbo_chk.pack(side=tk.RIGHT)
         r += 1
 
         # Preset row
@@ -7830,6 +7817,21 @@ class LoRATrainerGUI:
                                       lambda e: self._load_repair_preset(self.repair_preset_var.get()))
         ttk.Button(parent, text="Save Preset…",
                    command=self._save_repair_preset).grid(row=r, column=2, columnspan=2, padx=4, pady=2, sticky=tk.W)
+        r += 1
+
+        # Status + Start button row
+        status_row = tk.Frame(parent, bg=COLORS["bg_surface"])
+        status_row.grid(row=r, column=0, columnspan=4, sticky=tk.EW, pady=(6, 0))
+        self.repair_status_var = tk.StringVar(value="Set a LoRA path and prompt, then click Start.")
+        tk.Label(status_row, textvariable=self.repair_status_var,
+                 font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+        self._repair_start_btn = tk.Button(
+            status_row, text="Start", font=(FONT_FAMILY, 11, "bold"),
+            fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF", activebackground="#256F46",
+            relief="flat", bd=0, padx=24, pady=6, cursor="hand2",
+            command=self._repair_start)
+        self._repair_start_btn.pack(side=tk.RIGHT)
         r += 1
 
     def _build_repair_preview_panel(self, parent):
@@ -7971,19 +7973,7 @@ class LoRATrainerGUI:
             var.trace_add("write", _mk_trace(var, val_lbl, cat))
             r += 1
 
-        # Donor category toggles row (visible only when donor loaded)
-        donor_toggles_frame = ttk.Frame(parent)
-        donor_toggles_frame.grid(row=r, column=0, columnspan=6, sticky=tk.EW,
-                                 padx=6, pady=(6, 4))
-        donor_toggles_frame.grid_remove()
-        ttk.Label(donor_toggles_frame, text="Donor on/off by section:",
-                  font=(FONT_FAMILY, 9, "bold"), foreground="#888").pack(side=tk.LEFT, padx=(0, 8))
-        for cat, short in self._REPAIR_MASTER_CATS:
-            var = self.repair_donor_category_vars[cat]
-            cb = ttk.Checkbutton(donor_toggles_frame, text=short, variable=var,
-                                 command=lambda c=cat: self._on_donor_category_toggled(c))
-            cb.pack(side=tk.LEFT, padx=4)
-        self._repair_donor_toggles_frame = donor_toggles_frame
+        # Donor category toggles now live in the Per-Block Sliders card (created in create_repair_studio_tab)
 
     def _on_master_strength_changed(self, category: str, value: float):
         """Mirror master slider value to per-block strength vars for affected blocks."""
@@ -8005,6 +7995,10 @@ class LoRATrainerGUI:
             key = "primary_strength" if target == "primary" else "donor_strength"
             for bid in affected:
                 self.repair_block_vars[bid][key].set(value)
+            # Auto-enable donor blocks when adjusting donor master slider
+            if target == "donor":
+                for bid in affected:
+                    self.repair_block_vars[bid]["donor_enabled"].set(True)
         finally:
             self._repair_master_mutating = False
         # Fire one preview for the whole batch.
@@ -8276,16 +8270,51 @@ class LoRATrainerGUI:
             self.repair_status_var.set("Error loading models.")
             return False
 
+    def _repair_start(self):
+        """Smart Start: load/swap primary, load/swap donor, or regenerate."""
+        primary_path = self.repair_primary_var.get().strip()
+        donor_path = self.repair_donor_var.get().strip()
+
+        if not primary_path:
+            messagebox.showerror("Error", "Set a primary LoRA path first.")
+            return
+
+        if not os.path.exists(primary_path):
+            messagebox.showerror("Error", f"Primary LoRA not found:\n{primary_path}")
+            return
+
+        # Check if primary needs loading or swapping
+        current_primary = self.repair_engine.primary_path if self.repair_engine else None
+        if current_primary != primary_path:
+            # New or changed primary — reset and reload
+            if self.repair_engine is not None and self.repair_engine.primary_network is not None:
+                self._reset_repair_session()
+            self._load_repair_primary()
+        elif self.repair_engine is None or self.repair_engine.primary_network is None:
+            self._load_repair_primary()
+
+        # Check if donor needs loading or swapping
+        if donor_path and os.path.exists(donor_path):
+            current_donor = self.repair_engine.donor_path if self.repair_engine else None
+            if current_donor != donor_path:
+                if self.repair_engine and self.repair_engine.donor_network is not None:
+                    self._unload_repair_donor()
+                self._load_repair_donor()
+
+        # If everything is already loaded and nothing changed, just regenerate
+        if (self.repair_engine is not None and self.repair_engine.primary_network is not None
+                and current_primary == primary_path):
+            self._force_regenerate_preview()
+
+        # Reset button text back to Start
+        self._repair_reset_start_button()
+
     def _load_repair_primary(self):
         path = self.repair_primary_var.get().strip()
         if not path or not os.path.exists(path):
             messagebox.showerror("Error", "Pick a valid primary LoRA file first.")
             return
         if not self._ensure_repair_engine():
-            return
-        if self.repair_engine.primary_network is not None:
-            messagebox.showerror("Error",
-                                 "A primary LoRA is already loaded.\nClick Reset Session to swap.")
             return
         try:
             self.repair_status_var.set("Loading primary LoRA…")
@@ -8326,10 +8355,6 @@ class LoRATrainerGUI:
         if self.repair_engine is None or self.repair_engine.primary_network is None:
             messagebox.showerror("Error", "Load a primary LoRA before adding a donor.")
             return
-        if self.repair_engine.donor_network is not None:
-            messagebox.showerror("Error",
-                                 "A donor LoRA is already loaded.\nClick Unload first.")
-            return
         try:
             self.repair_status_var.set("Loading donor LoRA…")
             self.master.update_idletasks()
@@ -8348,9 +8373,7 @@ class LoRATrainerGUI:
             # Show donor sub-rows + master section toggles + enable the "Donor" master target radio
             for vars_ in self.repair_block_vars.values():
                 vars_["donor_rowf"].grid()
-            self._repair_donor_toggles_frame.grid()
             self._repair_master_donor_radio.state(["!disabled"])
-            # Initialize donor category toggles to reflect current donor state (all off at load)
             for cat in self.repair_donor_category_vars:
                 self.repair_donor_category_vars[cat].set(False)
             self._refresh_block_slider_activity()
@@ -8367,6 +8390,52 @@ class LoRATrainerGUI:
                 messagebox.showerror("Error", f"Failed to load donor:\n{traceback.format_exc()}")
                 self.repair_status_var.set("Error loading donor.")
 
+    def _repair_mark_update_needed(self):
+        """Prompt or seed changed — show 'Update' on the Start button instead of auto-regenerating."""
+        if self.repair_engine is not None and self.repair_engine.primary_network is not None:
+            self._repair_start_btn.configure(text="Update")
+
+    def _repair_randomize_seed(self):
+        """Randomize seed and mark update needed."""
+        import random
+        self.repair_seed_var.set(str(random.randint(1, 99999)))
+        self._repair_mark_update_needed()
+
+    def _repair_reset_start_button(self):
+        """Reset the Start button text back to 'Start'."""
+        self._repair_start_btn.configure(text="Start")
+
+    def _browse_and_load_primary(self):
+        """Browse for a primary LoRA, and auto-swap if one is already loaded."""
+        self._browse_repair_lora(self.repair_primary_var)
+        path = self.repair_primary_var.get().strip()
+        if not path or not os.path.exists(path):
+            return
+        if self.repair_engine is None or self.repair_engine.primary_network is None:
+            return  # not loaded yet — user will click Start
+        # Path changed — auto-swap
+        if self.repair_engine.primary_path != path:
+            self._reset_repair_session()
+            self._load_repair_primary()
+            self._repair_reset_start_button()
+
+    def _browse_and_load_donor(self):
+        """Browse for a donor LoRA, and auto-load if primary is loaded."""
+        self._browse_repair_lora(self.repair_donor_var)
+        path = self.repair_donor_var.get().strip()
+        if not path or not os.path.exists(path):
+            return
+        if self.repair_engine is None or self.repair_engine.primary_network is None:
+            return
+        # Swap donor if one is already loaded
+        if self.repair_engine.donor_network is not None:
+            current_donor = self.repair_engine.donor_path
+            if current_donor == path:
+                return  # same file, nothing to do
+            self._unload_repair_donor()
+        self._load_repair_donor()
+        self._repair_reset_start_button()
+
     def _unload_repair_donor(self):
         if self.repair_engine is None or self.repair_engine.donor_network is None:
             return
@@ -8376,7 +8445,7 @@ class LoRATrainerGUI:
         for vars_ in self.repair_block_vars.values():
             vars_["donor_rowf"].grid_remove()
             vars_["donor_enabled"].set(False)
-        self._repair_donor_toggles_frame.grid_remove()
+        # donor toggles removed — donor blocks managed via master sliders
         self._repair_master_donor_radio.state(["disabled"])
         if self.repair_master_target_var.get() == "donor":
             self.repair_master_target_var.set("primary")
@@ -8695,6 +8764,18 @@ class LoRATrainerGUI:
             messagebox.showerror("Error", "Load a primary LoRA first.")
             return
 
+        # Warn if donor is loaded — Explorer only supports primary
+        if self.repair_engine.donor_network is not None:
+            proceed = messagebox.askyesno(
+                "Donor LoRA loaded",
+                "The Explorer only works with a single primary LoRA — "
+                "donor blending isn't supported there.\n\n"
+                "Continue with just the primary LoRA's slider state?\n\n"
+                "Tip: you can Save Repaired LoRA first to bake the primary+donor "
+                "blend into a single file, then explore that.")
+            if not proceed:
+                return
+
         from fizgig.repair_studio.state import SliderState
 
         # Capture current state
@@ -8789,7 +8870,7 @@ class LoRATrainerGUI:
             vars_["donor_rowf"].grid_remove()
         # Hide master donor toggles + disable donor radio
         try:
-            self._repair_donor_toggles_frame.grid_remove()
+            # donor toggles removed — donor blocks managed via master sliders
             self._repair_master_donor_radio.state(["disabled"])
             self.repair_master_target_var.set("primary")
         except Exception:

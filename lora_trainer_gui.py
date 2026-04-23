@@ -5694,7 +5694,7 @@ class LoRATrainerGUI:
                     750, self._explorer_reroll)
         self.explorer_intensity_var.trace_add("write", _update_intensity_lbl)
         ttk.Label(params_frame, text="Mutations:").pack(side=tk.LEFT, padx=(0, 4))
-        self.explorer_mutations_var = tk.StringVar(value="5")
+        self.explorer_mutations_var = tk.StringVar(value="8")
         ttk.Combobox(params_frame, textvariable=self.explorer_mutations_var,
                      values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
         self.explorer_hold_var = tk.BooleanVar(value=False)
@@ -5705,14 +5705,11 @@ class LoRATrainerGUI:
         struct_frame = ttk.Frame(setup_card)
         struct_frame.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(2, 0))
         ttk.Label(struct_frame, text="Structure change:").pack(side=tk.LEFT, padx=(0, 4))
-        self.explorer_structure_var = tk.DoubleVar(value=0.07)
+        self.explorer_structure_var = tk.DoubleVar(value=0.40)
         ttk.Scale(struct_frame, from_=0.0, to=1.0, variable=self.explorer_structure_var,
                   orient=tk.HORIZONTAL, length=120).pack(side=tk.LEFT, padx=(0, 4))
-        self._explorer_structure_lbl = ttk.Label(struct_frame, text="7%", width=5)
+        self._explorer_structure_lbl = ttk.Label(struct_frame, text="40%", width=5)
         self._explorer_structure_lbl.pack(side=tk.LEFT, padx=(0, 8))
-        tk.Label(struct_frame, text="How much structural change to allow (composition/style anchor)",
-                 font=(FONT_FAMILY, 8, "italic"),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
         self._explorer_structure_debounce_id = None
         def _update_structure_lbl(*_):
             val = self.explorer_structure_var.get()
@@ -5728,11 +5725,16 @@ class LoRATrainerGUI:
         self.explorer_structure_var.trace_add("write", _update_structure_lbl)
         r += 1
 
+        status_row = tk.Frame(setup_card, bg=COLORS["bg_surface"])
+        status_row.grid(row=r, column=0, columnspan=3, sticky=tk.EW, pady=(4, 0))
+        tk.Label(status_row,
+                 text="Increase Structure if variants look too similar to baseline.",
+                 font=(FONT_FAMILY, 8, "italic"),
+                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
         self.explorer_status_var = tk.StringVar(value="Load a LoRA to begin exploring.")
-        tk.Label(setup_card, textvariable=self.explorer_status_var,
+        tk.Label(status_row, textvariable=self.explorer_status_var,
                  font=(FONT_FAMILY, 10, "italic"),
-                 fg=COLORS["accent"], bg=COLORS["bg_surface"]).grid(
-            row=r, column=0, columnspan=3, sticky=tk.W, pady=(6, 0))
+                 fg=COLORS["accent"], bg=COLORS["bg_surface"]).pack(side=tk.RIGHT)
 
         # Card 2: Baseline
         baseline_card = self._start_section_card(

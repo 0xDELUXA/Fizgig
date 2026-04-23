@@ -8340,6 +8340,10 @@ class LoRATrainerGUI:
             # New or changed primary — reset and reload
             if self.repair_engine is not None and self.repair_engine.primary_network is not None:
                 self._reset_repair_session()
+                import gc, torch
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             self._load_repair_primary()
         elif self.repair_engine is None or self.repair_engine.primary_network is None:
             self._load_repair_primary()
@@ -8467,6 +8471,11 @@ class LoRATrainerGUI:
         # Path changed — auto-swap
         if self.repair_engine.primary_path != path:
             self._reset_repair_session()
+            # Force GC + CUDA flush between unload and reload to prevent OOM
+            import gc, torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             self._load_repair_primary()
             self._repair_reset_start_button()
 

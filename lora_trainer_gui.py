@@ -8499,6 +8499,8 @@ class LoRATrainerGUI:
             # Reload donor if one was set
             if donor_path and os.path.exists(donor_path):
                 self._load_repair_donor()
+            # Refresh master slider display to match reloaded state
+            self._on_master_target_changed()
             self._repair_reset_start_button()
 
     def _browse_and_load_donor(self):

@@ -1182,7 +1182,7 @@ class LoRATrainerGUI:
             tk.Label(banner, text=subtitle,
                      font=(FONT_FAMILY, 11),
                      fg=COLORS["text_secondary"], bg=COLORS["bg_deep"],
-                     wraplength=820, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
+                     wraplength=1050, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
         return banner
 
     def _add_youtube_help_button(self, parent, tab_key="start", prominent=False):
@@ -5589,12 +5589,8 @@ class LoRATrainerGUI:
 
         self._add_tab_banner(
             outer, "LoRA the Explorer",
-            "Like Michelangelo chipping away at marble — the beauty is already inside "
-            "the LoRA, you just need to find it. The computer randomly adjusts blocks and shows you 4 variants. "
-            "Pick your favourite and it becomes the new baseline. "
-            "With Hold off (default), you can explore freely — each pick builds on the last but nothing locks. "
-            "Turn Hold on to lock picked blocks and sculpt progressively until every block is dialled in. "
-            "Reduce Structure change once you find a direction you like to keep the composition stable.",
+            "The computer randomly adjusts blocks and shows you 4 variants — pick your favourite and it evolves. "
+            "Find a direction you like? Reduce Structure to stabilise composition, and turn on Hold to lock blocks in place.",
         )
 
         # State

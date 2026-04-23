@@ -5590,7 +5590,7 @@ class LoRATrainerGUI:
         self._add_tab_banner(
             outer, "LoRA the Explorer",
             "The computer randomly adjusts blocks and shows you 4 variants — pick your favourite and it evolves. "
-            "Find a direction you like? Reduce Structure to stabilise composition, and turn on Hold to lock blocks in place.",
+            "Find a direction you like? Reduce Structure to stabilise composition, then Freeze to lock tweaked blocks in place.",
         )
 
         # State
@@ -5602,7 +5602,7 @@ class LoRATrainerGUI:
         self._explorer_variant_images = []  # 4 PIL.Image objects
         self._explorer_generating = False
         self._explorer_thumbnails = {}  # keep refs to prevent GC
-        self._explorer_locked_blocks = set()  # Hold Mode: blocks locked at their current value
+        self._explorer_locked_blocks = set()  # Freeze: blocks locked at their current value
         self._explorer_last_pick_blocks = set()  # blocks changed in the most recent pick
 
         # Card 1: Setup
@@ -5683,9 +5683,7 @@ class LoRATrainerGUI:
         self.explorer_mutations_var = tk.StringVar(value="8")
         ttk.Combobox(params_frame, textvariable=self.explorer_mutations_var,
                      values=["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "12", "14", "16"], state="readonly", width=3).pack(side=tk.LEFT, padx=(0, 16))
-        self.explorer_hold_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(params_frame, text="Hold Mode",
-                        variable=self.explorer_hold_var).pack(side=tk.LEFT)
+        # Hold Mode removed — replaced by Freeze Tweaked Blocks button
         r += 1
 
         struct_frame = ttk.Frame(setup_card)
@@ -5751,25 +5749,38 @@ class LoRATrainerGUI:
         baseline_right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         btn_row = tk.Frame(baseline_right, bg=COLORS["bg_surface"])
-        btn_row.pack(anchor=tk.W, pady=(4, 8))
+        btn_row.pack(fill=tk.X, pady=(4, 8))
+        btn_row.columnconfigure(0, weight=2)
+        btn_row.columnconfigure(1, weight=1)
+        btn_row.columnconfigure(2, weight=1)
         self._explorer_save_btn = ttk.Button(btn_row, text="Save Baseline as LoRA...",
                                               command=self._explorer_save, state="disabled")
-        self._explorer_save_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._explorer_save_btn.grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
         self._explorer_undo_btn = ttk.Button(btn_row, text="Undo",
                                               command=self._explorer_undo, state="disabled")
-        self._explorer_undo_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self._explorer_undo_btn.grid(row=0, column=1, sticky=tk.EW, padx=4)
         ttk.Button(btn_row, text="Restart",
-                   command=self._explorer_restart).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(btn_row, text="Unload",
-                   command=self._explorer_full_reset).pack(side=tk.LEFT)
+                   command=self._explorer_restart).grid(row=0, column=2, sticky=tk.EW, padx=(4, 0))
 
+        handoff_row = tk.Frame(baseline_right, bg=COLORS["bg_surface"])
+        handoff_row.pack(fill=tk.X, pady=(0, 8))
+        handoff_row.columnconfigure(0, weight=1)
+        handoff_row.columnconfigure(1, weight=1)
+        self._explorer_freeze_btn = tk.Button(
+            handoff_row, text="Freeze tweaked blocks",
+            font=(FONT_FAMILY, 10, "bold"),
+            fg="#FFFFFF", bg=COLORS["accent"], activeforeground="#FFFFFF",
+            activebackground=COLORS["accent_hover"],
+            relief="flat", bd=0, padx=16, pady=6, cursor="hand2", state="disabled",
+            command=self._explorer_freeze_tweaked)
+        self._explorer_freeze_btn.grid(row=0, column=0, sticky=tk.EW, padx=(0, 4))
         self._explorer_refine_btn = tk.Button(
-            baseline_right, text="Refine this baseline in Repair Studio \u2192",
+            handoff_row, text="Refine this baseline in Repair Studio \u2192",
             font=(FONT_FAMILY, 10, "bold"),
             fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF", activebackground="#256F46",
             relief="flat", bd=0, padx=16, pady=6, cursor="hand2", state="disabled",
             command=self._explorer_refine_in_repair)
-        self._explorer_refine_btn.pack(anchor=tk.W, pady=(0, 8))
+        self._explorer_refine_btn.grid(row=0, column=1, sticky=tk.EW, padx=(4, 0))
 
         # Collapsed slider state display
         state_frame = tk.Frame(baseline_right, bg=COLORS["bg_deep"])
@@ -5934,6 +5945,7 @@ class LoRATrainerGUI:
             self._explorer_undo_btn.configure(state="disabled")
             self._explorer_save_btn.configure(state="disabled")
             self._explorer_refine_btn.configure(state="disabled")
+            self._explorer_freeze_btn.configure(state="disabled")
             self._explorer_roll_btn.configure(state="normal")
             # Generate initial baseline image
             self._explorer_generate_baseline_and_roll()
@@ -5963,11 +5975,10 @@ class LoRATrainerGUI:
         state.preview_width = res
         state.preview_height = res
 
-        # Generate mutations (exclude locked blocks in Hold Mode, but double_0
-        # is never locked — it's always available as a structural anchor)
+        # Generate mutations (exclude locked blocks)
         active = self._explorer_engine.primary_block_ids - self._explorer_locked_blocks
-        # Ensure double_0 is always in the active set if the LoRA has it
-        if "double_0" in self._explorer_engine.primary_block_ids:
+        # double_0 as structural anchor — only if not explicitly frozen
+        if "double_0" in self._explorer_engine.primary_block_ids and "double_0" not in self._explorer_locked_blocks:
             active.add("double_0")
         intensity = self.explorer_intensity_var.get()
         structure = self.explorer_structure_var.get()
@@ -6046,19 +6057,24 @@ class LoRATrainerGUI:
 
         self._explorer_save_btn.configure(state="normal")
         self._explorer_refine_btn.configure(state="normal")
+        self._explorer_freeze_btn.configure(state="normal")
+        # Update freeze button appearance based on locked state
+        if self._explorer_locked_blocks:
+            self._explorer_freeze_btn.configure(bg=COLORS["accent_hover"])
+        else:
+            self._explorer_freeze_btn.configure(bg=COLORS["accent"])
         self._explorer_progress_var.set("")
 
-        # Check if all blocks are locked (Hold Mode complete)
-        # double_0 is never locked so exclude it from the check
+        # Check if all blocks are frozen
         active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
-        unlocked = active - self._explorer_locked_blocks - {"double_0"}
-        if self.explorer_hold_var.get() and not unlocked:
+        unlocked = active - self._explorer_locked_blocks
+        if not unlocked:
             self._explorer_roll_btn.configure(state="disabled")
             self.explorer_status_var.set(
-                f"All {len(active)} blocks locked! Exploration complete. Save your LoRA, Restart, or Undo.")
+                f"All {len(active)} blocks frozen! Save your LoRA, or click Freeze to unlock.")
         else:
             self._explorer_roll_btn.configure(state="normal")
-            locked_msg = f" ({len(self._explorer_locked_blocks)}/{len(active)} blocks locked)" if self._explorer_locked_blocks else ""
+            locked_msg = f" ({len(self._explorer_locked_blocks)} frozen)" if self._explorer_locked_blocks else ""
             self.explorer_status_var.set(f"Pick a favourite or re-roll.{locked_msg}")
 
     def _explorer_on_error(self, err):
@@ -6131,27 +6147,9 @@ class LoRATrainerGUI:
         else:
             self._explorer_last_pick_blocks = set()
 
-        # Hold Mode: lock any blocks that differ from the default strength
-        if self.explorer_hold_var.get() and self._explorer_baseline_state is not None:
-            newly_changed = set(self._explorer_last_pick_blocks)
-            newly_changed.discard("double_0")  # double_0 is never locked
-            self._explorer_locked_blocks |= newly_changed
-
         # New baseline = the picked variant
         self._explorer_baseline_state = picked_state
         self._explorer_baseline_image = self._explorer_variant_images[idx]
-
-        # Check if all active blocks are locked (Hold Mode complete)
-        # double_0 is never locked so exclude it from the check
-        active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
-        unlocked = active - self._explorer_locked_blocks - {"double_0"}
-        if self.explorer_hold_var.get() and not unlocked:
-            self._explorer_show_baseline(self._explorer_baseline_image)
-            self._explorer_update_state_text(self._explorer_baseline_state)
-            self.explorer_status_var.set(
-                f"All {len(active)} blocks locked! Exploration complete. Save your LoRA or Undo to continue.")
-            self._explorer_roll_btn.configure(state="disabled")
-            return
 
         locked_msg = f" ({len(self._explorer_locked_blocks)} blocks locked)" if self._explorer_locked_blocks else ""
         self._explorer_show_baseline(self._explorer_baseline_image)
@@ -6256,10 +6254,13 @@ class LoRATrainerGUI:
         self._explorer_show_baseline(prev_img)
         self._explorer_update_state_text(prev_state)
         self._explorer_roll_btn.configure(state="normal")
+        self._explorer_freeze_btn.configure(
+            bg=COLORS["accent_hover"] if self._explorer_locked_blocks else COLORS["accent"])
         if not self._explorer_history:
             self._explorer_undo_btn.configure(state="disabled")
-        locked_msg = f" ({len(self._explorer_locked_blocks)} locked)" if self._explorer_locked_blocks else ""
-        self.explorer_status_var.set(f"Undone{locked_msg}. Click Re-roll to generate new variants.")
+        locked_msg = f" ({len(self._explorer_locked_blocks)} frozen)" if self._explorer_locked_blocks else ""
+        self.explorer_status_var.set(f"Undone{locked_msg}. Re-rolling...")
+        self._explorer_generate_baseline_and_roll()
 
     def _explorer_restart(self):
         """Unlock all blocks and restart exploration — ask whether from defaults or current baseline."""
@@ -6332,6 +6333,110 @@ class LoRATrainerGUI:
         self._explorer_undo_btn.configure(state="disabled")
         self._explorer_progress_var.set("")
         self.explorer_status_var.set("Load a LoRA to begin exploring.")
+
+    def _explorer_freeze_tweaked(self):
+        """Freeze all blocks that differ from default — they won't be mutated on re-roll."""
+        if self._explorer_baseline_state is None or self._explorer_generating:
+            return
+
+        # Find blocks that differ from default (strength != starting strength)
+        try:
+            base_strength = float(self.explorer_strength_var.get())
+        except ValueError:
+            base_strength = 1.0
+
+        tweaked = set()
+        for bid, bs in self._explorer_baseline_state.blocks.items():
+            if not bs.primary_enabled or abs(bs.primary_strength - base_strength) > 0.01:
+                tweaked.add(bid)
+        # When explicitly freezing, include double_0 — stops the structural anchor behaviour
+
+        if self._explorer_locked_blocks:
+            # Already have frozen blocks — ask what to do
+            active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
+            unlocked = active - self._explorer_locked_blocks - {"double_0"}
+
+            if not unlocked:
+                # All locked — offer unlock all or undo last
+                choice = messagebox.askyesnocancel(
+                    "All blocks frozen",
+                    f"All {len(active)} blocks are already frozen.\n\n"
+                    "Yes = Unlock all blocks\n"
+                    "No = Undo last freeze (restore previous unlocked set)\n"
+                    "Cancel = Keep as is",
+                )
+                if choice is True:
+                    self._explorer_locked_blocks.clear()
+                    self._explorer_freeze_btn.configure(bg=COLORS["accent"])
+                    self._explorer_roll_btn.configure(state="normal")
+                    self._explorer_update_state_text(self._explorer_baseline_state)
+                    self.explorer_status_var.set("All blocks unlocked. Re-rolling...")
+                    self._explorer_generate_baseline_and_roll()
+                elif choice is False and hasattr(self, "_explorer_prev_locked"):
+                    self._explorer_locked_blocks = self._explorer_prev_locked
+                    if hasattr(self, "_explorer_prev_baseline") and self._explorer_prev_baseline is not None:
+                        self._explorer_baseline_state = self._explorer_prev_baseline
+                    self._explorer_freeze_btn.configure(bg=COLORS["accent_hover"] if self._explorer_locked_blocks else COLORS["accent"])
+                    self._explorer_roll_btn.configure(state="normal")
+                    self._explorer_show_baseline(self._explorer_baseline_image)
+                    self._explorer_update_state_text(self._explorer_baseline_state)
+                    n = len(self._explorer_locked_blocks)
+                    self.explorer_status_var.set(f"Last freeze undone. {n} blocks frozen. Re-rolling...")
+                    self._explorer_generate_baseline_and_roll()
+                return
+            else:
+                # Some locked, some not — ask to lock additions or unlock all
+                choice = messagebox.askyesnocancel(
+                    "Freeze tweaked blocks",
+                    f"Currently {len(self._explorer_locked_blocks)} blocks frozen.\n"
+                    f"{len(tweaked - self._explorer_locked_blocks)} new tweaked blocks to add.\n\n"
+                    "Yes = Lock the additions too\n"
+                    "No = Unlock all\n"
+                    "Cancel = Keep as is",
+                )
+                if choice is True:
+                    self._explorer_prev_locked = set(self._explorer_locked_blocks)
+                    self._explorer_prev_baseline = self._explorer_baseline_state.copy()
+                    self._explorer_locked_blocks |= tweaked
+                elif choice is False:
+                    self._explorer_prev_locked = set(self._explorer_locked_blocks)
+                    self._explorer_prev_baseline = self._explorer_baseline_state.copy()
+                    self._explorer_locked_blocks.clear()
+                    self._explorer_freeze_btn.configure(bg=COLORS["accent"])
+                else:
+                    return
+        else:
+            # No existing frozen blocks — freeze the tweaked ones
+            if not tweaked:
+                messagebox.showinfo("Nothing to freeze",
+                    "No blocks have been changed from their starting values yet.")
+                return
+            self._explorer_prev_locked = set()
+            self._explorer_prev_baseline = self._explorer_baseline_state.copy()
+            self._explorer_locked_blocks = tweaked
+
+        # Update UI
+        if self._explorer_locked_blocks:
+            self._explorer_freeze_btn.configure(bg=COLORS["accent_hover"])
+        else:
+            self._explorer_freeze_btn.configure(bg=COLORS["accent"])
+
+        # Check if all blocks now locked (Freeze can lock double_0 too)
+        active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
+        unlocked = active - self._explorer_locked_blocks
+        if not unlocked:
+            self._explorer_roll_btn.configure(state="disabled")
+            self.explorer_status_var.set(
+                f"All {len(active)} blocks frozen! Save your LoRA, Restart, or click Freeze to unlock.")
+        else:
+            n = len(self._explorer_locked_blocks)
+            self.explorer_status_var.set(f"{n} blocks frozen. {len(unlocked)} still explorable.")
+
+        self._explorer_update_state_text(self._explorer_baseline_state)
+
+        # Re-roll variants to respect the new freeze state
+        if unlocked:
+            self._explorer_generate_baseline_and_roll()
 
     def _explorer_refine_in_repair(self):
         """Send the current Explorer baseline to the Repair Studio for manual editing."""
@@ -8638,6 +8743,7 @@ class LoRATrainerGUI:
             self._explorer_undo_btn.configure(state="disabled")
             self._explorer_save_btn.configure(state="disabled")
             self._explorer_refine_btn.configure(state="disabled")
+            self._explorer_freeze_btn.configure(state="disabled")
             self._explorer_roll_btn.configure(state="normal")
 
             # Set low intensity + structure for refinement (subtle variants)

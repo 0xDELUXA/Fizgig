@@ -1199,7 +1199,7 @@ class LoRATrainerGUI:
         except Exception:
             url = fallback
         btn_frame = tk.Frame(parent, bg=COLORS["bg_deep"])
-        btn_frame.pack(fill=tk.X, padx=36, pady=(16 if prominent else 8, 28))
+        btn_frame.pack(fill=tk.X, padx=36, pady=(0 if prominent else 8, 8))
         if prominent:
             tk.Label(btn_frame, text="Need help? Every tab has a YouTube guide at the bottom.",
                      font=(FONT_FAMILY, 11), fg=COLORS["text_secondary"],
@@ -1315,7 +1315,7 @@ class LoRATrainerGUI:
         scrollable_frame, _ = self.create_scrollable_frame(self.start_tab)
 
         container = tk.Frame(scrollable_frame, bg=COLORS["bg_deep"])
-        container.pack(fill=tk.BOTH, expand=True, padx=36, pady=(28, 36))
+        container.pack(fill=tk.BOTH, expand=True, padx=36, pady=(28, 0))
 
         # Title + subtitle
         tk.Label(container, text="Welcome to Fizgig",

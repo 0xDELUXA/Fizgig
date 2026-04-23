@@ -1323,7 +1323,7 @@ class LoRATrainerGUI:
                  fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(anchor=tk.W)
         tk.Label(container,
                  text="A focused, local trainer and workbench for Flux 2 Klein 9B LoRAs — "
-                      "train, profile, repair, and extract, all in one place.",
+                      "train, profile, repair, explore, and extract, all in one place.",
                  font=(FONT_FAMILY, 11),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_deep"],
                  wraplength=800, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 24))
@@ -1483,6 +1483,9 @@ class LoRATrainerGUI:
             ("Repair Studio",
              "Live per-block sliders with side-by-side preview. Blend in a donor LoRA and "
              "bake the result to a new .safetensors."),
+            ("LoRA the Explorer",
+             "Evolutionary discovery — the computer proposes random mutations, you pick favourites, "
+             "and the LoRA evolves. Seamlessly connected to Repair Studio."),
             ("Extract",
              "Distill a LoRA to a lower rank with optional block- and timestep-targeted presets. "
              "Supports LyCORIS (LoKR / LoHa) sources."),

@@ -6962,8 +6962,8 @@ class LoRATrainerGUI:
         next_row = self._add_pref_row(
             models_card, next_row, "Text Encoder:", "text_encoder",
             "Qwen3-8B text encoder (used by Klein 9B)",
-            download_url="https://huggingface.co/Qwen/Qwen3-8B",
-            download_note="~15GB single-file safetensors — Qwen3-8B by Alibaba Qwen",
+            download_url="https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/blob/main/split_files/text_encoders/qwen_3_8b.safetensors",
+            download_note="~15GB single-file safetensors — Qwen3-8B packaged for Klein 9B (Comfy-Org)",
         )
 
         # Card 2: Inference Performance

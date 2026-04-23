@@ -97,9 +97,9 @@ Fizgig doesn't bundle model weights — they're ~40 GB combined and licensing va
 
 | Model | File | Size | Source |
 |---|---|---|---|
-| Base DiT | `flux-2-klein-base-9b.safetensors` | ~17 GB bf16 | [black-forest-labs/FLUX.2-klein-dev](https://huggingface.co/black-forest-labs/FLUX.2-klein-dev) |
+| Base DiT | `flux-2-klein-base-9b.safetensors` | ~17 GB bf16 | [black-forest-labs/FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B) |
 | Base DiT (fp8) | `flux-2-klein-base-9b-fp8.safetensors` | ~9.5 GB fp8 | [black-forest-labs/FLUX.2-klein-base-9b-fp8](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8) |
-| Distilled DiT | `flux-2-klein-9b-fp8.safetensors` | ~9 GB fp8 | [Comfy-Org/flux2_ComfyUI_repackaged](https://huggingface.co/Comfy-Org/flux2_ComfyUI_repackaged) |
+| Distilled DiT | `flux-2-klein-9b-fp8.safetensors` | ~9 GB fp8 | [black-forest-labs/FLUX.2-klein-9b-fp8](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8) |
 | VAE / AE | `ae.safetensors` | ~320 MB | [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev/blob/main/ae.safetensors) (from root, **not** the `vae/` subfolder) |
 | Text Encoder | Qwen3-8B single-file safetensors | ~15 GB | [Qwen/Qwen3-8B](https://huggingface.co/Qwen/Qwen3-8B) |
 

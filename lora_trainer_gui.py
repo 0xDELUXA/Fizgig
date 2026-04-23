@@ -5763,6 +5763,14 @@ class LoRATrainerGUI:
         ttk.Button(btn_row, text="Unload",
                    command=self._explorer_full_reset).pack(side=tk.LEFT)
 
+        self._explorer_refine_btn = tk.Button(
+            baseline_right, text="Refine this baseline in Repair Studio \u2192",
+            font=(FONT_FAMILY, 10, "bold"),
+            fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF", activebackground="#256F46",
+            relief="flat", bd=0, padx=16, pady=6, cursor="hand2", state="disabled",
+            command=self._explorer_refine_in_repair)
+        self._explorer_refine_btn.pack(anchor=tk.W, pady=(0, 8))
+
         # Collapsed slider state display
         state_frame = tk.Frame(baseline_right, bg=COLORS["bg_deep"])
         state_frame.pack(anchor=tk.W, fill=tk.BOTH, expand=True, pady=(0, 4))
@@ -5925,6 +5933,7 @@ class LoRATrainerGUI:
             self._explorer_baseline_image = None
             self._explorer_undo_btn.configure(state="disabled")
             self._explorer_save_btn.configure(state="disabled")
+            self._explorer_refine_btn.configure(state="disabled")
             self._explorer_roll_btn.configure(state="normal")
             # Generate initial baseline image
             self._explorer_generate_baseline_and_roll()
@@ -6036,6 +6045,7 @@ class LoRATrainerGUI:
             self._explorer_show_variant(i, img)
 
         self._explorer_save_btn.configure(state="normal")
+        self._explorer_refine_btn.configure(state="normal")
         self._explorer_progress_var.set("")
 
         # Check if all blocks are locked (Hold Mode complete)
@@ -6322,6 +6332,59 @@ class LoRATrainerGUI:
         self._explorer_undo_btn.configure(state="disabled")
         self._explorer_progress_var.set("")
         self.explorer_status_var.set("Load a LoRA to begin exploring.")
+
+    def _explorer_refine_in_repair(self):
+        """Send the current Explorer baseline to the Repair Studio for manual editing."""
+        if self._explorer_engine is None or self._explorer_baseline_state is None:
+            return
+        lora_path = self._explorer_engine.primary_path
+        if not lora_path:
+            return
+
+        baseline = self._explorer_baseline_state
+
+        # Set the LoRA path in Repair Studio
+        self.repair_primary_var.set(lora_path)
+
+        # Unload Explorer engine to free VRAM
+        self._unload_explorer_models()
+
+        # Switch to Repair Studio tab
+        self.notebook.select(self.repair_studio_tab)
+
+        # Load the LoRA in Repair Studio
+        if not self._ensure_repair_engine():
+            return
+        try:
+            self.repair_status_var.set("Loading LoRA from Explorer baseline...")
+            self.master.update_idletasks()
+            self.repair_engine.load_primary(lora_path)
+            self._refresh_block_slider_activity()
+
+            # Push the Explorer baseline slider values into Repair Studio
+            self._repair_master_mutating = True
+            try:
+                for bid, bs in baseline.blocks.items():
+                    if bid in self.repair_block_vars:
+                        self.repair_block_vars[bid]["primary_enabled"].set(bs.primary_enabled)
+                        self.repair_block_vars[bid]["primary_strength"].set(bs.primary_strength)
+            finally:
+                self._repair_master_mutating = False
+
+            # Set the prompt, seed, and resolution to match Explorer
+            self.repair_prompt_var.set(baseline.prompt)
+            self.repair_seed_var.set(str(baseline.seed))
+            self.repair_res_var.set(str(baseline.preview_width))
+
+            n_active = len(self.repair_engine.primary_block_ids)
+            self._find_repair_profile_match()
+            self.repair_status_var.set(
+                f"Loaded from Explorer: {os.path.basename(lora_path)} ({n_active}/32 blocks). "
+                f"Sliders set to Explorer baseline. Generating preview...")
+            self._schedule_preview(force=True)
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Failed to load in Repair Studio:\n{traceback.format_exc()}")
 
     def _explorer_save(self):
         """Save the current baseline as a baked LoRA."""

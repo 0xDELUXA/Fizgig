@@ -10461,7 +10461,12 @@ class LoRATrainerGUI:
         if self.current_process and self.current_process.poll() is None:
             try:
                 if os.name == 'nt':
-                    self.current_process.send_signal(signal.CTRL_BREAK_EVENT)
+                    # CREATE_NO_WINDOW prevents CTRL_BREAK_EVENT from working,
+                    # so terminate the process tree via taskkill instead.
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.current_process.pid)],
+                        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
+                    )
                 else:
                     os.killpg(os.getpgid(self.current_process.pid), signal.SIGTERM)
             except Exception as e:

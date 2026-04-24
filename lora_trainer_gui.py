@@ -788,21 +788,19 @@ class LoRATrainerGUI:
 
         self.setup_styles()
 
-        # Status indicator bar (thin strip above the notebook)
-        self._status_bar = tk.Frame(master, bg=COLORS["bg_deep"])
-        self._status_bar.pack(fill=tk.X, side=tk.TOP, padx=10, pady=(6, 0))
-        self._status_canvas = tk.Canvas(self._status_bar, width=16, height=16,
+        # Create notebook and tabs
+        self.notebook = ttk.Notebook(master)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Status indicator — overlaid on top-right of notebook, zero vertical space
+        self._status_canvas = tk.Canvas(master, width=16, height=16,
                                         bg=COLORS["bg_deep"], highlightthickness=0,
                                         cursor="hand2")
-        self._status_canvas.pack(side=tk.RIGHT, padx=(0, 4))
+        self._status_canvas.place(relx=1.0, x=-20, y=14, anchor="ne")
         self._status_indicator = self._status_canvas.create_oval(
             2, 2, 14, 14, fill=COLORS["success"], outline="")
         self._status_canvas.bind("<Button-1>", lambda e: self._open_console_popup())
         ToolTip(self._status_canvas, "Click to view console log")
-
-        # Create notebook and tabs
-        self.notebook = ttk.Notebook(master)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 10))
 
         # Tabs ordered by natural workflow: Start -> Prep -> Caption -> Train -> everything else.
         # The old Dataset tab was folded into Training (Other Options → Dataset subsection);

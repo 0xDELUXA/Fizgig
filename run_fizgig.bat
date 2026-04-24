@@ -1,3 +1,3 @@
 @echo off
 cd /d "%~dp0"
-start "" venv\Scripts\pythonw.exe launch.pyw
+start "" /b wscript //nologo //b "%~dp0run_silent.vbs"

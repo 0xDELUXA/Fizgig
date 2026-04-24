@@ -9715,6 +9715,18 @@ class LoRATrainerGUI:
         if resume_path and resume_path.strip() and not os.path.exists(resume_path):
             errors.append(f"Resume training path does not exist: {resume_path}")
 
+        # Check caption files exist in the dataset folder
+        image_dir = self.image_folder_var.get().strip()
+        caption_ext = self.dataset_caption_ext_var.get().strip()
+        if image_dir and os.path.isdir(image_dir) and caption_ext:
+            import glob as _glob
+            caption_files = _glob.glob(os.path.join(image_dir, "*" + caption_ext))
+            if not caption_files:
+                errors.append(
+                    f"No caption files (*{caption_ext}) found in {image_dir}. "
+                    f"Use the Captions tab to generate them first."
+                )
+
         if errors:
             error_message = "Please fix the following issues:\n\n" + "\n".join(f"• {e}" for e in errors)
             messagebox.showerror("Validation Error", error_message)

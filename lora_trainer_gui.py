@@ -1754,7 +1754,7 @@ class LoRATrainerGUI:
         adaptive_frame = ttk.Frame(training_content)
         adaptive_frame.grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 2))
         ttk.Label(adaptive_frame, text="Min LR:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["ADAPTIVE_LR_MIN"] = ttk.Combobox(adaptive_frame, width=8, values=["1e-5", "5e-5", "1e-4"], state="readonly")
+        self.entries["ADAPTIVE_LR_MIN"] = ttk.Combobox(adaptive_frame, width=28, values=["1e-5", "5e-5", "1e-4", "2e-4 - likely too high"], state="readonly")
         self.entries["ADAPTIVE_LR_MIN"].set("1e-5")
         self.entries["ADAPTIVE_LR_MIN"].pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(adaptive_frame, text="Max LR:").pack(side=tk.LEFT, padx=(0, 4))
@@ -9636,8 +9636,8 @@ class LoRATrainerGUI:
             # When adaptive LR is enabled, starting LR must not exceed max LR
             if hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get():
                 try:
-                    max_lr_str = self.entries["ADAPTIVE_LR_MAX"].get()
-                    min_lr_str = self.entries["ADAPTIVE_LR_MIN"].get()
+                    max_lr_str = self.entries["ADAPTIVE_LR_MAX"].get().split(" ")[0]
+                    min_lr_str = self.entries["ADAPTIVE_LR_MIN"].get().split(" ")[0]
                     max_lr_val = float(max_lr_str)
                     min_lr_val = float(min_lr_str)
                     if lr > max_lr_val:
@@ -10143,8 +10143,8 @@ class LoRATrainerGUI:
 
         if adaptive_on:
             command.append("--adaptive_lr")
-            min_lr = self.settings.get("ADAPTIVE_LR_MIN", "1e-5") or "1e-5"
-            max_lr = self.settings.get("ADAPTIVE_LR_MAX", "4e-4") or "4e-4"
+            min_lr = (self.settings.get("ADAPTIVE_LR_MIN", "1e-5") or "1e-5").split(" ")[0]
+            max_lr = (self.settings.get("ADAPTIVE_LR_MAX", "4e-4") or "4e-4").split(" ")[0]
             command.extend(["--adaptive_lr_min", str(min_lr)])
             command.extend(["--adaptive_lr_max", str(max_lr)])
 

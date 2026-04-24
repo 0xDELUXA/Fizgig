@@ -2806,11 +2806,9 @@ class LoRATrainerGUI:
         self.entries["LOG_PREFIX"].grid(row=row, column=1, sticky=tk.EW, padx=5, pady=2)
         row += 1
 
-        # Memory Management
+        # img_in/txt_in offloading — no-op for Klein 9B, widget kept for preset compat
         self.img_in_txt_in_offloading_var = tk.BooleanVar(value=self.settings["IMG_IN_TXT_IN_OFFLOADING"])
-        ttk.Checkbutton(parent, text="Offload img_in and txt_in to CPU", variable=self.img_in_txt_in_offloading_var).grid(row=row, column=0, columnspan=3, sticky=tk.W, padx=5, pady=5)
         self.entries["IMG_IN_TXT_IN_OFFLOADING"] = self.img_in_txt_in_offloading_var
-        row += 1
 
         # Metadata
         ttk.Label(parent, text="Metadata Title:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)

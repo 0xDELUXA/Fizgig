@@ -578,6 +578,16 @@ class LoRATrainerGUI:
         master.minsize(1100, 800)  # ensures all tabs visible at top + tab content not cut off
         master.configure(bg=BG_COLOR)
 
+        # Window/taskbar icon
+        icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
+        if os.path.exists(icon_path):
+            try:
+                icon_img = Image.open(icon_path).resize((32, 32), Image.LANCZOS)
+                self._window_icon = ImageTk.PhotoImage(icon_img)
+                master.iconphoto(True, self._window_icon)
+            except Exception:
+                pass
+
         self.current_process = None
         self.training_thread = None
         self.process_group_id = None
@@ -2203,7 +2213,10 @@ class LoRATrainerGUI:
         self._resume_training_btn.pack_forget()  # hidden until paused state exists
 
         stop_btn = ttk.Button(button_frame, text="Stop Training", command=self.stop_training, style="Danger.TButton")
-        stop_btn.pack(side=tk.LEFT)
+        stop_btn.pack(side=tk.LEFT, padx=(0, 24))
+
+        ttk.Button(button_frame, text="View Samples Gallery", command=self.open_samples_gallery).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(button_frame, text="Open Samples Folder", command=self.open_samples_folder).pack(side=tk.LEFT)
 
         # === Console Output card ===
         console_card = self._start_section_card(outer, "Console Output", None)
@@ -9740,7 +9753,7 @@ class LoRATrainerGUI:
         env["PYTHONUNBUFFERED"] = "1"  # flush stdout/stderr line-by-line so log output streams live
 
         if os.name == 'nt':
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
             preexec_fn = None
         else:
             creationflags = 0
@@ -10609,6 +10622,12 @@ class LoRATrainerGUI:
                 self.update_samples_ui_for_architecture()
 
 if __name__ == "__main__":
+    # Set unique app ID so Windows taskbar shows our icon, not Python's
+    try:
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('fizgig.lora.studio')
+    except Exception:
+        pass
     root = tk.Tk()
     gui = LoRATrainerGUI(root)
     # Detect leftover paused training state from a prior session

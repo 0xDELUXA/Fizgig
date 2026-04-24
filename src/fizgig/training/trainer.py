@@ -2020,6 +2020,7 @@ class KleinTrainer:
                             a_loss = anchor_pool.compute_loss(
                                 model_pred.to(network_dtype), noisy_model_input.to(network_dtype),
                                 timesteps, exclude_idx=None,
+                                timestep_weight=getattr(args, "anchor_timestep_weight", False),
                             )
                             loss = noise_loss + aw * a_loss
                         else:
@@ -2544,6 +2545,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anchor_anneal", type=str, default="linear",
                         choices=["linear", "cosine", "none"],
                         help="Annealing schedule for anchor weight.")
+    parser.add_argument("--anchor_timestep_weight", action="store_true",
+                        help="Scale anchor loss by (1-t): full weight at clean timesteps, near-zero at noisy.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

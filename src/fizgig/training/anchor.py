@@ -112,6 +112,7 @@ class AnchorPool:
         noisy_input: torch.Tensor,
         timesteps: torch.Tensor,
         exclude_idx: Optional[int] = None,
+        timestep_weight: bool = False,
     ) -> torch.Tensor:
         """Compute anchor loss: MSE between predicted clean latent and a random reference.
 
@@ -124,6 +125,8 @@ class AnchorPool:
             noisy_input: The noisy model input x_t, shape (B, C, H, W).
             timesteps: Timesteps in [0, 1000] range, shape (B,).
             exclude_idx: Optional dataset index to exclude from pool selection.
+            timestep_weight: If True, scale anchor loss by (1-t) per sample —
+                low noise (t→0) gets full weight, high noise (t→1) gets near-zero.
 
         Returns:
             Scalar anchor loss (MSE).
@@ -138,10 +141,13 @@ class AnchorPool:
         # x_t = (1-t) * x_0 + t * noise
         # v = noise - x_0  (the velocity/target)
         # model predicts v, so: x_0 = x_t - t * v
-        # But noisy_input is packed (sequence format) by the time call_dit returns,
-        # so we receive model_pred already unpacked to spatial (B, C, H, W).
-        # We need the spatial noisy_input too.
         predicted_clean = noisy_input - t * model_pred
+
+        # Per-sample timestep scaling: (1-t) so clean timesteps get full weight
+        if timestep_weight:
+            t_scale = (1.0 - t).squeeze()  # (B,)
+        else:
+            t_scale = None
 
         # Pick random reference latents (one per batch element)
         pool_size = len(self.latents)
@@ -162,7 +168,10 @@ class AnchorPool:
                     ref_latent.unsqueeze(0), size=(pred_h, pred_w), mode="bilinear", align_corners=False
                 ).squeeze(0)
 
-            total_loss = total_loss + F.mse_loss(predicted_clean[b], ref_latent)
+            sample_loss = F.mse_loss(predicted_clean[b], ref_latent)
+            if t_scale is not None:
+                sample_loss = sample_loss * t_scale[b]
+            total_loss = total_loss + sample_loss
 
         return total_loss / batch_size
 

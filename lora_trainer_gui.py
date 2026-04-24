@@ -1889,9 +1889,12 @@ class LoRATrainerGUI:
         ttk.Label(anchor_frame, text="Anneal:").pack(side=tk.LEFT, padx=(4, 4))
         ttk.Combobox(anchor_frame, textvariable=self.anchor_anneal_var,
                      values=["linear", "cosine", "none"], state="readonly", width=8).pack(side=tk.LEFT)
+        self.anchor_timestep_weight_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(anchor_frame, text="Timestep weight",
+                        variable=self.anchor_timestep_weight_var).pack(side=tk.LEFT, padx=(12, 0))
         ttk.Label(training_content,
                   text="Experimental: curated reference images steer the model toward your dataset's visual style. "
-                       "Leave empty to disable.",
+                       "Leave empty to disable. Timestep weight scales anchor by noise level (stronger at clean timesteps).",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
             row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
 
@@ -10182,6 +10185,8 @@ class LoRATrainerGUI:
             if anchor_weight:
                 command.extend(["--anchor_weight", anchor_weight.get().strip() or "0.1"])
             command.extend(["--anchor_anneal", self.anchor_anneal_var.get()])
+            if self.anchor_timestep_weight_var.get():
+                command.append("--anchor_timestep_weight")
 
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()

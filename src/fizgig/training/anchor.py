@@ -145,7 +145,7 @@ class AnchorPool:
 
         # Per-sample timestep scaling: (1-t) so clean timesteps get full weight
         if timestep_weight:
-            t_scale = (1.0 - t).squeeze()  # (B,)
+            t_scale = (1.0 - t).view(batch_size)  # (B,)
         else:
             t_scale = None
 

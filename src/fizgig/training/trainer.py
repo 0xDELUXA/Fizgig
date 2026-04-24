@@ -1881,6 +1881,27 @@ class KleinTrainer:
             accelerator.log({}, step=0)
 
         # ------------------------------------------------------------------
+        # Anchor pool (experimental — latent anchor training)
+        # ------------------------------------------------------------------
+        anchor_pool = None
+        if getattr(args, "anchor_dir", None) and args.anchor_weight > 0:
+            from fizgig.training.anchor import AnchorPool
+            # Load VAE briefly to encode anchors (may already be loaded for samples)
+            if vae is None:
+                vae = self.load_vae_model(args, vae_dtype=vae_dtype, vae_path=args.vae)
+                vae.requires_grad_(False)
+                vae.eval()
+            anchor_pool = AnchorPool(
+                args.anchor_dir, vae, accelerator.device, vae_dtype,
+            )
+            vae.to("cpu")
+            clean_memory_on_device(accelerator.device)
+            logger.info(
+                f"Anchor training enabled: weight={args.anchor_weight}, "
+                f"anneal={args.anchor_anneal}, pool={len(anchor_pool.latents)} refs"
+            )
+
+        # ------------------------------------------------------------------
         # Training loop
         # ------------------------------------------------------------------
 
@@ -1987,7 +2008,24 @@ class KleinTrainer:
                     loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
                     if weighting is not None:
                         loss = loss * weighting
-                    loss = loss.mean()
+                    noise_loss = loss.mean()
+
+                    # Anchor loss (experimental)
+                    if anchor_pool is not None:
+                        aw = anchor_pool.get_annealed_weight(
+                            args.anchor_weight, epoch, num_train_epochs, args.anchor_anneal
+                        )
+                        if aw > 0:
+                            # noisy_model_input is spatial (B,C,H,W) here — not yet packed
+                            a_loss = anchor_pool.compute_loss(
+                                model_pred.to(network_dtype), noisy_model_input.to(network_dtype),
+                                timesteps, exclude_idx=None,
+                            )
+                            loss = noise_loss + aw * a_loss
+                        else:
+                            loss = noise_loss
+                    else:
+                        loss = noise_loss
 
                     # Backward
                     accelerator.backward(loss)
@@ -2059,6 +2097,8 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
+                if anchor_pool is not None:
+                    logs["anchor_w"] = round(aw, 4)
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:
@@ -2495,6 +2535,15 @@ def setup_parser() -> argparse.ArgumentParser:
                              "during training. New LoRA learns to coexist with this context.")
     parser.add_argument("--context_lora_strength", type=float, default=1.0,
                         help="Strength multiplier for the context LoRA (typical: 0.5-1.0).")
+
+    # ---- Anchor Training (experimental) ----
+    parser.add_argument("--anchor_dir", type=str, default=None,
+                        help="Path to folder of curated reference images for anchor loss.")
+    parser.add_argument("--anchor_weight", type=float, default=0.1,
+                        help="Initial weight for anchor loss (0.0 = disabled, typical: 0.1-0.3).")
+    parser.add_argument("--anchor_anneal", type=str, default="linear",
+                        choices=["linear", "cosine", "none"],
+                        help="Annealing schedule for anchor weight.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

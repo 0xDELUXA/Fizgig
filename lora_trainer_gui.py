@@ -1758,22 +1758,27 @@ class LoRATrainerGUI:
                      values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0"], width=8).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(mp_frame, text="MP  (1.0 = 1024×1024 area)",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+        tk.Label(scheduler_content,
+                 text="Images are automatically resized to fit this target — no need to resize your dataset beforehand. "
+                      "Higher = more detail but more VRAM per step.",
+                 font=(FONT_FAMILY, 8, "italic"), fg="#95A5A6", bg=COLORS["bg_surface"],
+                 wraplength=500, justify=tk.LEFT).grid(row=3, column=0, columnspan=3, sticky=tk.W, padx=(12, 8), pady=(0, 2))
 
-        ttk.Label(scheduler_content, text="Batch Size:").grid(row=3, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        ttk.Label(scheduler_content, text="Batch Size:").grid(row=4, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         bs_frame = tk.Frame(scheduler_content, bg=COLORS["bg_surface"])
-        bs_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
+        bs_frame.grid(row=4, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
         ttk.Entry(bs_frame, textvariable=self.dataset_batch_size_var, width=6).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(bs_frame, text="(recommended: 1 — higher values need more VRAM)",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
 
-        ttk.Label(scheduler_content, text="Bucket Options:").grid(row=4, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        ttk.Label(scheduler_content, text="Bucket Options:").grid(row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         bucket_frame = tk.Frame(scheduler_content, bg=COLORS["bg_surface"])
-        bucket_frame.grid(row=4, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
+        bucket_frame.grid(row=5, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
         ttk.Checkbutton(bucket_frame, text="Enable Bucket", variable=self.dataset_enable_bucket_var).pack(side=tk.LEFT, padx=(0, 16))
         ttk.Checkbutton(bucket_frame, text="No Upscale (keep small images at native size)",
                         variable=self.dataset_no_upscale_var).pack(side=tk.LEFT)
 
-        ttk.Separator(scheduler_content, orient="horizontal").grid(row=5, column=0, columnspan=3, sticky="ew", padx=12, pady=(10, 6))
+        ttk.Separator(scheduler_content, orient="horizontal").grid(row=6, column=0, columnspan=3, sticky="ew", padx=12, pady=(10, 6))
 
         # === LR Scheduler ===
         tk.Label(
@@ -1782,9 +1787,9 @@ class LoRATrainerGUI:
             font=(FONT_FAMILY, 10, "bold"),
             fg=COLORS["text_primary"],
             bg=COLORS["bg_surface"],
-        ).grid(row=6, column=0, columnspan=3, sticky=tk.W, padx=12, pady=(4, 4))
+        ).grid(row=7, column=0, columnspan=3, sticky=tk.W, padx=12, pady=(4, 4))
 
-        self._add_field_to_section(scheduler_content, "LR_SCHEDULER", "LR Scheduler", "dropdown", 7)
+        self._add_field_to_section(scheduler_content, "LR_SCHEDULER", "LR Scheduler", "dropdown", 8)
 
         # Warmup/Decay steps in a sub-frame
         lr_steps_label = tk.Label(
@@ -1794,10 +1799,10 @@ class LoRATrainerGUI:
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_surface"]
         )
-        lr_steps_label.grid(row=8, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        lr_steps_label.grid(row=9, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
         lr_steps_frame = tk.Frame(scheduler_content, bg=COLORS["bg_surface"])
-        lr_steps_frame.grid(row=8, column=1, sticky=tk.W, padx=5, pady=4)
+        lr_steps_frame.grid(row=9, column=1, sticky=tk.W, padx=5, pady=4)
 
         tk.Label(lr_steps_frame, text="Warmup:", font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(0, 4))
         self.entries["LR_WARMUP_STEPS"] = ttk.Entry(lr_steps_frame, width=10)
@@ -1808,9 +1813,9 @@ class LoRATrainerGUI:
         self.entries["LR_DECAY_STEPS"].pack(side=tk.LEFT)
 
         # Separator before the migrated Advanced fields
-        ttk.Separator(scheduler_content, orient="horizontal").grid(row=9, column=0, columnspan=3, sticky="ew", padx=12, pady=(8, 4))
+        ttk.Separator(scheduler_content, orient="horizontal").grid(row=10, column=0, columnspan=3, sticky="ew", padx=12, pady=(8, 4))
         # Inline Attention / Logging / Memory / Metadata fields (formerly the Advanced tab)
-        self._populate_other_options(scheduler_content, start_row=10)
+        self._populate_other_options(scheduler_content, start_row=11)
 
         # === Memory & FP8 Section (Collapsed by default) ===
         memory_section = CollapsibleFrame(outer,"Memory & FP8", default_expanded=True)

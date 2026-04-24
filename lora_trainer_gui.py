@@ -2422,6 +2422,11 @@ class LoRATrainerGUI:
             for block_key, block_on in preset["TRAINING_BLOCKS"].items():
                 if block_key in self.training_block_vars:
                     self.training_block_vars[block_key].set(bool(block_on))
+        # Anchor training
+        if "ANCHOR_ANNEAL" in preset and hasattr(self, "anchor_anneal_var"):
+            self.anchor_anneal_var.set(preset["ANCHOR_ANNEAL"])
+        if "ANCHOR_TIMESTEP_WEIGHT" in preset and hasattr(self, "anchor_timestep_weight_var"):
+            self.anchor_timestep_weight_var.set(bool(preset["ANCHOR_TIMESTEP_WEIGHT"]))
         self.toggle_scaled()  # Update checkbox state
 
     def _save_last_train_settings(self):
@@ -2506,6 +2511,9 @@ class LoRATrainerGUI:
         _grab("dataset_caption_ext_var", "DATASET_CAPTION_EXT")
         _grab("dataset_megapixels_var", "DATASET_MEGAPIXELS")
         _grab("dataset_batch_size_var", "DATASET_BATCH_SIZE")
+        # Anchor training
+        _grab("anchor_anneal_var", "ANCHOR_ANNEAL")
+        _grab("anchor_timestep_weight_var", "ANCHOR_TIMESTEP_WEIGHT")
         # Per-block custom training selection (only meaningful when TARGET_LAYERS=Custom)
         if hasattr(self, "training_block_vars") and self.training_block_vars:
             preset["TRAINING_BLOCKS"] = {k: v.get() for k, v in self.training_block_vars.items()}

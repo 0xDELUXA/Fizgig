@@ -40,6 +40,10 @@ profiles/*
 *.ckpt
 *.bin
 
+# Research (private)
+research/
+anchor_images/
+
 # IDE
 .vscode/
 .idea/

@@ -1238,10 +1238,8 @@ class KleinTrainer:
         transformer = accelerator.unwrap_model(transformer)
         transformer.switch_block_swap_for_inference()
 
-        # Disable context LoRA during sampling — the trainable LoRA learns to
-        # work standalone, so samples should show just the trainable contribution.
-        if self.context_network is not None:
-            self.context_network.set_enabled(False)
+        # Context LoRA stays enabled during sampling — the trainable LoRA was
+        # trained with it active, so samples should reflect that environment.
 
         save_dir = os.path.join(args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
@@ -1278,10 +1276,6 @@ class KleinTrainer:
         torch.set_rng_state(rng_state)
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state)
-
-        # Re-enable context LoRA for training forward passes
-        if self.context_network is not None:
-            self.context_network.set_enabled(True)
 
         transformer.switch_block_swap_for_training()
         clean_memory_on_device(accelerator.device)

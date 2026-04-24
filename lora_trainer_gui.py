@@ -1934,15 +1934,12 @@ class LoRATrainerGUI:
         self.entries["TIMESTEP_SAMPLING"] = self.ts_sampling_combo
         ts_row += 1
 
-        # Discrete Flow Shift (not used by Klein 9B — uses flux2_shift automatic)
-        self.ts_flow_shift_label = tk.Label(ts_content, text="Discrete Flow Shift (not Klein 9B):",
+        # Discrete Flow Shift — not used by Klein 9B (uses flux2_shift automatic).
+        # Widget created but not gridded so presets/save still work.
+        self.ts_flow_shift_label = tk.Label(ts_content, text="Discrete Flow Shift:",
                                             font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
-        self.ts_flow_shift_label.grid(row=ts_row, column=0, sticky=tk.W, padx=(12, 8), pady=4)
-
         self.entries["DISCRETE_FLOW_SHIFT"] = ttk.Entry(ts_content, width=12)
         self.entries["DISCRETE_FLOW_SHIFT"].insert(0, self.settings["DISCRETE_FLOW_SHIFT"])
-        self.entries["DISCRETE_FLOW_SHIFT"].grid(row=ts_row, column=1, sticky=tk.W, padx=5, pady=4)
-        ts_row += 1
 
         # Sigmoid Scale
         self.ts_sigmoid_label = tk.Label(ts_content, text="Sigmoid Scale:",
@@ -1996,54 +1993,30 @@ class LoRATrainerGUI:
         self.entries["PRESERVE_DISTRIBUTION"] = self.preserve_dist_var
         ts_row += 1
 
-        # Separator
-        ttk.Separator(ts_content, orient="horizontal").grid(row=ts_row, column=0, columnspan=2, sticky="ew", padx=12, pady=8)
-        ts_row += 1
+        # --- Hidden fields (not used by Klein 9B) ---
+        # Widgets created but not gridded so presets/save/command-building still work.
 
-        # Weighting Scheme (not used by Klein 9B)
-        self.ts_weighting_label = tk.Label(ts_content, text="Weighting Scheme (not Klein 9B):",
-                                           font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
-        self.ts_weighting_label.grid(row=ts_row, column=0, sticky=tk.W, padx=(12, 8), pady=4)
-
+        # Weighting Scheme
+        self.ts_weighting_label = tk.Label(ts_content, text="Weighting Scheme:")
         self.weighting_scheme_var = tk.StringVar(value=self.settings["WEIGHTING_SCHEME"])
         weighting_options = ["none", "logit_normal", "mode", "cosmap", "sigma_sqrt"]
         self.ts_weighting_combo = ttk.Combobox(ts_content, textvariable=self.weighting_scheme_var,
                                                 values=weighting_options, state="readonly", width=20)
-        self.ts_weighting_combo.grid(row=ts_row, column=1, sticky=tk.W, padx=5, pady=4)
         self.ts_weighting_combo.bind("<<ComboboxSelected>>", self._on_weighting_scheme_changed)
         self.entries["WEIGHTING_SCHEME"] = self.ts_weighting_combo
-        ts_row += 1
 
-        # Logit Mean / Logit Std on one row
-        self.ts_logit_label = tk.Label(ts_content, text="Logit Normal:",
-                                       font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
-        self.ts_logit_label.grid(row=ts_row, column=0, sticky=tk.W, padx=(12, 8), pady=4)
-
+        # Logit Mean / Std
+        self.ts_logit_label = tk.Label(ts_content, text="Logit Normal:")
         logit_frame = tk.Frame(ts_content, bg=COLORS["bg_surface"])
-        logit_frame.grid(row=ts_row, column=1, sticky=tk.W, padx=5, pady=4)
-
-        tk.Label(logit_frame, text="Mean:", font=(FONT_FAMILY, 9),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(0, 4))
         self.entries["LOGIT_MEAN"] = ttk.Entry(logit_frame, width=8)
         self.entries["LOGIT_MEAN"].insert(0, self.settings["LOGIT_MEAN"])
-        self.entries["LOGIT_MEAN"].pack(side=tk.LEFT, padx=(0, 16))
-
-        tk.Label(logit_frame, text="Std:", font=(FONT_FAMILY, 9),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(0, 4))
         self.entries["LOGIT_STD"] = ttk.Entry(logit_frame, width=8)
         self.entries["LOGIT_STD"].insert(0, self.settings["LOGIT_STD"])
-        self.entries["LOGIT_STD"].pack(side=tk.LEFT)
-        ts_row += 1
 
         # Mode Scale
-        self.ts_mode_label = tk.Label(ts_content, text="Mode Scale:",
-                                      font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
-        self.ts_mode_label.grid(row=ts_row, column=0, sticky=tk.W, padx=(12, 8), pady=4)
-
+        self.ts_mode_label = tk.Label(ts_content, text="Mode Scale:")
         self.entries["MODE_SCALE"] = ttk.Entry(ts_content, width=12)
         self.entries["MODE_SCALE"].insert(0, self.settings["MODE_SCALE"])
-        self.entries["MODE_SCALE"].grid(row=ts_row, column=1, sticky=tk.W, padx=5, pady=4)
-        ts_row += 1
 
         # Initial state for conditional fields
         self._on_timestep_sampling_changed()

@@ -1771,30 +1771,32 @@ class LoRATrainerGUI:
                  ).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 6))
         self._on_adaptive_lr_toggle()  # sync initial enabled/disabled state
 
-        self._add_field_to_section(training_content, "LORA_LR_RATIO", "LoRA LR Ratio", "int", 5)
-        self._add_field_to_section(training_content, "NETWORK_DIM", "Network Dim (Rank)", "int", 6)
-        self._add_field_to_section(training_content, "NETWORK_ALPHA", "Network Alpha", "float", 7)
-        self._add_field_to_section(training_content, "MAX_TRAIN_EPOCHS", "Max Epochs", "int", 8)
-        self._add_field_to_section(training_content, "SAVE_EVERY_N_EPOCHS", "Save Every N Epochs", "int", 9)
-        self._add_field_to_section(training_content, "SEED", "Seed", "int", 10)
+        # LoRA LR Ratio — hidden, always 1 (LoRA+ default). Widget exists for preset/save compat.
+        self.entries["LORA_LR_RATIO"] = ttk.Entry(training_content, width=12)
+        self.entries["LORA_LR_RATIO"].insert(0, str(self.settings["LORA_LR_RATIO"]))
+        self._add_field_to_section(training_content, "NETWORK_DIM", "Network Dim (Rank)", "int", 5)
+        self._add_field_to_section(training_content, "NETWORK_ALPHA", "Network Alpha", "float", 6)
+        self._add_field_to_section(training_content, "MAX_TRAIN_EPOCHS", "Max Epochs", "int", 7)
+        self._add_field_to_section(training_content, "SAVE_EVERY_N_EPOCHS", "Save Every N Epochs", "int", 8)
+        self._add_field_to_section(training_content, "SEED", "Seed", "int", 9)
 
         # Model Area to Train dropdown (blocks + timestep auto-fill)
-        ttk.Label(training_content, text="Model Area to Train:").grid(row=11, column=0, sticky=tk.W, padx=5, pady=2)
+        ttk.Label(training_content, text="Model Area to Train:").grid(row=10, column=0, sticky=tk.W, padx=5, pady=2)
         self.training_preset_var = tk.StringVar(value="Full Model")
         training_preset_combo = ttk.Combobox(
             training_content, textvariable=self.training_preset_var,
             values=["Full Model", "Identity", "Style", "Style+Composition", "Details", "Custom"],
             state="readonly", width=20
         )
-        training_preset_combo.grid(row=11, column=1, sticky=tk.W, padx=5, pady=2)
+        training_preset_combo.grid(row=10, column=1, sticky=tk.W, padx=5, pady=2)
         training_preset_combo.bind("<<ComboboxSelected>>", self._on_training_preset_changed)
         ttk.Label(training_content,
                   text="Identity = single 1-16  |  Style = style+comp blocks @ late ts (0-400)  |  Style+Composition = double 0-7 + single 0-1  |  Details = single 12-23",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(row=12, column=0, columnspan=2, sticky=tk.W, padx=5)
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(row=11, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # Custom block picker panel (hidden unless preset == Custom)
         self._training_custom_frame = ttk.Frame(training_content)
-        self._training_custom_frame.grid(row=13, column=0, columnspan=2, sticky=tk.W, padx=15, pady=(4, 4))
+        self._training_custom_frame.grid(row=12, column=0, columnspan=2, sticky=tk.W, padx=15, pady=(4, 4))
         self.training_block_vars = {}  # block_name -> BooleanVar
 
         tc_header = ttk.Frame(self._training_custom_frame)
@@ -1846,9 +1848,9 @@ class LoRATrainerGUI:
         self._training_custom_frame.grid_remove()  # hidden until preset == Custom
 
         # Context LoRA (optional) — train new LoRA with an existing one frozen + active on the base
-        ttk.Label(training_content, text="Context LoRA:").grid(row=14, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        ttk.Label(training_content, text="Context LoRA:").grid(row=13, column=0, sticky=tk.W, padx=5, pady=(8, 2))
         ctx_frame = ttk.Frame(training_content)
-        ctx_frame.grid(row=14, column=1, sticky=tk.W, padx=5, pady=(8, 2))
+        ctx_frame.grid(row=13, column=1, sticky=tk.W, padx=5, pady=(8, 2))
         self.entries["CONTEXT_LORA_PATH"] = ttk.Entry(ctx_frame, width=42)
         self.entries["CONTEXT_LORA_PATH"].pack(side=tk.LEFT)
         ttk.Button(ctx_frame, text="Browse",
@@ -1861,12 +1863,12 @@ class LoRATrainerGUI:
                   text="Train this LoRA with an existing LoRA already active on the base model. "
                        "Pair with same context+strength at inference.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
+            row=14, column=0, columnspan=2, sticky=tk.W, padx=5)
         ttk.Label(training_content,
                   text="⚠ Context LoRAs usually look better in ComfyUI than in training samples — "
                        "don't worry if previews look rough, test the output LoRA in ComfyUI.",
                   foreground="#E67E22", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=16, column=0, columnspan=2, sticky=tk.W, padx=5)
+            row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -5626,7 +5628,8 @@ class LoRATrainerGUI:
         self._log(f"Face crops: {face_crops} | No face: {no_face}\n")
 
     def _auto_prep_images(self, source_folder, output_folder, max_size, face_mode, face_padding, replace_originals):
-        """Auto Prep mode: resize originals in place, then generate FaceCrop derivatives."""
+        """Auto Prep mode: resize originals + generate face crops from the HIGH-RES original
+        (before it gets overwritten/moved), then handle originals."""
         self._log(f"Mode: Auto Prep (Face Crops)\n")
         self._log(f"Face target: {face_mode}, padding: {face_padding}%\n")
         self._log(f"Output: {output_folder}\n\n")
@@ -5634,9 +5637,8 @@ class LoRATrainerGUI:
         files = self._get_image_files(source_folder)
         converted, skipped, errors = 0, 0, 0
         face_crops_created, no_face = 0, 0
+        crop_index = self._get_next_facecrop_index(output_folder)
 
-        # Phase A: Resize/convert originals
-        self._log("--- Phase 1: Resize/Convert Originals ---\n")
         for filepath in files:
             filename = os.path.basename(filepath)
             ext = os.path.splitext(filename)[1].lower()
@@ -5649,78 +5651,54 @@ class LoRATrainerGUI:
                 continue
 
             try:
-                img = self._load_image(filepath)
-                original_size = img.size
-                img, resized = self._resize_image(img, max_size)
-                w, h = img.size
+                # Load original at full resolution
+                original_img = self._load_image(filepath)
+                original_size = original_img.size
 
+                # --- Face crop from the HIGH-RES original (before resize) ---
+                try:
+                    faces = self.face_detector.detect_from_pil(original_img)
+                    if faces:
+                        selected, note = self._select_face(faces, face_mode)
+                        if note:
+                            self._log(note)
+                        if selected:
+                            cropped = crop_to_face(original_img, selected, face_padding)
+                            cropped, _ = self._resize_image(cropped, max_size)
+                            crop_name = f"FaceCrop_{crop_index:03d}.png"
+                            crop_path = os.path.join(output_folder, crop_name)
+                            cropped.save(crop_path, "PNG")
+                            cw, ch = cropped.size
+                            self._log(f"Face crop: {crop_name} ({cw}x{ch}) from {filename} ({original_size[0]}x{original_size[1]}) [{selected.gender}]\n")
+                            face_crops_created += 1
+                            crop_index += 1
+                            cropped.close()
+                        else:
+                            no_face += 1
+                    else:
+                        self._log(f"No face: {filename}\n")
+                        no_face += 1
+                except Exception as e:
+                    self._log(f"Face crop error ({filename}): {e}\n")
+
+                # --- Resize and save the main image ---
+                resized_img, resized = self._resize_image(original_img, max_size)
+                w, h = resized_img.size
                 output_path = os.path.join(output_folder, base_name + ".png")
 
                 if filepath == output_path and ext == '.png' and not resized:
                     self._log(f"OK (no changes): {filename}\n")
                     skipped += 1
-                    img.close()
+                    resized_img.close()
                     continue
 
-                img.save(output_path, "PNG")
+                resized_img.save(output_path, "PNG")
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if resized else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]\n")
                 converted += 1
-                img.close()
+                resized_img.close()
 
                 self._handle_original(filepath, output_path, output_folder, replace_originals)
-
-            except Exception as e:
-                self._log(f"Error ({filename}): {e}\n")
-                errors += 1
-
-        # Phase B: Generate face crop derivatives
-        self._log(f"\n--- Phase 2: Generate Face Crop Derivatives ---\n")
-        crop_index = self._get_next_facecrop_index(output_folder)
-
-        # Re-scan output folder for the resized originals (they're now in output_folder)
-        output_files = self._get_image_files(output_folder)
-
-        for filepath in output_files:
-            filename = os.path.basename(filepath)
-            base_name = os.path.splitext(filename)[0]
-
-            # Skip existing FaceCrop derivatives
-            if base_name.startswith("FaceCrop_"):
-                continue
-
-            try:
-                img = self._load_image(filepath)
-
-                faces = self.face_detector.detect_from_pil(img)
-                if not faces:
-                    self._log(f"No face: {filename}\n")
-                    no_face += 1
-                    img.close()
-                    continue
-
-                selected, note = self._select_face(faces, face_mode)
-                if note:
-                    self._log(note)
-
-                if not selected:
-                    no_face += 1
-                    img.close()
-                    continue
-
-                cropped = crop_to_face(img, selected, face_padding)
-                cropped, _ = self._resize_image(cropped, max_size)
-
-                crop_name = f"FaceCrop_{crop_index:03d}.png"
-                crop_path = os.path.join(output_folder, crop_name)
-                cropped.save(crop_path, "PNG")
-                w, h = cropped.size
-                self._log(f"Created: {crop_name} ({w}x{h}) from {filename} [{selected.gender}]\n")
-                face_crops_created += 1
-                crop_index += 1
-
-                cropped.close()
-                img.close()
 
             except Exception as e:
                 self._log(f"Error ({filename}): {e}\n")

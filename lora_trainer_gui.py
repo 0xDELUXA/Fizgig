@@ -61,6 +61,22 @@ ACTIVE_ENTRY_BG = "white"  # Background color for active entry field
 ACTIVE_ENTRY_FG = "black"  # Text color for active entry field
 
 
+class _GUIWriter:
+    """Redirect stdout/stderr to the GUI log buffer when running under pythonw."""
+    def __init__(self, gui_ref, stream_name):
+        self._gui = gui_ref
+        self._name = stream_name
+    def write(self, text):
+        if text and text.strip():
+            try:
+                self._gui.master.after(0, self._gui._append_global_log,
+                                       f"[{self._name}] {text}")
+            except Exception:
+                pass
+    def flush(self):
+        pass
+
+
 class ToolTip:
     """Simple tooltip class for tkinter widgets"""
     def __init__(self, widget, text):
@@ -73,9 +89,10 @@ class ToolTip:
     def show_tooltip(self, event=None):
         if self.tooltip_window:
             return
-        x, y, _, _ = self.widget.bbox("insert") if hasattr(self.widget, 'bbox') else (0, 0, 0, 0)
-        x += self.widget.winfo_rootx() + 25
-        y += self.widget.winfo_rooty() + 25
+        bbox = self.widget.bbox("insert") if hasattr(self.widget, 'bbox') else None
+        bx, by = (bbox[0], bbox[1]) if bbox else (0, 0)
+        x = bx + self.widget.winfo_rootx() + 25
+        y = by + self.widget.winfo_rooty() + 25
 
         self.tooltip_window = tw = tk.Toplevel(self.widget)
         tw.wm_overrideredirect(True)
@@ -568,6 +585,18 @@ class LoRATrainerGUI:
         self.samples_watcher_running = False  # For live gallery updates
         self.samples_watcher_thread = None
 
+        # Global log buffer + console popup state
+        self._log_buffer = []
+        self._console_popup = None
+        self._console_popup_text = None
+        self._captioning_running = False
+        self._translating = False
+
+        # Redirect stdout/stderr when running under pythonw.exe (no console)
+        if sys.stdout is None or sys.stderr is None:
+            sys.stdout = _GUIWriter(self, "stdout")
+            sys.stderr = _GUIWriter(self, "stderr")
+
         # HTTP server for samples gallery (avoids CORS issues)
         self.gallery_server = None
         self.gallery_server_port = None
@@ -749,9 +778,21 @@ class LoRATrainerGUI:
 
         self.setup_styles()
 
+        # Status indicator bar (thin strip above the notebook)
+        self._status_bar = tk.Frame(master, bg=COLORS["bg_deep"])
+        self._status_bar.pack(fill=tk.X, side=tk.TOP, padx=10, pady=(6, 0))
+        self._status_canvas = tk.Canvas(self._status_bar, width=16, height=16,
+                                        bg=COLORS["bg_deep"], highlightthickness=0,
+                                        cursor="hand2")
+        self._status_canvas.pack(side=tk.RIGHT, padx=(0, 4))
+        self._status_indicator = self._status_canvas.create_oval(
+            2, 2, 14, 14, fill=COLORS["success"], outline="")
+        self._status_canvas.bind("<Button-1>", lambda e: self._open_console_popup())
+        ToolTip(self._status_canvas, "Click to view console log")
+
         # Create notebook and tabs
         self.notebook = ttk.Notebook(master)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(4, 10))
 
         # Tabs ordered by natural workflow: Start -> Prep -> Caption -> Train -> everything else.
         # The old Dataset tab was folded into Training (Other Options → Dataset subsection);
@@ -844,9 +885,113 @@ class LoRATrainerGUI:
         # Reset flag when folder changes so images reload on next tab visit
         self.image_folder_var.trace_add("write", self._on_caption_folder_changed)
 
+        # Start status indicator polling
+        self._update_status_indicator()
+
         # Auto-save dataset config on startup if all fields are valid
         # This ensures training works immediately without manual "Save and Activate"
         self.auto_save_dataset_config_silent()
+
+    # ── Global log + status indicator ───────────────────────────────────
+
+    def _append_global_log(self, text):
+        """Append text to the global log buffer and push to popup if open."""
+        self._log_buffer.append(text)
+        if len(self._log_buffer) > 50000:
+            self._log_buffer = self._log_buffer[-40000:]
+        if self._console_popup_text is not None:
+            try:
+                at_bottom = self._console_popup_text.yview()[1] >= 0.999
+                self._console_popup_text.configure(state="normal")
+                self._console_popup_text.insert(tk.END, text)
+                if at_bottom:
+                    self._console_popup_text.see(tk.END)
+                self._console_popup_text.configure(state="disabled")
+            except Exception:
+                pass
+
+    def _is_any_busy(self):
+        """Return True if any background work is in progress."""
+        if self.current_process is not None:
+            try:
+                if self.current_process.poll() is None:
+                    return True
+            except Exception:
+                pass
+        if getattr(self, '_captioning_running', False):
+            return True
+        if getattr(self, '_translating', False):
+            return True
+        if getattr(self, '_repair_preview_in_flight', False):
+            return True
+        if getattr(self, '_explorer_generating', False):
+            return True
+        # Profiler running (button disabled while active)
+        if hasattr(self, 'profiler_run_btn'):
+            try:
+                if str(self.profiler_run_btn.cget("state")) == "disabled":
+                    return True
+            except Exception:
+                pass
+        # Extractor running
+        if hasattr(self, 'extract_run_btn'):
+            try:
+                if str(self.extract_run_btn.cget("state")) == "disabled":
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def _update_status_indicator(self):
+        """Poll busy state and update the indicator colour."""
+        try:
+            color = COLORS["error"] if self._is_any_busy() else COLORS["success"]
+            self._status_canvas.itemconfig(self._status_indicator, fill=color)
+        except Exception:
+            pass
+        self.master.after(500, self._update_status_indicator)
+
+    def _open_console_popup(self):
+        """Open (or raise) the console log popup window."""
+        if self._console_popup is not None:
+            try:
+                if self._console_popup.winfo_exists():
+                    self._console_popup.lift()
+                    return
+            except Exception:
+                pass
+            self._console_popup = None
+
+        win = tk.Toplevel(self.master)
+        win.title("Fizgig — Console Log")
+        win.geometry("900x500")
+        win.minsize(400, 200)
+        win.configure(bg=COLORS["bg_deep"])
+
+        text = tk.Text(win, bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
+                       font=("Consolas", 9), wrap="word", state="disabled",
+                       selectbackground=COLORS["accent"], borderwidth=0,
+                       padx=12, pady=8)
+        scrollbar = ttk.Scrollbar(win, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Populate with existing history
+        text.configure(state="normal")
+        text.insert(tk.END, "".join(self._log_buffer))
+        text.see(tk.END)
+        text.configure(state="disabled")
+
+        self._console_popup = win
+        self._console_popup_text = text
+
+        def _on_close():
+            self._console_popup = None
+            self._console_popup_text = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
 
     def _on_caption_folder_changed(self, *args):
         """Reset caption images loaded flag when folder changes"""
@@ -3344,6 +3489,7 @@ class LoRATrainerGUI:
 
     def _translate_captions_worker(self, folder: str):
         """Background worker: load Qwen3, walk folder, translate each .txt, write back."""
+        self._translating = True
         import glob
         files = sorted(glob.glob(os.path.join(folder, "*.txt")))
         if not files:
@@ -3404,6 +3550,7 @@ class LoRATrainerGUI:
                 ))
         finally:
             self._unload_translator()
+            self._translating = False
         self.master.after(0, lambda: self.update_caption_log(
             f"=== Done: {translated} translated, {skipped} skipped, {failed} failed ===\n"
         ))
@@ -3492,6 +3639,7 @@ class LoRATrainerGUI:
 
         # Run in thread
         self.captioning_stop_flag = False
+        self._captioning_running = True
         self.caption_stop_btn.configure(state=tk.NORMAL)
 
         def caption_thread():
@@ -3514,6 +3662,7 @@ class LoRATrainerGUI:
                 else:
                     self.master.after(0, lambda f=os.path.basename(img_path): self.update_caption_log(f"✗ {f} (failed)\n"))
 
+            self._captioning_running = False
             self.master.after(0, lambda: self.update_caption_log(f"\nCaptioning complete!\n"))
             self.master.after(0, lambda: self.caption_stop_btn.configure(state=tk.DISABLED))
             self.master.after(0, self.refresh_caption_images)
@@ -3528,6 +3677,7 @@ class LoRATrainerGUI:
 
         images = list(self.selected_images)
         self.captioning_stop_flag = False
+        self._captioning_running = True
         self.caption_stop_btn.configure(state=tk.NORMAL)
 
         def caption_thread():
@@ -3547,6 +3697,7 @@ class LoRATrainerGUI:
                     self.save_caption_with_trigger(img_path, caption)
                     self.master.after(0, lambda f=os.path.basename(img_path): self.update_caption_log(f"✓ {f}\n"))
 
+            self._captioning_running = False
             self.master.after(0, lambda: self.update_caption_log(f"\nCaptioning complete!\n"))
             self.master.after(0, lambda: self.caption_stop_btn.configure(state=tk.DISABLED))
             self.master.after(0, self.refresh_caption_images)
@@ -3593,6 +3744,7 @@ class LoRATrainerGUI:
 
     def update_caption_log(self, text):
         """Update the caption log (preserves user scroll position)."""
+        self._append_global_log(text)
         self._smart_text_insert(self.caption_log, text)
         self.master.update_idletasks()
 
@@ -5172,6 +5324,7 @@ class LoRATrainerGUI:
 
     def _log(self, text):
         """Append text to the convert log (preserves user scroll position)."""
+        self._append_global_log(text)
         try:
             at_bottom = self.convert_log.yview()[1] >= 0.999
         except Exception:
@@ -6915,6 +7068,7 @@ class LoRATrainerGUI:
 
     def _extract_log(self, text):
         """Append to extract log (preserves user scroll position)."""
+        self._append_global_log(text)
         self._smart_text_insert(self.extract_log, text)
 
     def _open_extract_folder(self):
@@ -7382,6 +7536,7 @@ class LoRATrainerGUI:
 
     def _profiler_log(self, text):
         """Append to profiler log (preserves user scroll position)."""
+        self._append_global_log(text)
         self._smart_text_insert(self.profiler_results, text)
 
     def _run_profiler(self):
@@ -9391,6 +9546,7 @@ class LoRATrainerGUI:
         """Update training console — only auto-scroll if user was already at the bottom.
         Uses the widget's own yview() position as the authoritative signal; the older
         self.user_scrolled flag sometimes got out of sync with actual widget state."""
+        self._append_global_log(line)
         try:
             at_bottom = self.console_output.yview()[1] >= 0.999
         except Exception:
@@ -9722,7 +9878,7 @@ class LoRATrainerGUI:
             "LORA_OUTPUT_DIR": self.entries["LORA_OUTPUT_DIR"].get(),
             "LORA_NAME": self.entries["LORA_NAME"].get(),
             "RESUME_TRAINING": self.entries["RESUME_TRAINING"].get(),
-            "OPTIMIZER_TYPE": optimizer_type,
+            "OPTIMIZER_TYPE": self.entries["OPTIMIZER_TYPE"].get(),
             "OPTIMIZER_ARGS": self.entries["OPTIMIZER_ARGS"].get(),
             "ATTENTION_MECHANISM": self.entries["ATTENTION_MECHANISM"].get(),
             "LOGGING_DIR": self.entries["LOGGING_DIR"].get(),
@@ -10452,11 +10608,12 @@ class LoRATrainerGUI:
             if hasattr(self, 'sample_settings_frame'):
                 self.update_samples_ui_for_architecture()
 
-root = tk.Tk()
-gui = LoRATrainerGUI(root)
-# Detect leftover paused training state from a prior session
-try:
-    gui._check_for_paused_state_on_startup()
-except Exception:
-    pass
-root.mainloop()
+if __name__ == "__main__":
+    root = tk.Tk()
+    gui = LoRATrainerGUI(root)
+    # Detect leftover paused training state from a prior session
+    try:
+        gui._check_for_paused_state_on_startup()
+    except Exception:
+        pass
+    root.mainloop()

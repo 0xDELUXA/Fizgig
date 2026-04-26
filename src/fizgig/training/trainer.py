@@ -1182,20 +1182,15 @@ class KleinTrainer:
             vae.to("cpu")
             clean_memory_on_device(device)
 
-        # Denoise
+        # Denoise — always use guidance embedding (matching ComfyUI's Flux2 approach).
+        # Klein 9B Base and Distilled both support guidance embed; CFG with negative
+        # prompts is not how ComfyUI handles Flux2 and produces artifacts.
         timesteps = get_schedule(sample_steps, x.shape[1], discrete_flow_shift)
-        if self.model_version_info.guidance_distilled:
-            x = denoise(
-                model, x, x_ids, ctx, ctx_ids,
-                timesteps=timesteps, guidance=guidance_scale,
-                img_cond_seq=ref_tokens, img_cond_seq_ids=ref_ids,
-            )
-        else:
-            x = denoise_cfg(
-                model, x, x_ids, ctx, ctx_ids, negative_ctx, negative_ctx_ids,
-                timesteps=timesteps, guidance=guidance_scale,
-                img_cond_seq=ref_tokens, img_cond_seq_ids=ref_ids,
-            )
+        x = denoise(
+            model, x, x_ids, ctx, ctx_ids,
+            timesteps=timesteps, guidance=guidance_scale,
+            img_cond_seq=ref_tokens, img_cond_seq_ids=ref_ids,
+        )
 
         # Unpack to spatial
         x = torch.cat(scatter_ids(x, x_ids)).squeeze(2)
@@ -1316,11 +1311,9 @@ class KleinTrainer:
         if seed is not None:
             logger.info(f"  seed: {seed}")
 
+        # Klein 9B uses guidance embedding (like ComfyUI) — not CFG with negative prompts.
+        # Negative prompts are ignored for sample generation to match ComfyUI output.
         do_classifier_free_guidance = False
-        if negative_prompt is not None:
-            do_classifier_free_guidance = True
-            logger.info(f"  negative: {negative_prompt}")
-            logger.info(f"  cfg_scale: {cfg_scale}")
 
         # Run inference
         has_self_ref_orig_mod = getattr(transformer, "_orig_mod", None) is transformer

@@ -273,7 +273,7 @@ ARCHITECTURES = {
         # Sample generation settings
         "supports_samples": True,
         "sample_guidance_default": 3.5,
-        "sample_cfg_default": 3.5,
+        "sample_cfg_default": 4.5,
         "sample_flow_shift_default": 2.02,
         "sample_steps_default": 20,
         "sample_width_default": 1024,
@@ -767,7 +767,7 @@ class LoRATrainerGUI:
             "SAMPLE_AT_FIRST": True,
             "SAMPLE_FLOW_SHIFT": 2.02,
             "SAMPLE_GUIDANCE": 4.0,
-            "SAMPLE_NEGATIVE": "bad photo, bad, low quality",
+            "SAMPLE_NEGATIVE": "blurry, low detail, noisy, washed out, oversaturated, distorted anatomy, extra limbs, duplicate objects, text, watermark, logo, frame, cropped subject, flat lighting, muddy colors",
             "SAMPLE_CFG_SCALE": 1.0,
             # Florence captioning settings
             "CAPTION_TRIGGER_WORD": "",

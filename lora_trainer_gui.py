@@ -893,6 +893,10 @@ class LoRATrainerGUI:
         # Reset flag when folder changes so images reload on next tab visit
         self.image_folder_var.trace_add("write", self._on_caption_folder_changed)
 
+        # Prevent mousewheel from accidentally changing Combobox/Spinbox values
+        self.master.bind_class("TCombobox", "<MouseWheel>", lambda e: "break")
+        self.master.bind_class("TSpinbox", "<MouseWheel>", lambda e: "break")
+
         # Start status indicator polling
         self._update_status_indicator()
 

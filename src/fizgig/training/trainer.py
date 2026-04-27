@@ -2132,7 +2132,11 @@ class KleinTrainer:
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
                 if anchor_pool is not None:
-                    logs["anchor_w"] = round(aw, 4)
+                    _ao_epochs = getattr(args, "anchor_only_epochs", 0) or 0
+                    if epoch < _ao_epochs:
+                        logs["phase"] = "anchor-only"
+                    else:
+                        logs["anchor_w"] = 0.0
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:

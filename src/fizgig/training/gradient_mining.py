@@ -1,21 +1,23 @@
-"""Gradient Mining — discover and amplify hidden learning signal in LoRA training.
+"""Gradient Mining — Signal-to-Noise amplification for LoRA training.
 
-Runs an alternating probe step at high LR to reveal gradient signal that exists
-below the noise floor of normal training. Parameters where the probe finds
-significant movement but the normal step doesn't are selectively amplified.
+Tracks per-parameter gradient statistics (EMA of mean and variance) over time.
+Parameters with consistent directional signal that's too quiet to drive learning
+are selectively amplified. Parameters with noisy, directionless gradients are
+left alone or suppressed.
 
-No external reference images, no extra loss term. Purely amplifies what the
-model's own training data is trying to teach it.
+No external reference images, no extra loss term, no second forward/backward pass.
+Just listens harder to what the model is already trying to learn.
 
 Usage:
-    miner = GradientMiner(probe_multiplier=10.0, amplify_scale=0.5, threshold_ratio=0.1)
+    miner = GradientMiner(ema_decay=0.99, amplify_scale=2.0, min_snr=0.1)
     ...
-    # In training loop, replace normal backward+step with:
-    stats = miner.mine_and_step(network, optimizer, loss_fn, ...)
+    # After backward, before optimizer.step():
+    stats = miner.amplify_gradients(network)
+    optimizer.step()
 """
 
 import logging
-from typing import Dict, Optional, Callable
+from typing import Dict
 
 import torch
 
@@ -23,133 +25,112 @@ logger = logging.getLogger(__name__)
 
 
 class GradientMiner:
-    """Discovers hidden learning signal by probing at high LR and amplifying
-    parameters where the probe found movement that normal training missed."""
+    """Amplifies suppressed learning signal based on per-parameter gradient SNR.
+
+    Tracks exponential moving averages of gradient magnitude (signal) and
+    gradient variance (noise) for each parameter. Parameters with high
+    signal-to-noise ratio (consistent direction, low variance) get amplified.
+    Parameters with low SNR (noisy, directionless) are left unchanged.
+    """
 
     def __init__(
         self,
-        probe_multiplier: float = 10.0,
-        amplify_scale: float = 0.5,
-        threshold_ratio: float = 0.1,
+        ema_decay: float = 0.99,
+        amplify_scale: float = 2.0,
+        min_snr: float = 0.1,
     ):
         """
         Args:
-            probe_multiplier: Probe LR = main_LR * this. Higher = more aggressive probe.
-            amplify_scale: How much of the discovered signal to inject (0-1).
-            threshold_ratio: A parameter is "hidden signal" if normal grad < threshold
-                           AND probe grad > threshold. The threshold is computed as
-                           threshold_ratio * mean(abs(probe_grads)) per parameter.
+            ema_decay: EMA smoothing factor for gradient stats (0.99 = slow adaptation,
+                      0.9 = fast adaptation). Higher = more history, more stable detection.
+            amplify_scale: Maximum amplification factor for high-SNR parameters.
+                          1.0 = no amplification, 2.0 = up to 2x, etc.
+            min_snr: Minimum SNR threshold below which no amplification is applied.
+                    Prevents amplifying pure noise.
         """
-        self.probe_multiplier = probe_multiplier
+        self.ema_decay = ema_decay
         self.amplify_scale = amplify_scale
-        self.threshold_ratio = threshold_ratio
+        self.min_snr = min_snr
 
-        # Running stats for logging
-        self.total_params = 0
-        self.mined_params = 0
-        self.last_mine_ratio = 0.0
+        # Per-parameter EMA stats — populated on first step
+        self._ema_mean: Dict[str, torch.Tensor] = {}   # EMA of grad (signed — tracks direction)
+        self._ema_sq: Dict[str, torch.Tensor] = {}     # EMA of grad^2 (tracks variance)
+        self._step_count = 0
 
-    def mine_and_step(
-        self,
-        network: torch.nn.Module,
-        optimizer: torch.optim.Optimizer,
-        accelerator,
-        loss: torch.Tensor,
-        network_dtype: torch.dtype,
-    ) -> Dict[str, float]:
-        """Run normal backward, probe backward, mine hidden signal, apply combined update.
+        # Stats for logging
+        self.last_amplified_ratio = 0.0
+        self.last_avg_snr = 0.0
+        self.last_avg_boost = 0.0
+
+    def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
+        """Analyze and amplify gradients in-place based on accumulated SNR stats.
+
+        Call this AFTER backward() and BEFORE optimizer.step().
 
         Args:
-            network: The LoRA network (trainable parameters).
-            optimizer: The optimizer (Adam, AdamW, etc.).
-            accelerator: HuggingFace Accelerator for backward().
-            loss: The computed loss tensor (before backward).
-            network_dtype: dtype for the network parameters.
+            network: The LoRA network with .grad populated on parameters.
 
         Returns:
             Dict with mining stats for logging.
         """
-        # Get trainable LoRA parameters
-        lora_params = [p for p in network.parameters() if p.requires_grad]
-        if not lora_params:
-            # No trainable params — just do normal step
-            accelerator.backward(loss)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            return {"mined": 0, "total": 0, "ratio": 0.0}
-
-        # Step 1: Normal backward — get gradients at normal LR
-        accelerator.backward(loss)
-
-        # Capture normal gradients (clone before optimizer modifies them)
-        normal_grads = {}
-        for name, param in network.named_parameters():
-            if param.requires_grad and param.grad is not None:
-                normal_grads[name] = param.grad.clone().detach()
-
-        # Save optimizer state for restore after probe
-        # (Adam momentum/variance would be corrupted by probe step)
-        optimizer.zero_grad(set_to_none=True)
-
-        # Step 2: Probe backward at high LR
-        # We need to recompute loss — but we can't, the computation graph is consumed.
-        # Instead, we scale the normal gradients to simulate what high LR would produce.
-        # This is mathematically equivalent for SGD: high_lr_grad = grad * multiplier
-        # For Adam, the gradient magnitude affects the update direction via momentum,
-        # so this is an approximation — but a useful one.
-        probe_grads = {}
-        for name in normal_grads:
-            probe_grads[name] = normal_grads[name] * self.probe_multiplier
-
-        # Step 3: Mine — find hidden signal
+        self._step_count += 1
         total_params = 0
-        mined_params = 0
-        combined_grads = {}
+        amplified_params = 0
+        snr_sum = 0.0
+        boost_sum = 0.0
 
-        for name in normal_grads:
-            normal_g = normal_grads[name]
-            probe_g = probe_grads[name]
-
-            abs_normal = normal_g.abs()
-            abs_probe = probe_g.abs()
-
-            # Adaptive threshold: based on mean probe gradient magnitude per parameter
-            threshold = abs_probe.mean() * self.threshold_ratio
-
-            # Hidden signal: probe found movement, normal didn't
-            # (probe is above threshold AND normal is below threshold)
-            hidden_mask = (abs_probe > threshold) & (abs_normal < threshold)
-
-            n_total = normal_g.numel()
-            n_mined = hidden_mask.sum().item()
-            total_params += n_total
-            mined_params += n_mined
-
-            # Combined gradient: normal + amplified hidden signal from probe
-            combined = normal_g.clone()
-            if n_mined > 0:
-                combined[hidden_mask] = (
-                    normal_g[hidden_mask]
-                    + self.amplify_scale * probe_g[hidden_mask]
-                )
-            combined_grads[name] = combined
-
-        # Step 4: Apply combined gradients
         for name, param in network.named_parameters():
-            if name in combined_grads:
-                param.grad = combined_grads[name]
+            if not param.requires_grad or param.grad is None:
+                continue
 
-        # Normal optimizer step with the enhanced gradients
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
+            grad = param.grad
+            total_params += 1
+
+            # Update EMA stats
+            if name not in self._ema_mean:
+                # First step — initialise from current gradient
+                self._ema_mean[name] = grad.detach().clone()
+                self._ema_sq[name] = (grad.detach() ** 2).clone()
+                continue  # Don't amplify on first step — no history yet
+
+            # EMA update: mean tracks signed direction, sq tracks magnitude
+            self._ema_mean[name].mul_(self.ema_decay).add_(grad.detach(), alpha=1.0 - self.ema_decay)
+            self._ema_sq[name].mul_(self.ema_decay).add_(grad.detach() ** 2, alpha=1.0 - self.ema_decay)
+
+            # Compute per-element signal-to-noise ratio
+            signal = self._ema_mean[name].abs()       # consistent direction = high
+            variance = self._ema_sq[name] - self._ema_mean[name] ** 2
+            noise = variance.clamp(min=0).sqrt()       # std dev of gradient
+
+            snr = signal / (noise + 1e-8)
+
+            # Average SNR for this parameter (for logging)
+            param_snr = snr.mean().item()
+            snr_sum += param_snr
+
+            # Compute amplification factor: scales from 1.0 to amplify_scale
+            # based on SNR. High SNR = amplify more. Low SNR = leave alone.
+            # Using tanh to smoothly saturate at amplify_scale.
+            boost = 1.0 + (self.amplify_scale - 1.0) * torch.tanh(snr - self.min_snr).clamp(min=0)
+
+            # Only count as "amplified" if boost is meaningfully above 1.0
+            n_boosted = (boost > 1.05).sum().item()
+            if n_boosted > 0:
+                amplified_params += 1
+                boost_sum += boost.mean().item()
+
+            # Apply amplification in-place
+            param.grad.mul_(boost)
 
         # Update stats
-        self.total_params = total_params
-        self.mined_params = mined_params
-        self.last_mine_ratio = mined_params / max(total_params, 1)
+        self.last_amplified_ratio = amplified_params / max(total_params, 1)
+        self.last_avg_snr = snr_sum / max(total_params, 1)
+        self.last_avg_boost = boost_sum / max(amplified_params, 1) if amplified_params > 0 else 1.0
 
         return {
-            "mined": mined_params,
+            "amplified": amplified_params,
             "total": total_params,
-            "ratio": self.last_mine_ratio,
+            "ratio": self.last_amplified_ratio,
+            "avg_snr": self.last_avg_snr,
+            "avg_boost": self.last_avg_boost,
         }

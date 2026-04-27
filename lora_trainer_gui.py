@@ -1880,21 +1880,20 @@ class LoRATrainerGUI:
         self.gradient_mining_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mining_frame, text="Gradient Mining",
                         variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(mining_frame, text="Probe:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_PROBE"] = ttk.Entry(mining_frame, width=5)
-        self.entries["GRADIENT_MINING_PROBE"].insert(0, "10")
-        self.entries["GRADIENT_MINING_PROBE"].pack(side=tk.LEFT, padx=(0, 4))
-        ttk.Label(mining_frame, text="x LR").pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(mining_frame, text="Amplify:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_frame, width=5)
-        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "0.5")
+        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "2.0")
         self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(mining_frame, text="Threshold:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(mining_frame, text="Min SNR:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_frame, width=5)
         self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.1")
-        self.entries["GRADIENT_MINING_THRESHOLD"].pack(side=tk.LEFT)
+        self.entries["GRADIENT_MINING_THRESHOLD"].pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(mining_frame, text="EMA:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_frame, width=5)
+        self.entries["GRADIENT_MINING_EMA"].insert(0, "0.99")
+        self.entries["GRADIENT_MINING_EMA"].pack(side=tk.LEFT)
         ttk.Label(training_content,
-                  text="Experimental: probes at high LR to discover hidden learning signal, then amplifies it. "
+                  text="Experimental: amplifies suppressed learning signal based on gradient consistency. "
                        "No external images needed.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
             row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
@@ -10185,15 +10184,15 @@ class LoRATrainerGUI:
         # Gradient mining (experimental)
         if hasattr(self, 'gradient_mining_var') and self.gradient_mining_var.get():
             command.append("--gradient_mining")
-            probe = self.entries.get("GRADIENT_MINING_PROBE")
-            if probe:
-                command.extend(["--gradient_mining_probe_multiplier", probe.get().strip() or "10"])
             amplify = self.entries.get("GRADIENT_MINING_AMPLIFY")
             if amplify:
-                command.extend(["--gradient_mining_amplify", amplify.get().strip() or "0.5"])
+                command.extend(["--gradient_mining_amplify", amplify.get().strip() or "2.0"])
             threshold = self.entries.get("GRADIENT_MINING_THRESHOLD")
             if threshold:
                 command.extend(["--gradient_mining_threshold", threshold.get().strip() or "0.1"])
+            ema = self.entries.get("GRADIENT_MINING_EMA")
+            if ema:
+                command.extend(["--gradient_mining_ema_decay", ema.get().strip() or "0.99"])
 
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()

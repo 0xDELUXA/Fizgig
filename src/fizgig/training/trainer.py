@@ -1896,13 +1896,13 @@ class KleinTrainer:
         if getattr(args, "gradient_mining", False):
             from fizgig.training.gradient_mining import GradientMiner
             gradient_miner = GradientMiner(
-                probe_multiplier=getattr(args, "gradient_mining_probe_multiplier", 10.0),
-                amplify_scale=getattr(args, "gradient_mining_amplify", 0.5),
-                threshold_ratio=getattr(args, "gradient_mining_threshold", 0.1),
+                ema_decay=getattr(args, "gradient_mining_ema_decay", 0.99),
+                amplify_scale=getattr(args, "gradient_mining_amplify", 2.0),
+                min_snr=getattr(args, "gradient_mining_threshold", 0.1),
             )
             logger.info(
-                f"Gradient mining enabled: probe={gradient_miner.probe_multiplier}x, "
-                f"amplify={gradient_miner.amplify_scale}, threshold={gradient_miner.threshold_ratio}"
+                f"Gradient mining enabled: amplify={gradient_miner.amplify_scale}x, "
+                f"min_snr={gradient_miner.min_snr}, ema_decay={gradient_miner.ema_decay}"
             )
 
         # ------------------------------------------------------------------
@@ -2016,13 +2016,12 @@ class KleinTrainer:
 
                     loss = noise_loss
 
-                    # Backward + step (gradient mining or standard)
+                    # Backward
+                    accelerator.backward(loss)
+
+                    # Gradient mining: amplify suppressed signal before optimizer step
                     if gradient_miner is not None:
-                        mine_stats = gradient_miner.mine_and_step(
-                            network, optimizer, accelerator, loss, network_dtype,
-                        )
-                    else:
-                        accelerator.backward(loss)
+                        mine_stats = gradient_miner.amplify_gradients(network)
 
                     if accelerator.sync_gradients:
                         # Manual gradient sync for DDP
@@ -2043,13 +2042,10 @@ class KleinTrainer:
                                 except (TypeError, ValueError):
                                     pass
 
-                    if gradient_miner is None:
-                        # Standard path — gradient mining does its own step
-                        optimizer.step()
+                    optimizer.step()
                     if not args.adaptive_lr:
                         lr_scheduler.step()
-                    if gradient_miner is None:
-                        optimizer.zero_grad(set_to_none=True)
+                    optimizer.zero_grad(set_to_none=True)
 
                 # Weight norm regularization
                 if args.scale_weight_norms:
@@ -2094,8 +2090,9 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
-                if gradient_miner is not None:
-                    logs["mined"] = f"{mine_stats['ratio']:.1%}"
+                if gradient_miner is not None and gradient_miner._step_count > 1:
+                    logs["snr"] = f"{mine_stats['avg_snr']:.2f}"
+                    logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:
@@ -2535,13 +2532,13 @@ def setup_parser() -> argparse.ArgumentParser:
 
     # ---- Gradient Mining (experimental) ----
     parser.add_argument("--gradient_mining", action="store_true",
-                        help="Enable gradient mining: probe at high LR to discover and amplify hidden learning signal.")
-    parser.add_argument("--gradient_mining_probe_multiplier", type=float, default=10.0,
-                        help="Probe LR = main_LR * this (default 10.0).")
-    parser.add_argument("--gradient_mining_amplify", type=float, default=0.5,
-                        help="Scale for injected hidden signal (default 0.5).")
+                        help="Enable gradient mining: amplify suppressed learning signal based on gradient SNR.")
+    parser.add_argument("--gradient_mining_amplify", type=float, default=2.0,
+                        help="Max amplification factor for high-SNR parameters (default 2.0).")
     parser.add_argument("--gradient_mining_threshold", type=float, default=0.1,
-                        help="Ratio for hidden signal detection (default 0.1).")
+                        help="Min SNR below which no amplification is applied (default 0.1).")
+    parser.add_argument("--gradient_mining_ema_decay", type=float, default=0.99,
+                        help="EMA smoothing for gradient stats (default 0.99). Lower = faster adaptation.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

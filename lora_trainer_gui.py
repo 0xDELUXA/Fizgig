@@ -1881,13 +1881,13 @@ class LoRATrainerGUI:
         ttk.Checkbutton(mining_row1, text="Gradient Mining",
                         variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
 
-        # Preset dropdown
+        # Preset dropdown — only controls orthogonal scale and min SNR
         self._mining_presets = {
-            "Balanced": {"amplify": "6.0", "snr": "0.001", "ortho": "0.2"},
-            "Identity Lock": {"amplify": "8.0", "snr": "0.001", "ortho": "0.05"},
-            "Style": {"amplify": "5.0", "snr": "0.001", "ortho": "0.4"},
-            "Exploration": {"amplify": "4.0", "snr": "0.001", "ortho": "0.6"},
-            "High Fidelity": {"amplify": "10.0", "snr": "0.001", "ortho": "0.1"},
+            "Identity Lock": {"snr": "0.001", "ortho": "0.05"},
+            "Balanced": {"snr": "0.001", "ortho": "0.2"},
+            "Style": {"snr": "0.001", "ortho": "0.4"},
+            "Exploration": {"snr": "0.001", "ortho": "0.6"},
+            "High Fidelity": {"snr": "0.001", "ortho": "0.1"},
         }
         self._mining_preset_var = tk.StringVar(value="Identity Lock")
         ttk.Label(mining_row1, text="Preset:").pack(side=tk.LEFT, padx=(0, 4))
@@ -1896,35 +1896,25 @@ class LoRATrainerGUI:
         mining_preset_combo.pack(side=tk.LEFT, padx=(0, 12))
         mining_preset_combo.bind("<<ComboboxSelected>>", self._on_mining_preset_changed)
 
-        self.gradient_mining_auto_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(mining_row1, text="Auto threshold",
-                        variable=self.gradient_mining_auto_var).pack(side=tk.LEFT)
-
-        # Controls row
-        mining_row2 = ttk.Frame(training_content)
-        mining_row2.grid(row=17, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(2, 0))
-        ttk.Label(mining_row2, text="Amplify:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row2, width=5)
-        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "8.0")
-        self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(mining_row2, text="Min SNR:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_row2, width=5)
-        self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.001")
-        self.entries["GRADIENT_MINING_THRESHOLD"].pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(mining_row2, text="Orthogonal:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row2, width=5)
+        ttk.Label(mining_row1, text="Orthogonal:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row1, width=5)
         self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.05")
         self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT)
 
-        # EMA box kept but hidden (auto EMA is default)
-        self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_row2, width=5)
+        # Hidden entries for values that are now auto-tuned (kept for preset/save compat)
+        self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row1)
+        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "8.0")
+        self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_row1)
+        self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.001")
+        self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_row1)
         self.entries["GRADIENT_MINING_EMA"].insert(0, "0.95")
+        # Auto threshold always on
+        self.gradient_mining_auto_var = tk.BooleanVar(value=True)
 
         ttk.Label(training_content,
-                  text="Amplifies suppressed learning signal. Identity Lock for characters, "
-                       "Style for artistic LoRAs, Exploration for creative discovery.",
+                  text="Amplifies suppressed learning signal. Amplification, EMA, and threshold auto-tune from gradient agreement.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=18, column=0, columnspan=2, sticky=tk.W, padx=5)
+            row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -4109,6 +4099,12 @@ class LoRATrainerGUI:
         ttk.Checkbutton(
             freq_card, text="Sample at Start", variable=self.sample_at_first_var
         ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+
+        self.use_distilled_samples_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            freq_card, text="Use Distilled model for samples (4-step, matches ComfyUI)",
+            variable=self.use_distilled_samples_var,
+        ).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
 
         # Card 3: Architecture-Specific (Flow Shift / Guidance / Negative / CFG)
         arch_card = self._start_section_card(
@@ -6954,8 +6950,7 @@ class LoRATrainerGUI:
         preset = self._mining_presets.get(name)
         if not preset:
             return
-        for key, entry_key in [("amplify", "GRADIENT_MINING_AMPLIFY"),
-                                ("snr", "GRADIENT_MINING_THRESHOLD"),
+        for key, entry_key in [("snr", "GRADIENT_MINING_THRESHOLD"),
                                 ("ortho", "GRADIENT_MINING_ORTHO")]:
             entry = self.entries.get(entry_key)
             if entry and key in preset:
@@ -10304,6 +10299,15 @@ class LoRATrainerGUI:
 
             if self.sample_at_first_var.get():
                 command.append("--sample_at_first")
+
+            # Use Distilled model for sample generation
+            if getattr(self, 'use_distilled_samples_var', None) and self.use_distilled_samples_var.get():
+                distilled_path = self.prefs_vars.get("distilled_dit", tk.StringVar()).get()
+                if distilled_path and os.path.exists(distilled_path):
+                    command.extend(["--sample_dit", distilled_path])
+                    blocks = self._get_inference_blocks_to_swap()
+                    if blocks > 0:
+                        command.extend(["--sample_blocks_to_swap", str(blocks)])
 
         return command
 

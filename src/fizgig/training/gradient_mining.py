@@ -77,6 +77,7 @@ class GradientMiner:
         self.last_agreement_slope = 0.0
         self._prev_avg_agreement = None
         self.last_effective_ema = ema_decay
+        self.last_effective_amplify = amplify_scale
 
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
         """Filter and amplify gradients in-place. Single-pass optimised.
@@ -175,6 +176,12 @@ class GradientMiner:
         else:
             block_entropy = 1.0
 
+        # ── Auto amplify: scale amplification by agreement level ──
+        # agree=0.6 → full amplify. Higher → push harder. Lower → back off.
+        effective_amplify = self.amplify_scale * (self.last_avg_agreement / 0.6)
+        effective_amplify = max(1.0, effective_amplify)  # never below 1.0 (no effect)
+        self.last_effective_amplify = effective_amplify
+
         # ── Pass 2: Directional filter + amplify + block weight ──
         for name, param in network.named_parameters():
             if name not in param_data:
@@ -205,8 +212,8 @@ class GradientMiner:
             agreement = (cos_sim + 1.0) * 0.5  # [-1,1] → [0,1]
             agreement_sum += agreement
 
-            # Per-element SNR boost
-            boost = 1.0 + (self.amplify_scale - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
+            # Per-element SNR boost (using auto-scaled amplify)
+            boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
 
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
@@ -242,4 +249,5 @@ class GradientMiner:
             "agree": self.last_avg_agreement,
             "d_agree": self.last_agreement_slope,
             "ema": self.last_effective_ema,
+            "amp": self.last_effective_amplify,
         }

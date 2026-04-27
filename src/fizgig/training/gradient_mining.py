@@ -88,8 +88,11 @@ class GradientMiner:
         self.last_avg_snr = 0.0
         self.last_avg_boost = 0.0
         self.last_threshold = min_snr
-        self.last_block_range = (1.0, 1.0)
+        self.last_block_entropy = 1.0
         self.last_avg_agreement = 0.0
+        self.last_agreement_slope = 0.0
+        self._prev_avg_agreement = None
+        self.last_effective_ema = ema_decay
 
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
         """Filter and amplify gradients in-place.
@@ -97,6 +100,11 @@ class GradientMiner:
         Call AFTER backward() and BEFORE optimizer.step().
         """
         self._step_count += 1
+
+        # Auto EMA: adapt decay based on agreement (higher agreement → trust history more)
+        effective_ema = 0.9 + 0.09 * self.last_avg_agreement
+        self.last_effective_ema = effective_ema
+
         total_params = 0
         snr_sum = 0.0
         boost_sum = 0.0
@@ -120,9 +128,9 @@ class GradientMiner:
                 self._prev_grad[name] = grad.clone()
                 continue
 
-            # EMA update
-            self._ema_mean[name].mul_(self.ema_decay).add_(grad, alpha=1.0 - self.ema_decay)
-            self._ema_sq[name].mul_(self.ema_decay).add_(grad ** 2, alpha=1.0 - self.ema_decay)
+            # EMA update (using auto-adapted decay)
+            self._ema_mean[name].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
+            self._ema_sq[name].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
 
             # Per-element SNR
             signal = self._ema_mean[name].abs()
@@ -177,8 +185,18 @@ class GradientMiner:
                     for b, v in block_scores.items()
                 }
 
-        min_bw = min(block_weights.values()) if block_weights else 1.0
-        max_bw = max(block_weights.values()) if block_weights else 1.0
+        # Block entropy: how distributed is learning across blocks?
+        # 0 = one block dominates, 1 = perfectly uniform
+        import math
+        if block_weights and len(block_weights) > 1:
+            bw_vals = list(block_weights.values())
+            bw_total = sum(bw_vals)
+            bw_probs = [w / bw_total for w in bw_vals]
+            entropy = -sum(p * math.log2(p) for p in bw_probs if p > 0)
+            max_entropy = math.log2(len(bw_vals))
+            block_entropy = entropy / max_entropy if max_entropy > 0 else 1.0
+        else:
+            block_entropy = 1.0
 
         # ── Pass 2: Directional filter + amplify + block weight ──
         for name, param in network.named_parameters():
@@ -231,14 +249,23 @@ class GradientMiner:
         self.last_avg_snr = snr_sum / max(n_with_data, 1)
         self.last_avg_boost = boost_sum / max(boost_count, 1) if boost_count > 0 else 1.0
         self.last_threshold = effective_threshold
-        self.last_block_range = (round(min_bw, 2), round(max_bw, 2))
-        self.last_avg_agreement = agreement_sum / max(n_with_data, 1)
+        self.last_block_entropy = block_entropy
+        current_agreement = agreement_sum / max(n_with_data, 1)
+
+        # Agreement slope
+        if self._prev_avg_agreement is not None:
+            self.last_agreement_slope = current_agreement - self._prev_avg_agreement
+        else:
+            self.last_agreement_slope = 0.0
+        self._prev_avg_agreement = current_agreement
+        self.last_avg_agreement = current_agreement
 
         return {
             "avg_snr": self.last_avg_snr,
             "avg_boost": self.last_avg_boost,
             "threshold": self.last_threshold,
-            "blk_min": self.last_block_range[0],
-            "blk_max": self.last_block_range[1],
+            "blk_H": self.last_block_entropy,
             "agree": self.last_avg_agreement,
+            "d_agree": self.last_agreement_slope,
+            "ema": self.last_effective_ema,
         }

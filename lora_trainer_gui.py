@@ -1875,31 +1875,56 @@ class LoRATrainerGUI:
             row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # Gradient Mining (experimental)
-        mining_frame = ttk.Frame(training_content)
-        mining_frame.grid(row=16, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        mining_row1 = ttk.Frame(training_content)
+        mining_row1.grid(row=16, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
         self.gradient_mining_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(mining_frame, text="Gradient Mining",
+        ttk.Checkbutton(mining_row1, text="Gradient Mining",
                         variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(mining_frame, text="Amplify:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_frame, width=5)
-        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "2.0")
-        self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(mining_frame, text="Min SNR:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_frame, width=5)
-        self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.1")
-        self.entries["GRADIENT_MINING_THRESHOLD"].pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(mining_frame, text="EMA:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_frame, width=5)
-        self.entries["GRADIENT_MINING_EMA"].insert(0, "0.99")
-        self.entries["GRADIENT_MINING_EMA"].pack(side=tk.LEFT, padx=(0, 12))
-        self.gradient_mining_auto_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(mining_frame, text="Auto threshold",
+
+        # Preset dropdown
+        self._mining_presets = {
+            "Balanced": {"amplify": "6.0", "snr": "0.001", "ortho": "0.2"},
+            "Identity Lock": {"amplify": "8.0", "snr": "0.001", "ortho": "0.05"},
+            "Style": {"amplify": "5.0", "snr": "0.001", "ortho": "0.4"},
+            "Exploration": {"amplify": "4.0", "snr": "0.001", "ortho": "0.6"},
+            "High Fidelity": {"amplify": "10.0", "snr": "0.001", "ortho": "0.1"},
+        }
+        self._mining_preset_var = tk.StringVar(value="Balanced")
+        ttk.Label(mining_row1, text="Preset:").pack(side=tk.LEFT, padx=(0, 4))
+        mining_preset_combo = ttk.Combobox(mining_row1, textvariable=self._mining_preset_var,
+                     values=list(self._mining_presets.keys()), state="readonly", width=14)
+        mining_preset_combo.pack(side=tk.LEFT, padx=(0, 12))
+        mining_preset_combo.bind("<<ComboboxSelected>>", self._on_mining_preset_changed)
+
+        self.gradient_mining_auto_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(mining_row1, text="Auto threshold",
                         variable=self.gradient_mining_auto_var).pack(side=tk.LEFT)
+
+        # Controls row
+        mining_row2 = ttk.Frame(training_content)
+        mining_row2.grid(row=17, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(2, 0))
+        ttk.Label(mining_row2, text="Amplify:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row2, width=5)
+        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "6.0")
+        self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(mining_row2, text="Min SNR:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_row2, width=5)
+        self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.001")
+        self.entries["GRADIENT_MINING_THRESHOLD"].pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(mining_row2, text="Orthogonal:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row2, width=5)
+        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.2")
+        self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT)
+
+        # EMA box kept but hidden (auto EMA is default)
+        self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_row2, width=5)
+        self.entries["GRADIENT_MINING_EMA"].insert(0, "0.95")
+
         ttk.Label(training_content,
-                  text="Experimental: amplifies suppressed learning signal based on gradient consistency. "
-                       "No external images needed.",
+                  text="Amplifies suppressed learning signal. Identity Lock for characters, "
+                       "Style for artistic LoRAs, Exploration for creative discovery.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
+            row=18, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -6923,6 +6948,20 @@ class LoRATrainerGUI:
 
         self._add_youtube_help_button(outer, "extract")
 
+    def _on_mining_preset_changed(self, *args):
+        """Fill gradient mining controls from the selected preset."""
+        name = self._mining_preset_var.get()
+        preset = self._mining_presets.get(name)
+        if not preset:
+            return
+        for key, entry_key in [("amplify", "GRADIENT_MINING_AMPLIFY"),
+                                ("snr", "GRADIENT_MINING_THRESHOLD"),
+                                ("ortho", "GRADIENT_MINING_ORTHO")]:
+            entry = self.entries.get(entry_key)
+            if entry and key in preset:
+                entry.delete(0, tk.END)
+                entry.insert(0, preset[key])
+
     def _on_training_preset_changed(self, *args):
         """Auto-fill MIN/MAX_TIMESTEP and show/hide custom block picker based on training preset."""
         preset = self.training_preset_var.get()
@@ -10196,6 +10235,9 @@ class LoRATrainerGUI:
             ema = self.entries.get("GRADIENT_MINING_EMA")
             if ema:
                 command.extend(["--gradient_mining_ema_decay", ema.get().strip() or "0.99"])
+            ortho = self.entries.get("GRADIENT_MINING_ORTHO")
+            if ortho:
+                command.extend(["--gradient_mining_orthogonal_scale", ortho.get().strip() or "0.2"])
             if hasattr(self, 'gradient_mining_auto_var') and self.gradient_mining_auto_var.get():
                 command.append("--gradient_mining_auto_threshold")
 

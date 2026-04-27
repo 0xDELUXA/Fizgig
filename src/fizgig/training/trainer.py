@@ -2093,12 +2093,10 @@ class KleinTrainer:
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
                 if gradient_miner is not None and gradient_miner._step_count > 1:
-                    logs["snr"] = f"{mine_stats['avg_snr']:.2f}"
-                    logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
                     logs["agree"] = f"{mine_stats['agree']:.0%}"
-                    logs["blk"] = f"{mine_stats['blk_min']:.1f}-{mine_stats['blk_max']:.1f}"
-                    if gradient_miner.auto_threshold:
-                        logs["thr"] = f"{mine_stats['threshold']:.3f}"
+                    logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
+                    logs["blk_H"] = f"{mine_stats['blk_H']:.2f}"
+                    logs["ema"] = f"{mine_stats['ema']:.3f}"
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:

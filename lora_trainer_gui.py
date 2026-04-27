@@ -1889,7 +1889,7 @@ class LoRATrainerGUI:
             "Exploration": {"amplify": "4.0", "snr": "0.001", "ortho": "0.6"},
             "High Fidelity": {"amplify": "10.0", "snr": "0.001", "ortho": "0.1"},
         }
-        self._mining_preset_var = tk.StringVar(value="Balanced")
+        self._mining_preset_var = tk.StringVar(value="Identity Lock")
         ttk.Label(mining_row1, text="Preset:").pack(side=tk.LEFT, padx=(0, 4))
         mining_preset_combo = ttk.Combobox(mining_row1, textvariable=self._mining_preset_var,
                      values=list(self._mining_presets.keys()), state="readonly", width=14)
@@ -1905,7 +1905,7 @@ class LoRATrainerGUI:
         mining_row2.grid(row=17, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(2, 0))
         ttk.Label(mining_row2, text="Amplify:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row2, width=5)
-        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "6.0")
+        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "8.0")
         self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(mining_row2, text="Min SNR:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_row2, width=5)
@@ -1913,7 +1913,7 @@ class LoRATrainerGUI:
         self.entries["GRADIENT_MINING_THRESHOLD"].pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(mining_row2, text="Orthogonal:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row2, width=5)
-        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.2")
+        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.05")
         self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT)
 
         # EMA box kept but hidden (auto EMA is default)

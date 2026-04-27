@@ -1890,24 +1890,19 @@ class KleinTrainer:
             accelerator.log({}, step=0)
 
         # ------------------------------------------------------------------
-        # Anchor pool (experimental — latent anchor training)
+        # Gradient Mining (experimental)
         # ------------------------------------------------------------------
-        anchor_pool = None
-        if getattr(args, "anchor_dir", None) and args.anchor_weight > 0:
-            from fizgig.training.anchor import AnchorPool
-            # Load VAE briefly to encode anchors (may already be loaded for samples)
-            if vae is None:
-                vae = self.load_vae_model(args, vae_dtype=vae_dtype, vae_path=args.vae)
-                vae.requires_grad_(False)
-                vae.eval()
-            anchor_pool = AnchorPool(
-                args.anchor_dir, vae, accelerator.device, vae_dtype,
+        gradient_miner = None
+        if getattr(args, "gradient_mining", False):
+            from fizgig.training.gradient_mining import GradientMiner
+            gradient_miner = GradientMiner(
+                probe_multiplier=getattr(args, "gradient_mining_probe_multiplier", 10.0),
+                amplify_scale=getattr(args, "gradient_mining_amplify", 0.5),
+                threshold_ratio=getattr(args, "gradient_mining_threshold", 0.1),
             )
-            vae.to("cpu")
-            clean_memory_on_device(accelerator.device)
             logger.info(
-                f"Anchor training enabled: weight={args.anchor_weight}, "
-                f"anneal={args.anchor_anneal}, pool={len(anchor_pool.latents)} refs"
+                f"Gradient mining enabled: probe={gradient_miner.probe_multiplier}x, "
+                f"amplify={gradient_miner.amplify_scale}, threshold={gradient_miner.threshold_ratio}"
             )
 
         # ------------------------------------------------------------------
@@ -1979,26 +1974,8 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
-        _anchor_only_epochs = getattr(args, "anchor_only_epochs", 0) or 0
-        _anchor_only_lr = getattr(args, "anchor_only_lr", None)
-        _main_lr = args.learning_rate  # save for restore after anchor-only phase
-
-        # Apply anchor-only LR if set and starting from epoch 0
-        if _anchor_only_epochs > 0 and _anchor_only_lr is not None and epoch_to_start < _anchor_only_epochs:
-            for pg in optimizer.param_groups:
-                pg["lr"] = _anchor_only_lr
-            accelerator.print(f"Anchor-only LR override: {_anchor_only_lr}")
-
         for epoch in range(epoch_to_start, num_train_epochs):
-            if _anchor_only_epochs > 0 and epoch == _anchor_only_epochs:
-                accelerator.print(f"\n=== Anchor-only phase complete. Switching to standard training. ===")
-                # Restore main LR
-                if _anchor_only_lr is not None:
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = _main_lr
-                    accelerator.print(f"LR restored to {_main_lr}")
-            phase_label = " [anchor-only]" if epoch < _anchor_only_epochs else ""
-            accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}{phase_label}")
+            accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
 
@@ -2037,32 +2014,15 @@ class KleinTrainer:
                         loss = loss * weighting
                     noise_loss = loss.mean()
 
-                    # Anchor loss (experimental)
-                    if anchor_pool is not None:
-                        anchor_only_epochs = getattr(args, "anchor_only_epochs", 0) or 0
-                        in_anchor_only_phase = epoch < anchor_only_epochs
+                    loss = noise_loss
 
-                        if in_anchor_only_phase:
-                            # Anchor-dominated pre-conditioning phase.
-                            a_loss = anchor_pool.compute_loss(
-                                model_pred.to(network_dtype), noisy_model_input.to(network_dtype),
-                                timesteps, exclude_idx=None,
-                                timestep_weight=getattr(args, "anchor_timestep_weight", False),
-                            )
-                            if getattr(args, "anchor_only_pure", False):
-                                # Pure anchor — zero noise prediction
-                                loss = a_loss
-                            else:
-                                # Hybrid — 5% noise to keep weights denoising-compatible
-                                loss = 0.05 * noise_loss + a_loss
-                        else:
-                            # After anchor-only phase: fully standard training, no anchor
-                            loss = noise_loss
+                    # Backward + step (gradient mining or standard)
+                    if gradient_miner is not None:
+                        mine_stats = gradient_miner.mine_and_step(
+                            network, optimizer, accelerator, loss, network_dtype,
+                        )
                     else:
-                        loss = noise_loss
-
-                    # Backward
-                    accelerator.backward(loss)
+                        accelerator.backward(loss)
 
                     if accelerator.sync_gradients:
                         # Manual gradient sync for DDP
@@ -2083,10 +2043,13 @@ class KleinTrainer:
                                 except (TypeError, ValueError):
                                     pass
 
-                    optimizer.step()
+                    if gradient_miner is None:
+                        # Standard path — gradient mining does its own step
+                        optimizer.step()
                     if not args.adaptive_lr:
                         lr_scheduler.step()
-                    optimizer.zero_grad(set_to_none=True)
+                    if gradient_miner is None:
+                        optimizer.zero_grad(set_to_none=True)
 
                 # Weight norm regularization
                 if args.scale_weight_norms:
@@ -2131,12 +2094,8 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
-                if anchor_pool is not None:
-                    _ao_epochs = getattr(args, "anchor_only_epochs", 0) or 0
-                    if epoch < _ao_epochs:
-                        logs["phase"] = "anchor-only"
-                    else:
-                        logs["anchor_w"] = 0.0
+                if gradient_miner is not None:
+                    logs["mined"] = f"{mine_stats['ratio']:.1%}"
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:
@@ -2574,25 +2533,15 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context_lora_strength", type=float, default=1.0,
                         help="Strength multiplier for the context LoRA (typical: 0.5-1.0).")
 
-    # ---- Anchor Training (experimental) ----
-    parser.add_argument("--anchor_dir", type=str, default=None,
-                        help="Path to folder of curated reference images for anchor loss.")
-    parser.add_argument("--anchor_weight", type=float, default=0.1,
-                        help="Initial weight for anchor loss (0.0 = disabled, typical: 0.1-0.3).")
-    parser.add_argument("--anchor_anneal", type=str, default="linear",
-                        choices=["linear", "cosine", "none"],
-                        help="Annealing schedule for anchor weight.")
-    parser.add_argument("--anchor_timestep_weight", action="store_true",
-                        help="Scale anchor loss by (1-t): full weight at clean timesteps, near-zero at noisy.")
-    parser.add_argument("--anchor_only_epochs", type=int, default=0,
-                        help="Number of initial epochs using anchor-only loss (no noise prediction). "
-                             "Remaining epochs are fully standard training.")
-    parser.add_argument("--anchor_only_pure", action="store_true",
-                        help="During anchor-only epochs, use zero noise loss (pure anchor). "
-                             "Default keeps 5%% noise for denoising-compatible gradients.")
-    parser.add_argument("--anchor_only_lr", type=float, default=None,
-                        help="Override learning rate during anchor-only epochs. "
-                             "Empty = use main learning rate.")
+    # ---- Gradient Mining (experimental) ----
+    parser.add_argument("--gradient_mining", action="store_true",
+                        help="Enable gradient mining: probe at high LR to discover and amplify hidden learning signal.")
+    parser.add_argument("--gradient_mining_probe_multiplier", type=float, default=10.0,
+                        help="Probe LR = main_LR * this (default 10.0).")
+    parser.add_argument("--gradient_mining_amplify", type=float, default=0.5,
+                        help="Scale for injected hidden signal (default 0.5).")
+    parser.add_argument("--gradient_mining_threshold", type=float, default=0.1,
+                        help="Ratio for hidden signal detection (default 0.1).")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

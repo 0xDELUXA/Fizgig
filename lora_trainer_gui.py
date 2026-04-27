@@ -1874,47 +1874,30 @@ class LoRATrainerGUI:
                   foreground="#E67E22", font=(FONT_FAMILY, 8, "italic")).grid(
             row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
-        # Anchor Training (experimental)
-        ttk.Label(training_content, text="Anchor Images:").grid(row=16, column=0, sticky=tk.W, padx=5, pady=(8, 2))
-        anchor_frame = ttk.Frame(training_content)
-        anchor_frame.grid(row=16, column=1, sticky=tk.W, padx=5, pady=(8, 2))
-        self.entries["ANCHOR_DIR"] = ttk.Entry(anchor_frame, width=42)
-        default_anchor_dir = os.path.join(os.path.dirname(__file__), "anchor_images")
-        if os.path.isdir(default_anchor_dir):
-            self.entries["ANCHOR_DIR"].insert(0, default_anchor_dir)
-        self.entries["ANCHOR_DIR"].pack(side=tk.LEFT)
-        ttk.Button(anchor_frame, text="Browse",
-                   command=lambda: self.browse_directory("ANCHOR_DIR")).pack(side=tk.LEFT, padx=(4, 8))
-        ttk.Label(anchor_frame, text="Weight:").pack(side=tk.LEFT, padx=(4, 4))
-        self.entries["ANCHOR_WEIGHT"] = ttk.Entry(anchor_frame, width=6)
-        self.entries["ANCHOR_WEIGHT"].insert(0, "0.1")
-        self.entries["ANCHOR_WEIGHT"].pack(side=tk.LEFT, padx=(0, 8))
-        self.anchor_anneal_var = tk.StringVar(value="linear")
-        ttk.Label(anchor_frame, text="Anneal:").pack(side=tk.LEFT, padx=(4, 4))
-        ttk.Combobox(anchor_frame, textvariable=self.anchor_anneal_var,
-                     values=["linear", "cosine", "none"], state="readonly", width=8).pack(side=tk.LEFT)
-        self.anchor_timestep_weight_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(anchor_frame, text="Timestep weight",
-                        variable=self.anchor_timestep_weight_var).pack(side=tk.LEFT, padx=(12, 0))
-        # Anchor-only pre-conditioning row
-        anchor_only_frame = ttk.Frame(training_content)
-        anchor_only_frame.grid(row=17, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(4, 0))
-        ttk.Label(anchor_only_frame, text="Anchor-Only Epochs:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["ANCHOR_ONLY_EPOCHS"] = ttk.Entry(anchor_only_frame, width=4)
-        self.entries["ANCHOR_ONLY_EPOCHS"].insert(0, "0")
-        self.entries["ANCHOR_ONLY_EPOCHS"].pack(side=tk.LEFT, padx=(0, 12))
-        self.anchor_only_pure_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(anchor_only_frame, text="Pure (no noise loss)",
-                        variable=self.anchor_only_pure_var).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Label(anchor_only_frame, text="Anchor LR:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["ANCHOR_ONLY_LR"] = ttk.Entry(anchor_only_frame, width=8)
-        self.entries["ANCHOR_ONLY_LR"].pack(side=tk.LEFT)
-
+        # Gradient Mining (experimental)
+        mining_frame = ttk.Frame(training_content)
+        mining_frame.grid(row=16, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        self.gradient_mining_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(mining_frame, text="Gradient Mining",
+                        variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(mining_frame, text="Probe:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_PROBE"] = ttk.Entry(mining_frame, width=5)
+        self.entries["GRADIENT_MINING_PROBE"].insert(0, "10")
+        self.entries["GRADIENT_MINING_PROBE"].pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(mining_frame, text="x LR").pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(mining_frame, text="Amplify:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_frame, width=5)
+        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "0.5")
+        self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(mining_frame, text="Threshold:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_frame, width=5)
+        self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.1")
+        self.entries["GRADIENT_MINING_THRESHOLD"].pack(side=tk.LEFT)
         ttk.Label(training_content,
-                  text="Experimental: curated reference images steer the model toward your dataset's visual style. "
-                       "Leave empty to disable. Anchor-Only epochs run pure anchor before standard training.",
+                  text="Experimental: probes at high LR to discover hidden learning signal, then amplifies it. "
+                       "No external images needed.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=18, column=0, columnspan=2, sticky=tk.W, padx=5)
+            row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -2440,13 +2423,9 @@ class LoRATrainerGUI:
             for block_key, block_on in preset["TRAINING_BLOCKS"].items():
                 if block_key in self.training_block_vars:
                     self.training_block_vars[block_key].set(bool(block_on))
-        # Anchor training
-        if "ANCHOR_ANNEAL" in preset and hasattr(self, "anchor_anneal_var"):
-            self.anchor_anneal_var.set(preset["ANCHOR_ANNEAL"])
-        if "ANCHOR_TIMESTEP_WEIGHT" in preset and hasattr(self, "anchor_timestep_weight_var"):
-            self.anchor_timestep_weight_var.set(bool(preset["ANCHOR_TIMESTEP_WEIGHT"]))
-        if "ANCHOR_ONLY_PURE" in preset and hasattr(self, "anchor_only_pure_var"):
-            self.anchor_only_pure_var.set(bool(preset["ANCHOR_ONLY_PURE"]))
+        # Gradient mining
+        if "GRADIENT_MINING" in preset and hasattr(self, "gradient_mining_var"):
+            self.gradient_mining_var.set(bool(preset["GRADIENT_MINING"]))
         self.toggle_scaled()  # Update checkbox state
 
     def _save_last_train_settings(self):
@@ -2531,10 +2510,8 @@ class LoRATrainerGUI:
         _grab("dataset_caption_ext_var", "DATASET_CAPTION_EXT")
         _grab("dataset_megapixels_var", "DATASET_MEGAPIXELS")
         _grab("dataset_batch_size_var", "DATASET_BATCH_SIZE")
-        # Anchor training
-        _grab("anchor_anneal_var", "ANCHOR_ANNEAL")
-        _grab("anchor_timestep_weight_var", "ANCHOR_TIMESTEP_WEIGHT")
-        _grab("anchor_only_pure_var", "ANCHOR_ONLY_PURE")
+        # Gradient mining
+        _grab("gradient_mining_var", "GRADIENT_MINING")
         # Per-block custom training selection (only meaningful when TARGET_LAYERS=Custom)
         if hasattr(self, "training_block_vars") and self.training_block_vars:
             preset["TRAINING_BLOCKS"] = {k: v.get() for k, v in self.training_block_vars.items()}
@@ -10205,29 +10182,18 @@ class LoRATrainerGUI:
             command.extend(["--adaptive_lr_min", str(min_lr)])
             command.extend(["--adaptive_lr_max", str(max_lr)])
 
-        # Anchor training (experimental)
-        anchor_dir = self.entries.get("ANCHOR_DIR")
-        anchor_dir_val = anchor_dir.get().strip() if anchor_dir else ""
-        if anchor_dir_val and os.path.isdir(anchor_dir_val):
-            command.extend(["--anchor_dir", anchor_dir_val])
-            anchor_weight = self.entries.get("ANCHOR_WEIGHT")
-            if anchor_weight:
-                command.extend(["--anchor_weight", anchor_weight.get().strip() or "0.1"])
-            command.extend(["--anchor_anneal", self.anchor_anneal_var.get()])
-            if self.anchor_timestep_weight_var.get():
-                command.append("--anchor_timestep_weight")
-            anchor_only = self.entries.get("ANCHOR_ONLY_EPOCHS")
-            if anchor_only:
-                val = anchor_only.get().strip()
-                if val and int(val) > 0:
-                    command.extend(["--anchor_only_epochs", val])
-                    if self.anchor_only_pure_var.get():
-                        command.append("--anchor_only_pure")
-                    anchor_only_lr = self.entries.get("ANCHOR_ONLY_LR")
-                    if anchor_only_lr:
-                        lr_val = anchor_only_lr.get().strip()
-                        if lr_val:
-                            command.extend(["--anchor_only_lr", lr_val])
+        # Gradient mining (experimental)
+        if hasattr(self, 'gradient_mining_var') and self.gradient_mining_var.get():
+            command.append("--gradient_mining")
+            probe = self.entries.get("GRADIENT_MINING_PROBE")
+            if probe:
+                command.extend(["--gradient_mining_probe_multiplier", probe.get().strip() or "10"])
+            amplify = self.entries.get("GRADIENT_MINING_AMPLIFY")
+            if amplify:
+                command.extend(["--gradient_mining_amplify", amplify.get().strip() or "0.5"])
+            threshold = self.entries.get("GRADIENT_MINING_THRESHOLD")
+            if threshold:
+                command.extend(["--gradient_mining_threshold", threshold.get().strip() or "0.1"])
 
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()

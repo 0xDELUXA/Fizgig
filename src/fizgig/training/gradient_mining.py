@@ -140,14 +140,8 @@ class GradientMiner:
             if block_name is not None:
                 block_accum.setdefault(block_name, []).append((snr_mean, consistency))
 
-        # ── Auto-threshold ──
-        if self.auto_threshold and len(param_data) > 1:
-            all_snr = [d[1] for d in param_data.values()]
-            mean_snr = sum(all_snr) / len(all_snr)
-            var_snr = sum((s - mean_snr) ** 2 for s in all_snr) / len(all_snr)
-            effective_threshold = max(mean_snr - 0.5 * var_snr ** 0.5, 0.001)
-        else:
-            effective_threshold = self.min_snr
+        # Threshold locked at 0.001 — tested as the reliable noise floor
+        effective_threshold = 0.001
 
         # ── Per-block weighting: SNR * consistency ──
         block_weights = {}

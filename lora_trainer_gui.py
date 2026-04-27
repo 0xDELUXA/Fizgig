@@ -1907,7 +1907,7 @@ class LoRATrainerGUI:
 
         # Hidden entries for values that are now auto-tuned (kept for preset/save compat)
         self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row1)
-        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "6.0")
+        self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "8.0")
         self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_row1)
         self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.001")
         self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_row1)

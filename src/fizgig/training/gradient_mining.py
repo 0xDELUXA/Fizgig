@@ -25,6 +25,7 @@ import logging
 from typing import Dict, Optional
 
 import torch
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +130,15 @@ class GradientMiner:
             snr_mean = snr.mean().item()
             snr_sum += snr_mean
 
-            # Directional consistency: cheap sign-agreement ratio (replaces cosine_similarity)
-            consistency = (grad.sign() == self._prev_grad[name].sign()).float().mean().item()
+            # Directional consistency: cosine similarity between current and previous grad
+            flat_grad = grad.flatten()
+            flat_prev = self._prev_grad[name].flatten()
+            if flat_grad.norm() > 1e-10 and flat_prev.norm() > 1e-10:
+                consistency = F.cosine_similarity(flat_grad.unsqueeze(0),
+                                                  flat_prev.unsqueeze(0)).item()
+                consistency = max(0.0, consistency)
+            else:
+                consistency = 0.0
 
             # Update prev grad in-place (no allocation after first step)
             self._prev_grad[name].copy_(grad)
@@ -140,8 +148,14 @@ class GradientMiner:
             if block_name is not None:
                 block_accum.setdefault(block_name, []).append((snr_mean, consistency))
 
-        # Threshold locked at 0.001 — tested as the reliable noise floor
-        effective_threshold = 0.001
+        # Auto-threshold: detect noise floor from SNR distribution variance
+        if len(param_data) > 1:
+            all_snr = [d[1] for d in param_data.values()]
+            mean_snr = sum(all_snr) / len(all_snr)
+            var_snr = sum((s - mean_snr) ** 2 for s in all_snr) / len(all_snr)
+            effective_threshold = max(mean_snr - 0.5 * var_snr ** 0.5, 0.001)  # floor at 0.001
+        else:
+            effective_threshold = 0.001
 
         # ── Per-block weighting: SNR * consistency ──
         block_weights = {}
@@ -171,9 +185,9 @@ class GradientMiner:
             block_entropy = 1.0
 
         # ── Auto amplify: scale amplification by agreement level ──
-        # agree=0.6 → full amplify. Higher → push harder. Lower → back off.
+        # agree=0.6 → full amplify. Lower → back off. Never exceeds base value.
         effective_amplify = self.amplify_scale * (self.last_avg_agreement / 0.6)
-        effective_amplify = max(1.0, min(8.0, effective_amplify))  # floor 1.0, ceiling 8.0
+        effective_amplify = max(1.0, min(self.amplify_scale, effective_amplify))  # floor 1.0, ceiling = base
         self.last_effective_amplify = effective_amplify
 
         # ── Pass 2: Directional filter + amplify + block weight ──

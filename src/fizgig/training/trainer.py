@@ -1979,8 +1979,13 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
+        _anchor_only_epochs = getattr(args, "anchor_only_epochs", 0) or 0
+
         for epoch in range(epoch_to_start, num_train_epochs):
-            accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
+            if _anchor_only_epochs > 0 and epoch == _anchor_only_epochs:
+                accelerator.print(f"\n=== Anchor-only phase complete. Switching to standard training. ===")
+            phase_label = " [anchor-only]" if epoch < _anchor_only_epochs else ""
+            accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}{phase_label}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
 
@@ -2021,18 +2026,24 @@ class KleinTrainer:
 
                     # Anchor loss (experimental)
                     if anchor_pool is not None:
-                        aw = anchor_pool.get_annealed_weight(
-                            args.anchor_weight, epoch, num_train_epochs, args.anchor_anneal
-                        )
-                        if aw > 0:
-                            # noisy_model_input is spatial (B,C,H,W) here — not yet packed
+                        anchor_only_epochs = getattr(args, "anchor_only_epochs", 0) or 0
+                        in_anchor_only_phase = epoch < anchor_only_epochs
+
+                        if in_anchor_only_phase:
+                            # Anchor-dominated pre-conditioning phase.
                             a_loss = anchor_pool.compute_loss(
                                 model_pred.to(network_dtype), noisy_model_input.to(network_dtype),
                                 timesteps, exclude_idx=None,
                                 timestep_weight=getattr(args, "anchor_timestep_weight", False),
                             )
-                            loss = noise_loss + aw * a_loss
+                            if getattr(args, "anchor_only_pure", False):
+                                # Pure anchor — zero noise prediction
+                                loss = a_loss
+                            else:
+                                # Hybrid — 5% noise to keep weights denoising-compatible
+                                loss = 0.05 * noise_loss + a_loss
                         else:
+                            # After anchor-only phase: fully standard training, no anchor
                             loss = noise_loss
                     else:
                         loss = noise_loss
@@ -2556,6 +2567,12 @@ def setup_parser() -> argparse.ArgumentParser:
                         help="Annealing schedule for anchor weight.")
     parser.add_argument("--anchor_timestep_weight", action="store_true",
                         help="Scale anchor loss by (1-t): full weight at clean timesteps, near-zero at noisy.")
+    parser.add_argument("--anchor_only_epochs", type=int, default=0,
+                        help="Number of initial epochs using anchor-only loss (no noise prediction). "
+                             "Remaining epochs are fully standard training.")
+    parser.add_argument("--anchor_only_pure", action="store_true",
+                        help="During anchor-only epochs, use zero noise loss (pure anchor). "
+                             "Default keeps 5%% noise for denoising-compatible gradients.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

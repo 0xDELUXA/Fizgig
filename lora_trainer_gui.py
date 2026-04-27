@@ -1896,11 +1896,22 @@ class LoRATrainerGUI:
         self.anchor_timestep_weight_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(anchor_frame, text="Timestep weight",
                         variable=self.anchor_timestep_weight_var).pack(side=tk.LEFT, padx=(12, 0))
+        # Anchor-only pre-conditioning row
+        anchor_only_frame = ttk.Frame(training_content)
+        anchor_only_frame.grid(row=17, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(4, 0))
+        ttk.Label(anchor_only_frame, text="Anchor-Only Epochs:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["ANCHOR_ONLY_EPOCHS"] = ttk.Entry(anchor_only_frame, width=4)
+        self.entries["ANCHOR_ONLY_EPOCHS"].insert(0, "0")
+        self.entries["ANCHOR_ONLY_EPOCHS"].pack(side=tk.LEFT, padx=(0, 12))
+        self.anchor_only_pure_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(anchor_only_frame, text="Pure (no noise loss)",
+                        variable=self.anchor_only_pure_var).pack(side=tk.LEFT)
+
         ttk.Label(training_content,
                   text="Experimental: curated reference images steer the model toward your dataset's visual style. "
-                       "Leave empty to disable. Timestep weight scales anchor by noise level (stronger at clean timesteps).",
+                       "Leave empty to disable. Anchor-Only epochs run pure anchor before standard training.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
+            row=18, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -2431,6 +2442,8 @@ class LoRATrainerGUI:
             self.anchor_anneal_var.set(preset["ANCHOR_ANNEAL"])
         if "ANCHOR_TIMESTEP_WEIGHT" in preset and hasattr(self, "anchor_timestep_weight_var"):
             self.anchor_timestep_weight_var.set(bool(preset["ANCHOR_TIMESTEP_WEIGHT"]))
+        if "ANCHOR_ONLY_PURE" in preset and hasattr(self, "anchor_only_pure_var"):
+            self.anchor_only_pure_var.set(bool(preset["ANCHOR_ONLY_PURE"]))
         self.toggle_scaled()  # Update checkbox state
 
     def _save_last_train_settings(self):
@@ -2518,6 +2531,7 @@ class LoRATrainerGUI:
         # Anchor training
         _grab("anchor_anneal_var", "ANCHOR_ANNEAL")
         _grab("anchor_timestep_weight_var", "ANCHOR_TIMESTEP_WEIGHT")
+        _grab("anchor_only_pure_var", "ANCHOR_ONLY_PURE")
         # Per-block custom training selection (only meaningful when TARGET_LAYERS=Custom)
         if hasattr(self, "training_block_vars") and self.training_block_vars:
             preset["TRAINING_BLOCKS"] = {k: v.get() for k, v in self.training_block_vars.items()}
@@ -10199,6 +10213,13 @@ class LoRATrainerGUI:
             command.extend(["--anchor_anneal", self.anchor_anneal_var.get()])
             if self.anchor_timestep_weight_var.get():
                 command.append("--anchor_timestep_weight")
+            anchor_only = self.entries.get("ANCHOR_ONLY_EPOCHS")
+            if anchor_only:
+                val = anchor_only.get().strip()
+                if val and int(val) > 0:
+                    command.extend(["--anchor_only_epochs", val])
+                    if self.anchor_only_pure_var.get():
+                        command.append("--anchor_only_pure")
 
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()

@@ -900,6 +900,10 @@ class LoRATrainerGUI:
         # Start status indicator polling
         self._update_status_indicator()
 
+        # Grey out sample fields overridden by Distilled (default on)
+        if hasattr(self, '_on_distilled_samples_toggled'):
+            self._on_distilled_samples_toggled()
+
         # Auto-save dataset config on startup if all fields are valid
         # This ensures training works immediately without manual "Save and Activate"
         self.auto_save_dataset_config_silent()
@@ -4060,7 +4064,8 @@ class LoRATrainerGUI:
         )
         self.sample_height_combo.grid(row=2, column=1, sticky=tk.W, pady=4)
 
-        ttk.Label(prompt_card, text="Steps:").grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_steps_label = ttk.Label(prompt_card, text="Steps:")
+        self.sample_steps_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_steps_var = tk.StringVar(value=str(self.settings["SAMPLE_STEPS"]))
         self.sample_steps_entry = ttk.Entry(prompt_card, textvariable=self.sample_steps_var, width=10)
         self.sample_steps_entry.grid(row=3, column=1, sticky=tk.W, pady=4)
@@ -4104,6 +4109,7 @@ class LoRATrainerGUI:
         ttk.Checkbutton(
             freq_card, text="Use Distilled model for samples (4-step, matches ComfyUI)",
             variable=self.use_distilled_samples_var,
+            command=self._on_distilled_samples_toggled,
         ).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
 
         # Card 3: Architecture-Specific (Flow Shift / Guidance / Negative / CFG)
@@ -4198,6 +4204,28 @@ class LoRATrainerGUI:
                     _walk(child)
 
         _walk(self.sample_settings_frame)
+
+    def _on_distilled_samples_toggled(self):
+        """Grey out fields that Distilled overrides when the checkbox is ticked."""
+        use_distilled = self.use_distilled_samples_var.get()
+        state = "disabled" if use_distilled else "normal"
+        grey = COLORS["text_muted"] if use_distilled else COLORS["text_primary"]
+
+        # Steps (overridden to 4)
+        self.sample_steps_entry.configure(state=state)
+        self.sample_steps_label.configure(foreground=grey)
+        # Flow Shift (overridden to auto)
+        self.sample_flow_shift_entry.configure(state=state)
+        self.sample_flow_shift_label.configure(foreground=grey)
+        # Guidance Scale (overridden to 1.0)
+        self.sample_guidance_entry.configure(state=state)
+        self.sample_guidance_label.configure(foreground=grey)
+        # Negative Prompt (not used by Distilled)
+        self.sample_negative_entry.configure(state=state)
+        self.sample_negative_label.configure(foreground=grey)
+        # CFG Scale (not used by Distilled)
+        self.sample_cfg_scale_entry.configure(state=state)
+        self.sample_cfg_label.configure(foreground=grey)
 
     def update_samples_ui_for_architecture(self):
         """Update samples tab UI based on selected architecture"""

@@ -1899,6 +1899,7 @@ class KleinTrainer:
                 ema_decay=getattr(args, "gradient_mining_ema_decay", 0.99),
                 amplify_scale=getattr(args, "gradient_mining_amplify", 2.0),
                 min_snr=getattr(args, "gradient_mining_threshold", 0.1),
+                auto_threshold=getattr(args, "gradient_mining_auto_threshold", False),
             )
             logger.info(
                 f"Gradient mining enabled: amplify={gradient_miner.amplify_scale}x, "
@@ -2093,6 +2094,8 @@ class KleinTrainer:
                 if gradient_miner is not None and gradient_miner._step_count > 1:
                     logs["snr"] = f"{mine_stats['avg_snr']:.2f}"
                     logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
+                    if gradient_miner.auto_threshold:
+                        logs["thr"] = f"{mine_stats['threshold']:.3f}"
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:
@@ -2539,6 +2542,8 @@ def setup_parser() -> argparse.ArgumentParser:
                         help="Min SNR below which no amplification is applied (default 0.1).")
     parser.add_argument("--gradient_mining_ema_decay", type=float, default=0.99,
                         help="EMA smoothing for gradient stats (default 0.99). Lower = faster adaptation.")
+    parser.add_argument("--gradient_mining_auto_threshold", action="store_true",
+                        help="Auto-detect noise floor from SNR distribution variance. Replaces fixed min_snr.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

@@ -1900,6 +1900,7 @@ class KleinTrainer:
                 amplify_scale=getattr(args, "gradient_mining_amplify", 2.0),
                 min_snr=getattr(args, "gradient_mining_threshold", 0.1),
                 auto_threshold=getattr(args, "gradient_mining_auto_threshold", False),
+                orthogonal_scale=getattr(args, "gradient_mining_orthogonal_scale", 0.2),
             )
             logger.info(
                 f"Gradient mining enabled: amplify={gradient_miner.amplify_scale}x, "
@@ -2094,7 +2095,7 @@ class KleinTrainer:
                 if gradient_miner is not None and gradient_miner._step_count > 1:
                     logs["snr"] = f"{mine_stats['avg_snr']:.2f}"
                     logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
-                    logs["filt"] = f"{mine_stats['filtered']:.0%}"
+                    logs["agree"] = f"{mine_stats['agree']:.0%}"
                     logs["blk"] = f"{mine_stats['blk_min']:.1f}-{mine_stats['blk_max']:.1f}"
                     if gradient_miner.auto_threshold:
                         logs["thr"] = f"{mine_stats['threshold']:.3f}"
@@ -2546,6 +2547,9 @@ def setup_parser() -> argparse.ArgumentParser:
                         help="EMA smoothing for gradient stats (default 0.99). Lower = faster adaptation.")
     parser.add_argument("--gradient_mining_auto_threshold", action="store_true",
                         help="Auto-detect noise floor from SNR distribution variance. Replaces fixed min_snr.")
+    parser.add_argument("--gradient_mining_orthogonal_scale", type=float, default=0.2,
+                        help="How much orthogonal (exploration) gradient to preserve (default 0.2). "
+                             "0.0 = pure refinement, 1.0 = full exploration.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

@@ -19,12 +19,12 @@ Usage:
     optimizer.step()
 """
 
+import math
 import re
 import logging
 from typing import Dict, Optional
 
 import torch
-import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ _BLOCK_RE = re.compile(r"(double_blocks|single_blocks)[._](\d+)")
 
 
 def _extract_block_name(param_name: str) -> Optional[str]:
-    """Extract block identifier from a LoRA parameter name."""
     m = _BLOCK_RE.search(param_name)
     if m:
         block_type = "double" if "double" in m.group(1) else "single"
@@ -42,16 +41,7 @@ def _extract_block_name(param_name: str) -> Optional[str]:
 
 
 class GradientMiner:
-    """Directional gradient filtering with per-block SNR+consistency weighting.
-
-    Three mechanisms:
-    1. Parallel/orthogonal split — parallel to EMA direction gets amplified,
-       orthogonal is preserved at reduced scale (exploration signal).
-    2. Soft agreement weighting — cosine-based, not binary. Aligned gradients
-       get full weight, opposing gradients are suppressed but not killed.
-    3. Per-block scoring — SNR * directional consistency. Blocks must show
-       both strong and stable gradient signal to earn a boost.
-    """
+    """Directional gradient filtering with per-block SNR+consistency weighting."""
 
     def __init__(
         self,
@@ -61,15 +51,6 @@ class GradientMiner:
         auto_threshold: bool = False,
         orthogonal_scale: float = 0.2,
     ):
-        """
-        Args:
-            ema_decay: EMA smoothing factor (0.95 = fast, 0.99 = slow).
-            amplify_scale: Maximum amplification for high-SNR parallel component.
-            min_snr: Minimum SNR threshold. Ignored when auto_threshold is True.
-            auto_threshold: Auto-detect noise floor from SNR distribution variance.
-            orthogonal_scale: How much of the orthogonal (exploration) component to keep.
-                            0.0 = discard all exploration, 1.0 = keep fully. Default 0.2.
-        """
         self.ema_decay = ema_decay
         self.amplify_scale = amplify_scale
         self.min_snr = min_snr
@@ -81,8 +62,11 @@ class GradientMiner:
         self._ema_sq: Dict[str, torch.Tensor] = {}
         self._step_count = 0
 
-        # Per-parameter previous gradient direction for consistency tracking
+        # Per-parameter previous gradient for consistency tracking
         self._prev_grad: Dict[str, torch.Tensor] = {}
+
+        # Cached block name lookups (parameter names don't change)
+        self._block_name_cache: Dict[str, Optional[str]] = {}
 
         # Stats for logging
         self.last_avg_snr = 0.0
@@ -95,13 +79,13 @@ class GradientMiner:
         self.last_effective_ema = ema_decay
 
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
-        """Filter and amplify gradients in-place.
+        """Filter and amplify gradients in-place. Single-pass optimised.
 
         Call AFTER backward() and BEFORE optimizer.step().
         """
         self._step_count += 1
 
-        # Auto EMA: adapt decay based on agreement (higher agreement → trust history more)
+        # Auto EMA: adapt decay based on agreement
         effective_ema = 0.9 + 0.09 * self.last_avg_agreement
         self.last_effective_ema = effective_ema
 
@@ -122,38 +106,34 @@ class GradientMiner:
             grad = param.grad.detach()
             total_params += 1
 
+            # Cache block name on first encounter
+            if name not in self._block_name_cache:
+                self._block_name_cache[name] = _extract_block_name(name)
+            block_name = self._block_name_cache[name]
+
             if name not in self._ema_mean:
                 self._ema_mean[name] = grad.clone()
                 self._ema_sq[name] = (grad ** 2).clone()
                 self._prev_grad[name] = grad.clone()
                 continue
 
-            # EMA update (using auto-adapted decay)
+            # EMA update
             self._ema_mean[name].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
             self._ema_sq[name].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
 
             # Per-element SNR
             signal = self._ema_mean[name].abs()
             variance = (self._ema_sq[name] - self._ema_mean[name] ** 2).clamp(min=0)
-            noise = variance.sqrt()
-            snr = signal / (noise + 1e-8)
+            snr = signal / (variance.sqrt() + 1e-8)
             snr_mean = snr.mean().item()
             snr_sum += snr_mean
 
-            # Directional consistency: cosine similarity between current and previous grad
-            flat_grad = grad.flatten()
-            flat_prev = self._prev_grad[name].flatten()
-            if flat_grad.norm() > 1e-10 and flat_prev.norm() > 1e-10:
-                consistency = F.cosine_similarity(flat_grad.unsqueeze(0),
-                                                  flat_prev.unsqueeze(0)).item()
-                consistency = max(0.0, consistency)  # clamp negative to 0
-            else:
-                consistency = 0.0
+            # Directional consistency: cheap sign-agreement ratio (replaces cosine_similarity)
+            consistency = (grad.sign() == self._prev_grad[name].sign()).float().mean().item()
 
-            # Update prev grad for next step
-            self._prev_grad[name] = grad.clone()
+            # Update prev grad in-place (no allocation after first step)
+            self._prev_grad[name].copy_(grad)
 
-            block_name = _extract_block_name(name)
             param_data[name] = (snr, snr_mean, consistency, block_name)
 
             if block_name is not None:
@@ -164,8 +144,7 @@ class GradientMiner:
             all_snr = [d[1] for d in param_data.values()]
             mean_snr = sum(all_snr) / len(all_snr)
             var_snr = sum((s - mean_snr) ** 2 for s in all_snr) / len(all_snr)
-            std_snr = var_snr ** 0.5
-            effective_threshold = max(mean_snr - 0.5 * std_snr, 0.001)
+            effective_threshold = max(mean_snr - 0.5 * var_snr ** 0.5, 0.001)
         else:
             effective_threshold = self.min_snr
 
@@ -176,7 +155,7 @@ class GradientMiner:
             for b, entries in block_accum.items():
                 avg_snr = sum(e[0] for e in entries) / len(entries)
                 avg_con = sum(e[1] for e in entries) / len(entries)
-                block_scores[b] = avg_snr * (avg_con + 0.1)  # +0.1 so zero consistency isn't fully dead
+                block_scores[b] = avg_snr * (avg_con + 0.1)
 
             overall_avg = sum(block_scores.values()) / max(len(block_scores), 1)
             if overall_avg > 1e-8:
@@ -185,9 +164,7 @@ class GradientMiner:
                     for b, v in block_scores.items()
                 }
 
-        # Block entropy: how distributed is learning across blocks?
-        # 0 = one block dominates, 1 = perfectly uniform
-        import math
+        # Block entropy
         if block_weights and len(block_weights) > 1:
             bw_vals = list(block_weights.values())
             bw_total = sum(bw_vals)
@@ -210,34 +187,32 @@ class GradientMiner:
             ema_dir = self._ema_mean[name]
             ema_norm = ema_dir.norm()
             if ema_norm < 1e-10:
-                continue  # no direction established yet
+                continue
 
             direction = ema_dir / ema_norm
 
-            # Split into parallel and orthogonal components
-            # parallel = projection of grad onto EMA direction
+            # Parallel/orthogonal split
             dot = (grad * direction).sum()
             parallel = dot * direction
             orthogonal = grad - parallel
 
-            # Soft agreement: cosine similarity mapped to [0, 1]
-            flat_grad = grad.flatten()
-            flat_dir = direction.flatten()
-            cos_sim = F.cosine_similarity(flat_grad.unsqueeze(0),
-                                          flat_dir.unsqueeze(0)).item()
+            # Agreement from dot product (direction is unit-length, so cos = dot / grad_norm)
+            grad_norm = grad.norm()
+            if grad_norm > 1e-10:
+                cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
+            else:
+                cos_sim = 0.0
             agreement = (cos_sim + 1.0) * 0.5  # [-1,1] → [0,1]
             agreement_sum += agreement
 
-            # Per-element SNR boost (on parallel component)
+            # Per-element SNR boost
             boost = 1.0 + (self.amplify_scale - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
 
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
 
-            # Combined: amplified parallel + preserved orthogonal, weighted by agreement and block
-            shaped_grad = (parallel * boost * agreement + orthogonal * self.orthogonal_scale) * bw
-
-            param.grad = shaped_grad
+            # Combined
+            param.grad = (parallel * boost * agreement + orthogonal * self.orthogonal_scale) * bw
 
             avg_boost_val = (boost * bw).mean().item()
             if avg_boost_val > 1.05:
@@ -252,7 +227,6 @@ class GradientMiner:
         self.last_block_entropy = block_entropy
         current_agreement = agreement_sum / max(n_with_data, 1)
 
-        # Agreement slope
         if self._prev_avg_agreement is not None:
             self.last_agreement_slope = current_agreement - self._prev_avg_agreement
         else:

@@ -1980,10 +1980,23 @@ class KleinTrainer:
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
         _anchor_only_epochs = getattr(args, "anchor_only_epochs", 0) or 0
+        _anchor_only_lr = getattr(args, "anchor_only_lr", None)
+        _main_lr = args.learning_rate  # save for restore after anchor-only phase
+
+        # Apply anchor-only LR if set and starting from epoch 0
+        if _anchor_only_epochs > 0 and _anchor_only_lr is not None and epoch_to_start < _anchor_only_epochs:
+            for pg in optimizer.param_groups:
+                pg["lr"] = _anchor_only_lr
+            accelerator.print(f"Anchor-only LR override: {_anchor_only_lr}")
 
         for epoch in range(epoch_to_start, num_train_epochs):
             if _anchor_only_epochs > 0 and epoch == _anchor_only_epochs:
                 accelerator.print(f"\n=== Anchor-only phase complete. Switching to standard training. ===")
+                # Restore main LR
+                if _anchor_only_lr is not None:
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = _main_lr
+                    accelerator.print(f"LR restored to {_main_lr}")
             phase_label = " [anchor-only]" if epoch < _anchor_only_epochs else ""
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}{phase_label}")
             current_epoch.value = epoch + 1
@@ -2573,6 +2586,9 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--anchor_only_pure", action="store_true",
                         help="During anchor-only epochs, use zero noise loss (pure anchor). "
                              "Default keeps 5%% noise for denoising-compatible gradients.")
+    parser.add_argument("--anchor_only_lr", type=float, default=None,
+                        help="Override learning rate during anchor-only epochs. "
+                             "Empty = use main learning rate.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

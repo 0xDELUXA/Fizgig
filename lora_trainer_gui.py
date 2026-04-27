@@ -1905,7 +1905,10 @@ class LoRATrainerGUI:
         self.entries["ANCHOR_ONLY_EPOCHS"].pack(side=tk.LEFT, padx=(0, 12))
         self.anchor_only_pure_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(anchor_only_frame, text="Pure (no noise loss)",
-                        variable=self.anchor_only_pure_var).pack(side=tk.LEFT)
+                        variable=self.anchor_only_pure_var).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Label(anchor_only_frame, text="Anchor LR:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["ANCHOR_ONLY_LR"] = ttk.Entry(anchor_only_frame, width=8)
+        self.entries["ANCHOR_ONLY_LR"].pack(side=tk.LEFT)
 
         ttk.Label(training_content,
                   text="Experimental: curated reference images steer the model toward your dataset's visual style. "
@@ -10220,6 +10223,11 @@ class LoRATrainerGUI:
                     command.extend(["--anchor_only_epochs", val])
                     if self.anchor_only_pure_var.get():
                         command.append("--anchor_only_pure")
+                    anchor_only_lr = self.entries.get("ANCHOR_ONLY_LR")
+                    if anchor_only_lr:
+                        lr_val = anchor_only_lr.get().strip()
+                        if lr_val:
+                            command.extend(["--anchor_only_lr", lr_val])
 
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()

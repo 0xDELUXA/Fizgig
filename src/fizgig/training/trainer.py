@@ -1474,7 +1474,7 @@ class KleinTrainer:
             # when LoRA is active — the LoRA contributes to both cond and uncond,
             # so CFG partially cancels the LoRA effect.
             from diffusers.utils.torch_utils import randn_tensor
-            from fizgig.klein.model_utils import get_schedule
+            from fizgig.klein.model_utils import get_simple_euler_schedule
             from fizgig.klein.position import prc_img, prc_txt, scatter_ids
 
             ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)
@@ -1490,7 +1490,8 @@ class KleinTrainer:
             if hasattr(transformer, 'prepare_block_swap_before_forward'):
                 transformer.prepare_block_swap_before_forward()
 
-            timesteps = get_schedule(sample_steps, x.shape[1], discrete_flow_shift)
+            # Match ComfyUI's Euler Simple schedule (shift=2.02, evenly-spaced)
+            timesteps = get_simple_euler_schedule(sample_steps)
             guidance_vec = torch.full((x.shape[0],), guidance_scale, device=device, dtype=x.dtype)
 
             for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):

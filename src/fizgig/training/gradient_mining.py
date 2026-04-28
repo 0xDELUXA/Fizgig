@@ -87,8 +87,7 @@ class GradientMiner:
         """
         self._step_count += 1
 
-        # Auto EMA: adapt decay based on agreement
-        effective_ema = 0.9 + 0.09 * self.last_avg_agreement
+        effective_ema = 0.9
         self.last_effective_ema = effective_ema
 
         total_params = 0

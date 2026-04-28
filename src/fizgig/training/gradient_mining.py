@@ -56,7 +56,7 @@ class GradientMiner:
         self.amplify_scale = amplify_scale
         self.min_snr = min_snr
         self.auto_threshold = auto_threshold
-        self.orthogonal_scale = orthogonal_scale
+        self.filter_strength = orthogonal_scale  # 0.0 = pure SNR boost, 1.0 = full directional filter
 
         # Per-parameter EMA stats
         self._ema_mean: Dict[str, torch.Tensor] = {}
@@ -225,8 +225,10 @@ class GradientMiner:
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
 
-            # Combined
-            param.grad = (parallel * boost * agreement + orthogonal * self.orthogonal_scale) * bw
+            # Blend: filtered (directional + agree) with raw (SNR boost only)
+            filtered = parallel * boost * agreement + orthogonal * 0.2
+            raw_boosted = grad * boost
+            param.grad = (self.filter_strength * filtered + (1.0 - self.filter_strength) * raw_boosted) * bw
 
             avg_boost_val = (boost * bw).mean().item()
             if avg_boost_val > 1.05:

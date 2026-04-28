@@ -1887,11 +1887,11 @@ class LoRATrainerGUI:
 
         # Preset dropdown — only controls orthogonal scale and min SNR
         self._mining_presets = {
-            "Identity Lock": {"snr": "0.001", "ortho": "0.05"},
-            "Balanced": {"snr": "0.001", "ortho": "0.2"},
-            "Style": {"snr": "0.001", "ortho": "0.4"},
-            "Exploration": {"snr": "0.001", "ortho": "0.6"},
-            "High Fidelity": {"snr": "0.001", "ortho": "0.1"},
+            "Identity Lock": {"snr": "0.001", "ortho": "0.3"},
+            "Balanced": {"snr": "0.001", "ortho": "0.3"},
+            "Style": {"snr": "0.001", "ortho": "0.15"},
+            "Exploration": {"snr": "0.001", "ortho": "0.1"},
+            "High Fidelity": {"snr": "0.001", "ortho": "0.4"},
         }
         self._mining_preset_var = tk.StringVar(value="Identity Lock")
         ttk.Label(mining_row1, text="Preset:").pack(side=tk.LEFT, padx=(0, 4))
@@ -1900,9 +1900,9 @@ class LoRATrainerGUI:
         mining_preset_combo.pack(side=tk.LEFT, padx=(0, 12))
         mining_preset_combo.bind("<<ComboboxSelected>>", self._on_mining_preset_changed)
 
-        ttk.Label(mining_row1, text="Orthogonal:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row1, width=5)
-        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.05")
+        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.3")
         self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT)
 
         # Hidden entries for values that are now auto-tuned (kept for preset/save compat)
@@ -1916,7 +1916,8 @@ class LoRATrainerGUI:
         self.gradient_mining_auto_var = tk.BooleanVar(value=True)
 
         ttk.Label(training_content,
-                  text="Amplifies suppressed learning signal. Amplification, EMA, and threshold auto-tune from gradient agreement.",
+                  text="Amplifies suppressed learning signal. Filter: 0=pure SNR boost, 1=full directional filter. "
+                       "Lower = more structural freedom. Amplification auto-tunes from gradient agreement.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
             row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
 

@@ -1469,20 +1469,16 @@ class KleinTrainer:
             transformer.eval()
 
         if use_distilled:
-            # Inline Distilled denoising with CFG=1.0
+            # Inline Distilled denoising — single cond pass, no CFG.
+            # Matches Repair Studio exactly. CFG=1.0 dual-pass is NOT equivalent
+            # when LoRA is active — the LoRA contributes to both cond and uncond,
+            # so CFG partially cancels the LoRA effect.
             from diffusers.utils.torch_utils import randn_tensor
             from fizgig.klein.model_utils import get_schedule
             from fizgig.klein.position import prc_img, prc_txt, scatter_ids
 
             ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)
             ctx, ctx_ids = prc_txt(ctx)
-            neg_ctx = sample_parameter.get("negative_ctx_vec")
-            if neg_ctx is not None:
-                neg_ctx = neg_ctx.to(device=device, dtype=torch.bfloat16)
-                neg_ctx, neg_ctx_ids = prc_txt(neg_ctx)
-            else:
-                # Create empty negative if none provided
-                neg_ctx, neg_ctx_ids = ctx.clone() * 0, ctx_ids.clone()
 
             packed_h, packed_w = height // 16, width // 16
             latents = randn_tensor(
@@ -1495,20 +1491,15 @@ class KleinTrainer:
                 transformer.prepare_block_swap_before_forward()
 
             timesteps = get_schedule(sample_steps, x.shape[1], discrete_flow_shift)
+            guidance_vec = torch.full((x.shape[0],), guidance_scale, device=device, dtype=x.dtype)
 
-            # CFG=1.0 denoising: cond + uncond passes, blend at scale 1.0
             for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
                 t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=device)
                 with torch.no_grad(), torch.autocast(device_type=device.type, dtype=x.dtype):
-                    pred_cond = transformer(
+                    pred = transformer(
                         x=x, x_ids=x_ids, timesteps=t_vec,
-                        ctx=ctx, ctx_ids=ctx_ids, guidance=None,
+                        ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec,
                     )
-                    pred_uncond = transformer(
-                        x=x, x_ids=x_ids, timesteps=t_vec,
-                        ctx=neg_ctx, ctx_ids=neg_ctx_ids, guidance=None,
-                    )
-                pred = pred_uncond + 1.0 * (pred_cond - pred_uncond)
                 x = x + (t_prev - t_curr) * pred
 
             # Unpack and decode

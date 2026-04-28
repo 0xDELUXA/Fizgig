@@ -374,7 +374,7 @@ class KleinTrainer:
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None
         self.default_guidance_scale = 4.0  # CFG scale for inference (base models)
-        self.default_discrete_flow_shift = 3.0  # BFL official Klein shift
+        self.default_discrete_flow_shift = None  # dynamic empirical mu
         self.model_version_info: Optional[KleinModelInfo] = None
         self.dit_dtype = torch.bfloat16
         self.context_network = None
@@ -1415,7 +1415,7 @@ class KleinTrainer:
             # Distilled: 4 steps, guidance embed, no CFG — matches Explorer/Repair Studio
             sample_steps = 4
             guidance_scale = 1.0
-            discrete_flow_shift = 3.0  # BFL official Klein 9B Distilled shift
+            discrete_flow_shift = None  # dynamic empirical mu
         else:
             default_steps = int(self.model_version_info.defaults.get("num_steps", 20))
             sample_steps = sample_parameter.get("sample_steps", default_steps)

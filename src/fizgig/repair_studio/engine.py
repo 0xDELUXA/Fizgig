@@ -439,8 +439,8 @@ class RepairEngine:
             pipeline.dit._offloader.set_forward_only(True)
             pipeline.dit.prepare_block_swap_before_forward()
 
-        # BFL's official scheduler_config.json for Klein 9B Distilled uses shift=3.0
-        timesteps = get_schedule(num_steps, x.shape[1], 3.0)
+        # flow_shift=None → dynamic empirical mu (~2.29 at 1024x1024, 4 steps)
+        timesteps = get_schedule(num_steps, x.shape[1], None)
         dlog(f"timesteps ({len(timesteps)}): {[round(t, 4) for t in timesteps]}")
 
         pipeline.dit.eval()

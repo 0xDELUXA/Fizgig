@@ -1782,7 +1782,6 @@ class KleinTrainer:
             self.context_network.eval()
 
         network.apply_to(None, transformer, apply_text_encoder=False, apply_unet=True)
-        self._sample_network_ref = network  # stored for Distilled sampling LoRA application
 
         if args.network_weights is not None:
             info = network.load_weights(args.network_weights)
@@ -1845,6 +1844,7 @@ class KleinTrainer:
             network, optimizer, train_dataloader, lr_scheduler
         )
         training_model = network
+        self._sample_network_ref = accelerator.unwrap_model(network)  # unwrapped for Distilled sampling
 
         if args.gradient_checkpointing:
             transformer.train()

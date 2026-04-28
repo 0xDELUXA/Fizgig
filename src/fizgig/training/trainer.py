@@ -1286,14 +1286,16 @@ class KleinTrainer:
             _distilled_dit.prepare_block_swap_before_forward()
             _distilled_dit.eval()
 
-            # Apply trainable LoRA to Distilled DiT
+            # Apply trainable LoRA from saved checkpoint — matches Repair Studio's loading path
             from fizgig.networks.lora_klein import create_arch_network_from_weights as _sample_create
             from fizgig.networks.lora import ensure_kohya_lora_state_dict as _sample_ensure
-            unwrapped_net = accelerator.unwrap_model(network) if 'network' in dir() else None
-            # Get current LoRA weights from the trainable network
-            if hasattr(self, '_sample_network_ref') and self._sample_network_ref is not None:
-                _lora_sd = self._sample_network_ref.state_dict()
-                _lora_sd = {k: v.cpu().to(torch.bfloat16) for k, v in _lora_sd.items()}
+            from fizgig.training.train_utils import get_epoch_ckpt_name as _get_ckpt
+            _ckpt_path = os.path.join(args.output_dir, _get_ckpt(args.output_name, epoch))
+            if epoch > 0 and os.path.exists(_ckpt_path):
+                from safetensors.torch import load_file as _sample_load_lora
+                logger.info(f"  Loading trainable LoRA from disk: {_ckpt_path}")
+                _lora_sd = _sample_load_lora(_ckpt_path)
+                _lora_sd = _sample_ensure(_lora_sd)
                 _sample_net = _sample_create(
                     multiplier=1.0, weights_sd=_lora_sd, unet=_distilled_dit, for_inference=True,
                 )
@@ -1302,6 +1304,8 @@ class KleinTrainer:
                 _sample_net.load_state_dict(_lora_sd, strict=False)
                 _sample_net.to(accelerator.device, dtype=torch.bfloat16)
                 _sample_net.eval()
+            else:
+                logger.info(f"  Epoch {epoch}: no checkpoint yet, sampling without trainable LoRA")
 
             # Apply context LoRA to Distilled DiT if active
             logger.info(f"  Context LoRA check: self.context_network is {'set' if self.context_network is not None else 'None'}")

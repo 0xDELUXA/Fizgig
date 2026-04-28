@@ -9991,6 +9991,8 @@ class LoRATrainerGUI:
             "GRADIENT_ACCUMULATION": self.entries["GRADIENT_ACCUMULATION"].get(),
             "MAX_GRAD_NORM": self.entries["MAX_GRAD_NORM"].get(),
             "NETWORK_DROPOUT": self.entries["NETWORK_DROPOUT"].get(),
+            "CONTEXT_LORA_PATH": self.entries["CONTEXT_LORA_PATH"].get(),
+            "CONTEXT_LORA_STRENGTH": self.entries["CONTEXT_LORA_STRENGTH"].get(),
             "TIMESTEP_SAMPLING": self.ts_sampling_var.get(),
             "DISCRETE_FLOW_SHIFT": self.entries["DISCRETE_FLOW_SHIFT"].get(),
             "SIGMOID_SCALE": self.entries["SIGMOID_SCALE"].get(),

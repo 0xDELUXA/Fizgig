@@ -1304,6 +1304,7 @@ class KleinTrainer:
                 _sample_net.eval()
 
             # Apply context LoRA to Distilled DiT if active
+            logger.info(f"  Context LoRA check: self.context_network is {'set' if self.context_network is not None else 'None'}")
             if self.context_network is not None:
                 # Context LoRA weights are frozen — get them from the stored network
                 _ctx_sd = self.context_network.state_dict()
@@ -1336,13 +1337,23 @@ class KleinTrainer:
             pass
 
         if distributed_state.num_processes <= 1:
-            with torch.no_grad(), accelerator.autocast():
+            # Distilled path manages its own no_grad/autocast per step (matching Repair Studio).
+            # Base path still uses accelerator.autocast().
+            if _use_distilled:
                 for sample_parameter in sample_parameters:
                     self.sample_image_inference(
                         accelerator, args, sample_transformer, dit_dtype, vae, save_dir,
-                        sample_parameter, epoch, steps, use_distilled=_use_distilled,
+                        sample_parameter, epoch, steps, use_distilled=True,
                     )
                     clean_memory_on_device(accelerator.device)
+            else:
+                with torch.no_grad(), accelerator.autocast():
+                    for sample_parameter in sample_parameters:
+                        self.sample_image_inference(
+                            accelerator, args, sample_transformer, dit_dtype, vae, save_dir,
+                            sample_parameter, epoch, steps, use_distilled=False,
+                        )
+                        clean_memory_on_device(accelerator.device)
         else:
             per_process_params = []
             for i in range(distributed_state.num_processes):
@@ -1453,12 +1464,61 @@ class KleinTrainer:
         if not has_self_ref_orig_mod:
             transformer.eval()
 
-        video = self.do_inference(
-            accelerator, args, sample_parameter, vae, dit_dtype, transformer,
-            discrete_flow_shift, sample_steps, width, height, frame_count, generator,
-            do_classifier_free_guidance, guidance_scale, cfg_scale, image_path=image_path,
-            force_guidance_embed=use_distilled,
-        )
+        if use_distilled:
+            # Inline Distilled denoising — matches Repair Studio's proven path exactly.
+            # Does NOT use denoise() or accelerator.autocast() — those cause dtype
+            # coercion issues that degrade likeness.
+            from diffusers.utils.torch_utils import randn_tensor
+            from fizgig.klein.model_utils import get_schedule
+            from fizgig.klein.position import prc_img, prc_txt, scatter_ids
+
+            ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)
+            ctx, ctx_ids = prc_txt(ctx)
+
+            packed_h, packed_w = height // 16, width // 16
+            latents = randn_tensor(
+                (1, 128, packed_h, packed_w),
+                generator=generator, device=device, dtype=torch.bfloat16,
+            )
+            x, x_ids = prc_img(latents)
+
+            if hasattr(transformer, 'prepare_block_swap_before_forward'):
+                transformer.prepare_block_swap_before_forward()
+
+            timesteps = get_schedule(sample_steps, x.shape[1], discrete_flow_shift)
+            guidance_vec = torch.full((x.shape[0],), guidance_scale, device=device, dtype=x.dtype)
+
+            for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+                t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=device)
+                with torch.no_grad(), torch.autocast(device_type=device.type, dtype=x.dtype):
+                    pred = transformer(
+                        x=x, x_ids=x_ids, timesteps=t_vec,
+                        ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec,
+                    )
+                x = x + (t_prev - t_curr) * pred
+
+            # Unpack and decode
+            x = torch.cat(scatter_ids(x, x_ids)).squeeze(2)
+            latent = x.to(vae.dtype)
+            del x
+
+            vae.to(device)
+            vae.eval()
+            with torch.no_grad():
+                pixels = vae.decode(latent)
+            del latent
+            pixels = pixels.to(torch.float32).cpu()
+            pixels = (pixels / 2 + 0.5).clamp(0, 1)
+            vae.to("cpu")
+            clean_memory_on_device(device)
+
+            video = pixels.unsqueeze(2)  # B C H W -> B C 1 H W
+        else:
+            video = self.do_inference(
+                accelerator, args, sample_parameter, vae, dit_dtype, transformer,
+                discrete_flow_shift, sample_steps, width, height, frame_count, generator,
+                do_classifier_free_guidance, guidance_scale, cfg_scale, image_path=image_path,
+            )
 
         if not has_self_ref_orig_mod:
             transformer.train(was_train)

@@ -439,10 +439,8 @@ class RepairEngine:
             pipeline.dit._offloader.set_forward_only(True)
             pipeline.dit.prepare_block_swap_before_forward()
 
-        # flow_shift=None → Fizgig's compute_empirical_mu (gives mu ≈ 2.0 at
-        # 4 steps, seq_len=1024 — matches ComfyUI's Klein shift=2.02 via the
-        # generalized SNR formula).
-        timesteps = get_schedule(num_steps, x.shape[1], None)
+        # BFL's official scheduler_config.json for Klein 9B Distilled uses shift=3.0
+        timesteps = get_schedule(num_steps, x.shape[1], 3.0)
         dlog(f"timesteps ({len(timesteps)}): {[round(t, 4) for t in timesteps]}")
 
         pipeline.dit.eval()

@@ -1,20 +1,16 @@
-"""Gradient Mining — Directional filtering + per-block SNR weighting for LoRA training.
+"""Gradient Mining — Multi-bucket directional filtering for LoRA training.
 
-Tracks per-parameter gradient statistics (EMA of direction and variance) over time.
-Each step:
-1. Splits gradients into parallel (aligned with history) and orthogonal (new direction)
-   components. Parallel gets amplified, orthogonal is preserved at reduced scale.
-2. Weights by soft agreement — gradients aligned with EMA direction get full weight,
-   opposing gradients are suppressed but not zeroed (preserves plasticity).
-3. Per-block scoring uses SNR * directional consistency — blocks must be both strong
-   AND stable to get boosted.
+Tracks multiple gradient direction buckets per parameter, allowing the model
+to learn diverse features (expressions, angles, lighting) without the dominant
+pattern suppressing minority features.
 
-No external reference images, no extra loss term, no second forward/backward pass.
+Each step, a gradient is assigned to its best-matching bucket. Agreement and
+amplification are computed against the matched bucket, not a single global
+direction. Buckets with too few hits are pruned as noise.
 
 Usage:
-    miner = GradientMiner(ema_decay=0.95, amplify_scale=2.0)
+    miner = GradientMiner(amplify_scale=8.0)
     ...
-    # After backward, before optimizer.step():
     stats = miner.amplify_gradients(network)
     optimizer.step()
 """
@@ -22,14 +18,13 @@ Usage:
 import math
 import re
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
-# Regex to extract block name from LoRA parameter name
 _BLOCK_RE = re.compile(r"(double_blocks|single_blocks)[._](\d+)")
 
 
@@ -42,31 +37,34 @@ def _extract_block_name(param_name: str) -> Optional[str]:
 
 
 class GradientMiner:
-    """Directional gradient filtering with per-block SNR+consistency weighting."""
+    """Multi-bucket directional gradient filtering with per-block SNR weighting."""
 
     def __init__(
         self,
         ema_decay: float = 0.95,
-        amplify_scale: float = 2.0,
-        min_snr: float = 0.1,
-        auto_threshold: bool = False,
-        orthogonal_scale: float = 0.2,
+        amplify_scale: float = 8.0,
+        min_snr: float = 0.001,
+        auto_threshold: bool = True,
+        orthogonal_scale: float = 0.3,
+        max_buckets: int = 3,
+        bucket_threshold: float = 0.3,
     ):
         self.ema_decay = ema_decay
         self.amplify_scale = amplify_scale
         self.min_snr = min_snr
         self.auto_threshold = auto_threshold
-        self.filter_strength = orthogonal_scale  # 0.0 = pure SNR boost, 1.0 = full directional filter
+        self.filter_strength = orthogonal_scale
+        self.max_buckets = max_buckets
+        self.bucket_threshold = bucket_threshold
 
-        # Per-parameter EMA stats
-        self._ema_mean: Dict[str, torch.Tensor] = {}
-        self._ema_sq: Dict[str, torch.Tensor] = {}
+        # Per-parameter bucket storage: name -> [(ema_dir, ema_sq, hit_count), ...]
+        self._buckets: Dict[str, List[List]] = {}
         self._step_count = 0
 
         # Per-parameter previous gradient for consistency tracking
         self._prev_grad: Dict[str, torch.Tensor] = {}
 
-        # Cached block name lookups (parameter names don't change)
+        # Cached block name lookups
         self._block_name_cache: Dict[str, Optional[str]] = {}
 
         # Stats for logging
@@ -77,17 +75,33 @@ class GradientMiner:
         self.last_avg_agreement = 0.0
         self.last_agreement_slope = 0.0
         self._prev_avg_agreement = None
-        self.last_effective_ema = ema_decay
         self.last_effective_amplify = amplify_scale
+        self.last_effective_ema = 0.9
+        self.last_avg_buckets = 1.0
+
+    def _find_best_bucket(self, grad_flat: torch.Tensor, buckets: list) -> Tuple[int, float]:
+        """Find the bucket with highest cosine similarity to this gradient."""
+        best_idx = 0
+        best_sim = -1.0
+        grad_norm = grad_flat.norm()
+        if grad_norm < 1e-10:
+            return 0, 0.0
+        for i, (bucket_ema, _, _) in enumerate(buckets):
+            bucket_flat = bucket_ema.flatten()
+            bucket_norm = bucket_flat.norm()
+            if bucket_norm < 1e-10:
+                continue
+            sim = (grad_flat * bucket_flat).sum() / (grad_norm * bucket_norm)
+            sim = sim.clamp(-1.0, 1.0).item()
+            if sim > best_sim:
+                best_sim = sim
+                best_idx = i
+        return best_idx, best_sim
 
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
-        """Filter and amplify gradients in-place. Single-pass optimised.
-
-        Call AFTER backward() and BEFORE optimizer.step().
-        """
+        """Filter and amplify gradients using multi-bucket direction tracking."""
         self._step_count += 1
-
-        effective_ema = 0.8
+        effective_ema = 0.9
         self.last_effective_ema = effective_ema
 
         total_params = 0
@@ -95,10 +109,14 @@ class GradientMiner:
         boost_sum = 0.0
         boost_count = 0
         agreement_sum = 0.0
+        bucket_count_sum = 0
 
-        # ── Pass 1: Update EMA, compute per-param SNR + consistency ──
-        param_data = {}  # name -> (snr, snr_mean, consistency, block_name)
-        block_accum = {}  # block_name -> [(snr_mean, consistency), ...]
+        # Prune weak buckets every 100 steps
+        do_prune = (self._step_count % 100 == 0) and self._step_count > 100
+
+        # ── Pass 1: Update buckets, compute per-param SNR + consistency ──
+        param_data = {}  # name -> (snr, snr_mean, consistency, block_name, best_bucket_idx)
+        block_accum = {}
 
         for name, param in network.named_parameters():
             if not param.requires_grad or param.grad is None:
@@ -107,56 +125,83 @@ class GradientMiner:
             grad = param.grad.detach()
             total_params += 1
 
-            # Cache block name on first encounter
             if name not in self._block_name_cache:
                 self._block_name_cache[name] = _extract_block_name(name)
             block_name = self._block_name_cache[name]
 
-            if name not in self._ema_mean:
-                self._ema_mean[name] = grad.clone()
-                self._ema_sq[name] = (grad ** 2).clone()
+            # Initialise buckets for new parameters
+            if name not in self._buckets:
+                self._buckets[name] = [[grad.clone(), (grad ** 2).clone(), 1]]
                 self._prev_grad[name] = grad.clone()
                 continue
 
-            # EMA update
-            self._ema_mean[name].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
-            self._ema_sq[name].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
+            buckets = self._buckets[name]
+            grad_flat = grad.flatten()
+            bucket_count_sum += len(buckets)
 
-            # Per-element SNR
-            signal = self._ema_mean[name].abs()
-            variance = (self._ema_sq[name] - self._ema_mean[name] ** 2).clamp(min=0)
+            # Find best matching bucket
+            best_idx, best_sim = self._find_best_bucket(grad_flat, buckets)
+
+            if best_sim > self.bucket_threshold:
+                # Update matching bucket
+                buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
+                buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
+                buckets[best_idx][2] += 1
+            elif len(buckets) < self.max_buckets:
+                # Create new bucket
+                buckets.append([grad.clone(), (grad ** 2).clone(), 1])
+                best_idx = len(buckets) - 1
+            else:
+                # At capacity — update closest
+                buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
+                buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
+                buckets[best_idx][2] += 1
+
+            # Prune weak buckets (< 5% of total hits)
+            if do_prune and len(buckets) > 1:
+                total_hits = sum(b[2] for b in buckets)
+                threshold_hits = total_hits * 0.05
+                buckets[:] = [b for b in buckets if b[2] >= threshold_hits]
+                if not buckets:
+                    # Should never happen, but safety
+                    buckets.append([grad.clone(), (grad ** 2).clone(), 1])
+                best_idx = min(best_idx, len(buckets) - 1)
+
+            # SNR from the matched bucket
+            bucket_ema = buckets[best_idx][0]
+            bucket_sq = buckets[best_idx][1]
+            signal = bucket_ema.abs()
+            variance = (bucket_sq - bucket_ema ** 2).clamp(min=0)
             snr = signal / (variance.sqrt() + 1e-8)
             snr_mean = snr.mean().item()
             snr_sum += snr_mean
 
-            # Directional consistency: cosine similarity between current and previous grad
-            flat_grad = grad.flatten()
+            # Directional consistency
             flat_prev = self._prev_grad[name].flatten()
-            if flat_grad.norm() > 1e-10 and flat_prev.norm() > 1e-10:
-                consistency = F.cosine_similarity(flat_grad.unsqueeze(0),
+            if grad_flat.norm() > 1e-10 and flat_prev.norm() > 1e-10:
+                consistency = F.cosine_similarity(grad_flat.unsqueeze(0),
                                                   flat_prev.unsqueeze(0)).item()
                 consistency = max(0.0, consistency)
             else:
                 consistency = 0.0
 
-            # Update prev grad in-place (no allocation after first step)
             self._prev_grad[name].copy_(grad)
 
-            param_data[name] = (snr, snr_mean, consistency, block_name)
+            param_data[name] = (snr, snr_mean, consistency, block_name, best_idx)
 
             if block_name is not None:
                 block_accum.setdefault(block_name, []).append((snr_mean, consistency))
 
-        # Auto-threshold: detect noise floor from SNR distribution variance
+        # ── Auto-threshold ──
         if len(param_data) > 1:
             all_snr = [d[1] for d in param_data.values()]
             mean_snr = sum(all_snr) / len(all_snr)
             var_snr = sum((s - mean_snr) ** 2 for s in all_snr) / len(all_snr)
-            effective_threshold = max(mean_snr - 0.5 * var_snr ** 0.5, 0.001)  # floor at 0.001
+            effective_threshold = max(mean_snr - 0.5 * var_snr ** 0.5, 0.001)
         else:
             effective_threshold = 0.001
 
-        # ── Per-block weighting: SNR * consistency ──
+        # ── Per-block weighting ──
         block_weights = {}
         if block_accum:
             block_scores = {}
@@ -183,49 +228,50 @@ class GradientMiner:
         else:
             block_entropy = 1.0
 
-        # ── Auto amplify: scale amplification by agreement level ──
-        # agree=0.6 → full amplify. Lower → back off. Never exceeds base value.
+        # ── Auto amplify ──
         effective_amplify = self.amplify_scale * (self.last_avg_agreement / 0.6)
-        effective_amplify = max(1.0, effective_amplify)  # floor 1.0, no ceiling
+        effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify
 
-        # ── Pass 2: Directional filter + amplify + block weight ──
+        # ── Pass 2: Directional filter using matched bucket ──
         for name, param in network.named_parameters():
             if name not in param_data:
                 continue
 
-            snr, snr_mean, consistency, block_name = param_data[name]
+            snr, snr_mean, consistency, block_name, best_idx = param_data[name]
             grad = param.grad
+            buckets = self._buckets[name]
+            best_idx = min(best_idx, len(buckets) - 1)
 
-            # Normalised EMA direction
-            ema_dir = self._ema_mean[name]
+            # Direction from matched bucket
+            ema_dir = buckets[best_idx][0]
             ema_norm = ema_dir.norm()
             if ema_norm < 1e-10:
                 continue
 
             direction = ema_dir / ema_norm
 
-            # Parallel/orthogonal split
+            # Parallel/orthogonal split against matched bucket direction
             dot = (grad * direction).sum()
             parallel = dot * direction
             orthogonal = grad - parallel
 
-            # Agreement from dot product (direction is unit-length, so cos = dot / grad_norm)
+            # Agreement against matched bucket
             grad_norm = grad.norm()
             if grad_norm > 1e-10:
                 cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
             else:
                 cos_sim = 0.0
-            agreement = (cos_sim + 1.0) * 0.5  # [-1,1] → [0,1]
+            agreement = (cos_sim + 1.0) * 0.5
             agreement_sum += agreement
 
-            # Per-element SNR boost (using auto-scaled amplify)
+            # SNR boost
             boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
 
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
 
-            # Blend: filtered (directional + agree) with raw (SNR boost only)
+            # Blend filtered + raw
             filtered = parallel * boost * agreement + orthogonal * 0.2
             raw_boosted = grad * boost
             param.grad = (self.filter_strength * filtered + (1.0 - self.filter_strength) * raw_boosted) * bw
@@ -242,6 +288,7 @@ class GradientMiner:
         self.last_threshold = effective_threshold
         self.last_block_entropy = block_entropy
         current_agreement = agreement_sum / max(n_with_data, 1)
+        self.last_avg_buckets = bucket_count_sum / max(n_with_data, 1)
 
         if self._prev_avg_agreement is not None:
             self.last_agreement_slope = current_agreement - self._prev_avg_agreement
@@ -259,4 +306,5 @@ class GradientMiner:
             "d_agree": self.last_agreement_slope,
             "ema": self.last_effective_ema,
             "amp": self.last_effective_amplify,
+            "bkts": self.last_avg_buckets,
         }

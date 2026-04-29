@@ -49,7 +49,7 @@ class GradientMiner:
         auto_threshold: bool = True,
         orthogonal_scale: float = 0.3,
         discovery_filter: float = None,
-        bucket_threshold: float = 0.02,
+        bucket_threshold: float = 0.1,
         discovery_epochs: int = 2,
     ):
         self.ema_decay = ema_decay

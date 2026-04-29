@@ -66,6 +66,7 @@ class GradientMiner:
         # Discovery state
         self._discovery_complete = False
         self._pruned_directions: Dict[str, List[torch.Tensor]] = {}  # blocked directions
+        self._current_epoch = 0  # updated by on_epoch_end
 
         # Per-parameter previous gradient for consistency tracking
         self._prev_grad: Dict[str, torch.Tensor] = {}
@@ -107,6 +108,7 @@ class GradientMiner:
     def on_epoch_end(self, epoch: int):
         """Called by the trainer at the end of each epoch.
         Triggers discovery→refinement transition at the right epoch."""
+        self._current_epoch = epoch
         if self._discovery_complete:
             return
         if epoch < self.discovery_epochs:
@@ -168,7 +170,7 @@ class GradientMiner:
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
         """Filter and amplify gradients using multi-bucket direction tracking."""
         self._step_count += 1
-        effective_ema = 0.5 if self._discovery_complete else self.ema_decay
+        effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
 
         total_params = 0
@@ -282,9 +284,14 @@ class GradientMiner:
         else:
             block_entropy = 1.0
 
-        # ── Auto amplify ──
-        # Reduced feedback coupling: agreement influences amplify but can't run away
-        effective_amplify = self.amplify_scale * (0.7 + 0.3 * self.last_avg_agreement)
+        # ── Auto amplify with epoch decay ──
+        # Full amplify during discovery, halved each epoch after, floor at 2.0
+        if self._current_epoch <= self.discovery_epochs:
+            base_amplify = self.amplify_scale
+        else:
+            epochs_since = self._current_epoch - self.discovery_epochs
+            base_amplify = max(2.0, self.amplify_scale / (2.0 ** epochs_since))
+        effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
         effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify
 

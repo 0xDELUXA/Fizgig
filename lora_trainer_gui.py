@@ -1902,7 +1902,7 @@ class LoRATrainerGUI:
 
         ttk.Label(mining_row1, text="Discovery:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_DISCOVERY"] = ttk.Entry(mining_row1, width=3)
-        self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "1")
+        self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "2")
         self.entries["GRADIENT_MINING_DISCOVERY"].pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))

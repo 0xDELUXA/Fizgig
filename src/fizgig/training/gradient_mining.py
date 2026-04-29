@@ -48,8 +48,8 @@ class GradientMiner:
         min_snr: float = 0.001,
         auto_threshold: bool = True,
         orthogonal_scale: float = 0.3,
-        bucket_threshold: float = 0.3,
-        discovery_epochs: int = 1,
+        bucket_threshold: float = 0.02,
+        discovery_epochs: int = 2,
     ):
         self.ema_decay = ema_decay
         self.amplify_scale = amplify_scale
@@ -121,23 +121,37 @@ class GradientMiner:
                 continue
 
             total_hits = sum(b[2] for b in buckets)
-            threshold_hits = total_hits * 0.05
+            max_to_prune = int(len(buckets) * 0.3)  # never prune more than 30%
+
+            # Score each bucket by frequency AND quality
+            scored = []
+            for b in buckets:
+                hit_ratio = b[2] / max(total_hits, 1)
+                # SNR score from this bucket's EMA
+                ema = b[0]
+                sq = b[1]
+                variance = (sq - ema ** 2).clamp(min=0)
+                snr = ema.abs() / (variance.sqrt() + 1e-8)
+                snr_score = snr.mean().item()
+                # Survive if frequent OR high-quality signal
+                keep = (hit_ratio >= 0.005) or (snr_score > 1.2)
+                scored.append((b, keep, hit_ratio, snr_score))
 
             survivors = []
             pruned_dirs = []
-            for b in buckets:
-                if b[2] >= threshold_hits:
+            pruned_count = 0
+            for b, keep, hit_ratio, snr_score in scored:
+                if keep or pruned_count >= max_to_prune:
                     survivors.append(b)
                 else:
-                    # Save normalised direction for blocking
                     d = b[0].flatten()
                     d_norm = d.norm()
                     if d_norm > 1e-10:
                         pruned_dirs.append((d / d_norm).clone())
+                    pruned_count += 1
                     total_pruned += 1
 
             if not survivors:
-                # Keep the strongest one at minimum
                 survivors = [max(buckets, key=lambda b: b[2])]
 
             self._buckets[name] = survivors
@@ -293,7 +307,7 @@ class GradientMiner:
                         pruned_sim = (grad_flat * pruned_dir).sum() / grad_norm
                         if pruned_sim.item() > 0.5:
                             # This gradient matches a confirmed-noise direction — dampen
-                            dampen = 0.3
+                            dampen = 0.7
                             break
 
             # Direction from matched bucket

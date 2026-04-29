@@ -218,9 +218,10 @@ class GradientMiner:
 
         # Periodic merge during discovery to bound VRAM usage
         if not self._discovery_complete and self._step_count > 1 and self._step_count % 30 == 0:
+            pre = sum(len(b) for b in self._buckets.values())
             merged = self._merge_similar_buckets(merge_threshold=0.5)
-            if merged > 0:
-                logger.info(f"[gradient_mining] Periodic merge at step {self._step_count}: {merged} buckets merged")
+            post = sum(len(b) for b in self._buckets.values())
+            logger.info(f"[gradient_mining] Periodic merge at step {self._step_count}: {pre} → {post} ({merged} merged)")
 
         # Effective filter: discovery value → tween over 1 epoch → refinement value
         if not self._discovery_complete:

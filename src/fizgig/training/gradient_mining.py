@@ -109,27 +109,12 @@ class GradientMiner:
                 best_idx = i
         return best_idx, best_sim
 
-    def on_epoch_end(self, epoch: int):
-        """Called by the trainer at the end of each epoch.
-        Triggers discovery→refinement transition at the right epoch."""
-        self._current_epoch = epoch
-        if self._discovery_complete:
-            return
-        if epoch < self.discovery_epochs:
-            return
-
-        # End of discovery — merge similar, then prune weak, then lock
+    def _merge_similar_buckets(self, merge_threshold: float = 0.7) -> int:
+        """Merge buckets with cosine similarity above threshold. Returns total merged."""
         total_merged = 0
-        total_pruned = 0
-        total_survived = 0
-        pre_merge_total = sum(len(b) for b in self._buckets.values())
-
         for name, buckets in self._buckets.items():
             if len(buckets) <= 1:
-                total_survived += len(buckets)
                 continue
-
-            # ── Step 1: Merge similar buckets (cos_sim > 0.85) ──
             merged = True
             while merged:
                 merged = False
@@ -148,8 +133,7 @@ class GradientMiner:
                         if norm_j < 1e-10:
                             continue
                         sim = (ema_i * ema_j).sum() / (norm_i * norm_j)
-                        if sim.item() > 0.85:
-                            # Merge j into i, weighted by hit count
+                        if sim.item() > merge_threshold:
                             hits_i, hits_j = buckets[i][2], buckets[j][2]
                             total = hits_i + hits_j
                             w_i = hits_i / max(total, 1)
@@ -163,11 +147,27 @@ class GradientMiner:
                             break
                     if merged:
                         break
-                # Remove None entries
                 buckets = [b for b in buckets if b is not None]
             self._buckets[name] = buckets
+        return total_merged
 
-            # ── Step 2: Prune weak buckets ──
+    def on_epoch_end(self, epoch: int):
+        """Called by the trainer at the end of each epoch.
+        Triggers discovery→refinement transition at the right epoch."""
+        self._current_epoch = epoch
+        if self._discovery_complete:
+            return
+        if epoch < self.discovery_epochs:
+            return
+
+        # End of discovery — merge similar, then prune weak, then lock
+        pre_merge_total = sum(len(b) for b in self._buckets.values())
+        total_merged = self._merge_similar_buckets(merge_threshold=0.85)
+        total_pruned = 0
+        total_survived = 0
+
+        for name, buckets in self._buckets.items():
+            # Prune weak buckets
             if len(buckets) <= 1:
                 total_survived += len(buckets)
                 continue
@@ -215,6 +215,12 @@ class GradientMiner:
         self._step_count += 1
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
+
+        # Periodic merge during discovery to bound VRAM usage
+        if not self._discovery_complete and self._step_count > 1 and self._step_count % 30 == 0:
+            merged = self._merge_similar_buckets(merge_threshold=0.7)
+            if merged > 0:
+                logger.info(f"[gradient_mining] Periodic merge at step {self._step_count}: {merged} buckets merged")
 
         # Effective filter: discovery value → tween over 1 epoch → refinement value
         if not self._discovery_complete:

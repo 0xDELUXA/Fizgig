@@ -491,4 +491,5 @@ class GradientMiner:
             "ema": self.last_effective_ema,
             "amp": self.last_effective_amplify,
             "bkts": self.last_avg_buckets,
+            "face": is_face_crop,
         }

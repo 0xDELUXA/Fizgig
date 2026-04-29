@@ -2318,7 +2318,10 @@ class KleinTrainer:
                     logs["agree"] = f"{mine_stats['agree']:.0%}"
                     logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
                     logs["amp"] = f"{mine_stats['amp']:.1f}"
-                    logs["bkts"] = f"{mine_stats['bkts']:.1f}"
+                    bkts_str = f"{mine_stats['bkts']:.1f}"
+                    if mine_stats.get('face', False):
+                        bkts_str += "F"
+                    logs["bkts"] = bkts_str
                     logs["blk_H"] = f"{mine_stats['blk_H']:.2f}"
                 progress_bar.set_postfix(**logs)
 

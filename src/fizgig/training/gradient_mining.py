@@ -133,8 +133,8 @@ class GradientMiner:
                 variance = (sq - ema ** 2).clamp(min=0)
                 snr = ema.abs() / (variance.sqrt() + 1e-8)
                 snr_score = snr.mean().item()
-                # Survive if frequent OR high-quality signal
-                keep = (hit_ratio >= 0.005) or (snr_score > 1.2)
+                # Survive if frequent enough AND decent quality
+                keep = (hit_ratio >= 0.03) and (snr_score > 0.5)
                 scored.append((b, keep, hit_ratio, snr_score))
 
             survivors = []
@@ -283,7 +283,8 @@ class GradientMiner:
             block_entropy = 1.0
 
         # ── Auto amplify ──
-        effective_amplify = self.amplify_scale * (self.last_avg_agreement / 0.6)
+        # Reduced feedback coupling: agreement influences amplify but can't run away
+        effective_amplify = self.amplify_scale * (0.7 + 0.3 * self.last_avg_agreement)
         effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify
 

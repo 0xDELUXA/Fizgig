@@ -218,7 +218,7 @@ class GradientMiner:
 
         # Periodic merge during discovery to bound VRAM usage
         if not self._discovery_complete and self._step_count > 1 and self._step_count % 30 == 0:
-            merged = self._merge_similar_buckets(merge_threshold=0.7)
+            merged = self._merge_similar_buckets(merge_threshold=0.5)
             if merged > 0:
                 logger.info(f"[gradient_mining] Periodic merge at step {self._step_count}: {merged} buckets merged")
 

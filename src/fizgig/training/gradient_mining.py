@@ -48,6 +48,7 @@ class GradientMiner:
         min_snr: float = 0.001,
         auto_threshold: bool = True,
         orthogonal_scale: float = 0.3,
+        discovery_filter: float = None,
         bucket_threshold: float = 0.02,
         discovery_epochs: int = 2,
     ):
@@ -56,6 +57,7 @@ class GradientMiner:
         self.min_snr = min_snr
         self.auto_threshold = auto_threshold
         self.filter_strength = orthogonal_scale
+        self.discovery_filter = discovery_filter if discovery_filter is not None else orthogonal_scale
         self.bucket_threshold = bucket_threshold
         self.discovery_epochs = discovery_epochs
 
@@ -67,6 +69,8 @@ class GradientMiner:
         self._discovery_complete = False
         self._pruned_directions: Dict[str, List[torch.Tensor]] = {}  # blocked directions
         self._current_epoch = 0  # updated by on_epoch_end
+        self._refinement_start_step = 0  # step when refinement began
+        self._steps_per_epoch = 0  # inferred at discovery end
 
         # Per-parameter previous gradient for consistency tracking
         self._prev_grad: Dict[str, torch.Tensor] = {}
@@ -155,6 +159,8 @@ class GradientMiner:
             total_survived += len(survivors)
 
         self._discovery_complete = True
+        self._refinement_start_step = self._step_count
+        self._steps_per_epoch = max(self._step_count // self.discovery_epochs, 1)
         logger.info(
             f"[gradient_mining] Discovery complete after {epoch} epoch(s): "
             f"{total_survived} buckets survived, {total_pruned} pruned"
@@ -165,6 +171,14 @@ class GradientMiner:
         self._step_count += 1
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
+
+        # Effective filter: discovery value → tween over 1 epoch → refinement value
+        if not self._discovery_complete:
+            effective_filter = self.discovery_filter
+        else:
+            steps_since = self._step_count - self._refinement_start_step
+            t = min(1.0, steps_since / self._steps_per_epoch)
+            effective_filter = self.discovery_filter + t * (self.filter_strength - self.discovery_filter)
 
         total_params = 0
         snr_sum = 0.0
@@ -329,7 +343,7 @@ class GradientMiner:
             # Blend filtered + raw
             filtered = parallel * boost * agreement + orthogonal * 0.2
             raw_boosted = grad * boost
-            param.grad = (self.filter_strength * filtered + (1.0 - self.filter_strength) * raw_boosted) * bw
+            param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
 
             avg_boost_val = (boost * bw).mean().item()
             if avg_boost_val > 1.05:

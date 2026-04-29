@@ -2085,6 +2085,7 @@ class KleinTrainer:
                 min_snr=getattr(args, "gradient_mining_threshold", 0.001),
                 auto_threshold=getattr(args, "gradient_mining_auto_threshold", True),
                 orthogonal_scale=getattr(args, "gradient_mining_orthogonal_scale", 0.3),
+                discovery_filter=getattr(args, "gradient_mining_discovery_filter", None),
                 discovery_epochs=getattr(args, "gradient_mining_discovery_epochs", 1),
             )
             logger.info(
@@ -2792,6 +2793,9 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient_mining_orthogonal_scale", type=float, default=0.2,
                         help="How much orthogonal (exploration) gradient to preserve (default 0.2). "
                              "0.0 = pure refinement, 1.0 = full exploration.")
+    parser.add_argument("--gradient_mining_discovery_filter", type=float, default=None,
+                        help="Filter strength during discovery epochs (default: same as orthogonal_scale). "
+                             "Tweens to orthogonal_scale over the first refinement epoch.")
     parser.add_argument("--gradient_mining_discovery_epochs", type=int, default=1,
                         help="Number of epochs for uncapped bucket discovery (default 1). "
                              "After this, bucket structure is locked and weak buckets pruned.")

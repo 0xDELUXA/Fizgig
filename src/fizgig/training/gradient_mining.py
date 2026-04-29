@@ -240,20 +240,12 @@ class GradientMiner:
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
 
-        # Cooldown: first refinement epoch is normal training (no mining)
-        # when face separation is off — lets model stabilize at the transition
-        if (self._discovery_complete and not self.face_separation
-                and self._step_count - self._refinement_start_step < self._steps_per_epoch):
-            return {"avg_snr": 0, "avg_boost": 1.0, "threshold": 0, "blk_H": 1.0,
-                    "agree": 0, "d_agree": 0, "ema": self.ema_decay,
-                    "amp": 0, "bkts": self.last_avg_buckets}
-
         # Effective filter: discovery value → tween over 1 epoch → refinement value
         if not self._discovery_complete:
             effective_filter = self.discovery_filter
         else:
-            steps_since = self._step_count - self._refinement_start_step - self._steps_per_epoch
-            t = min(1.0, max(0.0, steps_since / self._steps_per_epoch))
+            steps_since = self._step_count - self._refinement_start_step
+            t = min(1.0, steps_since / max(self._steps_per_epoch, 1))
             effective_filter = self.discovery_filter + t * (self.filter_strength - self.discovery_filter)
 
         total_params = 0

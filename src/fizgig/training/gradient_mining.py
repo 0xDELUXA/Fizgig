@@ -87,7 +87,7 @@ class GradientMiner:
         """
         self._step_count += 1
 
-        effective_ema = 0.9
+        effective_ema = 0.8
         self.last_effective_ema = effective_ema
 
         total_params = 0

@@ -186,7 +186,7 @@ class GradientMiner:
         # ── Auto amplify: scale amplification by agreement level ──
         # agree=0.6 → full amplify. Lower → back off. Never exceeds base value.
         effective_amplify = self.amplify_scale * (self.last_avg_agreement / 0.6)
-        effective_amplify = max(1.0, min(self.amplify_scale, effective_amplify))  # floor 1.0, ceiling = base
+        effective_amplify = max(1.0, effective_amplify)  # floor 1.0, no ceiling
         self.last_effective_amplify = effective_amplify
 
         # ── Pass 2: Directional filter + amplify + block weight ──

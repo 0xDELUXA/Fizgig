@@ -2080,15 +2080,17 @@ class KleinTrainer:
         if getattr(args, "gradient_mining", False):
             from fizgig.training.gradient_mining import GradientMiner
             gradient_miner = GradientMiner(
-                ema_decay=getattr(args, "gradient_mining_ema_decay", 0.99),
-                amplify_scale=getattr(args, "gradient_mining_amplify", 2.0),
-                min_snr=getattr(args, "gradient_mining_threshold", 0.1),
-                auto_threshold=getattr(args, "gradient_mining_auto_threshold", False),
-                orthogonal_scale=getattr(args, "gradient_mining_orthogonal_scale", 0.2),
+                ema_decay=getattr(args, "gradient_mining_ema_decay", 0.9),
+                amplify_scale=getattr(args, "gradient_mining_amplify", 8.0),
+                min_snr=getattr(args, "gradient_mining_threshold", 0.001),
+                auto_threshold=getattr(args, "gradient_mining_auto_threshold", True),
+                orthogonal_scale=getattr(args, "gradient_mining_orthogonal_scale", 0.3),
+                discovery_epochs=getattr(args, "gradient_mining_discovery_epochs", 1),
             )
             logger.info(
                 f"Gradient mining enabled: amplify={gradient_miner.amplify_scale}x, "
-                f"min_snr={gradient_miner.min_snr}, ema_decay={gradient_miner.ema_decay}"
+                f"min_snr={gradient_miner.min_snr}, ema_decay={gradient_miner.ema_decay}, "
+                f"discovery_epochs={gradient_miner.discovery_epochs}"
             )
 
         # ------------------------------------------------------------------
@@ -2164,11 +2166,20 @@ class KleinTrainer:
                     gradient_miner._step_count = _ms.get("step_count", 0)
                     gradient_miner.last_avg_agreement = _ms.get("last_avg_agreement", 0.0)
                     gradient_miner._prev_avg_agreement = gradient_miner.last_avg_agreement
-                    gradient_miner._ema_mean = {k: v.to(accelerator.device) for k, v in _ms.get("ema_mean", {}).items()}
-                    gradient_miner._ema_sq = {k: v.to(accelerator.device) for k, v in _ms.get("ema_sq", {}).items()}
+                    gradient_miner._discovery_complete = _ms.get("discovery_complete", False)
+                    gradient_miner._buckets = {
+                        k: [[b[0].to(accelerator.device), b[1].to(accelerator.device), b[2]] for b in v]
+                        for k, v in _ms.get("buckets", {}).items()
+                    }
                     gradient_miner._prev_grad = {k: v.to(accelerator.device) for k, v in _ms.get("prev_grad", {}).items()}
+                    gradient_miner._pruned_directions = {
+                        k: [d.to(accelerator.device) for d in v]
+                        for k, v in _ms.get("pruned_directions", {}).items()
+                    }
+                    n_buckets = sum(len(v) for v in gradient_miner._buckets.values())
                     accelerator.print(
-                        f"[resume] gradient_mining state restored: {len(gradient_miner._ema_mean)} params, "
+                        f"[resume] gradient_mining state restored: {len(gradient_miner._buckets)} params, "
+                        f"{n_buckets} total buckets, discovery={'done' if gradient_miner._discovery_complete else 'active'}, "
                         f"step_count={gradient_miner._step_count}, agree={gradient_miner.last_avg_agreement:.2f}"
                     )
                 except Exception as _e:
@@ -2526,21 +2537,29 @@ class KleinTrainer:
                             except Exception as _e:
                                 accelerator.print(f"[adaptive_lr] sidecar save failed: {_e}")
 
-                        # Gradient mining state — save EMA tensors for resume continuity
+                        # Gradient mining state — save buckets for resume continuity
                         if gradient_miner is not None and gradient_miner._step_count > 0:
                             _state_dir = os.path.join(args.output_dir, f"{args.output_name}-{epoch + 1:06d}-state")
                             try:
                                 _mining_state = {
                                     "step_count": gradient_miner._step_count,
                                     "last_avg_agreement": gradient_miner.last_avg_agreement,
-                                    "ema_mean": {k: v.cpu() for k, v in gradient_miner._ema_mean.items()},
-                                    "ema_sq": {k: v.cpu() for k, v in gradient_miner._ema_sq.items()},
+                                    "discovery_complete": gradient_miner._discovery_complete,
+                                    "buckets": {k: [(b[0].cpu(), b[1].cpu(), b[2]) for b in v]
+                                                for k, v in gradient_miner._buckets.items()},
                                     "prev_grad": {k: v.cpu() for k, v in gradient_miner._prev_grad.items()},
+                                    "pruned_directions": {k: [d.cpu() for d in v]
+                                                          for k, v in gradient_miner._pruned_directions.items()},
                                 }
                                 torch.save(_mining_state, os.path.join(_state_dir, "gradient_mining_state.pt"))
-                                accelerator.print(f"[gradient_mining] state saved ({len(gradient_miner._ema_mean)} params)")
+                                accelerator.print(f"[gradient_mining] state saved ({len(gradient_miner._buckets)} params, "
+                                                  f"discovery={'done' if gradient_miner._discovery_complete else 'active'})")
                             except Exception as _e:
                                 accelerator.print(f"[gradient_mining] state save failed: {_e}")
+
+            # Gradient mining: trigger discovery→refinement transition at epoch boundary
+            if gradient_miner is not None:
+                gradient_miner.on_epoch_end(epoch + 1)
 
             self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()
@@ -2773,6 +2792,9 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient_mining_orthogonal_scale", type=float, default=0.2,
                         help="How much orthogonal (exploration) gradient to preserve (default 0.2). "
                              "0.0 = pure refinement, 1.0 = full exploration.")
+    parser.add_argument("--gradient_mining_discovery_epochs", type=int, default=1,
+                        help="Number of epochs for uncapped bucket discovery (default 1). "
+                             "After this, bucket structure is locked and weak buckets pruned.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

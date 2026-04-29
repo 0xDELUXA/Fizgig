@@ -1,18 +1,20 @@
-"""Gradient Mining — Multi-bucket directional filtering for LoRA training.
+"""Gradient Mining — Multi-bucket directional filtering with discovery/refinement phases.
 
-Tracks multiple gradient direction buckets per parameter, allowing the model
-to learn diverse features (expressions, angles, lighting) without the dominant
-pattern suppressing minority features.
+Discovery phase (first N epochs): unlimited bucket creation, the dataset reveals
+its natural gradient pattern count. At the end of discovery, weak buckets (< 5%
+of hits) are pruned and their directions blocked.
 
-Each step, a gradient is assigned to its best-matching bucket. Agreement and
-amplification are computed against the matched bucket, not a single global
-direction. Buckets with too few hits are pruned as noise.
+Refinement phase (remaining epochs): bucket structure locked, no new buckets.
+All gradients assigned to surviving buckets. Pruned directions are dampened if
+they recur. Each pattern gets full amplification within its own tracked direction.
 
 Usage:
-    miner = GradientMiner(amplify_scale=8.0)
+    miner = GradientMiner(amplify_scale=8.0, discovery_epochs=1)
     ...
     stats = miner.amplify_gradients(network)
     optimizer.step()
+    # At epoch boundary:
+    miner.on_epoch_end(epoch_number)
 """
 
 import math
@@ -37,29 +39,33 @@ def _extract_block_name(param_name: str) -> Optional[str]:
 
 
 class GradientMiner:
-    """Multi-bucket directional gradient filtering with per-block SNR weighting."""
+    """Multi-bucket directional filtering with discovery/refinement phases."""
 
     def __init__(
         self,
-        ema_decay: float = 0.95,
+        ema_decay: float = 0.9,
         amplify_scale: float = 8.0,
         min_snr: float = 0.001,
         auto_threshold: bool = True,
         orthogonal_scale: float = 0.3,
-        max_buckets: int = 3,
         bucket_threshold: float = 0.3,
+        discovery_epochs: int = 1,
     ):
         self.ema_decay = ema_decay
         self.amplify_scale = amplify_scale
         self.min_snr = min_snr
         self.auto_threshold = auto_threshold
         self.filter_strength = orthogonal_scale
-        self.max_buckets = max_buckets
         self.bucket_threshold = bucket_threshold
+        self.discovery_epochs = discovery_epochs
 
         # Per-parameter bucket storage: name -> [(ema_dir, ema_sq, hit_count), ...]
         self._buckets: Dict[str, List[List]] = {}
         self._step_count = 0
+
+        # Discovery state
+        self._discovery_complete = False
+        self._pruned_directions: Dict[str, List[torch.Tensor]] = {}  # blocked directions
 
         # Per-parameter previous gradient for consistency tracking
         self._prev_grad: Dict[str, torch.Tensor] = {}
@@ -67,7 +73,7 @@ class GradientMiner:
         # Cached block name lookups
         self._block_name_cache: Dict[str, Optional[str]] = {}
 
-        # Stats for logging
+        # Stats
         self.last_avg_snr = 0.0
         self.last_avg_boost = 0.0
         self.last_threshold = min_snr
@@ -76,7 +82,7 @@ class GradientMiner:
         self.last_agreement_slope = 0.0
         self._prev_avg_agreement = None
         self.last_effective_amplify = amplify_scale
-        self.last_effective_ema = 0.9
+        self.last_effective_ema = ema_decay
         self.last_avg_buckets = 1.0
 
     def _find_best_bucket(self, grad_flat: torch.Tensor, buckets: list) -> Tuple[int, float]:
@@ -98,10 +104,57 @@ class GradientMiner:
                 best_idx = i
         return best_idx, best_sim
 
+    def on_epoch_end(self, epoch: int):
+        """Called by the trainer at the end of each epoch.
+        Triggers discovery→refinement transition at the right epoch."""
+        if self._discovery_complete:
+            return
+        if epoch < self.discovery_epochs:
+            return
+
+        # End of discovery — prune and lock
+        total_pruned = 0
+        total_survived = 0
+        for name, buckets in self._buckets.items():
+            if len(buckets) <= 1:
+                total_survived += len(buckets)
+                continue
+
+            total_hits = sum(b[2] for b in buckets)
+            threshold_hits = total_hits * 0.05
+
+            survivors = []
+            pruned_dirs = []
+            for b in buckets:
+                if b[2] >= threshold_hits:
+                    survivors.append(b)
+                else:
+                    # Save normalised direction for blocking
+                    d = b[0].flatten()
+                    d_norm = d.norm()
+                    if d_norm > 1e-10:
+                        pruned_dirs.append((d / d_norm).clone())
+                    total_pruned += 1
+
+            if not survivors:
+                # Keep the strongest one at minimum
+                survivors = [max(buckets, key=lambda b: b[2])]
+
+            self._buckets[name] = survivors
+            total_survived += len(survivors)
+            if pruned_dirs:
+                self._pruned_directions[name] = pruned_dirs
+
+        self._discovery_complete = True
+        logger.info(
+            f"[gradient_mining] Discovery complete after {epoch} epoch(s): "
+            f"{total_survived} buckets survived, {total_pruned} pruned and blocked"
+        )
+
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
         """Filter and amplify gradients using multi-bucket direction tracking."""
         self._step_count += 1
-        effective_ema = 0.9
+        effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
 
         total_params = 0
@@ -111,11 +164,8 @@ class GradientMiner:
         agreement_sum = 0.0
         bucket_count_sum = 0
 
-        # Prune weak buckets every 100 steps
-        do_prune = (self._step_count % 100 == 0) and self._step_count > 100
-
         # ── Pass 1: Update buckets, compute per-param SNR + consistency ──
-        param_data = {}  # name -> (snr, snr_mean, consistency, block_name, best_bucket_idx)
+        param_data = {}
         block_accum = {}
 
         for name, param in network.named_parameters():
@@ -147,25 +197,15 @@ class GradientMiner:
                 buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
                 buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
                 buckets[best_idx][2] += 1
-            elif len(buckets) < self.max_buckets:
-                # Create new bucket
+            elif not self._discovery_complete:
+                # Discovery phase: create new bucket (uncapped)
                 buckets.append([grad.clone(), (grad ** 2).clone(), 1])
                 best_idx = len(buckets) - 1
             else:
-                # At capacity — update closest
+                # Refinement phase: locked, assign to closest
                 buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
                 buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
                 buckets[best_idx][2] += 1
-
-            # Prune weak buckets (< 5% of total hits)
-            if do_prune and len(buckets) > 1:
-                total_hits = sum(b[2] for b in buckets)
-                threshold_hits = total_hits * 0.05
-                buckets[:] = [b for b in buckets if b[2] >= threshold_hits]
-                if not buckets:
-                    # Should never happen, but safety
-                    buckets.append([grad.clone(), (grad ** 2).clone(), 1])
-                best_idx = min(best_idx, len(buckets) - 1)
 
             # SNR from the matched bucket
             bucket_ema = buckets[best_idx][0]
@@ -243,6 +283,19 @@ class GradientMiner:
             buckets = self._buckets[name]
             best_idx = min(best_idx, len(buckets) - 1)
 
+            # Check if gradient matches a pruned (blocked) direction
+            dampen = 1.0
+            if self._discovery_complete and name in self._pruned_directions:
+                grad_flat = grad.flatten()
+                grad_norm = grad_flat.norm()
+                if grad_norm > 1e-10:
+                    for pruned_dir in self._pruned_directions[name]:
+                        pruned_sim = (grad_flat * pruned_dir).sum() / grad_norm
+                        if pruned_sim.item() > 0.5:
+                            # This gradient matches a confirmed-noise direction — dampen
+                            dampen = 0.3
+                            break
+
             # Direction from matched bucket
             ema_dir = buckets[best_idx][0]
             ema_norm = ema_dir.norm()
@@ -271,12 +324,12 @@ class GradientMiner:
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
 
-            # Blend filtered + raw
+            # Blend filtered + raw, apply dampen for blocked directions
             filtered = parallel * boost * agreement + orthogonal * 0.2
             raw_boosted = grad * boost
-            param.grad = (self.filter_strength * filtered + (1.0 - self.filter_strength) * raw_boosted) * bw
+            param.grad = (self.filter_strength * filtered + (1.0 - self.filter_strength) * raw_boosted) * bw * dampen
 
-            avg_boost_val = (boost * bw).mean().item()
+            avg_boost_val = (boost * bw).mean().item() * dampen
             if avg_boost_val > 1.05:
                 boost_count += 1
                 boost_sum += avg_boost_val

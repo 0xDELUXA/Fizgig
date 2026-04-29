@@ -1900,6 +1900,11 @@ class LoRATrainerGUI:
         mining_preset_combo.pack(side=tk.LEFT, padx=(0, 12))
         mining_preset_combo.bind("<<ComboboxSelected>>", self._on_mining_preset_changed)
 
+        ttk.Label(mining_row1, text="Discovery:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_DISCOVERY"] = ttk.Entry(mining_row1, width=3)
+        self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "1")
+        self.entries["GRADIENT_MINING_DISCOVERY"].pack(side=tk.LEFT, padx=(0, 8))
+
         ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row1, width=5)
         self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.3")
@@ -10266,6 +10271,10 @@ class LoRATrainerGUI:
                 command.extend(["--gradient_mining_orthogonal_scale", ortho.get().strip() or "0.2"])
             if hasattr(self, 'gradient_mining_auto_var') and self.gradient_mining_auto_var.get():
                 command.append("--gradient_mining_auto_threshold")
+            discovery = self.entries.get("GRADIENT_MINING_DISCOVERY")
+            if discovery:
+                val = discovery.get().strip() or "1"
+                command.extend(["--gradient_mining_discovery_epochs", val])
 
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()

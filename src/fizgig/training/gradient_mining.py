@@ -216,13 +216,6 @@ class GradientMiner:
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
 
-        # Periodic merge during discovery to bound VRAM usage
-        if not self._discovery_complete and self._step_count > 1 and self._step_count % 30 == 0:
-            pre = sum(len(b) for b in self._buckets.values())
-            merged = self._merge_similar_buckets(merge_threshold=0.5)
-            post = sum(len(b) for b in self._buckets.values())
-            logger.info(f"[gradient_mining] Periodic merge at step {self._step_count}: {pre} → {post} ({merged} merged)")
-
         # Effective filter: discovery value → tween over 1 epoch → refinement value
         if not self._discovery_complete:
             effective_filter = self.discovery_filter
@@ -272,7 +265,33 @@ class GradientMiner:
                 buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
                 buckets[best_idx][2] += 1
             elif not self._discovery_complete:
-                # Discovery phase: create new bucket (uncapped)
+                # Discovery phase: create new bucket, cap at 12 per parameter
+                if len(buckets) >= 12:
+                    # Merge the two most similar existing buckets to make room
+                    best_merge_sim = -1.0
+                    merge_i, merge_j = 0, 1
+                    for mi in range(len(buckets)):
+                        ei = buckets[mi][0].flatten()
+                        ni = ei.norm()
+                        if ni < 1e-10:
+                            continue
+                        for mj in range(mi + 1, len(buckets)):
+                            ej = buckets[mj][0].flatten()
+                            nj = ej.norm()
+                            if nj < 1e-10:
+                                continue
+                            s = (ei * ej).sum() / (ni * nj)
+                            if s.item() > best_merge_sim:
+                                best_merge_sim = s.item()
+                                merge_i, merge_j = mi, mj
+                    # Merge j into i
+                    hi, hj = buckets[merge_i][2], buckets[merge_j][2]
+                    tot = hi + hj
+                    wi, wj = hi / max(tot, 1), hj / max(tot, 1)
+                    buckets[merge_i][0] = buckets[merge_i][0] * wi + buckets[merge_j][0] * wj
+                    buckets[merge_i][1] = buckets[merge_i][1] * wi + buckets[merge_j][1] * wj
+                    buckets[merge_i][2] = tot
+                    buckets.pop(merge_j)
                 buckets.append([grad.clone(), (grad ** 2).clone(), 1])
                 best_idx = len(buckets) - 1
             else:

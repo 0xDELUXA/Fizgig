@@ -415,30 +415,6 @@ class GradientMiner:
 
             snr, snr_mean, consistency, block_name, best_idx = param_data[name]
             grad = param.grad
-            param_buckets = active_buckets[name]
-            best_idx = min(best_idx, len(param_buckets) - 1)
-
-            # Direction from matched bucket
-            ema_dir = param_buckets[best_idx][0]
-            ema_norm = ema_dir.norm()
-            if ema_norm < 1e-10:
-                continue
-
-            direction = ema_dir / ema_norm
-
-            # Parallel/orthogonal split against matched bucket direction
-            dot = (grad * direction).sum()
-            parallel = dot * direction
-            orthogonal = grad - parallel
-
-            # Agreement against matched bucket
-            grad_norm = grad.norm()
-            if grad_norm > 1e-10:
-                cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
-            else:
-                cos_sim = 0.0
-            agreement = (cos_sim + 1.0) * 0.5
-            agreement_sum += agreement
 
             # SNR boost
             boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
@@ -455,10 +431,35 @@ class GradientMiner:
                 except (ValueError, IndexError):
                     pass
 
-            # Blend filtered + raw
-            filtered = parallel * boost * agreement + orthogonal * 0.2
-            raw_boosted = grad * boost
-            param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
+            if effective_filter > 0:
+                # Directional filtering: split gradient into parallel/orthogonal
+                param_buckets = active_buckets[name]
+                best_idx = min(best_idx, len(param_buckets) - 1)
+                ema_dir = param_buckets[best_idx][0]
+                ema_norm = ema_dir.norm()
+                if ema_norm < 1e-10:
+                    param.grad = grad * boost * bw
+                    continue
+
+                direction = ema_dir / ema_norm
+                dot = (grad * direction).sum()
+                parallel = dot * direction
+                orthogonal = grad - parallel
+
+                grad_norm = grad.norm()
+                if grad_norm > 1e-10:
+                    cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
+                else:
+                    cos_sim = 0.0
+                agreement = (cos_sim + 1.0) * 0.5
+                agreement_sum += agreement
+
+                filtered = parallel * boost * agreement + orthogonal * 0.2
+                raw_boosted = grad * boost
+                param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
+            else:
+                # Pure SNR boost — no directional filtering overhead
+                param.grad = grad * boost * bw
 
             avg_boost_val = (boost * bw).mean().item()
             if avg_boost_val > 1.05:

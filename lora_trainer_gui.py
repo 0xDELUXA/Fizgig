@@ -9898,7 +9898,7 @@ class LoRATrainerGUI:
                 line = pipe.readline()
                 if not line:
                     break
-                self.master.after(0, self.update_console, f"{name} {output_type}: {line}")
+                self.master.after(0, self.update_console, line)
             pipe.close()
 
         threading.Thread(target=read_output, args=(process.stdout, "STDOUT"), daemon=True).start()

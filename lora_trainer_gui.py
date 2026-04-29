@@ -10786,4 +10786,9 @@ if __name__ == "__main__":
         gui._check_for_paused_state_on_startup()
     except Exception:
         pass
+    # Re-run dataset analysis now that all UI is built (catches face crop auto-detect)
+    try:
+        gui._update_dataset_recommendation()
+    except Exception:
+        pass
     root.mainloop()

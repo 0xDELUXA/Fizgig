@@ -1912,12 +1912,23 @@ class LoRATrainerGUI:
 
         ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row1, width=5)
-        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.3")
+        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0")
         self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT, padx=(0, 8))
 
         self.gradient_mining_face_sep_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mining_row1, text="Face Crop Sep",
                         variable=self.gradient_mining_face_sep_var).pack(side=tk.LEFT, padx=(0, 4))
+        # Smart defaults when face separation toggled
+        def _on_face_sep_change(*_):
+            if self.gradient_mining_face_sep_var.get():
+                # Face crop mode: 1 discovery epoch, filter 0.3 → 0
+                self.entries["GRADIENT_MINING_DISCOVERY"].delete(0, tk.END)
+                self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "1")
+            else:
+                # Non-face crop mode: 2 discovery epochs
+                self.entries["GRADIENT_MINING_DISCOVERY"].delete(0, tk.END)
+                self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "2")
+        self.gradient_mining_face_sep_var.trace_add("write", _on_face_sep_change)
 
         # Hidden entries for values that are now auto-tuned (kept for preset/save compat)
         self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row1)

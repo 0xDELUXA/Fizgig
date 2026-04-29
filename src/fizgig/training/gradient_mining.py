@@ -320,9 +320,8 @@ class GradientMiner:
             agreement = (cos_sim + 1.0) * 0.5
             agreement_sum += agreement
 
-            # SNR boost with minimum floor so minority patterns still get amplified
+            # SNR boost
             boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
-            boost = torch.clamp(boost, min=1.5)
 
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0

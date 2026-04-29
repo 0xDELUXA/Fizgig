@@ -118,28 +118,71 @@ class GradientMiner:
         if epoch < self.discovery_epochs:
             return
 
-        # End of discovery — prune and lock
+        # End of discovery — merge similar, then prune weak, then lock
+        total_merged = 0
         total_pruned = 0
         total_survived = 0
+        pre_merge_total = sum(len(b) for b in self._buckets.values())
+
         for name, buckets in self._buckets.items():
             if len(buckets) <= 1:
                 total_survived += len(buckets)
                 continue
 
-            total_hits = sum(b[2] for b in buckets)
-            max_to_prune = int(len(buckets) * 0.3)  # never prune more than 30%
+            # ── Step 1: Merge similar buckets (cos_sim > 0.85) ──
+            merged = True
+            while merged:
+                merged = False
+                for i in range(len(buckets)):
+                    if buckets[i] is None:
+                        continue
+                    ema_i = buckets[i][0].flatten()
+                    norm_i = ema_i.norm()
+                    if norm_i < 1e-10:
+                        continue
+                    for j in range(i + 1, len(buckets)):
+                        if buckets[j] is None:
+                            continue
+                        ema_j = buckets[j][0].flatten()
+                        norm_j = ema_j.norm()
+                        if norm_j < 1e-10:
+                            continue
+                        sim = (ema_i * ema_j).sum() / (norm_i * norm_j)
+                        if sim.item() > 0.85:
+                            # Merge j into i, weighted by hit count
+                            hits_i, hits_j = buckets[i][2], buckets[j][2]
+                            total = hits_i + hits_j
+                            w_i = hits_i / max(total, 1)
+                            w_j = hits_j / max(total, 1)
+                            buckets[i][0] = buckets[i][0] * w_i + buckets[j][0] * w_j
+                            buckets[i][1] = buckets[i][1] * w_i + buckets[j][1] * w_j
+                            buckets[i][2] = total
+                            buckets[j] = None
+                            total_merged += 1
+                            merged = True
+                            break
+                    if merged:
+                        break
+                # Remove None entries
+                buckets = [b for b in buckets if b is not None]
+            self._buckets[name] = buckets
 
-            # Score each bucket by frequency AND quality
+            # ── Step 2: Prune weak buckets ──
+            if len(buckets) <= 1:
+                total_survived += len(buckets)
+                continue
+
+            total_hits = sum(b[2] for b in buckets)
+            max_to_prune = int(len(buckets) * 0.3)
+
             scored = []
             for b in buckets:
                 hit_ratio = b[2] / max(total_hits, 1)
-                # SNR score from this bucket's EMA
                 ema = b[0]
                 sq = b[1]
                 variance = (sq - ema ** 2).clamp(min=0)
                 snr = ema.abs() / (variance.sqrt() + 1e-8)
                 snr_score = snr.mean().item()
-                # Survive if frequent enough AND decent quality
                 keep = (hit_ratio >= 0.03) and (snr_score > 0.5)
                 scored.append((b, keep, hit_ratio, snr_score))
 
@@ -163,7 +206,8 @@ class GradientMiner:
         self._steps_per_epoch = max(self._step_count // self.discovery_epochs, 1)
         logger.info(
             f"[gradient_mining] Discovery complete after {epoch} epoch(s): "
-            f"{total_survived} buckets survived, {total_pruned} pruned"
+            f"{pre_merge_total} buckets → {total_merged} merged, "
+            f"{total_pruned} pruned → {total_survived} survived"
         )
 
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:

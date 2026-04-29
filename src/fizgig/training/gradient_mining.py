@@ -336,9 +336,10 @@ class GradientMiner:
             block_entropy = 1.0
 
         # ── Auto amplify with epoch decay ──
-        # Full amplify during discovery, halved each epoch after, floor at 2.0
+        # Half amplify during discovery (let minority features through),
+        # full at refinement start, then halved each epoch, floor at 2.0
         if self._current_epoch <= self.discovery_epochs:
-            base_amplify = self.amplify_scale
+            base_amplify = self.amplify_scale * 0.5
         else:
             epochs_since = self._current_epoch - self.discovery_epochs
             base_amplify = max(2.0, self.amplify_scale / (2.0 ** epochs_since))

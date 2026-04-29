@@ -140,16 +140,11 @@ class GradientMiner:
                 scored.append((b, keep, hit_ratio, snr_score))
 
             survivors = []
-            pruned_dirs = []
             pruned_count = 0
             for b, keep, hit_ratio, snr_score in scored:
                 if keep or pruned_count >= max_to_prune:
                     survivors.append(b)
                 else:
-                    d = b[0].flatten()
-                    d_norm = d.norm()
-                    if d_norm > 1e-10:
-                        pruned_dirs.append((d / d_norm).clone())
                     pruned_count += 1
                     total_pruned += 1
 
@@ -158,13 +153,11 @@ class GradientMiner:
 
             self._buckets[name] = survivors
             total_survived += len(survivors)
-            if pruned_dirs:
-                self._pruned_directions[name] = pruned_dirs
 
         self._discovery_complete = True
         logger.info(
             f"[gradient_mining] Discovery complete after {epoch} epoch(s): "
-            f"{total_survived} buckets survived, {total_pruned} pruned and blocked"
+            f"{total_survived} buckets survived, {total_pruned} pruned"
         )
 
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
@@ -305,19 +298,6 @@ class GradientMiner:
             buckets = self._buckets[name]
             best_idx = min(best_idx, len(buckets) - 1)
 
-            # Check if gradient matches a pruned (blocked) direction
-            dampen = 1.0
-            if self._discovery_complete and name in self._pruned_directions:
-                grad_flat = grad.flatten()
-                grad_norm = grad_flat.norm()
-                if grad_norm > 1e-10:
-                    for pruned_dir in self._pruned_directions[name]:
-                        pruned_sim = (grad_flat * pruned_dir).sum() / grad_norm
-                        if pruned_sim.item() > 0.5:
-                            # This gradient matches a confirmed-noise direction — dampen
-                            dampen = 0.7
-                            break
-
             # Direction from matched bucket
             ema_dir = buckets[best_idx][0]
             ema_norm = ema_dir.norm()
@@ -340,18 +320,19 @@ class GradientMiner:
             agreement = (cos_sim + 1.0) * 0.5
             agreement_sum += agreement
 
-            # SNR boost
+            # SNR boost with minimum floor so minority patterns still get amplified
             boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
+            boost = torch.clamp(boost, min=1.5)
 
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
 
-            # Blend filtered + raw, apply dampen for blocked directions
+            # Blend filtered + raw
             filtered = parallel * boost * agreement + orthogonal * 0.2
             raw_boosted = grad * boost
-            param.grad = (self.filter_strength * filtered + (1.0 - self.filter_strength) * raw_boosted) * bw * dampen
+            param.grad = (self.filter_strength * filtered + (1.0 - self.filter_strength) * raw_boosted) * bw
 
-            avg_boost_val = (boost * bw).mean().item() * dampen
+            avg_boost_val = (boost * bw).mean().item()
             if avg_boost_val > 1.05:
                 boost_count += 1
                 boost_sum += avg_boost_val

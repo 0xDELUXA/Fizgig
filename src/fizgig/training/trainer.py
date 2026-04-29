@@ -1251,8 +1251,6 @@ class KleinTrainer:
         _use_distilled = _sample_dit_path and os.path.exists(_sample_dit_path)
         _orig_blocks_to_swap = self.blocks_to_swap or 0
         _distilled_dit = None
-        _sample_net = None
-        _ctx_sample = None
 
         if _use_distilled:
             logger.info(f"Using Distilled model for samples: {_sample_dit_path}")
@@ -1286,42 +1284,38 @@ class KleinTrainer:
             _distilled_dit.prepare_block_swap_before_forward()
             _distilled_dit.eval()
 
-            # Apply trainable LoRA from saved checkpoint — matches Repair Studio's loading path
+            # Merge trainable LoRA into Distilled DiT weights (ComfyUI style).
+            # Merge bakes W += up @ down * scale into the Linear weights directly,
+            # matching how ComfyUI applies LoRAs. This avoids precision differences
+            # between hook-based application and weight-merged application on fp8 models.
             from fizgig.networks.lora_klein import create_arch_network_from_weights as _sample_create
             from fizgig.networks.lora import ensure_kohya_lora_state_dict as _sample_ensure
             from fizgig.training.train_utils import get_epoch_ckpt_name as _get_ckpt
             _ckpt_path = os.path.join(args.output_dir, _get_ckpt(args.output_name, epoch))
             if epoch > 0 and os.path.exists(_ckpt_path):
                 from safetensors.torch import load_file as _sample_load_lora
-                logger.info(f"  Loading trainable LoRA from disk: {_ckpt_path}")
+                logger.info(f"  Merging trainable LoRA from disk: {_ckpt_path}")
                 _lora_sd = _sample_load_lora(_ckpt_path)
                 _lora_sd = _sample_ensure(_lora_sd)
                 _sample_net = _sample_create(
                     multiplier=1.0, weights_sd=_lora_sd, unet=_distilled_dit, for_inference=True,
                 )
-                _sample_net.apply_to(text_encoders=None, unet=_distilled_dit,
-                                     apply_text_encoder=False, apply_unet=True)
-                _sample_net.load_state_dict(_lora_sd, strict=False)
-                _sample_net.to(accelerator.device, dtype=torch.bfloat16)
-                _sample_net.eval()
+                _sample_net.merge_to(None, _distilled_dit, _lora_sd, torch.bfloat16, accelerator.device)
+                logger.info(f"  LoRA merged into Distilled DiT weights")
             else:
                 logger.info(f"  Epoch {epoch}: no checkpoint yet, sampling without trainable LoRA")
 
-            # Apply context LoRA to Distilled DiT if active
+            # Merge context LoRA into Distilled DiT if active
             logger.info(f"  Context LoRA check: self.context_network is {'set' if self.context_network is not None else 'None'}")
             if self.context_network is not None:
-                # Context LoRA weights are frozen — get them from the stored network
                 _ctx_sd = self.context_network.state_dict()
                 _ctx_sd = {k: v.cpu().to(torch.bfloat16) for k, v in _ctx_sd.items()}
                 _ctx_sample = _sample_create(
                     multiplier=self.context_network.multiplier,
                     weights_sd=_ctx_sd, unet=_distilled_dit, for_inference=True,
                 )
-                _ctx_sample.apply_to(text_encoders=None, unet=_distilled_dit,
-                                     apply_text_encoder=False, apply_unet=True)
-                _ctx_sample.load_state_dict(_ctx_sd, strict=False)
-                _ctx_sample.to(accelerator.device, dtype=torch.bfloat16)
-                _ctx_sample.eval()
+                _ctx_sample.merge_to(None, _distilled_dit, _ctx_sd, torch.bfloat16, accelerator.device)
+                logger.info(f"  Context LoRA merged into Distilled DiT weights")
 
             sample_transformer = _distilled_dit
             logger.info("  Distilled loaded — sampling with 4 steps, guidance 1.0")
@@ -1378,17 +1372,7 @@ class KleinTrainer:
             torch.cuda.set_rng_state(cuda_rng_state)
 
         if _use_distilled:
-            # Unload Distilled DiT — break LoRA circular references first
-            for _net in (_sample_net, _ctx_sample):
-                if _net is not None:
-                    for lora in getattr(_net, 'unet_loras', []):
-                        if hasattr(lora, 'org_forward'):
-                            lora.org_forward = None
-                    if hasattr(_net, 'unet_loras'):
-                        _net.unet_loras.clear()
-            del _sample_net, _ctx_sample
-            _sample_net = _ctx_sample = None
-            # Move Distilled to CPU before deleting to free GPU immediately
+            # Unload Distilled DiT — no hook cleanup needed (LoRA was merged, not hooked)
             _distilled_dit.to("cpu")
             del _distilled_dit
             _distilled_dit = None

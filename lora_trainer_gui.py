@@ -10786,9 +10786,12 @@ if __name__ == "__main__":
         gui._check_for_paused_state_on_startup()
     except Exception:
         pass
-    # Re-run dataset analysis now that all UI is built (catches face crop auto-detect)
+    # Auto-detect face crops for gradient mining separation
     try:
-        gui._update_dataset_recommendation()
+        folder = gui.image_folder_var.get()
+        if folder and os.path.isdir(folder) and hasattr(gui, 'gradient_mining_face_sep_var'):
+            if any(f.startswith("FaceCrop_") for f in os.listdir(folder)):
+                gui.gradient_mining_face_sep_var.set(True)
     except Exception:
         pass
     root.mainloop()

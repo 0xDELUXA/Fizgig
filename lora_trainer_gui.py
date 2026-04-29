@@ -276,8 +276,8 @@ ARCHITECTURES = {
         "sample_cfg_default": 4.5,
         "sample_flow_shift_default": None,
         "sample_steps_default": 20,
-        "sample_width_default": 1024,
-        "sample_height_default": 1024,
+        "sample_width_default": 768,
+        "sample_height_default": 768,
     },
 }
 
@@ -758,8 +758,8 @@ class LoRATrainerGUI:
             # Sample generation settings
             "SAMPLE_ENABLED": True,
             "SAMPLE_PROMPT": "A high quality photo",
-            "SAMPLE_WIDTH": 1024,
-            "SAMPLE_HEIGHT": 1024,
+            "SAMPLE_WIDTH": 768,
+            "SAMPLE_HEIGHT": 768,
             "SAMPLE_STEPS": 25,
             "SAMPLE_SEED": 1234,
             "SAMPLE_EVERY_N_EPOCHS": 1,

@@ -73,10 +73,12 @@ def swap_weight_devices_no_cuda(device: torch.device, layer_to_cpu: nn.Module, l
 
 
 def weighs_to_device(layer: nn.Module, device: torch.device):
-    """Move all Linear weights in *layer* to *device*."""
+    """Move all Linear weights (and fp8 scale_weight buffers) in *layer* to *device*."""
     for module in layer.modules():
         if hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear"):
             module.weight.data = module.weight.data.to(device, non_blocking=device.type != "cpu")
+            if hasattr(module, "scale_weight"):
+                module.scale_weight.data = module.scale_weight.data.to(device, non_blocking=device.type != "cpu")
 
 
 # ---------------------------------------------------------------------------

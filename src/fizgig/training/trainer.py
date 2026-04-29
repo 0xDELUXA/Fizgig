@@ -2079,6 +2079,7 @@ class KleinTrainer:
         gradient_miner = None
         if getattr(args, "gradient_mining", False):
             from fizgig.training.gradient_mining import GradientMiner
+            face_sep = getattr(args, "gradient_mining_face_separation", False)
             gradient_miner = GradientMiner(
                 ema_decay=getattr(args, "gradient_mining_ema_decay", 0.9),
                 amplify_scale=getattr(args, "gradient_mining_amplify", 8.0),
@@ -2087,11 +2088,13 @@ class KleinTrainer:
                 orthogonal_scale=getattr(args, "gradient_mining_orthogonal_scale", 0.3),
                 discovery_filter=getattr(args, "gradient_mining_discovery_filter", None),
                 discovery_epochs=getattr(args, "gradient_mining_discovery_epochs", 1),
+                face_separation=face_sep,
             )
             logger.info(
                 f"Gradient mining enabled: amplify={gradient_miner.amplify_scale}x, "
                 f"min_snr={gradient_miner.min_snr}, ema_decay={gradient_miner.ema_decay}, "
                 f"discovery_epochs={gradient_miner.discovery_epochs}"
+                + (", face_separation=True" if face_sep else "")
             )
 
         # ------------------------------------------------------------------
@@ -2238,7 +2241,11 @@ class KleinTrainer:
 
                     # Gradient mining: amplify suppressed signal before optimizer step
                     if gradient_miner is not None:
-                        mine_stats = gradient_miner.amplify_gradients(network)
+                        is_face = False
+                        if gradient_miner.face_separation:
+                            face_flags = batch.get("is_face_crop", [])
+                            is_face = any(face_flags) if face_flags else False
+                        mine_stats = gradient_miner.amplify_gradients(network, is_face_crop=is_face)
 
                     if accelerator.sync_gradients:
                         # Manual gradient sync for DDP
@@ -2799,6 +2806,9 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient_mining_discovery_epochs", type=int, default=1,
                         help="Number of epochs for uncapped bucket discovery (default 1). "
                              "After this, bucket structure is locked and weak buckets pruned.")
+    parser.add_argument("--gradient_mining_face_separation", action="store_true",
+                        help="Separate face crops (FaceCrop_*.png) into their own bucket pool "
+                             "with boosted identity block weights.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

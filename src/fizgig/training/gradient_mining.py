@@ -51,6 +51,7 @@ class GradientMiner:
         discovery_filter: float = None,
         bucket_threshold: float = 0.1,
         discovery_epochs: int = 2,
+        face_separation: bool = False,
     ):
         self.ema_decay = ema_decay
         self.amplify_scale = amplify_scale
@@ -60,10 +61,15 @@ class GradientMiner:
         self.discovery_filter = discovery_filter if discovery_filter is not None else orthogonal_scale
         self.bucket_threshold = bucket_threshold
         self.discovery_epochs = discovery_epochs
+        self.face_separation = face_separation
 
         # Per-parameter bucket storage: name -> [(ema_dir, ema_sq, hit_count), ...]
         self._buckets: Dict[str, List[List]] = {}
+        self._buckets_face: Dict[str, List[List]] = {}
         self._step_count = 0
+
+        # Bucket cap: 8 per pool when separated, 12 when not
+        self._bucket_cap = 8 if face_separation else 12
 
         # Discovery state
         self._discovery_complete = False
@@ -74,6 +80,7 @@ class GradientMiner:
 
         # Per-parameter previous gradient for consistency tracking
         self._prev_grad: Dict[str, torch.Tensor] = {}
+        self._prev_grad_face: Dict[str, torch.Tensor] = {}
 
         # Cached block name lookups
         self._block_name_cache: Dict[str, Optional[str]] = {}
@@ -89,6 +96,12 @@ class GradientMiner:
         self.last_effective_amplify = amplify_scale
         self.last_effective_ema = ema_decay
         self.last_avg_buckets = 1.0
+
+    def _get_active_pool(self, is_face_crop: bool):
+        """Return (buckets_dict, prev_grad_dict) for the active pool."""
+        if self.face_separation and is_face_crop:
+            return self._buckets_face, self._prev_grad_face
+        return self._buckets, self._prev_grad
 
     def _find_best_bucket(self, grad_flat: torch.Tensor, buckets: list) -> Tuple[int, float]:
         """Find the bucket with highest cosine similarity to this gradient."""
@@ -109,10 +122,12 @@ class GradientMiner:
                 best_idx = i
         return best_idx, best_sim
 
-    def _merge_similar_buckets(self, merge_threshold: float = 0.7) -> int:
+    def _merge_similar_buckets(self, merge_threshold: float = 0.7, target_buckets: Dict = None) -> int:
         """Merge buckets with cosine similarity above threshold. Returns total merged."""
+        if target_buckets is None:
+            target_buckets = self._buckets
         total_merged = 0
-        for name, buckets in self._buckets.items():
+        for name, buckets in target_buckets.items():
             if len(buckets) <= 1:
                 continue
             merged = True
@@ -148,7 +163,7 @@ class GradientMiner:
                     if merged:
                         break
                 buckets = [b for b in buckets if b is not None]
-            self._buckets[name] = buckets
+            target_buckets[name] = buckets
         return total_merged
 
     def on_epoch_end(self, epoch: int):
@@ -161,15 +176,30 @@ class GradientMiner:
             return
 
         # End of discovery — merge similar, then prune weak, then lock
-        pre_merge_total = sum(len(b) for b in self._buckets.values())
-        total_merged = self._merge_similar_buckets(merge_threshold=0.85)
-        total_pruned = 0
-        total_survived = 0
+        stats_main = self._finalize_pool(self._buckets)
+        stats_face = self._finalize_pool(self._buckets_face) if self.face_separation else None
 
-        for name, buckets in self._buckets.items():
-            # Prune weak buckets
+        self._discovery_complete = True
+        self._refinement_start_step = self._step_count
+        self._steps_per_epoch = max(self._step_count // self.discovery_epochs, 1)
+
+        msg = (f"[gradient_mining] Discovery complete after {epoch} epoch(s): "
+               f"main: {stats_main[0]}→{stats_main[1]} merged, {stats_main[2]} pruned → {stats_main[3]} survived")
+        if stats_face:
+            msg += (f" | face: {stats_face[0]}→{stats_face[1]} merged, "
+                    f"{stats_face[2]} pruned → {stats_face[3]} survived")
+        logger.info(msg)
+
+    def _finalize_pool(self, pool: Dict) -> Tuple[int, int, int, int]:
+        """Merge + prune a bucket pool. Returns (pre_total, merged, pruned, survived)."""
+        pre_total = sum(len(b) for b in pool.values())
+        merged = self._merge_similar_buckets(merge_threshold=0.85, target_buckets=pool)
+        pruned = 0
+        survived = 0
+
+        for name, buckets in pool.items():
             if len(buckets) <= 1:
-                total_survived += len(buckets)
+                survived += len(buckets)
                 continue
 
             total_hits = sum(b[2] for b in buckets)
@@ -193,26 +223,20 @@ class GradientMiner:
                     survivors.append(b)
                 else:
                     pruned_count += 1
-                    total_pruned += 1
+                    pruned += 1
 
             if not survivors:
                 survivors = [max(buckets, key=lambda b: b[2])]
 
-            self._buckets[name] = survivors
-            total_survived += len(survivors)
+            pool[name] = survivors
+            survived += len(survivors)
 
-        self._discovery_complete = True
-        self._refinement_start_step = self._step_count
-        self._steps_per_epoch = max(self._step_count // self.discovery_epochs, 1)
-        logger.info(
-            f"[gradient_mining] Discovery complete after {epoch} epoch(s): "
-            f"{pre_merge_total} buckets → {total_merged} merged, "
-            f"{total_pruned} pruned → {total_survived} survived"
-        )
+        return (pre_total, merged, pruned, survived)
 
-    def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
+    def amplify_gradients(self, network: torch.nn.Module, is_face_crop: bool = False) -> Dict[str, float]:
         """Filter and amplify gradients using multi-bucket direction tracking."""
         self._step_count += 1
+        active_buckets, active_prev_grad = self._get_active_pool(is_face_crop)
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
 
@@ -247,36 +271,36 @@ class GradientMiner:
             block_name = self._block_name_cache[name]
 
             # Initialise buckets for new parameters
-            if name not in self._buckets:
-                self._buckets[name] = [[grad.clone(), (grad ** 2).clone(), 1]]
-                self._prev_grad[name] = grad.clone()
+            if name not in active_buckets:
+                active_buckets[name] = [[grad.clone(), (grad ** 2).clone(), 1]]
+                active_prev_grad[name] = grad.clone()
                 continue
 
-            buckets = self._buckets[name]
+            param_buckets = active_buckets[name]
             grad_flat = grad.flatten()
-            bucket_count_sum += len(buckets)
+            bucket_count_sum += len(param_buckets)
 
             # Find best matching bucket
-            best_idx, best_sim = self._find_best_bucket(grad_flat, buckets)
+            best_idx, best_sim = self._find_best_bucket(grad_flat, param_buckets)
 
             if best_sim > self.bucket_threshold:
                 # Update matching bucket
-                buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
-                buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
-                buckets[best_idx][2] += 1
+                param_buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
+                param_buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
+                param_buckets[best_idx][2] += 1
             elif not self._discovery_complete:
-                # Discovery phase: create new bucket, cap at 12 per parameter
-                if len(buckets) >= 12:
+                # Discovery phase: create new bucket, cap per pool
+                if len(param_buckets) >= self._bucket_cap:
                     # Merge the two most similar existing buckets to make room
                     best_merge_sim = -1.0
                     merge_i, merge_j = 0, 1
-                    for mi in range(len(buckets)):
-                        ei = buckets[mi][0].flatten()
+                    for mi in range(len(param_buckets)):
+                        ei = param_buckets[mi][0].flatten()
                         ni = ei.norm()
                         if ni < 1e-10:
                             continue
-                        for mj in range(mi + 1, len(buckets)):
-                            ej = buckets[mj][0].flatten()
+                        for mj in range(mi + 1, len(param_buckets)):
+                            ej = param_buckets[mj][0].flatten()
                             nj = ej.norm()
                             if nj < 1e-10:
                                 continue
@@ -285,24 +309,24 @@ class GradientMiner:
                                 best_merge_sim = s.item()
                                 merge_i, merge_j = mi, mj
                     # Merge j into i
-                    hi, hj = buckets[merge_i][2], buckets[merge_j][2]
+                    hi, hj = param_buckets[merge_i][2], param_buckets[merge_j][2]
                     tot = hi + hj
                     wi, wj = hi / max(tot, 1), hj / max(tot, 1)
-                    buckets[merge_i][0] = buckets[merge_i][0] * wi + buckets[merge_j][0] * wj
-                    buckets[merge_i][1] = buckets[merge_i][1] * wi + buckets[merge_j][1] * wj
-                    buckets[merge_i][2] = tot
-                    buckets.pop(merge_j)
-                buckets.append([grad.clone(), (grad ** 2).clone(), 1])
-                best_idx = len(buckets) - 1
+                    param_buckets[merge_i][0] = param_buckets[merge_i][0] * wi + param_buckets[merge_j][0] * wj
+                    param_buckets[merge_i][1] = param_buckets[merge_i][1] * wi + param_buckets[merge_j][1] * wj
+                    param_buckets[merge_i][2] = tot
+                    param_buckets.pop(merge_j)
+                param_buckets.append([grad.clone(), (grad ** 2).clone(), 1])
+                best_idx = len(param_buckets) - 1
             else:
                 # Refinement phase: locked, assign to closest
-                buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
-                buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
-                buckets[best_idx][2] += 1
+                param_buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
+                param_buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
+                param_buckets[best_idx][2] += 1
 
             # SNR from the matched bucket
-            bucket_ema = buckets[best_idx][0]
-            bucket_sq = buckets[best_idx][1]
+            bucket_ema = param_buckets[best_idx][0]
+            bucket_sq = param_buckets[best_idx][1]
             signal = bucket_ema.abs()
             variance = (bucket_sq - bucket_ema ** 2).clamp(min=0)
             snr = signal / (variance.sqrt() + 1e-8)
@@ -310,15 +334,18 @@ class GradientMiner:
             snr_sum += snr_mean
 
             # Directional consistency
-            flat_prev = self._prev_grad[name].flatten()
-            if grad_flat.norm() > 1e-10 and flat_prev.norm() > 1e-10:
-                consistency = F.cosine_similarity(grad_flat.unsqueeze(0),
-                                                  flat_prev.unsqueeze(0)).item()
-                consistency = max(0.0, consistency)
+            if name in active_prev_grad:
+                flat_prev = active_prev_grad[name].flatten()
+                if grad_flat.norm() > 1e-10 and flat_prev.norm() > 1e-10:
+                    consistency = F.cosine_similarity(grad_flat.unsqueeze(0),
+                                                      flat_prev.unsqueeze(0)).item()
+                    consistency = max(0.0, consistency)
+                else:
+                    consistency = 0.0
             else:
                 consistency = 0.0
 
-            self._prev_grad[name].copy_(grad)
+            active_prev_grad[name] = grad.clone()
 
             param_data[name] = (snr, snr_mean, consistency, block_name, best_idx)
 
@@ -380,11 +407,11 @@ class GradientMiner:
 
             snr, snr_mean, consistency, block_name, best_idx = param_data[name]
             grad = param.grad
-            buckets = self._buckets[name]
-            best_idx = min(best_idx, len(buckets) - 1)
+            param_buckets = active_buckets[name]
+            best_idx = min(best_idx, len(param_buckets) - 1)
 
             # Direction from matched bucket
-            ema_dir = buckets[best_idx][0]
+            ema_dir = param_buckets[best_idx][0]
             ema_norm = ema_dir.norm()
             if ema_norm < 1e-10:
                 continue
@@ -410,6 +437,15 @@ class GradientMiner:
 
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
+
+            # Face separation: boost identity blocks for face crops, reduce for non-face
+            if self.face_separation and block_name is not None and block_name.startswith("single_"):
+                try:
+                    block_idx = int(block_name.split("_")[1])
+                    if 1 <= block_idx <= 16:
+                        bw *= 1.3 if is_face_crop else 0.8
+                except (ValueError, IndexError):
+                    pass
 
             # Blend filtered + raw
             filtered = parallel * boost * agreement + orthogonal * 0.2

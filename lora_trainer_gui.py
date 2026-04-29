@@ -1913,7 +1913,11 @@ class LoRATrainerGUI:
         ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row1, width=5)
         self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0.3")
-        self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT)
+        self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT, padx=(0, 8))
+
+        self.gradient_mining_face_sep_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(mining_row1, text="Face Crop Sep",
+                        variable=self.gradient_mining_face_sep_var).pack(side=tk.LEFT, padx=(0, 4))
 
         # Hidden entries for values that are now auto-tuned (kept for preset/save compat)
         self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row1)
@@ -5559,6 +5563,11 @@ class LoRATrainerGUI:
             warnings.append("No caption files (.txt) found — captions are required for training.")
 
         self._rec_warning_var.set("\n".join(warnings) if warnings else "")
+
+        # Auto-detect face crops for gradient mining separation
+        if (hasattr(self, 'gradient_mining_face_sep_var') and
+                analysis is not None and analysis.get("face_crops", 0) > 0):
+            self.gradient_mining_face_sep_var.set(True)
 
     def _apply_recommendation(self):
         """Apply recommended settings to the training fields."""
@@ -10285,6 +10294,8 @@ class LoRATrainerGUI:
             if discovery:
                 val = discovery.get().strip() or "1"
                 command.extend(["--gradient_mining_discovery_epochs", val])
+            if hasattr(self, 'gradient_mining_face_sep_var') and self.gradient_mining_face_sep_var.get():
+                command.append("--gradient_mining_face_separation")
 
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()

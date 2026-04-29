@@ -168,7 +168,7 @@ class GradientMiner:
     def amplify_gradients(self, network: torch.nn.Module) -> Dict[str, float]:
         """Filter and amplify gradients using multi-bucket direction tracking."""
         self._step_count += 1
-        effective_ema = self.ema_decay
+        effective_ema = 0.5 if self._discovery_complete else self.ema_decay
         self.last_effective_ema = effective_ema
 
         total_params = 0

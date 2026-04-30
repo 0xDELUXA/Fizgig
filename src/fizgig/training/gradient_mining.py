@@ -411,8 +411,9 @@ class GradientMiner:
             # SNR boost
             boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
 
-            # Block weight
+            # Block weight (capped at 1.3 to prevent hidden amplification)
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
+            bw = min(1.3, bw)
 
             # Face separation: boost identity blocks for face crops, reduce for non-face
             if self.face_separation and block_name is not None and block_name.startswith("single_"):
@@ -422,6 +423,7 @@ class GradientMiner:
                         bw *= 1.3 if is_face_crop else 0.8
                 except (ValueError, IndexError):
                     pass
+            bw = min(1.5, bw)  # cap total bw including identity modifier
 
             if effective_filter > 0:
                 # Directional filtering: split gradient into parallel/orthogonal

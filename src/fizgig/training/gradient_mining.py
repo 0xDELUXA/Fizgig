@@ -395,7 +395,7 @@ class GradientMiner:
         else:
             steps_since = self._step_count - self._refinement_start_step
             ramp = min(1.0, steps_since / max(self._steps_per_epoch, 1))
-            base_amplify = 1.0 + ramp  # 1.0 → 2.0 over first refinement epoch
+            base_amplify = 1.0 + ramp * 0.3  # 1.0 → 1.3 over first refinement epoch
         effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
         effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify

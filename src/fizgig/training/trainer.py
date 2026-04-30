@@ -2194,23 +2194,10 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
-        _user_lr = optimizer.param_groups[0]["lr"]  # save user's chosen LR
-        _discovery_lr = 1e-4  # fixed discovery LR
-
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
-
-            # Discovery always runs at 1e-4, refinement at user's LR
-            if gradient_miner is not None and not gradient_miner._discovery_complete:
-                for pg in optimizer.param_groups:
-                    pg["lr"] = _discovery_lr
-            elif gradient_miner is not None and epoch == gradient_miner.discovery_epochs:
-                # First refinement epoch: restore user's LR
-                for pg in optimizer.param_groups:
-                    pg["lr"] = _user_lr
-                accelerator.print(f"[gradient_mining] Discovery LR {_discovery_lr:.0e} → user LR {_user_lr:.0e}")
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
@@ -2252,8 +2239,8 @@ class KleinTrainer:
                     # Backward
                     accelerator.backward(loss)
 
-                    # Gradient mining: only active during discovery
-                    if gradient_miner is not None and not gradient_miner._discovery_complete:
+                    # Gradient mining: amplify suppressed signal before optimizer step
+                    if gradient_miner is not None:
                         is_face = False
                         if gradient_miner.face_separation:
                             face_flags = batch.get("is_face_crop", [])
@@ -2327,7 +2314,7 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
-                if gradient_miner is not None and not gradient_miner._discovery_complete and gradient_miner._step_count > 1:
+                if gradient_miner is not None and gradient_miner._step_count > 1:
                     logs["agree"] = f"{mine_stats['agree']:.0%}"
                     logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
                     logs["amp"] = f"{mine_stats['amp']:.1f}"
@@ -2356,23 +2343,19 @@ class KleinTrainer:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 
             # Adaptive LR: baseline log at end of epoch 0 (watcher armed but not acting yet)
-            # Adaptive LR: skip discovery epochs when gradient mining is active
-            _adaptive_start = 0
-            if gradient_miner is not None:
-                _adaptive_start = gradient_miner.discovery_epochs
-
-            if args.adaptive_lr and epoch == _adaptive_start:
+            if args.adaptive_lr and epoch == 0:
                 _cur_lr = optimizer.param_groups[0]["lr"]
-                # Seed best-loss tracker with first post-discovery epoch's loss
+                # Seed best-loss tracker with epoch 1's loss so the next epoch's comparison
+                # is against a real baseline (not None, which incorrectly triggered "improving").
                 adaptive_best_loss = loss_recorder.moving_average
                 accelerator.print(
-                    f"[adaptive_lr] epoch {epoch + 1:>2}: loss={loss_recorder.moving_average:.4f} "
+                    f"[adaptive_lr] epoch  1: loss={loss_recorder.moving_average:.4f} "
                     f"lr={_cur_lr:.2e} | ARMED (baseline captured, watcher begins next epoch)"
                 )
                 import sys as _sys; _sys.stdout.flush()
 
             # Adaptive LR: bi-directional plateau tracker (epoch-boundary, loss + stability driven)
-            if args.adaptive_lr and epoch >= _adaptive_start + 1:
+            if args.adaptive_lr and epoch >= 1:
                 current_epoch_loss = loss_recorder.moving_average
                 # Asymmetric patience:
                 #   - probe UP: always 2 (the risky direction)
@@ -2594,9 +2577,6 @@ class KleinTrainer:
                     # gradients would poison normal refinement training
                     accelerator.print("[gradient_mining] Discovery complete — resetting optimizer state for clean refinement")
                     optimizer.state.clear()
-                    # Restore user's LR (discovery ran at 1e-4)
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = _user_lr
 
             self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()

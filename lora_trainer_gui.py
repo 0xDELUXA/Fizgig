@@ -1885,21 +1885,6 @@ class LoRATrainerGUI:
         ttk.Checkbutton(mining_row1, text="Gradient Mining",
                         variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
 
-        # Smart defaults when mining toggled
-        def _on_mining_toggle(*_):
-            if self.gradient_mining_var.get():
-                # Mining on: LR 5e-5, adaptive LR on, min 5e-5
-                lr_entry = self.entries.get("LEARNING_RATE")
-                if lr_entry:
-                    lr_entry.delete(0, tk.END)
-                    lr_entry.insert(0, "5e-5")
-                if hasattr(self, 'adaptive_lr_var'):
-                    self.adaptive_lr_var.set(True)
-                min_combo = self.entries.get("ADAPTIVE_LR_MIN")
-                if min_combo:
-                    min_combo.set("5e-5")
-        self.gradient_mining_var.trace_add("write", _on_mining_toggle)
-
         # Preset dropdown — only controls orthogonal scale and min SNR
         self._mining_presets = {
             "Identity Lock": {"snr": "0.001", "ortho": "0.3"},
@@ -1920,10 +1905,15 @@ class LoRATrainerGUI:
         self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "2")
         self.entries["GRADIENT_MINING_DISCOVERY"].pack(side=tk.LEFT, padx=(0, 8))
 
-        ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Label(mining_row1, text="Disc Filter:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_DISC_FILTER"] = ttk.Entry(mining_row1, width=5)
         self.entries["GRADIENT_MINING_DISC_FILTER"].insert(0, "0.3")
         self.entries["GRADIENT_MINING_DISC_FILTER"].pack(side=tk.LEFT, padx=(0, 8))
+
+        ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row1, width=5)
+        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0")
+        self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT, padx=(0, 8))
 
         self.gradient_mining_face_sep_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mining_row1, text="Face Crop Sep",
@@ -1931,7 +1921,7 @@ class LoRATrainerGUI:
         # Smart defaults when face separation toggled
         def _on_face_sep_change(*_):
             if self.gradient_mining_face_sep_var.get():
-                # Face crop mode: 1 discovery epoch
+                # Face crop mode: 1 discovery epoch, filter 0.3 → 0
                 self.entries["GRADIENT_MINING_DISCOVERY"].delete(0, tk.END)
                 self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "1")
             else:
@@ -1951,8 +1941,8 @@ class LoRATrainerGUI:
         self.gradient_mining_auto_var = tk.BooleanVar(value=True)
 
         ttk.Label(training_content,
-                  text="Filter: directional filtering strength during discovery (0=pure SNR boost, 0.3=default). "
-                       "Refinement always uses pure SNR boost (no directional filtering).",
+                  text="Disc Filter: directional filter during discovery. Filter: filter during refinement (tweens over 1 epoch). "
+                       "0=pure SNR boost, 1=full directional. Lower = more minority features (smile etc).",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
             row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
 
@@ -10301,14 +10291,16 @@ class LoRATrainerGUI:
             ema = self.entries.get("GRADIENT_MINING_EMA")
             if ema:
                 command.extend(["--gradient_mining_ema_decay", ema.get().strip() or "0.99"])
-            # Refinement filter is always 0 (pure SNR boost)
-            command.extend(["--gradient_mining_orthogonal_scale", "0"])
+            ortho = self.entries.get("GRADIENT_MINING_ORTHO")
+            if ortho:
+                command.extend(["--gradient_mining_orthogonal_scale", ortho.get().strip() or "0.2"])
             if hasattr(self, 'gradient_mining_auto_var') and self.gradient_mining_auto_var.get():
                 command.append("--gradient_mining_auto_threshold")
             disc_filter = self.entries.get("GRADIENT_MINING_DISC_FILTER")
             if disc_filter:
-                val = disc_filter.get().strip() or "0.3"
-                command.extend(["--gradient_mining_discovery_filter", val])
+                val = disc_filter.get().strip()
+                if val:
+                    command.extend(["--gradient_mining_discovery_filter", val])
             discovery = self.entries.get("GRADIENT_MINING_DISCOVERY")
             if discovery:
                 val = discovery.get().strip() or "1"

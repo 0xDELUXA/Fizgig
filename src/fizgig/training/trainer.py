@@ -2343,19 +2343,23 @@ class KleinTrainer:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 
             # Adaptive LR: baseline log at end of epoch 0 (watcher armed but not acting yet)
-            if args.adaptive_lr and epoch == 0:
+            # Adaptive LR: skip discovery epochs when gradient mining is active
+            _adaptive_start = 0
+            if gradient_miner is not None:
+                _adaptive_start = gradient_miner.discovery_epochs
+
+            if args.adaptive_lr and epoch == _adaptive_start:
                 _cur_lr = optimizer.param_groups[0]["lr"]
-                # Seed best-loss tracker with epoch 1's loss so the next epoch's comparison
-                # is against a real baseline (not None, which incorrectly triggered "improving").
+                # Seed best-loss tracker with first post-discovery epoch's loss
                 adaptive_best_loss = loss_recorder.moving_average
                 accelerator.print(
-                    f"[adaptive_lr] epoch  1: loss={loss_recorder.moving_average:.4f} "
+                    f"[adaptive_lr] epoch {epoch + 1:>2}: loss={loss_recorder.moving_average:.4f} "
                     f"lr={_cur_lr:.2e} | ARMED (baseline captured, watcher begins next epoch)"
                 )
                 import sys as _sys; _sys.stdout.flush()
 
             # Adaptive LR: bi-directional plateau tracker (epoch-boundary, loss + stability driven)
-            if args.adaptive_lr and epoch >= 1:
+            if args.adaptive_lr and epoch >= _adaptive_start + 1:
                 current_epoch_loss = loss_recorder.moving_average
                 # Asymmetric patience:
                 #   - probe UP: always 2 (the risky direction)

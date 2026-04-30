@@ -2327,7 +2327,7 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
-                if gradient_miner is not None and gradient_miner._step_count > 1:
+                if gradient_miner is not None and not gradient_miner._discovery_complete and gradient_miner._step_count > 1:
                     logs["agree"] = f"{mine_stats['agree']:.0%}"
                     logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
                     logs["amp"] = f"{mine_stats['amp']:.1f}"

@@ -401,18 +401,13 @@ class GradientMiner:
             snr, snr_mean, consistency, block_name, best_idx = param_data[name]
             grad = param.grad
 
-            # SNR boost
-            boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
-
-            # Block weight
-            bw = block_weights.get(block_name, 1.0) if block_name else 1.0
-
-            # Face separation: boost identity blocks for face crops, reduce for non-face
-            if self.face_separation and block_name is not None and block_name.startswith("single_"):
+            # Block weight: flat 1.0, with penalty on identity blocks for non-face images
+            bw = 1.0
+            if self.face_separation and not is_face_crop and block_name is not None and block_name.startswith("single_"):
                 try:
                     block_idx = int(block_name.split("_")[1])
                     if 1 <= block_idx <= 16:
-                        bw *= 1.3 if is_face_crop else 0.8
+                        bw = 0.8
                 except (ValueError, IndexError):
                     pass
 
@@ -423,7 +418,8 @@ class GradientMiner:
                 ema_dir = param_buckets[best_idx][0]
                 ema_norm = ema_dir.norm()
                 if ema_norm < 1e-10:
-                    param.grad = grad * boost * bw
+                    if bw != 1.0:
+                        param.grad = grad * bw
                     continue
 
                 direction = ema_dir / ema_norm
@@ -439,17 +435,15 @@ class GradientMiner:
                 agreement = (cos_sim + 1.0) * 0.5
                 agreement_sum += agreement
 
-                filtered = parallel * boost * agreement + orthogonal * 0.2
-                raw_boosted = grad * boost
-                param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
+                filtered = parallel * agreement + orthogonal * 0.2
+                param.grad = (effective_filter * filtered + (1.0 - effective_filter) * grad) * bw
             else:
-                # Pure SNR boost — no directional filtering overhead
-                param.grad = grad * boost * bw
+                if bw != 1.0:
+                    param.grad = grad * bw
 
-            avg_boost_val = (boost * bw).mean().item()
-            if avg_boost_val > 1.05:
+            if bw != 1.0:
                 boost_count += 1
-                boost_sum += avg_boost_val
+                boost_sum += bw
 
         # ── Update stats ──
         n_with_data = len(param_data)

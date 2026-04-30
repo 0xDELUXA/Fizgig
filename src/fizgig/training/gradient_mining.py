@@ -377,8 +377,8 @@ class GradientMiner:
             block_entropy = 1.0
 
         # ── Auto amplify ──
-        # Discovery amplify: half of user's amplify_scale
-        base_amplify = self.amplify_scale * 0.5
+        # Discovery amplify
+        base_amplify = 1.5
         effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
         effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify

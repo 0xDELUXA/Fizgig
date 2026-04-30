@@ -2194,10 +2194,23 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
+        _user_lr = optimizer.param_groups[0]["lr"]  # save user's chosen LR
+        _discovery_lr = 1e-4  # fixed discovery LR
+
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
+
+            # Discovery always runs at 1e-4, refinement at user's LR
+            if gradient_miner is not None and not gradient_miner._discovery_complete:
+                for pg in optimizer.param_groups:
+                    pg["lr"] = _discovery_lr
+            elif gradient_miner is not None and epoch == gradient_miner.discovery_epochs:
+                # First refinement epoch: restore user's LR
+                for pg in optimizer.param_groups:
+                    pg["lr"] = _user_lr
+                accelerator.print(f"[gradient_mining] Discovery LR {_discovery_lr:.0e} → user LR {_user_lr:.0e}")
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 

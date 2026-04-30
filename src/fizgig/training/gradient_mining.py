@@ -390,7 +390,7 @@ class GradientMiner:
 
         # ── Auto amplify ──
         # Half amplify during discovery, ramp 1.0→2.0 over first refinement epoch
-        if self._current_epoch <= self.discovery_epochs:
+        if not self._discovery_complete:
             base_amplify = self.amplify_scale * 0.5
         else:
             steps_since = self._step_count - self._refinement_start_step

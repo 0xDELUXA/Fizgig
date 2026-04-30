@@ -395,7 +395,7 @@ class GradientMiner:
         else:
             steps_since = self._step_count - self._refinement_start_step
             ramp = min(1.0, steps_since / max(self._steps_per_epoch, 1))
-            base_amplify = 1.0 + ramp * 0.3  # 1.0 → 1.3 over first refinement epoch
+            base_amplify = 1.0 + ramp * 0.1  # 1.0 → 1.1 over first refinement epoch
         effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
         effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify
@@ -415,15 +415,15 @@ class GradientMiner:
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
             bw = min(1.3, bw)
 
-            # Face separation: boost identity blocks for face crops, reduce for non-face
-            if self.face_separation and block_name is not None and block_name.startswith("single_"):
+            # Face separation: reduce identity block weight for non-face images
+            # (face crops get natural weight — no artificial boost needed with clean pools)
+            if self.face_separation and not is_face_crop and block_name is not None and block_name.startswith("single_"):
                 try:
                     block_idx = int(block_name.split("_")[1])
                     if 1 <= block_idx <= 16:
-                        bw *= 1.3 if is_face_crop else 0.8
+                        bw *= 0.8
                 except (ValueError, IndexError):
                     pass
-            bw = min(1.5, bw)  # cap total bw including identity modifier
 
             if effective_filter > 0:
                 # Directional filtering: split gradient into parallel/orthogonal

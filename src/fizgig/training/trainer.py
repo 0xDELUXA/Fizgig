@@ -2570,13 +2570,7 @@ class KleinTrainer:
 
             # Gradient mining: trigger discovery→refinement transition at epoch boundary
             if gradient_miner is not None:
-                was_discovering = not gradient_miner._discovery_complete
                 gradient_miner.on_epoch_end(epoch + 1)
-                if was_discovering and gradient_miner._discovery_complete:
-                    # Reset optimizer state — Adam's momentum from amplified discovery
-                    # gradients would poison normal refinement training
-                    accelerator.print("[gradient_mining] Discovery complete — resetting optimizer state for clean refinement")
-                    optimizer.state.clear()
 
             self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()

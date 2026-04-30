@@ -239,20 +239,7 @@ class GradientMiner:
         active_buckets, active_prev_grad = self._get_active_pool(is_face_crop)
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
-
-        # Refinement = totally normal training (no gradient modification)
-        if self._discovery_complete:
-            return {"avg_snr": 0, "avg_boost": 1.0, "threshold": 0, "blk_H": 1.0,
-                    "agree": 0, "d_agree": 0, "ema": self.ema_decay,
-                    "amp": 0, "bkts": self.last_avg_buckets, "face": is_face_crop}
-
-        # Effective filter: discovery value → tween over 1 epoch → refinement value
-        if not self._discovery_complete:
-            effective_filter = self.discovery_filter
-        else:
-            steps_since = self._step_count - self._refinement_start_step
-            t = min(1.0, steps_since / max(self._steps_per_epoch, 1))
-            effective_filter = self.discovery_filter + t * (self.filter_strength - self.discovery_filter)
+        effective_filter = self.discovery_filter
 
         total_params = 0
         snr_sum = 0.0
@@ -324,11 +311,6 @@ class GradientMiner:
                     param_buckets.pop(merge_j)
                 param_buckets.append([grad.clone(), (grad ** 2).clone(), 1])
                 best_idx = len(param_buckets) - 1
-            else:
-                # Refinement phase: locked, assign to closest
-                param_buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
-                param_buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
-                param_buckets[best_idx][2] += 1
 
             # SNR from the matched bucket
             bucket_ema = param_buckets[best_idx][0]
@@ -396,12 +378,8 @@ class GradientMiner:
 
         # ── Auto amplify ──
         # Half amplify during discovery, ramp 1.0→2.0 over first refinement epoch
-        if not self._discovery_complete:
-            base_amplify = self.amplify_scale * 0.5
-        else:
-            steps_since = self._step_count - self._refinement_start_step
-            ramp = min(1.0, steps_since / max(self._steps_per_epoch, 1))
-            base_amplify = 1.0 + ramp * 0.1  # 1.0 → 1.1 over first refinement epoch
+        # Discovery amplify: half of user's amplify_scale
+        base_amplify = self.amplify_scale * 0.5
         effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
         effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify
@@ -417,49 +395,35 @@ class GradientMiner:
             # SNR boost
             boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
 
-            # Block weight (capped at 1.3 to prevent hidden amplification)
+            # Block weight (capped at 1.3)
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
             bw = min(1.3, bw)
 
-            # Face separation: reduce identity block weight for non-face images
-            # (face crops get natural weight — no artificial boost needed with clean pools)
-            if self.face_separation and not is_face_crop and block_name is not None and block_name.startswith("single_"):
-                try:
-                    block_idx = int(block_name.split("_")[1])
-                    if 1 <= block_idx <= 16:
-                        bw *= 0.8
-                except (ValueError, IndexError):
-                    pass
-
-            if effective_filter > 0:
-                # Directional filtering: split gradient into parallel/orthogonal
-                param_buckets = active_buckets[name]
-                best_idx = min(best_idx, len(param_buckets) - 1)
-                ema_dir = param_buckets[best_idx][0]
-                ema_norm = ema_dir.norm()
-                if ema_norm < 1e-10:
-                    param.grad = grad * boost * bw
-                    continue
-
-                direction = ema_dir / ema_norm
-                dot = (grad * direction).sum()
-                parallel = dot * direction
-                orthogonal = grad - parallel
-
-                grad_norm = grad.norm()
-                if grad_norm > 1e-10:
-                    cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
-                else:
-                    cos_sim = 0.0
-                agreement = (cos_sim + 1.0) * 0.5
-                agreement_sum += agreement
-
-                filtered = parallel * boost * agreement + orthogonal * 0.2
-                raw_boosted = grad * boost
-                param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
-            else:
-                # Pure SNR boost — no directional filtering overhead
+            # Directional filtering
+            param_buckets = active_buckets[name]
+            best_idx = min(best_idx, len(param_buckets) - 1)
+            ema_dir = param_buckets[best_idx][0]
+            ema_norm = ema_dir.norm()
+            if ema_norm < 1e-10:
                 param.grad = grad * boost * bw
+                continue
+
+            direction = ema_dir / ema_norm
+            dot = (grad * direction).sum()
+            parallel = dot * direction
+            orthogonal = grad - parallel
+
+            grad_norm = grad.norm()
+            if grad_norm > 1e-10:
+                cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
+            else:
+                cos_sim = 0.0
+            agreement = (cos_sim + 1.0) * 0.5
+            agreement_sum += agreement
+
+            filtered = parallel * boost * agreement + orthogonal * 0.2
+            raw_boosted = grad * boost
+            param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
 
             avg_boost_val = (boost * bw).mean().item()
             if avg_boost_val > 1.05:

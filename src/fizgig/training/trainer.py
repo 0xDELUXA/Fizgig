@@ -2252,8 +2252,8 @@ class KleinTrainer:
                     # Backward
                     accelerator.backward(loss)
 
-                    # Gradient mining: amplify suppressed signal before optimizer step
-                    if gradient_miner is not None:
+                    # Gradient mining: only active during discovery
+                    if gradient_miner is not None and not gradient_miner._discovery_complete:
                         is_face = False
                         if gradient_miner.face_separation:
                             face_flags = batch.get("is_face_crop", [])

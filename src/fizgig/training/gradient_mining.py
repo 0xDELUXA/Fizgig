@@ -240,6 +240,12 @@ class GradientMiner:
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
 
+        # Refinement = totally normal training (no gradient modification)
+        if self._discovery_complete:
+            return {"avg_snr": 0, "avg_boost": 1.0, "threshold": 0, "blk_H": 1.0,
+                    "agree": 0, "d_agree": 0, "ema": self.ema_decay,
+                    "amp": 0, "bkts": self.last_avg_buckets, "face": is_face_crop}
+
         # Effective filter: discovery value → tween over 1 epoch → refinement value
         if not self._discovery_complete:
             effective_filter = self.discovery_filter

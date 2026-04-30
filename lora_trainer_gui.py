@@ -1885,6 +1885,21 @@ class LoRATrainerGUI:
         ttk.Checkbutton(mining_row1, text="Gradient Mining",
                         variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
 
+        # Smart defaults when mining toggled
+        def _on_mining_toggle(*_):
+            if self.gradient_mining_var.get():
+                # Mining on: LR 5e-5, adaptive LR on, min 5e-5
+                lr_entry = self.entries.get("LEARNING_RATE")
+                if lr_entry:
+                    lr_entry.delete(0, tk.END)
+                    lr_entry.insert(0, "5e-5")
+                if hasattr(self, 'adaptive_lr_var'):
+                    self.adaptive_lr_var.set(True)
+                min_combo = self.entries.get("ADAPTIVE_LR_MIN")
+                if min_combo:
+                    min_combo.set("5e-5")
+        self.gradient_mining_var.trace_add("write", _on_mining_toggle)
+
         # Preset dropdown — only controls orthogonal scale and min SNR
         self._mining_presets = {
             "Identity Lock": {"snr": "0.001", "ortho": "0.3"},

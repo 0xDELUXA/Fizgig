@@ -2080,19 +2080,15 @@ class KleinTrainer:
         if getattr(args, "gradient_mining", False):
             from fizgig.training.gradient_mining import GradientMiner
             face_sep = getattr(args, "gradient_mining_face_separation", False)
-            mining_epochs = getattr(args, "gradient_mining_mining_epochs", 2)
+            # Mining epochs = total epochs minus 1 (data gather epoch)
+            mining_epochs = max(1, num_train_epochs - 1)
             gradient_miner = GradientMiner(
-                ema_decay=getattr(args, "gradient_mining_ema_decay", 0.9),
-                amplify_scale=getattr(args, "gradient_mining_amplify", 8.0),
-                min_snr=getattr(args, "gradient_mining_threshold", 0.001),
-                auto_threshold=getattr(args, "gradient_mining_auto_threshold", True),
-                filter_strength=getattr(args, "gradient_mining_filter", 0.5),
+                filter_strength=1.0,
                 mining_epochs=mining_epochs,
                 face_separation=face_sep,
             )
             logger.info(
-                f"Gradient mining enabled: amplify={gradient_miner.amplify_scale}x, "
-                f"filter={gradient_miner.filter_strength}, mining_epochs={mining_epochs}"
+                f"Gradient mining enabled: {mining_epochs} mining epoch(s) after data gather"
                 + (", face_separation=True" if face_sep else "")
             )
 
@@ -2193,34 +2189,10 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
-        _user_lr = optimizer.param_groups[0]["lr"]
-        _mining_lr = getattr(args, "gradient_mining_mining_lr", None) if gradient_miner is not None else None
-        if _mining_lr is None and gradient_miner is not None:
-            _mining_lr = 4e-4  # default mining LR
-        _data_gather_lr = 1e-4  # fixed for data gather epoch
-
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
-
-            # 3-phase LR management for gradient mining
-            if gradient_miner is not None:
-                if gradient_miner.phase == gradient_miner.PHASE_OBSERVE:
-                    # Phase 1: data gather at fixed 1e-4
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = _data_gather_lr
-                elif gradient_miner.phase == gradient_miner.PHASE_MINING:
-                    # Phase 2: mining at user's mining LR
-                    if _mining_lr is not None:
-                        for pg in optimizer.param_groups:
-                            pg["lr"] = _mining_lr
-                elif gradient_miner.phase == gradient_miner.PHASE_DONE:
-                    # Phase 3: normal training at user's LR (restored once)
-                    if epoch == 1 + gradient_miner.mining_epochs:
-                        for pg in optimizer.param_groups:
-                            pg["lr"] = _user_lr
-                        accelerator.print(f"[gradient_mining] Normal training: LR restored to {_user_lr:.1e}")
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 

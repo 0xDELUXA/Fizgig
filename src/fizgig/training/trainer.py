@@ -2195,6 +2195,8 @@ class KleinTrainer:
 
         _user_lr = optimizer.param_groups[0]["lr"]
         _mining_lr = getattr(args, "gradient_mining_mining_lr", None) if gradient_miner is not None else None
+        if _mining_lr is None and gradient_miner is not None:
+            _mining_lr = 4e-4  # default mining LR
         _data_gather_lr = 1e-4  # fixed for data gather epoch
 
         for epoch in range(epoch_to_start, num_train_epochs):

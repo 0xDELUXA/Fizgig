@@ -1930,11 +1930,17 @@ class LoRATrainerGUI:
                 self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "2")
         self.gradient_mining_face_sep_var.trace_add("write", _on_face_sep_change)
 
-        # Amplify control (discovery uses half this value)
+        # Amplify control
         ttk.Label(mining_row1, text="Amp:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row1, width=5)
         self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "8.0")
         self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 8))
+
+        # Discovery LR override
+        ttk.Label(mining_row1, text="Disc LR:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_DISC_LR"] = ttk.Entry(mining_row1, width=7)
+        self.entries["GRADIENT_MINING_DISC_LR"].insert(0, "4e-4")
+        self.entries["GRADIENT_MINING_DISC_LR"].pack(side=tk.LEFT, padx=(0, 8))
         self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_row1)
         self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.001")
         self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_row1)
@@ -10307,6 +10313,11 @@ class LoRATrainerGUI:
             if discovery:
                 val = discovery.get().strip() or "1"
                 command.extend(["--gradient_mining_discovery_epochs", val])
+            disc_lr = self.entries.get("GRADIENT_MINING_DISC_LR")
+            if disc_lr:
+                val = disc_lr.get().strip()
+                if val:
+                    command.extend(["--gradient_mining_discovery_lr", val])
             if hasattr(self, 'gradient_mining_face_sep_var') and self.gradient_mining_face_sep_var.get():
                 command.append("--gradient_mining_face_separation")
 

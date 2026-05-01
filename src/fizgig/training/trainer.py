@@ -2194,10 +2194,23 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
+        _user_lr = optimizer.param_groups[0]["lr"]
+        _discovery_lr = getattr(args, "gradient_mining_discovery_lr", None) if gradient_miner is not None else None
+
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
+
+            # Discovery LR override
+            if gradient_miner is not None and _discovery_lr is not None:
+                if not gradient_miner._discovery_complete:
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = _discovery_lr
+                elif epoch == gradient_miner.discovery_epochs:
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = _user_lr
+                    accelerator.print(f"[gradient_mining] Discovery LR {_discovery_lr:.1e} → user LR {_user_lr:.1e}")
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
@@ -2815,6 +2828,8 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--gradient_mining_discovery_epochs", type=int, default=1,
                         help="Number of epochs for uncapped bucket discovery (default 1). "
                              "After this, bucket structure is locked and weak buckets pruned.")
+    parser.add_argument("--gradient_mining_discovery_lr", type=float, default=None,
+                        help="Learning rate override during discovery epochs (default: same as --learning_rate).")
     parser.add_argument("--gradient_mining_face_separation", action="store_true",
                         help="Separate face crops (FaceCrop_*.png) into their own bucket pool "
                              "with boosted identity block weights.")

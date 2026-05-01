@@ -2194,23 +2194,10 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
-        _user_lr = optimizer.param_groups[0]["lr"]
-        _discovery_lr = _user_lr * 0.5  # discovery always runs at half user's LR
-
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
-
-            # Discovery runs at half LR, refinement restores user's LR
-            if gradient_miner is not None:
-                if not gradient_miner._discovery_complete:
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = _discovery_lr
-                elif epoch == gradient_miner.discovery_epochs:
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = _user_lr
-                    accelerator.print(f"[gradient_mining] Discovery LR {_discovery_lr:.1e} → user LR {_user_lr:.1e}")
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
@@ -2327,7 +2314,7 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
-                if gradient_miner is not None and gradient_miner._step_count > 1:
+                if gradient_miner is not None and not gradient_miner._discovery_complete and gradient_miner._step_count > 1:
                     logs["agree"] = f"{mine_stats['agree']:.0%}"
                     logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
                     logs["amp"] = f"{mine_stats['amp']:.1f}"
@@ -2355,7 +2342,6 @@ class KleinTrainer:
             if len(accelerator.trackers) > 0:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 
-            # Adaptive LR: baseline log at end of epoch 0 (watcher armed but not acting yet)
             # Adaptive LR: skip discovery epochs when gradient mining is active
             _adaptive_start = 0
             if gradient_miner is not None:
@@ -2586,7 +2572,11 @@ class KleinTrainer:
 
             # Gradient mining: trigger discovery→refinement transition at epoch boundary
             if gradient_miner is not None:
+                was_discovering = not gradient_miner._discovery_complete
                 gradient_miner.on_epoch_end(epoch + 1)
+                if was_discovering and gradient_miner._discovery_complete:
+                    accelerator.print("[gradient_mining] Discovery complete — resetting optimizer state for clean refinement")
+                    optimizer.state.clear()
 
             self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()

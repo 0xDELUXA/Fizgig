@@ -388,9 +388,16 @@ class GradientMiner:
         else:
             block_entropy = 1.0
 
-        # ── Amplify ──
-        # Fixed at 1.0: no LR boost, only directional filtering + noise suppression
-        effective_amplify = 1.0
+        # ── Auto amplify with epoch decay ──
+        # Half amplify during discovery (let minority features through),
+        # full at refinement start, then halved each epoch, floor at 2.0
+        if not self._discovery_complete:
+            base_amplify = self.amplify_scale * 0.5
+        else:
+            epochs_since = self._current_epoch - self.discovery_epochs
+            base_amplify = max(2.0, self.amplify_scale / (2.0 ** epochs_since))
+        effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
+        effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify
 
         # ── Pass 2: Directional filter using matched bucket ──
@@ -401,13 +408,18 @@ class GradientMiner:
             snr, snr_mean, consistency, block_name, best_idx = param_data[name]
             grad = param.grad
 
-            # Block weight: flat 1.0, with penalty on identity blocks for non-face images
-            bw = 1.0
-            if self.face_separation and not is_face_crop and block_name is not None and block_name.startswith("single_"):
+            # SNR boost
+            boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
+
+            # Block weight
+            bw = block_weights.get(block_name, 1.0) if block_name else 1.0
+
+            # Face separation: boost identity blocks for face crops, reduce for non-face
+            if self.face_separation and block_name is not None and block_name.startswith("single_"):
                 try:
                     block_idx = int(block_name.split("_")[1])
                     if 1 <= block_idx <= 16:
-                        bw = 0.8
+                        bw *= 1.3 if is_face_crop else 0.8
                 except (ValueError, IndexError):
                     pass
 
@@ -418,8 +430,7 @@ class GradientMiner:
                 ema_dir = param_buckets[best_idx][0]
                 ema_norm = ema_dir.norm()
                 if ema_norm < 1e-10:
-                    if bw != 1.0:
-                        param.grad = grad * bw
+                    param.grad = grad * boost * bw
                     continue
 
                 direction = ema_dir / ema_norm
@@ -435,15 +446,17 @@ class GradientMiner:
                 agreement = (cos_sim + 1.0) * 0.5
                 agreement_sum += agreement
 
-                filtered = parallel * agreement + orthogonal * 0.2
-                param.grad = (effective_filter * filtered + (1.0 - effective_filter) * grad) * bw
+                filtered = parallel * boost * agreement + orthogonal * 0.2
+                raw_boosted = grad * boost
+                param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
             else:
-                if bw != 1.0:
-                    param.grad = grad * bw
+                # Pure SNR boost — no directional filtering overhead
+                param.grad = grad * boost * bw
 
-            if bw != 1.0:
+            avg_boost_val = (boost * bw).mean().item()
+            if avg_boost_val > 1.05:
                 boost_count += 1
-                boost_sum += bw
+                boost_sum += avg_boost_val
 
         # ── Update stats ──
         n_with_data = len(param_data)

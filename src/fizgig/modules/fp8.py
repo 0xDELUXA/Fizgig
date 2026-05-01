@@ -383,7 +383,9 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         return o.to(input_dtype)
 
     else:
-        # Dequantize the weight
+        # Dequantize the weight (ensure scale_weight follows block swap moves)
+        if self.scale_weight.device != self.weight.device:
+            self.scale_weight.data = self.scale_weight.data.to(self.weight.device)
         original_dtype = self.scale_weight.dtype
         if self.scale_weight.ndim < 3:
             # per-tensor or per-channel quantization, we can broadcast

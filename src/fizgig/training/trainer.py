@@ -2080,20 +2080,19 @@ class KleinTrainer:
         if getattr(args, "gradient_mining", False):
             from fizgig.training.gradient_mining import GradientMiner
             face_sep = getattr(args, "gradient_mining_face_separation", False)
+            mining_epochs = getattr(args, "gradient_mining_mining_epochs", 2)
             gradient_miner = GradientMiner(
                 ema_decay=getattr(args, "gradient_mining_ema_decay", 0.9),
                 amplify_scale=getattr(args, "gradient_mining_amplify", 8.0),
                 min_snr=getattr(args, "gradient_mining_threshold", 0.001),
                 auto_threshold=getattr(args, "gradient_mining_auto_threshold", True),
-                orthogonal_scale=getattr(args, "gradient_mining_orthogonal_scale", 0.3),
-                discovery_filter=getattr(args, "gradient_mining_discovery_filter", None),
-                discovery_epochs=getattr(args, "gradient_mining_discovery_epochs", 1),
+                filter_strength=getattr(args, "gradient_mining_filter", 0.5),
+                mining_epochs=mining_epochs,
                 face_separation=face_sep,
             )
             logger.info(
                 f"Gradient mining enabled: amplify={gradient_miner.amplify_scale}x, "
-                f"min_snr={gradient_miner.min_snr}, ema_decay={gradient_miner.ema_decay}, "
-                f"discovery_epochs={gradient_miner.discovery_epochs}"
+                f"filter={gradient_miner.filter_strength}, mining_epochs={mining_epochs}"
                 + (", face_separation=True" if face_sep else "")
             )
 
@@ -2195,22 +2194,31 @@ class KleinTrainer:
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
         _user_lr = optimizer.param_groups[0]["lr"]
-        _discovery_lr = getattr(args, "gradient_mining_discovery_lr", None) if gradient_miner is not None else None
+        _mining_lr = getattr(args, "gradient_mining_mining_lr", None) if gradient_miner is not None else None
+        _data_gather_lr = 1e-4  # fixed for data gather epoch
 
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
 
-            # Discovery LR override
-            if gradient_miner is not None and _discovery_lr is not None:
-                if not gradient_miner._discovery_complete:
+            # 3-phase LR management for gradient mining
+            if gradient_miner is not None:
+                if gradient_miner.phase == gradient_miner.PHASE_OBSERVE:
+                    # Phase 1: data gather at fixed 1e-4
                     for pg in optimizer.param_groups:
-                        pg["lr"] = _discovery_lr
-                elif epoch == gradient_miner.discovery_epochs:
-                    for pg in optimizer.param_groups:
-                        pg["lr"] = _user_lr
-                    accelerator.print(f"[gradient_mining] Discovery LR {_discovery_lr:.1e} → user LR {_user_lr:.1e}")
+                        pg["lr"] = _data_gather_lr
+                elif gradient_miner.phase == gradient_miner.PHASE_MINING:
+                    # Phase 2: mining at user's mining LR
+                    if _mining_lr is not None:
+                        for pg in optimizer.param_groups:
+                            pg["lr"] = _mining_lr
+                elif gradient_miner.phase == gradient_miner.PHASE_DONE:
+                    # Phase 3: normal training at user's LR (restored once)
+                    if epoch == 1 + gradient_miner.mining_epochs:
+                        for pg in optimizer.param_groups:
+                            pg["lr"] = _user_lr
+                        accelerator.print(f"[gradient_mining] Normal training: LR restored to {_user_lr:.1e}")
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
@@ -2252,8 +2260,8 @@ class KleinTrainer:
                     # Backward
                     accelerator.backward(loss)
 
-                    # Gradient mining: amplify suppressed signal before optimizer step
-                    if gradient_miner is not None:
+                    # Gradient mining: observe (phase 1) or mine (phase 2)
+                    if gradient_miner is not None and gradient_miner.phase != gradient_miner.PHASE_DONE:
                         is_face = False
                         if gradient_miner.face_separation:
                             face_flags = batch.get("is_face_crop", [])
@@ -2327,7 +2335,7 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
-                if gradient_miner is not None and not gradient_miner._discovery_complete and gradient_miner._step_count > 1:
+                if gradient_miner is not None and gradient_miner.phase != gradient_miner.PHASE_DONE and gradient_miner._step_count > 1:
                     logs["agree"] = f"{mine_stats['agree']:.0%}"
                     logs["boost"] = f"{mine_stats['avg_boost']:.2f}"
                     logs["amp"] = f"{mine_stats['amp']:.1f}"
@@ -2355,10 +2363,10 @@ class KleinTrainer:
             if len(accelerator.trackers) > 0:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 
-            # Adaptive LR: skip discovery epochs when gradient mining is active
+            # Adaptive LR: skip data-gather + mining epochs, start in phase 3
             _adaptive_start = 0
             if gradient_miner is not None:
-                _adaptive_start = gradient_miner.discovery_epochs
+                _adaptive_start = 1 + gradient_miner.mining_epochs  # 1 gather + N mining
 
             if args.adaptive_lr and epoch == _adaptive_start:
                 _cur_lr = optimizer.param_groups[0]["lr"]
@@ -2570,26 +2578,33 @@ class KleinTrainer:
                                 _mining_state = {
                                     "step_count": gradient_miner._step_count,
                                     "last_avg_agreement": gradient_miner.last_avg_agreement,
-                                    "discovery_complete": gradient_miner._discovery_complete,
+                                    "phase": gradient_miner.phase,
+                                    "mining_epoch_count": gradient_miner._mining_epoch_count,
                                     "buckets": {k: [(b[0].cpu(), b[1].cpu(), b[2]) for b in v]
                                                 for k, v in gradient_miner._buckets.items()},
+                                    "buckets_face": {k: [(b[0].cpu(), b[1].cpu(), b[2]) for b in v]
+                                                     for k, v in gradient_miner._buckets_face.items()},
                                     "prev_grad": {k: v.cpu() for k, v in gradient_miner._prev_grad.items()},
-                                    "pruned_directions": {k: [d.cpu() for d in v]
-                                                          for k, v in gradient_miner._pruned_directions.items()},
                                 }
                                 torch.save(_mining_state, os.path.join(_state_dir, "gradient_mining_state.pt"))
                                 accelerator.print(f"[gradient_mining] state saved ({len(gradient_miner._buckets)} params, "
-                                                  f"discovery={'done' if gradient_miner._discovery_complete else 'active'})")
+                                                  f"phase={gradient_miner.phase})")
                             except Exception as _e:
                                 accelerator.print(f"[gradient_mining] state save failed: {_e}")
 
-            # Gradient mining: trigger discovery→refinement transition at epoch boundary
+            # Gradient mining: phase transitions at epoch boundary
             if gradient_miner is not None:
-                was_discovering = not gradient_miner._discovery_complete
-                gradient_miner.on_epoch_end(epoch + 1)
-                if was_discovering and gradient_miner._discovery_complete:
-                    accelerator.print("[gradient_mining] Discovery complete — resetting optimizer state for clean refinement")
+                if gradient_miner.phase == gradient_miner.PHASE_OBSERVE:
+                    # End of data gather → start mining
+                    gradient_miner.start_mining()
+                    accelerator.print("[gradient_mining] Resetting optimizer state for mining phase")
                     optimizer.state.clear()
+                elif gradient_miner.phase == gradient_miner.PHASE_MINING:
+                    gradient_miner.on_mining_epoch_end()
+                    if gradient_miner._mining_epoch_count >= gradient_miner.mining_epochs:
+                        gradient_miner.stop_mining()
+                        accelerator.print("[gradient_mining] Resetting optimizer state for normal training")
+                        optimizer.state.clear()
 
             self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()
@@ -2808,31 +2823,25 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--context_lora_strength", type=float, default=1.0,
                         help="Strength multiplier for the context LoRA (typical: 0.5-1.0).")
 
-    # ---- Gradient Mining (experimental) ----
+    # ---- Gradient Mining v2 (Observe + Mine) ----
     parser.add_argument("--gradient_mining", action="store_true",
-                        help="Enable gradient mining: amplify suppressed learning signal based on gradient SNR.")
-    parser.add_argument("--gradient_mining_amplify", type=float, default=2.0,
-                        help="Max amplification factor for high-SNR parameters (default 2.0).")
-    parser.add_argument("--gradient_mining_threshold", type=float, default=0.1,
-                        help="Min SNR below which no amplification is applied (default 0.1).")
-    parser.add_argument("--gradient_mining_ema_decay", type=float, default=0.99,
-                        help="EMA smoothing for gradient stats (default 0.99). Lower = faster adaptation.")
+                        help="Enable gradient mining: 1 epoch data gather + N epochs amplified mining.")
+    parser.add_argument("--gradient_mining_amplify", type=float, default=8.0,
+                        help="Amplification scale for mining phase (default 8.0, effective = half = 4x).")
+    parser.add_argument("--gradient_mining_filter", type=float, default=0.5,
+                        help="Directional filter strength during mining (0=pure SNR boost, 1=full directional). Default 0.5.")
+    parser.add_argument("--gradient_mining_mining_epochs", type=int, default=2,
+                        help="Number of mining epochs after data gather (default 2).")
+    parser.add_argument("--gradient_mining_mining_lr", type=float, default=None,
+                        help="Learning rate during mining epochs (default: 4e-4).")
+    parser.add_argument("--gradient_mining_threshold", type=float, default=0.001,
+                        help="Min SNR threshold (default 0.001).")
+    parser.add_argument("--gradient_mining_ema_decay", type=float, default=0.9,
+                        help="EMA smoothing for gradient stats (default 0.9).")
     parser.add_argument("--gradient_mining_auto_threshold", action="store_true",
-                        help="Auto-detect noise floor from SNR distribution variance. Replaces fixed min_snr.")
-    parser.add_argument("--gradient_mining_orthogonal_scale", type=float, default=0.2,
-                        help="How much orthogonal (exploration) gradient to preserve (default 0.2). "
-                             "0.0 = pure refinement, 1.0 = full exploration.")
-    parser.add_argument("--gradient_mining_discovery_filter", type=float, default=None,
-                        help="Filter strength during discovery epochs (default: same as orthogonal_scale). "
-                             "Tweens to orthogonal_scale over the first refinement epoch.")
-    parser.add_argument("--gradient_mining_discovery_epochs", type=int, default=1,
-                        help="Number of epochs for uncapped bucket discovery (default 1). "
-                             "After this, bucket structure is locked and weak buckets pruned.")
-    parser.add_argument("--gradient_mining_discovery_lr", type=float, default=None,
-                        help="Learning rate override during discovery epochs (default: same as --learning_rate).")
+                        help="Auto-detect noise floor from SNR distribution variance.")
     parser.add_argument("--gradient_mining_face_separation", action="store_true",
-                        help="Separate face crops (FaceCrop_*.png) into their own bucket pool "
-                             "with boosted identity block weights.")
+                        help="Separate face crops (FaceCrop_*.png) into their own bucket pool.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

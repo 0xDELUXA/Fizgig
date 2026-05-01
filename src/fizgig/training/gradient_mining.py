@@ -1,20 +1,27 @@
-"""Gradient Mining — Multi-bucket directional filtering with discovery/refinement phases.
+"""Gradient Mining v2 — Observe + Mine.
 
-Discovery phase (first N epochs): unlimited bucket creation, the dataset reveals
-its natural gradient pattern count. At the end of discovery, weak buckets (< 5%
-of hits) are pruned and their directions blocked.
+Phase 1 (Data Gather): One epoch of vanilla training while silently observing
+gradient patterns. Buckets build from unmodified gradients — the model trains
+normally while the miner maps the gradient landscape.
 
-Refinement phase (remaining epochs): bucket structure locked, no new buckets.
-All gradients assigned to surviving buckets. Pruned directions are dampened if
-they recur. Each pattern gets full amplification within its own tracked direction.
+Phase 2 (Mining): Bucket structure locked from observation. Directional filtering
++ SNR amplification along the pre-observed directions. The model is pushed hard
+along known-good gradient directions.
+
+Phase 3 (Normal): Mining complete. Standard training with no gradient modification.
+Adaptive LR takes over from here.
 
 Usage:
-    miner = GradientMiner(amplify_scale=8.0, discovery_epochs=1)
+    miner = GradientMiner(amplify_scale=8.0, mining_epochs=2)
     ...
-    stats = miner.amplify_gradients(network)
-    optimizer.step()
-    # At epoch boundary:
-    miner.on_epoch_end(epoch_number)
+    # Phase 1: observe only
+    stats = miner.amplify_gradients(network, is_face_crop=False)
+    # At epoch 1 end:
+    miner.start_mining()  # finalize buckets, lock structure
+    # Phase 2: mining active
+    stats = miner.amplify_gradients(network, is_face_crop=False)
+    # After mining_epochs:
+    miner.stop_mining()   # mining done
 """
 
 import math
@@ -39,7 +46,12 @@ def _extract_block_name(param_name: str) -> Optional[str]:
 
 
 class GradientMiner:
-    """Multi-bucket directional filtering with discovery/refinement phases."""
+    """Observe + Mine gradient routing with face crop separation."""
+
+    # Phases
+    PHASE_OBSERVE = "observe"
+    PHASE_MINING = "mining"
+    PHASE_DONE = "done"
 
     def __init__(
         self,
@@ -47,20 +59,18 @@ class GradientMiner:
         amplify_scale: float = 8.0,
         min_snr: float = 0.001,
         auto_threshold: bool = True,
-        orthogonal_scale: float = 0.3,
-        discovery_filter: float = None,
+        filter_strength: float = 0.5,
         bucket_threshold: float = 0.1,
-        discovery_epochs: int = 2,
+        mining_epochs: int = 2,
         face_separation: bool = False,
     ):
         self.ema_decay = ema_decay
         self.amplify_scale = amplify_scale
         self.min_snr = min_snr
         self.auto_threshold = auto_threshold
-        self.filter_strength = orthogonal_scale
-        self.discovery_filter = discovery_filter if discovery_filter is not None else orthogonal_scale
+        self.filter_strength = filter_strength
         self.bucket_threshold = bucket_threshold
-        self.discovery_epochs = discovery_epochs
+        self.mining_epochs = mining_epochs
         self.face_separation = face_separation
 
         # Per-parameter bucket storage: name -> [(ema_dir, ema_sq, hit_count), ...]
@@ -71,12 +81,10 @@ class GradientMiner:
         # Bucket cap: 8 per pool when separated, 12 when not
         self._bucket_cap = 8 if face_separation else 12
 
-        # Discovery state
-        self._discovery_complete = False
-        self._pruned_directions: Dict[str, List[torch.Tensor]] = {}  # blocked directions
-        self._current_epoch = 0  # updated by on_epoch_end
-        self._refinement_start_step = 0  # step when refinement began
-        self._steps_per_epoch = 0  # inferred at discovery end
+        # Phase state
+        self.phase = self.PHASE_OBSERVE
+        self._mining_epoch_count = 0  # how many mining epochs have run
+        self._steps_per_epoch = 0
 
         # Per-parameter previous gradient for consistency tracking
         self._prev_grad: Dict[str, torch.Tensor] = {}
@@ -166,30 +174,6 @@ class GradientMiner:
             target_buckets[name] = buckets
         return total_merged
 
-    def on_epoch_end(self, epoch: int):
-        """Called by the trainer at the end of each epoch.
-        Triggers discovery→refinement transition at the right epoch."""
-        self._current_epoch = epoch
-        if self._discovery_complete:
-            return
-        if epoch < self.discovery_epochs:
-            return
-
-        # End of discovery — merge similar, then prune weak, then lock
-        stats_main = self._finalize_pool(self._buckets)
-        stats_face = self._finalize_pool(self._buckets_face) if self.face_separation else None
-
-        self._discovery_complete = True
-        self._refinement_start_step = self._step_count
-        self._steps_per_epoch = max(self._step_count // self.discovery_epochs, 1)
-
-        msg = (f"[gradient_mining] Discovery complete after {epoch} epoch(s): "
-               f"main: {stats_main[0]}→{stats_main[1]} merged, {stats_main[2]} pruned → {stats_main[3]} survived")
-        if stats_face:
-            msg += (f" | face: {stats_face[0]}→{stats_face[1]} merged, "
-                    f"{stats_face[2]} pruned → {stats_face[3]} survived")
-        logger.info(msg)
-
     def _finalize_pool(self, pool: Dict) -> Tuple[int, int, int, int]:
         """Merge + prune a bucket pool. Returns (pre_total, merged, pruned, survived)."""
         pre_total = sum(len(b) for b in pool.values())
@@ -233,20 +217,47 @@ class GradientMiner:
 
         return (pre_total, merged, pruned, survived)
 
+    def start_mining(self):
+        """Called at the end of the data-gather epoch. Finalizes buckets and enters mining phase."""
+        if self.phase != self.PHASE_OBSERVE:
+            return
+
+        stats_main = self._finalize_pool(self._buckets)
+        stats_face = self._finalize_pool(self._buckets_face) if self.face_separation else None
+
+        self._steps_per_epoch = max(self._step_count, 1)
+        self.phase = self.PHASE_MINING
+        self._mining_epoch_count = 0
+
+        msg = (f"[gradient_mining] Data gather complete: "
+               f"main: {stats_main[0]}→{stats_main[1]} merged, {stats_main[2]} pruned → {stats_main[3]} survived")
+        if stats_face:
+            msg += (f" | face: {stats_face[0]}→{stats_face[1]} merged, "
+                    f"{stats_face[2]} pruned → {stats_face[3]} survived")
+        logger.info(msg)
+
+    def on_mining_epoch_end(self):
+        """Called at the end of each mining epoch. Tracks count for phase transition."""
+        if self.phase != self.PHASE_MINING:
+            return
+        self._mining_epoch_count += 1
+
+    def stop_mining(self):
+        """Called when all mining epochs are complete. Enters normal training phase."""
+        self.phase = self.PHASE_DONE
+        logger.info(f"[gradient_mining] Mining complete after {self._mining_epoch_count} epoch(s). Normal training resumes.")
+
     def amplify_gradients(self, network: torch.nn.Module, is_face_crop: bool = False) -> Dict[str, float]:
-        """Filter and amplify gradients using multi-bucket direction tracking."""
+        """Process gradients based on current phase.
+
+        OBSERVE: track bucket EMAs, do NOT modify gradients.
+        MINING: directional filtering + SNR boost along locked bucket directions.
+        DONE: should not be called (trainer skips).
+        """
         self._step_count += 1
         active_buckets, active_prev_grad = self._get_active_pool(is_face_crop)
         effective_ema = self.ema_decay
         self.last_effective_ema = effective_ema
-
-        # Effective filter: discovery value → tween over 1 epoch → refinement value
-        if not self._discovery_complete:
-            effective_filter = self.discovery_filter
-        else:
-            steps_since = self._step_count - self._refinement_start_step
-            t = min(1.0, steps_since / max(self._steps_per_epoch, 1))
-            effective_filter = self.discovery_filter + t * (self.filter_strength - self.discovery_filter)
 
         total_params = 0
         snr_sum = 0.0
@@ -288,8 +299,8 @@ class GradientMiner:
                 param_buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
                 param_buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
                 param_buckets[best_idx][2] += 1
-            elif not self._discovery_complete:
-                # Discovery phase: create new bucket, cap per pool
+            elif self.phase == self.PHASE_OBSERVE:
+                # Observe phase: create new bucket, cap per pool
                 if len(param_buckets) >= self._bucket_cap:
                     # Merge the two most similar existing buckets to make room
                     best_merge_sim = -1.0
@@ -319,7 +330,7 @@ class GradientMiner:
                 param_buckets.append([grad.clone(), (grad ** 2).clone(), 1])
                 best_idx = len(param_buckets) - 1
             else:
-                # Refinement phase: locked, assign to closest
+                # Mining phase: locked, assign to closest
                 param_buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
                 param_buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
                 param_buckets[best_idx][2] += 1
@@ -352,7 +363,27 @@ class GradientMiner:
             if block_name is not None:
                 block_accum.setdefault(block_name, []).append((snr_mean, consistency))
 
-        # ── Auto-threshold ──
+        # ── OBSERVE phase: tracking only, no gradient modification ──
+        if self.phase == self.PHASE_OBSERVE:
+            n_with_data = len(param_data)
+            self.last_avg_snr = snr_sum / max(n_with_data, 1)
+            self.last_avg_buckets = bucket_count_sum / max(n_with_data, 1)
+            return {
+                "avg_snr": self.last_avg_snr,
+                "avg_boost": 1.0,
+                "threshold": 0,
+                "blk_H": 1.0,
+                "agree": 0,
+                "d_agree": 0,
+                "ema": self.last_effective_ema,
+                "amp": 0,
+                "bkts": self.last_avg_buckets,
+                "face": is_face_crop,
+            }
+
+        # ── MINING phase: directional filtering + amplification ──
+
+        # Auto-threshold
         if len(param_data) > 1:
             all_snr = [d[1] for d in param_data.values()]
             mean_snr = sum(all_snr) / len(all_snr)
@@ -361,7 +392,7 @@ class GradientMiner:
         else:
             effective_threshold = 0.001
 
-        # ── Per-block weighting ──
+        # Per-block weighting
         block_weights = {}
         if block_accum:
             block_scores = {}
@@ -388,19 +419,15 @@ class GradientMiner:
         else:
             block_entropy = 1.0
 
-        # ── Auto amplify with epoch decay ──
-        # Half amplify during discovery (let minority features through),
-        # full at refinement start, then halved each epoch, floor at 2.0
-        if not self._discovery_complete:
-            base_amplify = self.amplify_scale * 0.5
-        else:
-            epochs_since = self._current_epoch - self.discovery_epochs
-            base_amplify = max(2.0, self.amplify_scale / (2.0 ** epochs_since))
+        # Amplification: half of amplify_scale during mining
+        base_amplify = self.amplify_scale * 0.5
         effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
         effective_amplify = max(1.0, effective_amplify)
         self.last_effective_amplify = effective_amplify
 
-        # ── Pass 2: Directional filter using matched bucket ──
+        effective_filter = self.filter_strength
+
+        # ── Pass 2: Directional filter using locked bucket directions ──
         for name, param in network.named_parameters():
             if name not in param_data:
                 continue
@@ -413,15 +440,6 @@ class GradientMiner:
 
             # Block weight
             bw = block_weights.get(block_name, 1.0) if block_name else 1.0
-
-            # Face separation: boost identity blocks for face crops, reduce for non-face
-            if self.face_separation and block_name is not None and block_name.startswith("single_"):
-                try:
-                    block_idx = int(block_name.split("_")[1])
-                    if 1 <= block_idx <= 16:
-                        bw *= 1.3 if is_face_crop else 0.8
-                except (ValueError, IndexError):
-                    pass
 
             if effective_filter > 0:
                 # Directional filtering: split gradient into parallel/orthogonal

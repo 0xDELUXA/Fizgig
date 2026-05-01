@@ -1878,79 +1878,55 @@ class LoRATrainerGUI:
                   foreground="#E67E22", font=(FONT_FAMILY, 8, "italic")).grid(
             row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
-        # Gradient Mining (experimental)
+        # Gradient Mining v2 (Observe + Mine)
         mining_row1 = ttk.Frame(training_content)
         mining_row1.grid(row=16, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
         self.gradient_mining_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(mining_row1, text="Gradient Mining",
                         variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
 
-        # Preset dropdown — only controls orthogonal scale and min SNR
-        self._mining_presets = {
-            "Identity Lock": {"snr": "0.001", "ortho": "0.3"},
-            "Balanced": {"snr": "0.001", "ortho": "0.3"},
-            "Style": {"snr": "0.001", "ortho": "0.15"},
-            "Exploration": {"snr": "0.001", "ortho": "0.1"},
-            "High Fidelity": {"snr": "0.001", "ortho": "0.4"},
-        }
-        self._mining_preset_var = tk.StringVar(value="Identity Lock")
-        ttk.Label(mining_row1, text="Preset:").pack(side=tk.LEFT, padx=(0, 4))
-        mining_preset_combo = ttk.Combobox(mining_row1, textvariable=self._mining_preset_var,
-                     values=list(self._mining_presets.keys()), state="readonly", width=14)
-        mining_preset_combo.pack(side=tk.LEFT, padx=(0, 12))
-        mining_preset_combo.bind("<<ComboboxSelected>>", self._on_mining_preset_changed)
-
-        ttk.Label(mining_row1, text="Discovery:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_DISCOVERY"] = ttk.Entry(mining_row1, width=3)
-        self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "2")
-        self.entries["GRADIENT_MINING_DISCOVERY"].pack(side=tk.LEFT, padx=(0, 8))
-
-        ttk.Label(mining_row1, text="Disc Filter:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_DISC_FILTER"] = ttk.Entry(mining_row1, width=5)
-        self.entries["GRADIENT_MINING_DISC_FILTER"].insert(0, "0.3")
-        self.entries["GRADIENT_MINING_DISC_FILTER"].pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Label(mining_row1, text="Mining Epochs:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_EPOCHS"] = ttk.Entry(mining_row1, width=3)
+        self.entries["GRADIENT_MINING_EPOCHS"].insert(0, "2")
+        self.entries["GRADIENT_MINING_EPOCHS"].pack(side=tk.LEFT, padx=(0, 8))
 
         ttk.Label(mining_row1, text="Filter:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_ORTHO"] = ttk.Entry(mining_row1, width=5)
-        self.entries["GRADIENT_MINING_ORTHO"].insert(0, "0")
-        self.entries["GRADIENT_MINING_ORTHO"].pack(side=tk.LEFT, padx=(0, 8))
+        self.entries["GRADIENT_MINING_FILTER"] = ttk.Entry(mining_row1, width=5)
+        self.entries["GRADIENT_MINING_FILTER"].insert(0, "0.5")
+        self.entries["GRADIENT_MINING_FILTER"].pack(side=tk.LEFT, padx=(0, 8))
 
-        self.gradient_mining_face_sep_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(mining_row1, text="Face Crop Sep",
-                        variable=self.gradient_mining_face_sep_var).pack(side=tk.LEFT, padx=(0, 4))
-        # Smart defaults when face separation toggled
-        def _on_face_sep_change(*_):
-            if self.gradient_mining_face_sep_var.get():
-                # Face crop mode: 1 discovery epoch, filter 0.3 → 0
-                self.entries["GRADIENT_MINING_DISCOVERY"].delete(0, tk.END)
-                self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "1")
-            else:
-                # Non-face crop mode: 2 discovery epochs
-                self.entries["GRADIENT_MINING_DISCOVERY"].delete(0, tk.END)
-                self.entries["GRADIENT_MINING_DISCOVERY"].insert(0, "2")
-        self.gradient_mining_face_sep_var.trace_add("write", _on_face_sep_change)
-
-        # Amplify control
         ttk.Label(mining_row1, text="Amp:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["GRADIENT_MINING_AMPLIFY"] = ttk.Entry(mining_row1, width=5)
         self.entries["GRADIENT_MINING_AMPLIFY"].insert(0, "8.0")
         self.entries["GRADIENT_MINING_AMPLIFY"].pack(side=tk.LEFT, padx=(0, 8))
 
-        # Discovery LR override
-        ttk.Label(mining_row1, text="Disc LR:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["GRADIENT_MINING_DISC_LR"] = ttk.Entry(mining_row1, width=7)
-        self.entries["GRADIENT_MINING_DISC_LR"].insert(0, "4e-4")
-        self.entries["GRADIENT_MINING_DISC_LR"].pack(side=tk.LEFT, padx=(0, 8))
-        self.entries["GRADIENT_MINING_THRESHOLD"] = ttk.Entry(mining_row1)
-        self.entries["GRADIENT_MINING_THRESHOLD"].insert(0, "0.001")
-        self.entries["GRADIENT_MINING_EMA"] = ttk.Entry(mining_row1)
-        self.entries["GRADIENT_MINING_EMA"].insert(0, "0.95")
-        # Auto threshold always on
+        ttk.Label(mining_row1, text="Mining LR:").pack(side=tk.LEFT, padx=(0, 4))
+        self.entries["GRADIENT_MINING_LR"] = ttk.Entry(mining_row1, width=7)
+        self.entries["GRADIENT_MINING_LR"].insert(0, "4e-4")
+        self.entries["GRADIENT_MINING_LR"].pack(side=tk.LEFT, padx=(0, 8))
+
+        self.gradient_mining_face_sep_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(mining_row1, text="Face Crop Sep",
+                        variable=self.gradient_mining_face_sep_var).pack(side=tk.LEFT, padx=(0, 4))
+
+        # Hidden entries for auto-tuned values
         self.gradient_mining_auto_var = tk.BooleanVar(value=True)
 
+        # Grey out main LR and Adaptive LR when mining enabled
+        def _on_mining_toggle(*_):
+            mining_on = self.gradient_mining_var.get()
+            state = "disabled" if mining_on else "normal"
+            lr_entry = self.entries.get("LEARNING_RATE")
+            if lr_entry:
+                lr_entry.config(state=state)
+            if hasattr(self, 'adaptive_lr_var'):
+                # Don't change the var value, just disable the checkbox
+                pass  # adaptive LR managed internally by trainer
+        self.gradient_mining_var.trace_add("write", _on_mining_toggle)
+
         ttk.Label(training_content,
-                  text="Disc Filter: directional filter during discovery. Filter: filter during refinement (tweens over 1 epoch). "
-                       "0=pure SNR boost, 1=full directional. Lower = more minority features (smile etc).",
+                  text="1 epoch data gather (vanilla at 1e-4) → N mining epochs with directional filtering + amp. "
+                       "LR/Adaptive LR managed automatically.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
             row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
 
@@ -10287,37 +10263,24 @@ class LoRATrainerGUI:
             command.extend(["--adaptive_lr_min", str(min_lr)])
             command.extend(["--adaptive_lr_max", str(max_lr)])
 
-        # Gradient mining (experimental)
+        # Gradient mining v2 (Observe + Mine)
         if hasattr(self, 'gradient_mining_var') and self.gradient_mining_var.get():
             command.append("--gradient_mining")
+            command.append("--gradient_mining_auto_threshold")
             amplify = self.entries.get("GRADIENT_MINING_AMPLIFY")
             if amplify:
-                command.extend(["--gradient_mining_amplify", amplify.get().strip() or "2.0"])
-            threshold = self.entries.get("GRADIENT_MINING_THRESHOLD")
-            if threshold:
-                command.extend(["--gradient_mining_threshold", threshold.get().strip() or "0.1"])
-            ema = self.entries.get("GRADIENT_MINING_EMA")
-            if ema:
-                command.extend(["--gradient_mining_ema_decay", ema.get().strip() or "0.99"])
-            ortho = self.entries.get("GRADIENT_MINING_ORTHO")
-            if ortho:
-                command.extend(["--gradient_mining_orthogonal_scale", ortho.get().strip() or "0.2"])
-            if hasattr(self, 'gradient_mining_auto_var') and self.gradient_mining_auto_var.get():
-                command.append("--gradient_mining_auto_threshold")
-            disc_filter = self.entries.get("GRADIENT_MINING_DISC_FILTER")
-            if disc_filter:
-                val = disc_filter.get().strip()
+                command.extend(["--gradient_mining_amplify", amplify.get().strip() or "8.0"])
+            mining_filter = self.entries.get("GRADIENT_MINING_FILTER")
+            if mining_filter:
+                command.extend(["--gradient_mining_filter", mining_filter.get().strip() or "0.5"])
+            mining_epochs = self.entries.get("GRADIENT_MINING_EPOCHS")
+            if mining_epochs:
+                command.extend(["--gradient_mining_mining_epochs", mining_epochs.get().strip() or "2"])
+            mining_lr = self.entries.get("GRADIENT_MINING_LR")
+            if mining_lr:
+                val = mining_lr.get().strip()
                 if val:
-                    command.extend(["--gradient_mining_discovery_filter", val])
-            discovery = self.entries.get("GRADIENT_MINING_DISCOVERY")
-            if discovery:
-                val = discovery.get().strip() or "1"
-                command.extend(["--gradient_mining_discovery_epochs", val])
-            disc_lr = self.entries.get("GRADIENT_MINING_DISC_LR")
-            if disc_lr:
-                val = disc_lr.get().strip()
-                if val:
-                    command.extend(["--gradient_mining_discovery_lr", val])
+                    command.extend(["--gradient_mining_mining_lr", val])
             if hasattr(self, 'gradient_mining_face_sep_var') and self.gradient_mining_face_sep_var.get():
                 command.append("--gradient_mining_face_separation")
 

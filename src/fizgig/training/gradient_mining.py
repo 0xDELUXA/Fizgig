@@ -381,51 +381,10 @@ class GradientMiner:
                 "face": is_face_crop,
             }
 
-        # ── MINING phase: directional filtering + amplification ──
-
-        # Auto-threshold
-        if len(param_data) > 1:
-            all_snr = [d[1] for d in param_data.values()]
-            mean_snr = sum(all_snr) / len(all_snr)
-            var_snr = sum((s - mean_snr) ** 2 for s in all_snr) / len(all_snr)
-            effective_threshold = max(mean_snr - 0.5 * var_snr ** 0.5, 0.001)
-        else:
-            effective_threshold = 0.001
-
-        # Per-block weighting
-        block_weights = {}
-        if block_accum:
-            block_scores = {}
-            for b, entries in block_accum.items():
-                avg_snr = sum(e[0] for e in entries) / len(entries)
-                avg_con = sum(e[1] for e in entries) / len(entries)
-                block_scores[b] = avg_snr * (avg_con + 0.1)
-
-            overall_avg = sum(block_scores.values()) / max(len(block_scores), 1)
-            if overall_avg > 1e-8:
-                block_weights = {
-                    b: max(0.5, min(2.0, v / overall_avg))
-                    for b, v in block_scores.items()
-                }
-
-        # Block entropy
-        if block_weights and len(block_weights) > 1:
-            bw_vals = list(block_weights.values())
-            bw_total = sum(bw_vals)
-            bw_probs = [w / bw_total for w in bw_vals]
-            entropy = -sum(p * math.log2(p) for p in bw_probs if p > 0)
-            max_entropy = math.log2(len(bw_vals))
-            block_entropy = entropy / max_entropy if max_entropy > 0 else 1.0
-        else:
-            block_entropy = 1.0
-
-        # Amplification: half of amplify_scale during mining
-        base_amplify = self.amplify_scale * 0.5
-        effective_amplify = base_amplify * (0.7 + 0.3 * self.last_avg_agreement)
-        effective_amplify = max(1.0, effective_amplify)
-        self.last_effective_amplify = effective_amplify
+        # ── MINING phase: pure directional filtering (no amplification) ──
 
         effective_filter = self.filter_strength
+        self.last_effective_amplify = 1.0
 
         # ── Pass 2: Directional filter using locked bucket directions ──
         for name, param in network.named_parameters():
@@ -435,51 +394,34 @@ class GradientMiner:
             snr, snr_mean, consistency, block_name, best_idx = param_data[name]
             grad = param.grad
 
-            # SNR boost
-            boost = 1.0 + (effective_amplify - 1.0) * torch.tanh(snr - effective_threshold).clamp(min=0)
+            # Directional filtering: split gradient into parallel/orthogonal
+            param_buckets = active_buckets[name]
+            best_idx = min(best_idx, len(param_buckets) - 1)
+            ema_dir = param_buckets[best_idx][0]
+            ema_norm = ema_dir.norm()
+            if ema_norm < 1e-10:
+                continue
 
-            # Block weight
-            bw = block_weights.get(block_name, 1.0) if block_name else 1.0
+            direction = ema_dir / ema_norm
+            dot = (grad * direction).sum()
+            parallel = dot * direction
+            orthogonal = grad - parallel
 
-            if effective_filter > 0:
-                # Directional filtering: split gradient into parallel/orthogonal
-                param_buckets = active_buckets[name]
-                best_idx = min(best_idx, len(param_buckets) - 1)
-                ema_dir = param_buckets[best_idx][0]
-                ema_norm = ema_dir.norm()
-                if ema_norm < 1e-10:
-                    param.grad = grad * boost * bw
-                    continue
-
-                direction = ema_dir / ema_norm
-                dot = (grad * direction).sum()
-                parallel = dot * direction
-                orthogonal = grad - parallel
-
-                grad_norm = grad.norm()
-                if grad_norm > 1e-10:
-                    cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
-                else:
-                    cos_sim = 0.0
-                agreement = (cos_sim + 1.0) * 0.5
-                agreement_sum += agreement
-
-                filtered = parallel * boost * agreement + orthogonal * 0.2
-                raw_boosted = grad * boost
-                param.grad = (effective_filter * filtered + (1.0 - effective_filter) * raw_boosted) * bw
+            grad_norm = grad.norm()
+            if grad_norm > 1e-10:
+                cos_sim = (dot / grad_norm).clamp(-1.0, 1.0).item()
             else:
-                # Pure SNR boost — no directional filtering overhead
-                param.grad = grad * boost * bw
+                cos_sim = 0.0
+            agreement = (cos_sim + 1.0) * 0.5
+            agreement_sum += agreement
 
-            avg_boost_val = (boost * bw).mean().item()
-            if avg_boost_val > 1.05:
-                boost_count += 1
-                boost_sum += avg_boost_val
+            filtered = parallel * agreement + orthogonal * 0.2
+            param.grad = effective_filter * filtered + (1.0 - effective_filter) * grad
 
         # ── Update stats ──
         n_with_data = len(param_data)
         self.last_avg_snr = snr_sum / max(n_with_data, 1)
-        self.last_avg_boost = boost_sum / max(boost_count, 1) if boost_count > 0 else 1.0
+        self.last_avg_boost = 1.0
         self.last_threshold = effective_threshold
         self.last_block_entropy = block_entropy
         current_agreement = agreement_sum / max(n_with_data, 1)

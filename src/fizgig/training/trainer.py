@@ -2194,10 +2194,23 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
+        _user_lr = optimizer.param_groups[0]["lr"]
+        _discovery_lr = _user_lr * 0.5  # discovery always runs at half user's LR
+
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
             metadata["ss_epoch"] = str(epoch + 1)
+
+            # Discovery runs at half LR, refinement restores user's LR
+            if gradient_miner is not None:
+                if not gradient_miner._discovery_complete:
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = _discovery_lr
+                elif epoch == gradient_miner.discovery_epochs:
+                    for pg in optimizer.param_groups:
+                        pg["lr"] = _user_lr
+                    accelerator.print(f"[gradient_mining] Discovery LR {_discovery_lr:.1e} → user LR {_user_lr:.1e}")
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
@@ -2343,19 +2356,22 @@ class KleinTrainer:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 
             # Adaptive LR: baseline log at end of epoch 0 (watcher armed but not acting yet)
-            if args.adaptive_lr and epoch == 0:
+            # Adaptive LR: skip discovery epochs when gradient mining is active
+            _adaptive_start = 0
+            if gradient_miner is not None:
+                _adaptive_start = gradient_miner.discovery_epochs
+
+            if args.adaptive_lr and epoch == _adaptive_start:
                 _cur_lr = optimizer.param_groups[0]["lr"]
-                # Seed best-loss tracker with epoch 1's loss so the next epoch's comparison
-                # is against a real baseline (not None, which incorrectly triggered "improving").
                 adaptive_best_loss = loss_recorder.moving_average
                 accelerator.print(
-                    f"[adaptive_lr] epoch  1: loss={loss_recorder.moving_average:.4f} "
+                    f"[adaptive_lr] epoch {epoch + 1:>2}: loss={loss_recorder.moving_average:.4f} "
                     f"lr={_cur_lr:.2e} | ARMED (baseline captured, watcher begins next epoch)"
                 )
                 import sys as _sys; _sys.stdout.flush()
 
             # Adaptive LR: bi-directional plateau tracker (epoch-boundary, loss + stability driven)
-            if args.adaptive_lr and epoch >= 1:
+            if args.adaptive_lr and epoch >= _adaptive_start + 1:
                 current_epoch_loss = loss_recorder.moving_average
                 # Asymmetric patience:
                 #   - probe UP: always 2 (the risky direction)

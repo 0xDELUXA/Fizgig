@@ -2,8 +2,8 @@
 
 Buckets track gradient direction patterns per parameter as training progresses.
 Each gradient is split into parallel (aligned with bucket direction) and
-orthogonal (noise) components. The parallel signal is preserved, orthogonal
-is suppressed to 0.2x. No amplification — only directional cleanup.
+orthogonal (noise) components. Parallel signal preserved at agreement strength,
+orthogonal suppressed to 0.2x. No amplification — only directional cleanup.
 
 Face crop separation routes face crop gradients to a dedicated bucket pool,
 preventing facial feature gradients from competing with composition/style.
@@ -20,19 +20,8 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
-
-_BLOCK_RE = re.compile(r"(double_blocks|single_blocks)[._](\d+)")
-
-
-def _extract_block_name(param_name: str) -> Optional[str]:
-    m = _BLOCK_RE.search(param_name)
-    if m:
-        block_type = "double" if "double" in m.group(1) else "single"
-        return f"{block_type}_{m.group(2)}"
-    return None
 
 
 class GradientMiner:
@@ -48,16 +37,13 @@ class GradientMiner:
         self.bucket_threshold = bucket_threshold
         self.face_separation = face_separation
 
-        # Per-parameter bucket storage: name -> [(ema_dir, ema_sq, hit_count), ...]
+        # Per-parameter bucket storage: name -> [(ema_dir, hit_count), ...]
         self._buckets: Dict[str, List[List]] = {}
         self._buckets_face: Dict[str, List[List]] = {}
         self._step_count = 0
 
         # Bucket cap: 8 per pool when separated, 12 when not
         self._bucket_cap = 8 if face_separation else 12
-
-        # Cached block name lookups
-        self._block_name_cache: Dict[str, Optional[str]] = {}
 
         # Stats
         self.last_avg_agreement = 0.0
@@ -76,7 +62,7 @@ class GradientMiner:
         grad_norm = grad_flat.norm()
         if grad_norm < 1e-10:
             return 0, 0.0
-        for i, (bucket_ema, _, _) in enumerate(buckets):
+        for i, (bucket_ema, _) in enumerate(buckets):
             bucket_flat = bucket_ema.flatten()
             bucket_norm = bucket_flat.norm()
             if bucket_norm < 1e-10:
@@ -104,12 +90,9 @@ class GradientMiner:
 
             grad = param.grad.detach()
 
-            if name not in self._block_name_cache:
-                self._block_name_cache[name] = _extract_block_name(name)
-
-            # Initialise buckets for new parameters
+            # Initialise bucket for new parameters
             if name not in active_buckets:
-                active_buckets[name] = [[grad.clone(), (grad ** 2).clone(), 1]]
+                active_buckets[name] = [[grad.clone(), 1]]
                 continue
 
             param_buckets = active_buckets[name]
@@ -120,10 +103,9 @@ class GradientMiner:
             best_idx, best_sim = self._find_best_bucket(grad_flat, param_buckets)
 
             if best_sim > self.bucket_threshold:
-                # Update matching bucket
+                # Update matching bucket EMA
                 param_buckets[best_idx][0].mul_(effective_ema).add_(grad, alpha=1.0 - effective_ema)
-                param_buckets[best_idx][1].mul_(effective_ema).add_(grad ** 2, alpha=1.0 - effective_ema)
-                param_buckets[best_idx][2] += 1
+                param_buckets[best_idx][1] += 1
             else:
                 # Create new bucket, cap per pool with merge-to-make-room
                 if len(param_buckets) >= self._bucket_cap:
@@ -143,14 +125,13 @@ class GradientMiner:
                             if s.item() > best_merge_sim:
                                 best_merge_sim = s.item()
                                 merge_i, merge_j = mi, mj
-                    hi, hj = param_buckets[merge_i][2], param_buckets[merge_j][2]
+                    hi, hj = param_buckets[merge_i][1], param_buckets[merge_j][1]
                     tot = hi + hj
                     wi, wj = hi / max(tot, 1), hj / max(tot, 1)
                     param_buckets[merge_i][0] = param_buckets[merge_i][0] * wi + param_buckets[merge_j][0] * wj
-                    param_buckets[merge_i][1] = param_buckets[merge_i][1] * wi + param_buckets[merge_j][1] * wj
-                    param_buckets[merge_i][2] = tot
+                    param_buckets[merge_i][1] = tot
                     param_buckets.pop(merge_j)
-                param_buckets.append([grad.clone(), (grad ** 2).clone(), 1])
+                param_buckets.append([grad.clone(), 1])
                 best_idx = len(param_buckets) - 1
 
             # Directional filtering against matched bucket

@@ -1878,25 +1878,6 @@ class LoRATrainerGUI:
                   foreground="#E67E22", font=(FONT_FAMILY, 8, "italic")).grid(
             row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
-        # Gradient Mining v2 (Observe + Mine)
-        mining_row1 = ttk.Frame(training_content)
-        mining_row1.grid(row=16, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
-        self.gradient_mining_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(mining_row1, text="Gradient Mining",
-                        variable=self.gradient_mining_var).pack(side=tk.LEFT, padx=(0, 12))
-
-        self.gradient_mining_face_sep_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(mining_row1, text="Face Crop Sep",
-                        variable=self.gradient_mining_face_sep_var).pack(side=tk.LEFT, padx=(0, 4))
-
-        self.gradient_mining_auto_var = tk.BooleanVar(value=True)
-
-        ttk.Label(training_content,
-                  text="Epoch 1 observes gradient patterns, remaining epochs train with directional filtering. "
-                       "Uses LR and epoch settings from above.",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=17, column=0, columnspan=2, sticky=tk.W, padx=5)
-
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
         optimizer_section.pack(fill=tk.X, padx=36, pady=(0, 16))
@@ -5525,11 +5506,6 @@ class LoRATrainerGUI:
             warnings.append("No caption files (.txt) found — captions are required for training.")
 
         self._rec_warning_var.set("\n".join(warnings) if warnings else "")
-
-        # Auto-detect face crops for gradient mining separation
-        if (hasattr(self, 'gradient_mining_face_sep_var') and
-                analysis is not None and analysis.get("face_crops", 0) > 0):
-            self.gradient_mining_face_sep_var.set(True)
 
     def _apply_recommendation(self):
         """Apply recommended settings to the training fields."""
@@ -10230,12 +10206,6 @@ class LoRATrainerGUI:
             command.extend(["--adaptive_lr_min", str(min_lr)])
             command.extend(["--adaptive_lr_max", str(max_lr)])
 
-        # Gradient mining v2 (Observe + Mine)
-        if hasattr(self, 'gradient_mining_var') and self.gradient_mining_var.get():
-            command.append("--gradient_mining")
-            if hasattr(self, 'gradient_mining_face_sep_var') and self.gradient_mining_face_sep_var.get():
-                command.append("--gradient_mining_face_separation")
-
         # Context LoRA — train new LoRA with an existing one frozen + active
         ctx_path = self.settings.get("CONTEXT_LORA_PATH", "").strip()
         if ctx_path:
@@ -10723,14 +10693,6 @@ if __name__ == "__main__":
     # Detect leftover paused training state from a prior session
     try:
         gui._check_for_paused_state_on_startup()
-    except Exception:
-        pass
-    # Auto-detect face crops for gradient mining separation
-    try:
-        folder = gui.image_folder_var.get()
-        if folder and os.path.isdir(folder) and hasattr(gui, 'gradient_mining_face_sep_var'):
-            if any(f.startswith("FaceCrop_") for f in os.listdir(folder)):
-                gui.gradient_mining_face_sep_var.set(True)
     except Exception:
         pass
     root.mainloop()

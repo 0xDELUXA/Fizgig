@@ -102,6 +102,30 @@ def get_schedule(num_steps: int, image_seq_len: int, flow_shift: Optional[float]
     return timesteps.tolist()
 
 
+def get_simple_euler_schedule(num_steps: int, shift: float = 2.02) -> list[float]:
+    """Replicate ComfyUI's Euler Simple schedule for Flux2/Klein.
+
+    Matches ComfyUI's ModelSamplingFlux(shift) + simple_scheduler exactly:
+    1. Pre-compute 10000 sigmas via flux_time_shift(shift, 1.0, t)
+    2. Pick num_steps evenly-spaced points from the end
+    3. Append 0.0
+
+    This is resolution-independent (shift is fixed, not dynamic).
+    """
+    n_sigmas = 10000
+    # Build the full sigma schedule (same as ModelSamplingFlux.set_parameters)
+    t = torch.arange(1, n_sigmas + 1, dtype=torch.float64) / n_sigmas
+    sigmas = torch.tensor([
+        math.exp(shift) / (math.exp(shift) + (1.0 / ti - 1.0) ** 1.0)
+        for ti in t.tolist()
+    ])
+    # simple_scheduler: pick evenly-spaced from the end
+    ss = n_sigmas / num_steps
+    schedule = [float(sigmas[-(1 + int(x * ss))]) for x in range(num_steps)]
+    schedule.append(0.0)
+    return schedule
+
+
 def denoise(model, img, img_ids, txt, txt_ids, timesteps, guidance,
             img_cond_seq=None, img_cond_seq_ids=None):
     """Non-CFG denoising loop."""

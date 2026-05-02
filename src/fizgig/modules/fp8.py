@@ -383,21 +383,22 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         return o.to(input_dtype)
 
     else:
-        # Dequantize the weight
-        original_dtype = self.scale_weight.dtype
-        if self.scale_weight.ndim < 3:
-            # per-tensor or per-channel quantization, we can broadcast
-            dequantized_weight = self.weight.to(original_dtype) * self.scale_weight
+        # Dequantize on the input's device (handles block swap: weight on CPU, x on CUDA)
+        target_device = x.device
+        weight = self.weight.to(target_device)
+        scale = self.scale_weight.to(target_device)
+        original_dtype = scale.dtype
+        if scale.ndim < 3:
+            dequantized_weight = weight.to(original_dtype) * scale
         else:
-            # block-wise quantization, need to reshape weight to match scale shape for broadcasting
-            out_features, num_blocks, _ = self.scale_weight.shape
-            dequantized_weight = self.weight.to(original_dtype).contiguous().view(out_features, num_blocks, -1)
-            dequantized_weight = dequantized_weight * self.scale_weight
-            dequantized_weight = dequantized_weight.view(self.weight.shape)
+            out_features, num_blocks, _ = scale.shape
+            dequantized_weight = weight.to(original_dtype).contiguous().view(out_features, num_blocks, -1)
+            dequantized_weight = dequantized_weight * scale
+            dequantized_weight = dequantized_weight.view(weight.shape)
 
         # Perform linear transformation
         if self.bias is not None:
-            output = F.linear(x, dequantized_weight, self.bias)
+            output = F.linear(x, dequantized_weight, self.bias.to(target_device))
         else:
             output = F.linear(x, dequantized_weight)
 

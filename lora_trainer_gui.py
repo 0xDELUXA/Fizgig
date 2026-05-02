@@ -273,11 +273,11 @@ ARCHITECTURES = {
         # Sample generation settings
         "supports_samples": True,
         "sample_guidance_default": 3.5,
-        "sample_cfg_default": 3.5,
+        "sample_cfg_default": 4.5,
         "sample_flow_shift_default": None,
         "sample_steps_default": 20,
-        "sample_width_default": 1024,
-        "sample_height_default": 1024,
+        "sample_width_default": 768,
+        "sample_height_default": 768,
     },
 }
 
@@ -758,16 +758,16 @@ class LoRATrainerGUI:
             # Sample generation settings
             "SAMPLE_ENABLED": True,
             "SAMPLE_PROMPT": "A high quality photo",
-            "SAMPLE_WIDTH": 1024,
-            "SAMPLE_HEIGHT": 1024,
+            "SAMPLE_WIDTH": 768,
+            "SAMPLE_HEIGHT": 768,
             "SAMPLE_STEPS": 25,
             "SAMPLE_SEED": 1234,
             "SAMPLE_EVERY_N_EPOCHS": 1,
             "SAMPLE_EVERY_N_STEPS": 0,
             "SAMPLE_AT_FIRST": True,
-            "SAMPLE_FLOW_SHIFT": 3.0,
+            "SAMPLE_FLOW_SHIFT": "",
             "SAMPLE_GUIDANCE": 4.0,
-            "SAMPLE_NEGATIVE": "bad photo, bad, low quality",
+            "SAMPLE_NEGATIVE": "blurry, low detail, noisy, washed out, oversaturated, distorted anatomy, extra limbs, duplicate objects, text, watermark, logo, frame, cropped subject, flat lighting, muddy colors",
             "SAMPLE_CFG_SCALE": 1.0,
             # Florence captioning settings
             "CAPTION_TRIGGER_WORD": "",
@@ -893,8 +893,16 @@ class LoRATrainerGUI:
         # Reset flag when folder changes so images reload on next tab visit
         self.image_folder_var.trace_add("write", self._on_caption_folder_changed)
 
+        # Prevent mousewheel from accidentally changing Combobox/Spinbox values
+        self.master.bind_class("TCombobox", "<MouseWheel>", lambda e: "break")
+        self.master.bind_class("TSpinbox", "<MouseWheel>", lambda e: "break")
+
         # Start status indicator polling
         self._update_status_indicator()
+
+        # Grey out sample fields overridden by Distilled (default on)
+        if hasattr(self, '_on_distilled_samples_toggled'):
+            self._on_distilled_samples_toggled()
 
         # Auto-save dataset config on startup if all fields are valid
         # This ensures training works immediately without manual "Save and Activate"
@@ -2394,6 +2402,9 @@ class LoRATrainerGUI:
             for block_key, block_on in preset["TRAINING_BLOCKS"].items():
                 if block_key in self.training_block_vars:
                     self.training_block_vars[block_key].set(bool(block_on))
+        # Gradient mining
+        if "GRADIENT_MINING" in preset and hasattr(self, "gradient_mining_var"):
+            self.gradient_mining_var.set(bool(preset["GRADIENT_MINING"]))
         self.toggle_scaled()  # Update checkbox state
 
     def _save_last_train_settings(self):
@@ -2478,6 +2489,8 @@ class LoRATrainerGUI:
         _grab("dataset_caption_ext_var", "DATASET_CAPTION_EXT")
         _grab("dataset_megapixels_var", "DATASET_MEGAPIXELS")
         _grab("dataset_batch_size_var", "DATASET_BATCH_SIZE")
+        # Gradient mining
+        _grab("gradient_mining_var", "GRADIENT_MINING")
         # Per-block custom training selection (only meaningful when TARGET_LAYERS=Custom)
         if hasattr(self, "training_block_vars") and self.training_block_vars:
             preset["TRAINING_BLOCKS"] = {k: v.get() for k, v in self.training_block_vars.items()}
@@ -4009,7 +4022,8 @@ class LoRATrainerGUI:
         )
         self.sample_height_combo.grid(row=2, column=1, sticky=tk.W, pady=4)
 
-        ttk.Label(prompt_card, text="Steps:").grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_steps_label = ttk.Label(prompt_card, text="Steps:")
+        self.sample_steps_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_steps_var = tk.StringVar(value=str(self.settings["SAMPLE_STEPS"]))
         self.sample_steps_entry = ttk.Entry(prompt_card, textvariable=self.sample_steps_var, width=10)
         self.sample_steps_entry.grid(row=3, column=1, sticky=tk.W, pady=4)
@@ -4048,6 +4062,13 @@ class LoRATrainerGUI:
         ttk.Checkbutton(
             freq_card, text="Sample at Start", variable=self.sample_at_first_var
         ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+
+        self.use_distilled_samples_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(
+            freq_card, text="Use Distilled model for samples (4-step, matches ComfyUI)",
+            variable=self.use_distilled_samples_var,
+            command=self._on_distilled_samples_toggled,
+        ).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
 
         # Card 3: Architecture-Specific (Flow Shift / Guidance / Negative / CFG)
         arch_card = self._start_section_card(
@@ -4141,6 +4162,28 @@ class LoRATrainerGUI:
                     _walk(child)
 
         _walk(self.sample_settings_frame)
+
+    def _on_distilled_samples_toggled(self):
+        """Grey out fields that Distilled overrides when the checkbox is ticked."""
+        use_distilled = self.use_distilled_samples_var.get()
+        state = "disabled" if use_distilled else "normal"
+        grey = COLORS["text_muted"] if use_distilled else COLORS["text_primary"]
+
+        # Steps (overridden to 4)
+        self.sample_steps_entry.configure(state=state)
+        self.sample_steps_label.configure(foreground=grey)
+        # Flow Shift (overridden to auto)
+        self.sample_flow_shift_entry.configure(state=state)
+        self.sample_flow_shift_label.configure(foreground=grey)
+        # Guidance Scale (overridden to 1.0)
+        self.sample_guidance_entry.configure(state=state)
+        self.sample_guidance_label.configure(foreground=grey)
+        # Negative Prompt (not used by Distilled)
+        self.sample_negative_entry.configure(state=state)
+        self.sample_negative_label.configure(foreground=grey)
+        # CFG Scale (not used by Distilled)
+        self.sample_cfg_scale_entry.configure(state=state)
+        self.sample_cfg_label.configure(foreground=grey)
 
     def update_samples_ui_for_architecture(self):
         """Update samples tab UI based on selected architecture"""
@@ -6886,6 +6929,19 @@ class LoRATrainerGUI:
         self._extract_output_path = None
 
         self._add_youtube_help_button(outer, "extract")
+
+    def _on_mining_preset_changed(self, *args):
+        """Fill gradient mining controls from the selected preset."""
+        name = self._mining_preset_var.get()
+        preset = self._mining_presets.get(name)
+        if not preset:
+            return
+        for key, entry_key in [("snr", "GRADIENT_MINING_THRESHOLD"),
+                                ("ortho", "GRADIENT_MINING_ORTHO")]:
+            entry = self.entries.get(entry_key)
+            if entry and key in preset:
+                entry.delete(0, tk.END)
+                entry.insert(0, preset[key])
 
     def _on_training_preset_changed(self, *args):
         """Auto-fill MIN/MAX_TIMESTEP and show/hide custom block picker based on training preset."""
@@ -9769,7 +9825,7 @@ class LoRATrainerGUI:
                 line = pipe.readline()
                 if not line:
                     break
-                self.master.after(0, self.update_console, f"{name} {output_type}: {line}")
+                self.master.after(0, self.update_console, line)
             pipe.close()
 
         threading.Thread(target=read_output, args=(process.stdout, "STDOUT"), daemon=True).start()
@@ -9892,6 +9948,8 @@ class LoRATrainerGUI:
             "GRADIENT_ACCUMULATION": self.entries["GRADIENT_ACCUMULATION"].get(),
             "MAX_GRAD_NORM": self.entries["MAX_GRAD_NORM"].get(),
             "NETWORK_DROPOUT": self.entries["NETWORK_DROPOUT"].get(),
+            "CONTEXT_LORA_PATH": self.entries["CONTEXT_LORA_PATH"].get(),
+            "CONTEXT_LORA_STRENGTH": self.entries["CONTEXT_LORA_STRENGTH"].get(),
             "TIMESTEP_SAMPLING": self.ts_sampling_var.get(),
             "DISCRETE_FLOW_SHIFT": self.entries["DISCRETE_FLOW_SHIFT"].get(),
             "SIGMOID_SCALE": self.entries["SIGMOID_SCALE"].get(),
@@ -10211,6 +10269,15 @@ class LoRATrainerGUI:
 
             if self.sample_at_first_var.get():
                 command.append("--sample_at_first")
+
+            # Use Distilled model for sample generation
+            if getattr(self, 'use_distilled_samples_var', None) and self.use_distilled_samples_var.get():
+                distilled_path = self.prefs_vars.get("distilled_dit", tk.StringVar()).get()
+                if distilled_path and os.path.exists(distilled_path):
+                    command.extend(["--sample_dit", distilled_path])
+                    blocks = self._get_inference_blocks_to_swap()
+                    if blocks > 0:
+                        command.extend(["--sample_blocks_to_swap", str(blocks)])
 
         return command
 

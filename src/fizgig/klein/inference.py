@@ -52,7 +52,7 @@ class GenerationConfig:
     num_steps: Optional[int] = None  # None = model default (4 Distilled, 50 Base)
     guidance_scale: Optional[float] = None  # None = model default (1.0 Distilled, 4.0 Base)
     cfg_scale: Optional[float] = None  # None = same as guidance_scale
-    flow_shift: Optional[float] = None  # None = auto (empirical mu shift)
+    flow_shift: Optional[float] = None  # None = dynamic empirical mu
     seed: Optional[int] = None
     lora_path: Optional[str] = None
     lora_multiplier: float = 1.0

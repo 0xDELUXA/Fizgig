@@ -374,7 +374,7 @@ class KleinTrainer:
         self.timestep_range_pool = []
         self.num_timestep_buckets: Optional[int] = None
         self.default_guidance_scale = 4.0  # CFG scale for inference (base models)
-        self.default_discrete_flow_shift = None  # use FLUX.2 dynamic shift
+        self.default_discrete_flow_shift = None  # dynamic empirical mu
         self.model_version_info: Optional[KleinModelInfo] = None
         self.dit_dtype = torch.bfloat16
         self.context_network = None
@@ -1125,6 +1125,7 @@ class KleinTrainer:
         cfg_scale,
         image_path=None,
         control_video_path=None,
+        force_guidance_embed=False,
     ):
         """Run Klein denoising loop and decode to pixels."""
         model: KleinDiT = transformer
@@ -1184,18 +1185,27 @@ class KleinTrainer:
 
         # Denoise
         timesteps = get_schedule(sample_steps, x.shape[1], discrete_flow_shift)
-        if self.model_version_info.guidance_distilled:
+        if self.model_version_info.guidance_distilled or force_guidance_embed:
             x = denoise(
                 model, x, x_ids, ctx, ctx_ids,
                 timesteps=timesteps, guidance=guidance_scale,
                 img_cond_seq=ref_tokens, img_cond_seq_ids=ref_ids,
             )
         else:
-            x = denoise_cfg(
-                model, x, x_ids, ctx, ctx_ids, negative_ctx, negative_ctx_ids,
-                timesteps=timesteps, guidance=guidance_scale,
-                img_cond_seq=ref_tokens, img_cond_seq_ids=ref_ids,
-            )
+            # Klein 9B Base has no guidance embed — CFG is the only way guidance works.
+            if do_classifier_free_guidance:
+                x = denoise_cfg(
+                    model, x, x_ids, ctx, ctx_ids, negative_ctx, negative_ctx_ids,
+                    timesteps=timesteps, guidance=cfg_scale,
+                    img_cond_seq=ref_tokens, img_cond_seq_ids=ref_ids,
+                )
+            else:
+                # No negative prompt — use denoise() but guidance has no effect on Base
+                x = denoise(
+                    model, x, x_ids, ctx, ctx_ids,
+                    timesteps=timesteps, guidance=guidance_scale,
+                    img_cond_seq=ref_tokens, img_cond_seq_ids=ref_ids,
+                )
 
         # Unpack to spatial
         x = torch.cat(scatter_ids(x, x_ids)).squeeze(2)
@@ -1234,12 +1244,90 @@ class KleinTrainer:
             return
 
         distributed_state = PartialState()
-
         transformer = accelerator.unwrap_model(transformer)
-        transformer.switch_block_swap_for_inference()
 
-        # Context LoRA stays enabled during sampling — the trainable LoRA was
-        # trained with it active, so samples should reflect that environment.
+        # Determine whether to use Distilled model for sampling
+        _sample_dit_path = getattr(args, "sample_dit", None)
+        _use_distilled = _sample_dit_path and os.path.exists(_sample_dit_path)
+        _orig_blocks_to_swap = self.blocks_to_swap or 0
+        _distilled_dit = None
+        _sample_net = None
+        _ctx_sample = None
+
+        if _use_distilled:
+            logger.info(f"Using Distilled model for samples: {_sample_dit_path}")
+            # Max block-swap Base DiT to free VRAM (keeps 2 double + 2 single on GPU)
+            # Klein 9B: 8 double + 24 single. Max swappable = (8-2) + (24-2) = 28.
+            # But enable_block_swap's distribution formula needs a value it can split.
+            # Use num_double-2 + num_single-2 as separate calls won't work, so pick
+            # a value the formula handles: 16 is the documented max for Klein 9B.
+            _max_swap = 16
+            transformer.enable_block_swap(_max_swap, device=accelerator.device, supports_backward=True)
+            transformer.prepare_block_swap_before_forward()
+            clean_memory_on_device(accelerator.device)
+
+            # Load separate Distilled DiT — same path as Explorer/Repair Studio
+            from fizgig.klein.model_utils import load_dit, KLEIN_MODEL_INFO
+            _sample_blocks = getattr(args, "sample_blocks_to_swap", 0) or 0
+            _loading_device = "cpu" if _sample_blocks > 0 else accelerator.device
+            _distilled_dit = load_dit(
+                device=accelerator.device,
+                model_version_info=KLEIN_MODEL_INFO["klein-9b"],
+                dit_path=_sample_dit_path,
+                attn_mode="torch",
+                split_attn=False,
+                loading_device=_loading_device,
+                dit_weight_dtype=torch.bfloat16,
+                fp8_scaled=False,
+            )
+            if _sample_blocks > 0:
+                _distilled_dit.enable_block_swap(_sample_blocks, device=accelerator.device, supports_backward=False)
+                _distilled_dit.move_to_device_except_swap_blocks(accelerator.device)
+            _distilled_dit.prepare_block_swap_before_forward()
+            _distilled_dit.eval()
+
+            # Apply trainable LoRA from saved checkpoint — matches Repair Studio's loading path
+            from fizgig.networks.lora_klein import create_arch_network_from_weights as _sample_create
+            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _sample_ensure
+            from fizgig.training.train_utils import get_epoch_ckpt_name as _get_ckpt
+            _ckpt_path = os.path.join(args.output_dir, _get_ckpt(args.output_name, epoch))
+            if epoch > 0 and os.path.exists(_ckpt_path):
+                from safetensors.torch import load_file as _sample_load_lora
+                logger.info(f"  Loading trainable LoRA from disk: {_ckpt_path}")
+                _lora_sd = _sample_load_lora(_ckpt_path)
+                _lora_sd = _sample_ensure(_lora_sd)
+                _sample_net = _sample_create(
+                    multiplier=1.0, weights_sd=_lora_sd, unet=_distilled_dit, for_inference=True,
+                )
+                _sample_net.apply_to(text_encoders=None, unet=_distilled_dit,
+                                     apply_text_encoder=False, apply_unet=True)
+                _sample_net.load_state_dict(_lora_sd, strict=False)
+                _sample_net.to(accelerator.device, dtype=torch.bfloat16)
+                _sample_net.eval()
+            else:
+                logger.info(f"  Epoch {epoch}: no checkpoint yet, sampling without trainable LoRA")
+
+            # Apply context LoRA to Distilled DiT if active
+            logger.info(f"  Context LoRA check: self.context_network is {'set' if self.context_network is not None else 'None'}")
+            if self.context_network is not None:
+                # Context LoRA weights are frozen — get them from the stored network
+                _ctx_sd = self.context_network.state_dict()
+                _ctx_sd = {k: v.cpu().to(torch.bfloat16) for k, v in _ctx_sd.items()}
+                _ctx_sample = _sample_create(
+                    multiplier=self.context_network.multiplier,
+                    weights_sd=_ctx_sd, unet=_distilled_dit, for_inference=True,
+                )
+                _ctx_sample.apply_to(text_encoders=None, unet=_distilled_dit,
+                                     apply_text_encoder=False, apply_unet=True)
+                _ctx_sample.load_state_dict(_ctx_sd, strict=False)
+                _ctx_sample.to(accelerator.device, dtype=torch.bfloat16)
+                _ctx_sample.eval()
+
+            sample_transformer = _distilled_dit
+            logger.info("  Distilled loaded — sampling with 4 steps, guidance 1.0")
+        else:
+            transformer.switch_block_swap_for_inference()
+            sample_transformer = transformer
 
         save_dir = os.path.join(args.output_dir, "sample")
         os.makedirs(save_dir, exist_ok=True)
@@ -1253,12 +1341,23 @@ class KleinTrainer:
             pass
 
         if distributed_state.num_processes <= 1:
-            with torch.no_grad(), accelerator.autocast():
+            # Distilled path manages its own no_grad/autocast per step (matching Repair Studio).
+            # Base path still uses accelerator.autocast().
+            if _use_distilled:
                 for sample_parameter in sample_parameters:
                     self.sample_image_inference(
-                        accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps
+                        accelerator, args, sample_transformer, dit_dtype, vae, save_dir,
+                        sample_parameter, epoch, steps, use_distilled=True,
                     )
                     clean_memory_on_device(accelerator.device)
+            else:
+                with torch.no_grad(), accelerator.autocast():
+                    for sample_parameter in sample_parameters:
+                        self.sample_image_inference(
+                            accelerator, args, sample_transformer, dit_dtype, vae, save_dir,
+                            sample_parameter, epoch, steps, use_distilled=False,
+                        )
+                        clean_memory_on_device(accelerator.device)
         else:
             per_process_params = []
             for i in range(distributed_state.num_processes):
@@ -1268,7 +1367,8 @@ class KleinTrainer:
                 with distributed_state.split_between_processes(per_process_params) as sample_parameter_lists:
                     for sample_parameter in sample_parameter_lists[0]:
                         self.sample_image_inference(
-                            accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps
+                            accelerator, args, sample_transformer, dit_dtype, vae, save_dir,
+                            sample_parameter, epoch, steps, use_distilled=_use_distilled,
                         )
                         clean_memory_on_device(accelerator.device)
 
@@ -1277,18 +1377,54 @@ class KleinTrainer:
         if cuda_rng_state is not None:
             torch.cuda.set_rng_state(cuda_rng_state)
 
-        transformer.switch_block_swap_for_training()
+        if _use_distilled:
+            # Unload Distilled DiT — break LoRA circular references first
+            for _net in (_sample_net, _ctx_sample):
+                if _net is not None:
+                    for lora in getattr(_net, 'unet_loras', []):
+                        if hasattr(lora, 'org_forward'):
+                            lora.org_forward = None
+                    if hasattr(_net, 'unet_loras'):
+                        _net.unet_loras.clear()
+            del _sample_net, _ctx_sample
+            _sample_net = _ctx_sample = None
+            # Move Distilled to CPU before deleting to free GPU immediately
+            _distilled_dit.to("cpu")
+            del _distilled_dit
+            _distilled_dit = None
+            import gc; gc.collect(); gc.collect()
+            torch.cuda.empty_cache()
+            clean_memory_on_device(accelerator.device)
+            # Restore Base DiT to training state
+            if _orig_blocks_to_swap > 0:
+                # Re-enable original block swap level
+                transformer.enable_block_swap(_orig_blocks_to_swap, device=accelerator.device, supports_backward=True)
+                transformer.move_to_device_except_swap_blocks(accelerator.device)
+            else:
+                # No block swap during training — move everything back to GPU
+                transformer.blocks_to_swap = 0
+                transformer.to(accelerator.device)
+            transformer.switch_block_swap_for_training()
+        else:
+            transformer.switch_block_swap_for_training()
         clean_memory_on_device(accelerator.device)
 
-    def sample_image_inference(self, accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps):
+    def sample_image_inference(self, accelerator, args, transformer, dit_dtype, vae, save_dir, sample_parameter, epoch, steps, use_distilled=False):
         """Generate a single sample image for a given prompt."""
-        default_steps = int(self.model_version_info.defaults.get("num_steps", 20))
-        sample_steps = sample_parameter.get("sample_steps", default_steps)
+        if use_distilled:
+            # Distilled: 4 steps, guidance embed, no CFG — matches Explorer/Repair Studio
+            sample_steps = 4
+            guidance_scale = 1.0
+            discrete_flow_shift = None  # dynamic empirical mu
+        else:
+            default_steps = int(self.model_version_info.defaults.get("num_steps", 20))
+            sample_steps = sample_parameter.get("sample_steps", default_steps)
+            guidance_scale = sample_parameter.get("guidance_scale", self.default_guidance_scale)
+            discrete_flow_shift = sample_parameter.get("discrete_flow_shift", self.default_discrete_flow_shift)
+
         width = sample_parameter.get("width", 256)
         height = sample_parameter.get("height", 256)
         frame_count = 1  # Klein is image-only
-        guidance_scale = sample_parameter.get("guidance_scale", self.default_guidance_scale)
-        discrete_flow_shift = sample_parameter.get("discrete_flow_shift", self.default_discrete_flow_shift)
         seed = sample_parameter.get("seed")
         prompt: str = sample_parameter.get("prompt", "")
         cfg_scale = sample_parameter.get("cfg_scale", None)
@@ -1312,15 +1448,19 @@ class KleinTrainer:
 
         logger.info(f"  prompt: {prompt}")
         logger.info(f"  size: {width}x{height}")
-        logger.info(f"  steps: {sample_steps}, guidance: {guidance_scale}, shift: {discrete_flow_shift}")
+        mode_str = "Distilled 4-step" if use_distilled else "Base"
+        logger.info(f"  mode: {mode_str}, steps: {sample_steps}, guidance: {guidance_scale}, shift: {discrete_flow_shift}")
         if seed is not None:
             logger.info(f"  seed: {seed}")
 
-        do_classifier_free_guidance = False
-        if negative_prompt is not None:
-            do_classifier_free_guidance = True
-            logger.info(f"  negative: {negative_prompt}")
-            logger.info(f"  cfg_scale: {cfg_scale}")
+        if use_distilled:
+            do_classifier_free_guidance = False
+        else:
+            do_classifier_free_guidance = False
+            if negative_prompt is not None:
+                do_classifier_free_guidance = True
+                logger.info(f"  negative: {negative_prompt}")
+                logger.info(f"  cfg_scale: {cfg_scale}")
 
         # Run inference
         has_self_ref_orig_mod = getattr(transformer, "_orig_mod", None) is transformer
@@ -1328,11 +1468,63 @@ class KleinTrainer:
         if not has_self_ref_orig_mod:
             transformer.eval()
 
-        video = self.do_inference(
-            accelerator, args, sample_parameter, vae, dit_dtype, transformer,
-            discrete_flow_shift, sample_steps, width, height, frame_count, generator,
-            do_classifier_free_guidance, guidance_scale, cfg_scale, image_path=image_path,
-        )
+        if use_distilled:
+            # Inline Distilled denoising — single cond pass, no CFG.
+            # Matches Repair Studio exactly. CFG=1.0 dual-pass is NOT equivalent
+            # when LoRA is active — the LoRA contributes to both cond and uncond,
+            # so CFG partially cancels the LoRA effect.
+            from diffusers.utils.torch_utils import randn_tensor
+            from fizgig.klein.model_utils import get_simple_euler_schedule
+            from fizgig.klein.position import prc_img, prc_txt, scatter_ids
+
+            ctx = sample_parameter["ctx_vec"].to(device=device, dtype=torch.bfloat16)
+            ctx, ctx_ids = prc_txt(ctx)
+
+            packed_h, packed_w = height // 16, width // 16
+            latents = randn_tensor(
+                (1, 128, packed_h, packed_w),
+                generator=generator, device=device, dtype=torch.bfloat16,
+            )
+            x, x_ids = prc_img(latents)
+
+            if hasattr(transformer, 'prepare_block_swap_before_forward'):
+                transformer.prepare_block_swap_before_forward()
+
+            # Match ComfyUI's Euler Simple schedule (shift=2.02, evenly-spaced)
+            timesteps = get_simple_euler_schedule(sample_steps)
+            guidance_vec = torch.full((x.shape[0],), guidance_scale, device=device, dtype=x.dtype)
+
+            for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+                t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=device)
+                with torch.no_grad(), torch.autocast(device_type=device.type, dtype=x.dtype):
+                    pred = transformer(
+                        x=x, x_ids=x_ids, timesteps=t_vec,
+                        ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec,
+                    )
+                x = x + (t_prev - t_curr) * pred
+
+            # Unpack and decode
+            x = torch.cat(scatter_ids(x, x_ids)).squeeze(2)
+            latent = x.to(vae.dtype)
+            del x
+
+            vae.to(device)
+            vae.eval()
+            with torch.no_grad():
+                pixels = vae.decode(latent)
+            del latent
+            pixels = pixels.to(torch.float32).cpu()
+            pixels = (pixels / 2 + 0.5).clamp(0, 1)
+            vae.to("cpu")
+            clean_memory_on_device(device)
+
+            video = pixels.unsqueeze(2)  # B C H W -> B C 1 H W
+        else:
+            video = self.do_inference(
+                accelerator, args, sample_parameter, vae, dit_dtype, transformer,
+                discrete_flow_shift, sample_steps, width, height, frame_count, generator,
+                do_classifier_free_guidance, guidance_scale, cfg_scale, image_path=image_path,
+            )
 
         if not has_self_ref_orig_mod:
             transformer.train(was_train)
@@ -1658,6 +1850,7 @@ class KleinTrainer:
             network, optimizer, train_dataloader, lr_scheduler
         )
         training_model = network
+        self._sample_network_ref = accelerator.unwrap_model(network)  # unwrapped for Distilled sampling
 
         if args.gradient_checkpointing:
             transformer.train()
@@ -1881,6 +2074,10 @@ class KleinTrainer:
             accelerator.log({}, step=0)
 
         # ------------------------------------------------------------------
+        # Gradient Mining (experimental)
+        # ------------------------------------------------------------------
+
+        # ------------------------------------------------------------------
         # Training loop
         # ------------------------------------------------------------------
 
@@ -1987,11 +2184,14 @@ class KleinTrainer:
                     loss = torch.nn.functional.mse_loss(model_pred.to(network_dtype), target, reduction="none")
                     if weighting is not None:
                         loss = loss * weighting
-                    loss = loss.mean()
+                    noise_loss = loss.mean()
+
+                    loss = noise_loss
 
                     # Backward
                     accelerator.backward(loss)
 
+                    # Gradient mining: directional filtering
                     if accelerator.sync_gradients:
                         # Manual gradient sync for DDP
                         state = accelerate.PartialState()
@@ -2078,14 +2278,11 @@ class KleinTrainer:
             if len(accelerator.trackers) > 0:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 
-            # Adaptive LR: baseline log at end of epoch 0 (watcher armed but not acting yet)
             if args.adaptive_lr and epoch == 0:
                 _cur_lr = optimizer.param_groups[0]["lr"]
-                # Seed best-loss tracker with epoch 1's loss so the next epoch's comparison
-                # is against a real baseline (not None, which incorrectly triggered "improving").
                 adaptive_best_loss = loss_recorder.moving_average
                 accelerator.print(
-                    f"[adaptive_lr] epoch  1: loss={loss_recorder.moving_average:.4f} "
+                    f"[adaptive_lr] epoch {epoch + 1:>2}: loss={loss_recorder.moving_average:.4f} "
                     f"lr={_cur_lr:.2e} | ARMED (baseline captured, watcher begins next epoch)"
                 )
                 import sys as _sys; _sys.stdout.flush()
@@ -2456,6 +2653,11 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sample_at_first", action="store_true")
     parser.add_argument("--sample_every_n_epochs", type=int, default=None)
     parser.add_argument("--sample_prompts", type=str, default=None, help="Prompt file for sample generation")
+    parser.add_argument("--sample_dit", type=str, default=None,
+                        help="Path to Distilled DiT for 4-step sample generation. "
+                             "Loads separately alongside the training Base model.")
+    parser.add_argument("--sample_blocks_to_swap", type=int, default=0,
+                        help="Block swap for Distilled sampling DiT (from inference prefs).")
 
     # ---- Optimizer ----
     parser.add_argument("--optimizer_type", type=str, default="",

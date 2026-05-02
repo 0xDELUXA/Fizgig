@@ -4063,7 +4063,7 @@ class LoRATrainerGUI:
             freq_card, text="Sample at Start", variable=self.sample_at_first_var
         ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
 
-        self.use_distilled_samples_var = tk.BooleanVar(value=True)
+        self.use_distilled_samples_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             freq_card, text="Use Distilled model for samples (4-step, matches ComfyUI)",
             variable=self.use_distilled_samples_var,

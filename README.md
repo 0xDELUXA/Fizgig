@@ -47,6 +47,8 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 
 > **⚠️ Context LoRA note:** Training sample previews in context mode often don't reflect the final quality of the trained LoRA. The samples can look distorted even when the LoRA itself is excellent. Always evaluate the output LoRA in ComfyUI for accurate results. This is a known issue being worked on.
 
+> **⚠️ Training samples note:** Training samples in general often look inferior to the actual LoRA when deployed in ComfyUI — less detail, weaker likeness, or slightly off colours. The LoRA is usually better than the samples suggest. Always evaluate checkpoints in ComfyUI rather than judging quality from training previews alone. This is an active area of investigation — if you have insights into the discrepancy, contributions and ideas are welcome.
+
 - **Pause / Resume** — graceful epoch-boundary pause that frees VRAM and resumes with full optimizer state and no quality regression.
 - **Model Area targeting** — train only Identity blocks, Style blocks, Details blocks, or the full model.
 - **Auto VRAM management** — block swap auto-detects from GPU VRAM, OOM detection suggests fixes. Supports both bf16 and fp8 Base DiT. Training with fp8 Base and block swap works correctly.

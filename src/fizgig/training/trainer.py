@@ -2076,15 +2076,6 @@ class KleinTrainer:
         # ------------------------------------------------------------------
         # Gradient Mining (experimental)
         # ------------------------------------------------------------------
-        gradient_miner = None
-        if getattr(args, "gradient_mining", False):
-            from fizgig.training.gradient_mining import GradientMiner
-            face_sep = getattr(args, "gradient_mining_face_separation", False)
-            gradient_miner = GradientMiner(face_separation=face_sep)
-            logger.info(
-                f"Gradient mining enabled: live directional filtering"
-                + (", face_separation=True" if face_sep else "")
-            )
 
         # ------------------------------------------------------------------
         # Training loop
@@ -2150,34 +2141,6 @@ class KleinTrainer:
                     import sys as _sys; _sys.stdout.flush()
                 except Exception as _e:
                     accelerator.print(f"[resume] WARN: failed to load adaptive_lr_state.json: {_e}")
-        # Restore gradient mining state on resume
-        if gradient_miner is not None and args.resume:
-            _mining_state_path = os.path.join(args.resume, "gradient_mining_state.pt")
-            if os.path.exists(_mining_state_path):
-                try:
-                    _ms = torch.load(_mining_state_path, map_location="cpu", weights_only=False)
-                    gradient_miner._step_count = _ms.get("step_count", 0)
-                    gradient_miner.last_avg_agreement = _ms.get("last_avg_agreement", 0.0)
-                    gradient_miner._prev_avg_agreement = gradient_miner.last_avg_agreement
-                    gradient_miner._discovery_complete = _ms.get("discovery_complete", False)
-                    gradient_miner._buckets = {
-                        k: [[b[0].to(accelerator.device), b[1].to(accelerator.device), b[2]] for b in v]
-                        for k, v in _ms.get("buckets", {}).items()
-                    }
-                    gradient_miner._prev_grad = {k: v.to(accelerator.device) for k, v in _ms.get("prev_grad", {}).items()}
-                    gradient_miner._pruned_directions = {
-                        k: [d.to(accelerator.device) for d in v]
-                        for k, v in _ms.get("pruned_directions", {}).items()
-                    }
-                    n_buckets = sum(len(v) for v in gradient_miner._buckets.values())
-                    accelerator.print(
-                        f"[resume] gradient_mining state restored: {len(gradient_miner._buckets)} params, "
-                        f"{n_buckets} total buckets, discovery={'done' if gradient_miner._discovery_complete else 'active'}, "
-                        f"step_count={gradient_miner._step_count}, agree={gradient_miner.last_avg_agreement:.2f}"
-                    )
-                except Exception as _e:
-                    accelerator.print(f"[resume] WARN: failed to load gradient_mining_state.pt: {_e}")
-
         ADAPTIVE_BLEND_RATIO = 0.7  # 70% prev + 30% current on rollback
         # Stability thresholds (hardcoded)
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
@@ -2229,13 +2192,6 @@ class KleinTrainer:
                     accelerator.backward(loss)
 
                     # Gradient mining: directional filtering
-                    if gradient_miner is not None:
-                        is_face = False
-                        if gradient_miner.face_separation:
-                            face_flags = batch.get("is_face_crop", [])
-                            is_face = any(face_flags) if face_flags else False
-                        mine_stats = gradient_miner.amplify_gradients(network, is_face_crop=is_face)
-
                     if accelerator.sync_gradients:
                         # Manual gradient sync for DDP
                         state = accelerate.PartialState()
@@ -2303,12 +2259,6 @@ class KleinTrainer:
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
                 avr_loss: float = loss_recorder.moving_average
                 logs = {"avr_loss": avr_loss}
-                if gradient_miner is not None and gradient_miner._step_count > 1:
-                    logs["agree"] = f"{mine_stats['agree']:.0%}"
-                    bkts_str = f"{mine_stats['bkts']:.1f}"
-                    if mine_stats.get('face', False):
-                        bkts_str += "F"
-                    logs["bkts"] = bkts_str
                 progress_bar.set_postfix(**logs)
 
                 if args.scale_weight_norms:
@@ -2531,22 +2481,6 @@ class KleinTrainer:
                             except Exception as _e:
                                 accelerator.print(f"[adaptive_lr] sidecar save failed: {_e}")
 
-                        # Gradient mining state — save buckets for resume continuity
-                        if gradient_miner is not None and gradient_miner._step_count > 0:
-                            _state_dir = os.path.join(args.output_dir, f"{args.output_name}-{epoch + 1:06d}-state")
-                            try:
-                                _mining_state = {
-                                    "step_count": gradient_miner._step_count,
-                                    "buckets": {k: [(b[0].cpu(), b[1].cpu(), b[2]) for b in v]
-                                                for k, v in gradient_miner._buckets.items()},
-                                    "buckets_face": {k: [(b[0].cpu(), b[1].cpu(), b[2]) for b in v]
-                                                     for k, v in gradient_miner._buckets_face.items()},
-                                }
-                                torch.save(_mining_state, os.path.join(_state_dir, "gradient_mining_state.pt"))
-                                accelerator.print(f"[gradient_mining] state saved ({len(gradient_miner._buckets)} params)")
-                            except Exception as _e:
-                                accelerator.print(f"[gradient_mining] state save failed: {_e}")
-
             self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
             optimizer_train_fn()
 
@@ -2763,12 +2697,6 @@ def setup_parser() -> argparse.ArgumentParser:
                              "during training. New LoRA learns to coexist with this context.")
     parser.add_argument("--context_lora_strength", type=float, default=1.0,
                         help="Strength multiplier for the context LoRA (typical: 0.5-1.0).")
-
-    # ---- Gradient Mining v2 (Observe + Mine) ----
-    parser.add_argument("--gradient_mining", action="store_true",
-                        help="Enable gradient mining: 1 epoch data gather + N epochs amplified mining.")
-    parser.add_argument("--gradient_mining_face_separation", action="store_true",
-                        help="Separate face crops (FaceCrop_*.png) into their own bucket pool.")
 
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")

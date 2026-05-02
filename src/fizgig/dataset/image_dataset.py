@@ -154,7 +154,6 @@ class ItemInfo:
         self.bucket_size = bucket_size
         self.content = content  # np.ndarray or list[np.ndarray] for multi-target
         self.latent_cache_path = latent_cache_path
-        self.is_face_crop = item_key.startswith("FaceCrop_")
         self.text_encoder_output_cache_path: Optional[str] = None
         self.control_content: Optional[list[np.ndarray]] = None
 
@@ -432,9 +431,6 @@ class BucketBatchManager:
             stacked["timesteps"] = self.timestep_pool[idx][:end - start]
         else:
             stacked["timesteps"] = None
-
-        # Face crop flag for gradient mining separation
-        stacked["is_face_crop"] = [item_info.is_face_crop for item_info in bucket[start:end]]
 
         return stacked
 

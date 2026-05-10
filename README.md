@@ -77,6 +77,7 @@ Distil any Klein LoRA down to a lower rank with block and timestep targeting. Fa
 - **OS** — Windows 10 / 11, or Linux. macOS works for captioning and image prep but training requires CUDA.
 - **Python** — 3.10, 3.11, 3.12, or 3.13.
 - **Disk** — ~10 GB for the venv, plus ~40 GB for the model files (see below).
+- **Visual Studio Build Tools** (Windows only) — required for compiling InsightFace. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) and select **"Desktop development with C++"** workload. If you see errors about `cl.exe` or missing C++ compiler during install, this is what's needed.
 
 ---
 

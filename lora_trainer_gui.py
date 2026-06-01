@@ -655,7 +655,7 @@ class LoRATrainerGUI:
         self.dataset_cache_dir_var = tk.StringVar()  # legacy/back-compat — UI removed; cache dir now lives in prefs_vars["cache_dir"]
         self.dataset_caption_ext_var = tk.StringVar(value=".txt")
         self.dataset_jsonl_file_var = tk.StringVar()
-        self.dataset_megapixels_var = tk.StringVar(value="1.0")
+        self.dataset_megapixels_var = tk.StringVar(value="0.25")
         self.dataset_batch_size_var = tk.StringVar(value="1")
         self.dataset_num_repeats_var = tk.StringVar(value="1")
         self.dataset_enable_bucket_var = tk.BooleanVar(value=True)

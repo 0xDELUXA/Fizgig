@@ -41,7 +41,7 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 
 ### Training
 - **Proven presets** for rank 4–16, single subject through multi-character — or build your own.
-- **Distilled training samples** — optional 4-step Distilled previews that match ComfyUI output exactly. Uses a separate Distilled DiT loaded alongside the training Base model, with the ComfyUI Euler Simple schedule. Enable via the checkbox on the Samples tab. Falls back to Base 20-step samples when off or when VRAM is tight.
+- **Distilled training samples** — 4-step Distilled previews that match ComfyUI output exactly. Uses a separate Distilled DiT loaded alongside the training Base model, with the ComfyUI Euler Simple schedule. **On by default** — toggle via the checkbox on the Samples tab. Falls back to Base multi-step samples (~40 steps) when off or when VRAM is tight.
 - **Adaptive LR** — bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
 - **Context LoRA** — load an existing LoRA as a frozen active layer during training, so the new LoRA learns to coexist at inference. No other trainer does this.
 
@@ -124,7 +124,7 @@ After install, launch Fizgig and work left-to-right through the numbered tabs:
 1. **Start** — set your training image folder. If model paths aren't configured, a prompt guides you to Preferences.
 2. **Image Prep** (optional) — resize, PNG-convert, or face-crop your training images.
 3. **Captions** — write trigger-word captions or generate with Florence-2 AI. Optionally translate to bilingual English+Chinese.
-4. **Samples** — configure the preview prompts that render during training. Optionally enable Distilled 4-step previews for faster, ComfyUI-accurate samples.
+4. **Samples** — configure the preview prompts that render during training. Distilled 4-step previews (faster, ComfyUI-accurate) are on by default; toggle on the Samples tab.
 5. **Training** — pick a preset, tune settings, click **Start Training**.
 
 The unnumbered tabs are post-training tools (also work on any Klein LoRA you've downloaded):
@@ -148,6 +148,8 @@ Inference tools (Profiler / Repair Studio / Explorer / Extract) on Distilled 4-s
 | 8 | 16 GB | Moderate swap |
 | 12 | 14 GB | Aggressive swap |
 | 16 | 12 GB | Maximum swap — slower but fits |
+
+**Training:** the fp8 Base DiT stays resident at ~9.6 GB (not dequantised to bf16), so training a 9B LoRA fits comfortably in **16 GB** — around **14 GB** observed at block-swap 0 with a context LoRA active (a little less without). VRAM scales with resolution and batch size; raise block swap to fit smaller cards.
 
 **DiT Block Swap (inference)** in Preferences applies to all tool tabs. Training has its own separate block swap setting. On first launch, Fizgig auto-detects your GPU VRAM and picks a sensible default — once you explicitly choose a value, your choice is saved.
 

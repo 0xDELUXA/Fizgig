@@ -466,7 +466,7 @@ DEFAULT_PREFS = {
     # 32GB+ VRAM), 16 = max swap (fits a 16GB card via PCIe offload). Applies
     # to Repair Studio, Profiler, and Extractor. The Training tab has its own
     # separate BLOCKS_SWAP setting that's not affected.
-    "inference_blocks_to_swap": 0,
+    "inference_blocks_to_swap": "Auto (detect from GPU)",
 }
 
 
@@ -479,7 +479,7 @@ def _auto_detect_blocks_to_swap() -> int:
     try:
         import torch
         if torch.cuda.is_available():
-            vram_gb = torch.cuda.get_device_properties(0).total_mem / (1024 ** 3)
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
             if vram_gb >= 28:
                 return 0   # 32 GB+ — no swap needed
             if vram_gb >= 20:
@@ -507,10 +507,11 @@ def load_prefs() -> dict:
                 prefs.update(saved)
         except Exception:
             pass
-    # Auto-detect block swap from GPU VRAM if user hasn't explicitly chosen one.
+    # Inference block swap defaults to "Auto (detect from GPU)", resolved at each
+    # pipeline load (see _get_inference_blocks_to_swap) — same behaviour as the
+    # training Blocks Swap setting. Users who saved an explicit value keep it.
     first_run = not os.path.exists(PREFS_FILE)
-    if not user_set_swap:
-        prefs["inference_blocks_to_swap"] = _auto_detect_blocks_to_swap()
+    _ = user_set_swap  # retained for clarity; no longer forces a concrete value
     # Resolve portable directory paths to absolute.
     for key in _PORTABLE_DIR_KEYS:
         if key in prefs and isinstance(prefs[key], str):
@@ -2760,15 +2761,19 @@ class LoRATrainerGUI:
         return 8  # safe fallback
 
     def _get_inference_blocks_to_swap(self) -> int:
-        """Parse the leading int from the Preferences inference_blocks_to_swap
-        pref. Labeled options like '16 (Max — …)' store as the full string; we
-        just take the leading integer. Returns 0 on any parse failure."""
+        """Resolve the Preferences inference_blocks_to_swap pref to an int.
+
+        'Auto (detect from GPU)' resolves from VRAM at call time (same as the
+        training Blocks Swap setting). Labeled options like '16 (Max — …)' store
+        as the full string; we take the leading integer. Returns 0 on failure."""
         import re as _re
         raw = ""
         try:
             raw = str(self.prefs_vars["inference_blocks_to_swap"].get()).strip()
         except Exception:
             return 0
+        if raw.lower().startswith("auto"):
+            return _auto_detect_blocks_to_swap()
         m = _re.match(r'\d+', raw)
         return int(m.group()) if m else 0
 
@@ -7357,6 +7362,7 @@ class LoRATrainerGUI:
 
         ttk.Label(inf_card, text="DiT Block Swap (inference):").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         inference_swap_options = [
+            "Auto (detect from GPU)",
             "0  (24 GB VRAM)",
             "4  (20 GB VRAM)",
             "8  (16 GB VRAM)",

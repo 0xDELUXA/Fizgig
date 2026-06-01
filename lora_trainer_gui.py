@@ -7319,9 +7319,14 @@ class LoRATrainerGUI:
         next_row = self._add_pref_row(
             models_card, next_row, "Base DiT:", "base_dit",
             "Klein 9B Base model (for training & precise profiling). "
-            "An fp8 version (~9.5GB) is also available — see the GitHub README for the link.",
-            download_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B/tree/main",
-            download_note="~17GB bf16 — Black Forest Labs on HuggingFace (flux-2-klein-base-9b.safetensors)",
+            "Recommended: the fp8 version — same training quality, ~half the VRAM (stays resident at "
+            "~9.6GB, fits 16GB cards). The bf16 version is the larger alternative.",
+            download_url="https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8/tree/main",
+            download_label="Download fp8 (recommended)",
+            download_note="~9.5GB fp8 — Black Forest Labs (flux-2-klein-base-9b-fp8.safetensors)",
+            download_url2="https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B/tree/main",
+            download_label2="Download bf16",
+            download_note2="~17GB bf16 (flux-2-klein-base-9b.safetensors)",
         )
         next_row = self._add_pref_row(
             models_card, next_row, "Distilled DiT:", "distilled_dit",
@@ -7395,11 +7400,14 @@ class LoRATrainerGUI:
 
         self._add_youtube_help_button(outer, "preferences")
 
-    def _add_pref_row(self, frame, row, label, pref_key, hint, is_dir=False, download_url=None, download_note=None):
+    def _add_pref_row(self, frame, row, label, pref_key, hint, is_dir=False, download_url=None, download_note=None,
+                      download_label="Download", download_url2=None, download_label2="Download", download_note2=None):
         """Add a labeled pref entry with Browse button and hint text. Returns next row index.
 
-        If download_url is set, a "Download" link is added next to Browse that opens the URL in
-        the user's default browser. download_note (optional) is appended to the hint line.
+        If download_url is set, a download link (text=download_label) is added next to Browse that opens
+        the URL in the user's default browser. A second link (download_url2 / download_label2) can be
+        added too — used to offer e.g. both fp8 and bf16 variants. download_note / download_note2 are
+        appended to the hint line.
         """
         ttk.Label(frame, text=label).grid(row=row, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         ttk.Entry(frame, textvariable=self.prefs_vars[pref_key], width=60).grid(row=row, column=1, sticky=tk.EW, pady=4)
@@ -7408,18 +7416,21 @@ class LoRATrainerGUI:
         btn_frame.grid(row=row, column=2, sticky=tk.W, padx=(8, 0))
         browse_cmd = (lambda: self._browse_pref_dir(pref_key)) if is_dir else (lambda: self._browse_pref_file(pref_key))
         ttk.Button(btn_frame, text="Browse", command=browse_cmd).pack(side=tk.LEFT)
-        if download_url:
-            dl_link = tk.Label(btn_frame, text="Download",
+        for _url, _lbl in ((download_url, download_label), (download_url2, download_label2)):
+            if not _url:
+                continue
+            dl_link = tk.Label(btn_frame, text=_lbl,
                                fg=COLORS["accent_hover"], cursor="hand2",
                                font=(FONT_FAMILY, 9, "underline"),
                                bg=COLORS["bg_surface"])
             dl_link.pack(side=tk.LEFT, padx=(8, 0))
-            dl_link.bind("<Button-1>", lambda e, url=download_url: webbrowser.open(url))
-            ToolTip(dl_link, f"Open download page in browser:\n{download_url}")
+            dl_link.bind("<Button-1>", lambda e, url=_url: webbrowser.open(url))
+            ToolTip(dl_link, f"Open download page in browser:\n{_url}")
         row += 1
         hint_text = hint
-        if download_note:
-            hint_text = f"{hint}  ·  {download_note}"
+        _notes = [n for n in (download_note, download_note2) if n]
+        if _notes:
+            hint_text = hint + "  ·  " + "  ·  ".join(_notes)
         tk.Label(frame, text=hint_text,
                  font=(FONT_FAMILY, 9, "italic"),
                  fg=COLORS["text_muted"], bg=COLORS["bg_surface"],

@@ -275,7 +275,7 @@ ARCHITECTURES = {
         "sample_guidance_default": 3.5,
         "sample_cfg_default": 4.5,
         "sample_flow_shift_default": None,
-        "sample_steps_default": 20,
+        "sample_steps_default": 40,  # Base is not step-distilled — BFL spec is ~50 steps; 40 balances quality vs sample time. Distilled path overrides to 4.
         "sample_width_default": 768,
         "sample_height_default": 768,
     },
@@ -760,7 +760,7 @@ class LoRATrainerGUI:
             "SAMPLE_PROMPT": "A high quality photo",
             "SAMPLE_WIDTH": 768,
             "SAMPLE_HEIGHT": 768,
-            "SAMPLE_STEPS": 25,
+            "SAMPLE_STEPS": 40,
             "SAMPLE_SEED": 1234,
             "SAMPLE_EVERY_N_EPOCHS": 1,
             "SAMPLE_EVERY_N_STEPS": 0,

@@ -1918,7 +1918,7 @@ class LoRATrainerGUI:
         mp_frame = tk.Frame(scheduler_content, bg=COLORS["bg_surface"])
         mp_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
         ttk.Combobox(mp_frame, textvariable=self.dataset_megapixels_var,
-                     values=["0.15", "0.25", "0.5", "0.75", "1.0", "1.5", "2.0"], width=8).pack(side=tk.LEFT, padx=(0, 10))
+                     values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0"], width=8).pack(side=tk.LEFT, padx=(0, 10))
         tk.Label(mp_frame, text="MP  (1.0 = 1024×1024 area)",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
         tk.Label(scheduler_content,

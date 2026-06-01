@@ -6,6 +6,28 @@ from typing import Optional, Union
 import torch
 
 
+def fp8_scaled_mm_supported(device: Optional[Union[str, torch.device]] = None) -> bool:
+    """True if the GPU has fp8 tensor cores usable by torch._scaled_mm.
+
+    Requires compute capability >= 8.9 (Ada / Hopper / Blackwell). Older cards
+    (Ampere sm_86 like the 3090, Turing, etc.) lack fp8 silicon and must fall
+    back to the dequantize-to-bf16 path — for them this returns False and the
+    fast path is never entered, so training/inference behaves exactly as today.
+    """
+    if not torch.cuda.is_available():
+        return False
+    if device is not None:
+        dev = torch.device(device) if isinstance(device, str) else device
+        index = dev.index if dev.type == "cuda" else None
+    else:
+        index = None
+    try:
+        major, minor = torch.cuda.get_device_capability(index)
+    except Exception:
+        return False
+    return (major, minor) >= (8, 9)
+
+
 def clean_memory_on_device(device: Optional[Union[str, torch.device]]):
     """Free cached memory on the specified device."""
     if device is None:

@@ -345,44 +345,47 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
         torch.Tensor: Result of linear transformation
     """
     if use_scaled_mm:
-        # **not tested**
-        # _scaled_mm only works for per-tensor scale for now (per-channel scale does not work in certain cases)
-        if self.scale_weight.ndim != 1:
-            raise ValueError("scaled_mm only supports per-tensor scale_weight for now.")
+        # FP8 tensor-core matmul via torch._scaled_mm (Ada/Hopper/Blackwell,
+        # SM 8.9+). Both operands run in fp8; the GEMM is ~2x bf16. Per-tensor
+        # scales only (Blackwell rejects rowwise). The activation scale comes
+        # from the file's pre-calibrated `input_scale` (registered as
+        # self.scale_input) when available, else a cheap dynamic per-tensor
+        # amax. On ANY failure we fall through to the dequant path below so a
+        # bad shape / odd dim never breaks a run.
+        try:
+            input_dtype = x.dtype
+            target_dtype = self.weight.dtype  # fp8_e4m3fn for patched Linears
+            fp8_max = torch.finfo(target_dtype).max
 
-        input_dtype = x.dtype
-        original_weight_dtype = self.scale_weight.dtype
-        target_dtype = self.weight.dtype
-        # assert x.ndim == 3, "Input tensor must be 3D (batch_size, seq_len, hidden_dim)"
+            scale_input = getattr(self, "scale_input", None)
+            if scale_input is not None:
+                scale_x = scale_input.to(torch.float32).reshape(())
+            else:
+                scale_x = (x.detach().abs().amax() / fp8_max).clamp(min=1e-8).to(torch.float32)
 
-        if max_value is None:
-            # no input quantization
-            scale_x = torch.tensor(1.0, dtype=torch.float32, device=x.device)
-        else:
-            # calculate scale factor for input tensor
-            scale_x = (torch.max(torch.abs(x.flatten())) / max_value).to(torch.float32)
+            # Quantize activations in the input dtype (bf16) — fp8 only keeps 3
+            # mantissa bits, so a float32 intermediate buys no precision and just
+            # doubles activation memory traffic. inv is a bf16 scalar.
+            inv = (1.0 / scale_x).to(x.dtype)
+            original_shape = x.shape
+            x_fp8 = (x * inv).clamp_(-fp8_max, fp8_max).to(target_dtype)
+            x_fp8 = x_fp8.reshape(-1, original_shape[-1]).contiguous()
 
-            # quantize input tensor to FP8: this seems to consume a lot of memory
-            fp8_max_value = torch.finfo(target_dtype).max
-            fp8_min_value = torch.finfo(target_dtype).min
-            x = quantize_fp8(x, scale_x, target_dtype, fp8_max_value, fp8_min_value)
+            weight = self.weight.t()  # (K, N), column-major as _scaled_mm wants
+            scale_weight = self.scale_weight.to(torch.float32).reshape(())
 
-        original_shape = x.shape
-        x = x.reshape(-1, x.shape[-1]).to(target_dtype)
+            o = torch._scaled_mm(x_fp8, weight, scale_a=scale_x, scale_b=scale_weight, out_dtype=input_dtype)
+            if self.bias is not None:
+                o = o + self.bias.to(o.dtype)
 
-        weight = self.weight.t()
-        scale_weight = self.scale_weight.to(torch.float32)
+            return o.reshape(*original_shape[:-1], -1)
+        except Exception as e:
+            if not getattr(self, "_scaled_mm_warned", False):
+                logger.warning(f"_scaled_mm failed ({type(e).__name__}: {e}); falling back to dequant path.")
+                self._scaled_mm_warned = True
+            # fall through to the dequant path
 
-        if self.bias is not None:
-            # float32 is not supported with bias in scaled_mm
-            o = torch._scaled_mm(x, weight, out_dtype=original_weight_dtype, bias=self.bias, scale_a=scale_x, scale_b=scale_weight)
-        else:
-            o = torch._scaled_mm(x, weight, out_dtype=input_dtype, scale_a=scale_x, scale_b=scale_weight)
-
-        o = o.reshape(original_shape[0], original_shape[1], -1) if len(original_shape) == 3 else o.reshape(original_shape[0], -1)
-        return o.to(input_dtype)
-
-    else:
+    if True:
         # Dequantize on the input's device (handles block swap: weight on CPU, x on CUDA)
         target_device = x.device
         weight = self.weight.to(target_device)
@@ -448,6 +451,14 @@ def apply_fp8_monkey_patch(model, optimized_state_dict, use_scaled_mm=False):
             # module.register_buffer("scale_weight", torch.tensor(1.0, dtype=module.weight.dtype))
             scale_shape = scale_shape_info[name]
             module.register_buffer("scale_weight", torch.ones(scale_shape, dtype=module.weight.dtype))
+
+            # For scaled_mm: register the pre-calibrated input (activation) scale
+            # as a buffer so load_state_dict populates it. Only present for
+            # pre-quantized files that ship `input_scale` per Linear.
+            input_scale_key = name + ".scale_input"
+            if input_scale_key in optimized_state_dict:
+                in_shape = optimized_state_dict[input_scale_key].shape
+                module.register_buffer("scale_input", torch.ones(in_shape, dtype=torch.float32))
 
             # Create a new forward method with the patched version.
             def new_forward(self, x):

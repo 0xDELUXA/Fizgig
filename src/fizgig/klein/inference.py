@@ -119,6 +119,8 @@ class KleinInferencePipeline:
         fp8_text_encoder: bool = False,
         attn_mode: str = "torch",
         blocks_to_swap: int = 0,
+        use_scaled_mm: bool = False,
+        keep_fp8_resident: bool = False,
     ):
         """Load all models for inference.
 
@@ -149,6 +151,8 @@ class KleinInferencePipeline:
             loading_device=self.device,
             dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=fp8_scaled,
+            use_scaled_mm=use_scaled_mm,
+            keep_fp8_resident=keep_fp8_resident,
         )
 
         # Enable block swap if requested

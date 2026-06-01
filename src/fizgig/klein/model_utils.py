@@ -191,6 +191,8 @@ def load_dit(
     lora_weights_list: Optional[List[Dict[str, torch.Tensor]]] = None,
     lora_multipliers: Optional[list[float]] = None,
     disable_numpy_memmap: bool = False,
+    use_scaled_mm: bool = False,
+    keep_fp8_resident: bool = False,
 ):
     """Load the Klein 9B DiT model.
 
@@ -224,6 +226,22 @@ def load_dit(
         if dit_weight_dtype is not None:
             model.to(dit_weight_dtype)
 
+    # Auto-detect a pre-quantized fp8 file (Comfy-Org / BFL): it ships per-Linear
+    # `.weight_scale` keys. For these, keeping the fp8 weights resident instead of
+    # casting them up to bf16 at load halves DiT VRAM (~9 GB vs ~18 GB) with
+    # BIT-IDENTICAL output — the dequant forward does the same per-matmul
+    # `weight.to(bf16) * scale` either way. This is the real low-VRAM win and it
+    # works on every card (no fp8 tensor cores needed). scaled_mm additionally
+    # needs fp8 residency for its operands.
+    if not fp8_scaled and _file_is_prequantized_fp8(dit_path):
+        keep_fp8_resident = True
+
+    # Loading with dit_weight_dtype set would cast fp8 weights to bf16. Pass None
+    # so file dtypes are preserved (fp8 stays fp8, the remaining bf16
+    # Linears/norms stay bf16); assign=True below fixes up the model dtypes from
+    # the loaded state dict.
+    load_weight_dtype = None if (use_scaled_mm or keep_fp8_resident) else dit_weight_dtype
+
     logger.info(f"Loading DiT model from {dit_path}, device={loading_device}")
     sd = load_safetensors_with_lora_and_fp8(
         model_files=dit_path,
@@ -232,7 +250,7 @@ def load_dit(
         fp8_optimization=fp8_scaled,
         calc_device=device,
         move_to_device=(loading_device == device),
-        dit_weight_dtype=dit_weight_dtype,
+        dit_weight_dtype=load_weight_dtype,
         target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
         disable_numpy_memmap=disable_numpy_memmap,
@@ -260,20 +278,32 @@ def load_dit(
         # Cast scale to bf16 to match the existing fp8_scaled path's dtype
         # convention — the patched forward multiplies fp8-cast-to-bf16 by
         # this, so keeping both as bf16 avoids fp32 upcasts inside F.linear.
+        # weight_scale dtype: bf16 for the dequant path (multiplied against
+        # bf16-cast fp8 weights); float32 for scaled_mm (scale_b must be fp32).
+        ws_dtype = torch.float32 if use_scaled_mm else torch.bfloat16
         for ws_key in list(sd.keys()):
             if ws_key.endswith(".weight_scale"):
                 new_key = ws_key[: -len(".weight_scale")] + ".scale_weight"
-                sd[new_key] = sd.pop(ws_key).to(torch.bfloat16)
-        # Input-scale keys aren't used by the non-scaled-mm forward path
-        # (max_value=None in fp8_linear_forward_patch → input stays bf16).
+                sd[new_key] = sd.pop(ws_key).to(ws_dtype)
         in_scale_keys = [k for k in sd if k.endswith(".input_scale")]
-        for k in in_scale_keys:
-            del sd[k]
+        if use_scaled_mm:
+            # Keep the pre-calibrated activation scale — scaled_mm quantizes the
+            # input to fp8 using it (renamed to .scale_input to match the buffer
+            # apply_fp8_monkey_patch registers).
+            for k in list(in_scale_keys):
+                new_key = k[: -len(".input_scale")] + ".scale_input"
+                sd[new_key] = sd.pop(k).to(torch.float32)
+        else:
+            # Input-scale keys aren't used by the dequant forward path
+            # (max_value=None in fp8_linear_forward_patch → input stays bf16).
+            for k in in_scale_keys:
+                del sd[k]
         logger.info(
             f"Pre-quantized fp8 passthrough: keeping fp8 residency for "
-            f"{len(weight_scale_keys)} Linears (~9 GB DiT vs ~18 GB bf16)."
+            f"{len(weight_scale_keys)} Linears (~9 GB DiT vs ~18 GB bf16). "
+            f"scaled_mm={use_scaled_mm}."
         )
-        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=use_scaled_mm)
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded KleinDiT: {info}")
@@ -318,6 +348,29 @@ def load_text_encoder(
 
 
 # region LoRA + FP8 loading utilities
+
+def _file_is_prequantized_fp8(dit_path: Union[str, List[str]]) -> bool:
+    """True if the DiT file ships per-Linear `.weight_scale` keys (Comfy-Org /
+    BFL pre-quantized fp8). Reads only the safetensors header (8-byte length +
+    JSON tensor index) — no tensor data is loaded, so this is microseconds.
+    """
+    files = dit_path if isinstance(dit_path, list) else [dit_path]
+    expanded = []
+    for f in files:
+        split = get_split_weight_filenames(f)
+        expanded.extend(split if split else [f])
+    import json as _json
+    for f in expanded:
+        try:
+            with open(f, "rb") as fh:
+                header_len = int.from_bytes(fh.read(8), "little")
+                header = _json.loads(fh.read(header_len))
+            if any(k.endswith(".weight_scale") for k in header.keys()):
+                return True
+        except Exception:
+            continue
+    return False
+
 
 def detect_network_type(lora_sd: Dict[str, torch.Tensor]) -> str:
     """Detect network type from state dict keys."""

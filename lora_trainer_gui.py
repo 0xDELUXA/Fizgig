@@ -468,6 +468,13 @@ DEFAULT_PREFS = {
     "lora_output_dir": "output_loras",
     "profiles_dir": "profiles",
     "cache_dir": "cache",
+    # Input directories — default folders the Browse dialogs open in, so users
+    # don't re-hunt every session. input_lora_dir seeds LoRA pickers (Repair
+    # Studio primary/donor, LoRA the Explorer, Context LoRA on Training);
+    # input_ref_dir seeds the reference-image pickers (Repair Studio, Explorer).
+    # Absolute paths (may live anywhere); empty = no default (last folder).
+    "input_lora_dir": "",
+    "input_ref_dir": "",
     # Inference DiT block swap — int 0-16 for Klein 9B. With the Distilled fp8
     # model (workbench default) 0 = no swap fits ~16GB; loading Base is heavier
     # (0 ≈ 24GB). 16 = max swap for the smallest cards. Applies to Repair Studio,
@@ -6493,7 +6500,8 @@ class LoRATrainerGUI:
         from tkinter import filedialog
         path = filedialog.askopenfilename(
             title="Select reference image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")])
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_ref_dir"))
         if path:
             self.explorer_ref_path_var.set(path)
             if self._explorer_baseline_state is not None and not self._explorer_generating:
@@ -7513,6 +7521,20 @@ class LoRATrainerGUI:
         next_row = self._add_pref_row(out_card, next_row, "LoRA output:", "lora_output_dir", "Where trained LoRAs are saved", is_dir=True)
         next_row = self._add_pref_row(out_card, next_row, "Profiles:", "profiles_dir", "Where profiler HTML reports are saved", is_dir=True)
         next_row = self._add_pref_row(out_card, next_row, "Cache:", "cache_dir", "Cached latents and text encodings", is_dir=True)
+
+        # Card 3b: Input Directories — default starting folders for the Browse
+        # dialogs, so users don't re-hunt for their LoRAs / reference images.
+        in_card = self._start_section_card(
+            outer, "Input Directories",
+            "Default folders the Browse dialogs open in. Saves hunting each session when loading "
+            "LoRAs or reference images. Leave empty to use the last-used folder.",
+        )
+        in_card.columnconfigure(1, weight=1)
+        in_row = 0
+        in_row = self._add_pref_row(in_card, in_row, "LoRA loading:", "input_lora_dir",
+                                    "Default folder for loading LoRAs — Repair Studio, LoRA the Explorer, and the Context LoRA picker", is_dir=True)
+        in_row = self._add_pref_row(in_card, in_row, "Reference images:", "input_ref_dir",
+                                    "Default folder for reference images — Repair Studio and LoRA the Explorer", is_dir=True)
 
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)
@@ -8625,9 +8647,20 @@ class LoRATrainerGUI:
     # Repair Studio actions
     # ------------------------------------------------------------
 
+    def _pref_initialdir(self, pref_key: str) -> str:
+        """Return the preferred starting folder for a Browse dialog, or "" to let
+        Tk use the last-used folder. Reads the prefs var named by pref_key (e.g.
+        'input_lora_dir', 'input_ref_dir', 'lora_output_dir') and validates it."""
+        try:
+            d = self.prefs_vars[pref_key].get().strip()
+        except (KeyError, AttributeError):
+            return ""
+        return d if d and os.path.isdir(d) else ""
+
     def _browse_repair_lora(self, var):
         filepath = filedialog.askopenfilename(
-            title="Select LoRA file", filetypes=[("SafeTensors", "*.safetensors")]
+            title="Select LoRA file", filetypes=[("SafeTensors", "*.safetensors")],
+            initialdir=self._pref_initialdir("input_lora_dir"),
         )
         if filepath:
             var.set(filepath)
@@ -8907,7 +8940,8 @@ class LoRATrainerGUI:
         from tkinter import filedialog
         path = filedialog.askopenfilename(
             title="Select reference image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")])
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_ref_dir"))
         if path:
             self.repair_ref_path_var.set(path)
             self._on_repair_ref_changed()
@@ -9829,16 +9863,20 @@ class LoRATrainerGUI:
         path = filedialog.askopenfilename(
             title="Select Context LoRA",
             filetypes=[("SafeTensors", "*.safetensors"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_lora_dir"),
         )
         if path:
             self.entries["CONTEXT_LORA_PATH"].delete(0, tk.END)
             self.entries["CONTEXT_LORA_PATH"].insert(0, path)
 
     def browse_file(self, setting_name, input_type):
+        # Resume Training points at a saved state dir, which lives under the LoRA
+        # output folder — open the Browse there so users don't hunt for it.
+        initial = self._pref_initialdir("lora_output_dir") if setting_name == "RESUME_TRAINING" else ""
         if input_type == "directory":
-            path = filedialog.askdirectory()
+            path = filedialog.askdirectory(initialdir=initial)
         else:
-            path = filedialog.askopenfilename()
+            path = filedialog.askopenfilename(initialdir=initial)
         if path:
             self.settings[setting_name] = path
             self.entries[setting_name].delete(0, tk.END)

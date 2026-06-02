@@ -4031,8 +4031,12 @@ class LoRATrainerGUI:
         self.sample_steps_label = ttk.Label(prompt_card, text="Steps:")
         self.sample_steps_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_steps_var = tk.StringVar(value=str(self.settings["SAMPLE_STEPS"]))
-        self.sample_steps_entry = ttk.Entry(prompt_card, textvariable=self.sample_steps_var, width=10)
-        self.sample_steps_entry.grid(row=3, column=1, sticky=tk.W, pady=4)
+        _steps_frame = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
+        _steps_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.sample_steps_entry = ttk.Entry(_steps_frame, textvariable=self.sample_steps_var, width=10)
+        self.sample_steps_entry.pack(side=tk.LEFT)
+        tk.Label(_steps_frame, text="Base samples only — Distilled is locked at 4 steps",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(10, 0))
 
         ttk.Label(prompt_card, text="Seed:").grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_seed_var = tk.StringVar(value=str(self.settings["SAMPLE_SEED"]))
@@ -4084,32 +4088,48 @@ class LoRATrainerGUI:
         )
         arch_card.grid_columnconfigure(1, weight=1)
 
+        def _arch_note(parent, text):
+            return tk.Label(parent, text=text, font=(FONT_FAMILY, 9),
+                            fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+
         self.sample_flow_shift_label = ttk.Label(arch_card, text="Flow Shift:")
         self.sample_flow_shift_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_flow_shift_var = tk.StringVar(value=str(self.settings["SAMPLE_FLOW_SHIFT"]))
-        self.sample_flow_shift_entry = ttk.Entry(arch_card, textvariable=self.sample_flow_shift_var, width=10)
-        self.sample_flow_shift_entry.grid(row=0, column=1, sticky=tk.W, pady=4)
+        _flow_frame = tk.Frame(arch_card, bg=COLORS["bg_surface"])
+        _flow_frame.grid(row=0, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.sample_flow_shift_entry = ttk.Entry(_flow_frame, textvariable=self.sample_flow_shift_var, width=10)
+        self.sample_flow_shift_entry.pack(side=tk.LEFT)
+        _arch_note(_flow_frame, "Base samples only — Distilled uses its own schedule").pack(side=tk.LEFT, padx=(10, 0))
         self.sample_flow_shift_row = 0
 
         self.sample_guidance_label = ttk.Label(arch_card, text="Guidance Scale:")
         self.sample_guidance_label.grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_guidance_var = tk.StringVar(value=str(self.settings["SAMPLE_GUIDANCE"]))
-        self.sample_guidance_entry = ttk.Entry(arch_card, textvariable=self.sample_guidance_var, width=10)
-        self.sample_guidance_entry.grid(row=1, column=1, sticky=tk.W, pady=4)
+        _guid_frame = tk.Frame(arch_card, bg=COLORS["bg_surface"])
+        _guid_frame.grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.sample_guidance_entry = ttk.Entry(_guid_frame, textvariable=self.sample_guidance_var, width=10)
+        self.sample_guidance_entry.pack(side=tk.LEFT)
+        _arch_note(_guid_frame, "Klein Base ignores guidance (use CFG Scale) — Distilled is locked at 1.0").pack(side=tk.LEFT, padx=(10, 0))
         self.sample_guidance_row = 1
 
         self.sample_negative_label = ttk.Label(arch_card, text="Negative Prompt:")
         self.sample_negative_label.grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_negative_var = tk.StringVar(value=self.settings["SAMPLE_NEGATIVE"])
-        self.sample_negative_entry = ttk.Entry(arch_card, textvariable=self.sample_negative_var, width=50)
-        self.sample_negative_entry.grid(row=2, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        _neg_frame = tk.Frame(arch_card, bg=COLORS["bg_surface"])
+        _neg_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.sample_negative_entry = ttk.Entry(_neg_frame, textvariable=self.sample_negative_var, width=50)
+        self.sample_negative_entry.pack(side=tk.LEFT)
+        _arch_note(_neg_frame, "Base samples only — Distilled ignores it").pack(side=tk.LEFT, padx=(10, 0))
         self.sample_negative_row = 2
 
         self.sample_cfg_label = ttk.Label(arch_card, text="CFG Scale:")
         self.sample_cfg_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_cfg_scale_var = tk.StringVar(value=str(self.settings["SAMPLE_CFG_SCALE"]))
-        self.sample_cfg_scale_entry = ttk.Entry(arch_card, textvariable=self.sample_cfg_scale_var, width=10)
-        self.sample_cfg_scale_entry.grid(row=3, column=1, sticky=tk.W, pady=4)
+        _cfg_frame = tk.Frame(arch_card, bg=COLORS["bg_surface"])
+        _cfg_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.sample_cfg_scale_entry = ttk.Entry(_cfg_frame, textvariable=self.sample_cfg_scale_var, width=10)
+        self.sample_cfg_scale_entry.pack(side=tk.LEFT)
+        _arch_note(_cfg_frame, "Base samples only — Distilled uses no CFG").pack(side=tk.LEFT, padx=(10, 0))
         self.sample_cfg_row = 3
 
         # Card 4: Viewer

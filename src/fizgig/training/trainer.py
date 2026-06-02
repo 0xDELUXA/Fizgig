@@ -426,6 +426,7 @@ class KleinTrainer:
             dit_weight_dtype=dit_weight_dtype,
             fp8_scaled=args.fp8_scaled,
             disable_numpy_memmap=args.disable_numpy_memmap,
+            quant_4bit=getattr(args, "quant_4bit", False),
         )
         return model
 
@@ -1673,6 +1674,12 @@ class KleinTrainer:
 
         # Load DiT
         blocks_to_swap = args.blocks_to_swap if args.blocks_to_swap else 0
+        if getattr(args, "quant_4bit", False) and blocks_to_swap > 0:
+            # NF4 weights live in module._nf4_packed, not module.weight (which is
+            # freed), so the block-swap machinery would shuffle empty tensors.
+            # 4-bit already fits without swap — force it off.
+            logger.warning("4-bit base mode: block swap is incompatible — forcing blocks_to_swap=0.")
+            blocks_to_swap = 0
         self.blocks_to_swap = blocks_to_swap
         loading_device = "cpu" if blocks_to_swap > 0 else accelerator.device
 
@@ -2703,6 +2710,9 @@ def setup_parser() -> argparse.ArgumentParser:
     # ---- FP8 ----
     parser.add_argument("--fp8_base", action="store_true", help="Use fp8 for base model")
     parser.add_argument("--fp8_scaled", action="store_true", help="Use scaled fp8 for DiT")
+    parser.add_argument("--quant_4bit", action="store_true",
+                        help="Quantize the frozen base to 4-bit NF4 (low-VRAM mode, ~halves DiT residency). "
+                             "Trains a LoRA on top, QLoRA-style. Incompatible with block swap (forced off).")
 
     # ---- Dynamo ----
     parser.add_argument("--dynamo_backend", type=str, default="NO", choices=[e.value for e in DynamoBackend])

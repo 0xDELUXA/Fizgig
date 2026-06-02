@@ -193,6 +193,7 @@ def load_dit(
     disable_numpy_memmap: bool = False,
     use_scaled_mm: bool = False,
     keep_fp8_resident: bool = False,
+    quant_4bit: bool = False,
 ):
     """Load the Klein 9B DiT model.
 
@@ -219,6 +220,14 @@ def load_dit(
 
     device = torch.device(device)
     loading_device = torch.device(loading_device)
+
+    # 4-bit (NF4) base: stage the load on CPU and quantize layer-by-layer onto the
+    # GPU afterwards, so a small card never has to hold the full fp8/bf16 model at
+    # once. The fp8/bf16 weights load to CPU (fp8 residency / scaled_mm don't apply
+    # — the weights become NF4), then apply_nf4_quantization moves each to the GPU,
+    # quantizes, and frees the CPU copy.
+    if quant_4bit:
+        loading_device = torch.device("cpu")
 
     with init_empty_weights():
         params = Klein9BParams()
@@ -307,6 +316,22 @@ def load_dit(
 
     info = model.load_state_dict(sd, strict=True, assign=True)
     logger.info(f"Loaded KleinDiT: {info}")
+
+    if quant_4bit:
+        # Quantize the frozen base-block Linears to NF4 (4-bit) on the GPU,
+        # layer-by-layer, freeing each CPU weight as we go. Halves DiT residency
+        # (~9.6 GB → ~5.6 GB) so a 9B LoRA trains on an 8–12 GB card with no swap.
+        from fizgig.modules.nf4 import apply_nf4_quantization
+        n_q = apply_nf4_quantization(
+            model, target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+            exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS, compute_device=device,
+        )
+        model.to(device)  # move the remaining (non-quantized) bf16 modules to GPU
+        import gc as _gc
+        _gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        logger.info(f"NF4 4-bit base active: {n_q} Linears quantized; DiT resident on {device}.")
     return model
 
 

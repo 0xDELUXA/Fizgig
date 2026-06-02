@@ -331,6 +331,168 @@ def load_safetensors_with_fp8_optimization(
     return state_dict
 
 
+# region FP8 scaled_mm training path
+#
+# When training a LoRA on an fp8 base, the frozen-base Linears dominate compute.
+# Running them in fp8 via torch._scaled_mm (forward AND backward) is ~1.3-1.5x
+# faster than dequantize-to-bf16 on the GEMMs, biggest at low (face-crop)
+# resolutions where attention is cheap. Recipe (OneTrainer-style): per-token
+# activation quant + POST-matmul scale (sidesteps Blackwell's rowwise-scale
+# limitation). The base weight is frozen, so the custom autograd Function only
+# returns grad w.r.t. the input (to chain back to earlier LoRA modules).
+
+_FP8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
+_TRAIN_SCALED_MM_SUPPORTED = None      # lazily resolved hardware capability
+_ONE_BY_DEVICE = {}                    # cached scalar 1.0 per device
+# Diagnostic: logs each fp8 Linear's path + state and flags any divergence
+# between a Linear's calls (forward vs checkpoint recompute). Off by default;
+# set FIZGIG_FP8_DIAG=1 to enable (very verbose — one line per fp8 Linear).
+_FP8_DIAG = os.environ.get("FIZGIG_FP8_DIAG", "0") != "0"
+_fp8_diag_last = {}
+
+
+def _train_scaled_mm_supported() -> bool:
+    global _TRAIN_SCALED_MM_SUPPORTED
+    if _TRAIN_SCALED_MM_SUPPORTED is None:
+        from fizgig.utils.device import fp8_scaled_mm_supported
+        _TRAIN_SCALED_MM_SUPPORTED = fp8_scaled_mm_supported()
+    return _TRAIN_SCALED_MM_SUPPORTED
+
+
+def _one(device):
+    o = _ONE_BY_DEVICE.get(device)
+    if o is None:
+        o = torch.tensor(1.0, device=device, dtype=torch.float32)
+        _ONE_BY_DEVICE[device] = o
+    return o
+
+
+def _per_token_quant(t: torch.Tensor):
+    """Per-row (per-token) fp8 quant. Returns (fp8 tensor, per-row scale (M,1) fp32)."""
+    sc = (t.detach().abs().amax(dim=-1, keepdim=True) / _FP8_E4M3_MAX).clamp_(min=1e-8).to(torch.float32)
+    q = (t / sc).clamp_(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+    return q, sc
+
+
+class _FP8ScaledMMLinear(torch.autograd.Function):
+    """fp8 matmul for a FROZEN base Linear (weight requires no grad).
+
+    forward:  y = (x_fp8 @ Wᵀ_fp8) · w_scale · x_token_scale
+    backward: grad_x = (gradᵀ_fp8 @ W_fp8) · w_scale · grad_token_scale
+    Only grad w.r.t. x is returned (weight/scale are frozen → None).
+    """
+    @staticmethod
+    def forward(ctx, x, weight_fp8, scale_weight):
+        orig_shape = x.shape
+        x2 = x.reshape(-1, orig_shape[-1])
+        xq, xs = _per_token_quant(x2)
+        sw = scale_weight.to(torch.float32).reshape(())
+        w_fwd = weight_fp8.t()  # (K,N) col-major view — free
+        out = torch._scaled_mm(xq, w_fwd, scale_a=_one(x.device), scale_b=sw, out_dtype=torch.bfloat16)
+        out = out * xs.to(out.dtype)
+        # The weight + scale are FROZEN module attributes that need no gradient, so
+        # we stash them on ctx directly instead of save_for_backward. save_for_backward
+        # registers tensors into autograd's saved-tensor machinery, which under
+        # gradient checkpointing (use_reentrant=False) must line up exactly between
+        # the original forward and the recompute — the extra scalar scale tensor
+        # shifted that list and triggered a CheckpointError. Stashing on ctx keeps
+        # these frozen tensors out of that bookkeeping entirely.
+        ctx.weight_fp8 = weight_fp8
+        ctx.scale_weight = scale_weight
+        ctx.orig_shape = orig_shape
+        return out.reshape(*orig_shape[:-1], -1)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        weight_fp8, scale_weight = ctx.weight_fp8, ctx.scale_weight
+        go = grad_out.reshape(-1, grad_out.shape[-1]).contiguous()
+        gq, gs = _per_token_quant(go)
+        sw = scale_weight.to(torch.float32).reshape(())
+        # grad_x = grad_out @ W ; W is (N,K) → need (N,K) col-major (transpose-copy)
+        w_bwd = weight_fp8.t().contiguous().t()
+        gx = torch._scaled_mm(gq, w_bwd, scale_a=_one(grad_out.device), scale_b=sw, out_dtype=torch.bfloat16)
+        gx = gx * gs.to(gx.dtype)
+        return gx.reshape(*ctx.orig_shape[:-1], -1), None, None
+
+
+def _try_fp8_scaled_mm_train(self: nn.Linear, x):
+    """Return the fp8 scaled_mm result for a training step, or None to fall back.
+
+    Gated on self.training (NOT torch.is_grad_enabled): gradient checkpointing
+    flips grad mode between its first forward and its recompute; self.training is
+    stable across both and False for inference/preview (eval()).
+
+    CRITICAL — the fp8-vs-dequant decision is PROBED ONCE per module and cached on
+    self._fp8_train_decision. A per-call try/except is unsafe under gradient
+    checkpointing: torch._scaled_mm can succeed on the first forward but raise on
+    the recompute (or vice versa), so the two passes take different code paths ->
+    save different tensors -> "recomputed values have different metadata"
+    CheckpointError (the crash this fixes). Caching forces both passes to take the
+    SAME path. If the probe fails, we cache dequant for that Linear permanently
+    and log the real error — so the run completes and we can see why scaled_mm
+    failed.
+
+    Stable preconditions: fp8 weight with per-tensor scale, fp8 tensor cores
+    (SM 8.9+), 16-aligned matmul dims."""
+    def _diag(path, M=None):
+        # FIZGIG_FP8_DIAG=1 only. Logs per-fp8-Linear decisions and flags the
+        # instant a Linear's path flips between calls (forward vs checkpoint
+        # recompute) — the divergence that causes the CheckpointError.
+        if _FP8_DIAG and self.weight.dtype == torch.float8_e4m3fn:
+            prev = _fp8_diag_last.get(id(self))
+            tag = "   <<<<< DIVERGENCE" if (prev is not None and prev != path) else ""
+            logger.warning(
+                f"[fp8diag] {path:<8} train={self.training} grad={torch.is_grad_enabled()} "
+                f"cached={getattr(self, '_fp8_train_decision', None)} M={M} "
+                f"wshape={tuple(self.weight.shape)}{tag}")
+            _fp8_diag_last[id(self)] = path
+
+    if not (self.training and _train_scaled_mm_supported()):
+        _diag("DEQUANT")
+        return None
+    decision = getattr(self, "_fp8_train_decision", None)
+    if decision == "dequant":
+        _diag("DEQUANT")
+        return None
+    if self.weight.dtype != torch.float8_e4m3fn:
+        return None
+    sw = getattr(self, "scale_weight", None)
+    if sw is None or sw.numel() != 1:   # per-tensor scale only (not block-wise)
+        _diag("DEQUANT")
+        return None
+    K = x.shape[-1]
+    N = self.weight.shape[0]
+    M = x.numel() // K if K else 0
+    if K % 16 or N % 16 or M % 16 or M == 0:
+        _diag("DEQUANT", M)
+        return None  # alignment is input-dependent — never cached
+
+    if decision == "scaled_mm":
+        out = _FP8ScaledMMLinear.apply(x, self.weight, sw)
+        if self.bias is not None:
+            out = out + self.bias.to(out.dtype)
+        _diag("SCALED", M)
+        return out
+
+    # decision is None: probe once. Catch only RuntimeError (a real _scaled_mm
+    # failure) — NOT a bare Exception, which would swallow checkpoint's private
+    # _StopRecomputationError control-flow signal and corrupt its state.
+    try:
+        out = _FP8ScaledMMLinear.apply(x, self.weight, sw)
+        if self.bias is not None:
+            out = out + self.bias.to(out.dtype)
+        self._fp8_train_decision = "scaled_mm"
+        _diag("SCALED", M)
+        return out
+    except RuntimeError as e:
+        self._fp8_train_decision = "dequant"
+        logger.warning(f"fp8 scaled_mm disabled for this Linear ({type(e).__name__}: {e}); using dequant.")
+        _diag("DEQUANT", M)
+        return None
+
+# endregion
+
+
 def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=None):
     """
     Patched forward method for Linear layers with FP8 weights.
@@ -344,6 +506,13 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
     Returns:
         torch.Tensor: Result of linear transformation
     """
+    # Training on fp8 base: run the frozen-base GEMM in fp8 (fwd+bwd) for ~1.3-1.5x
+    # over dequant. Inference (no_grad) skips this and uses the bit-identical
+    # dequant path below. Returns None (falls through) when not applicable.
+    _train_out = _try_fp8_scaled_mm_train(self, x)
+    if _train_out is not None:
+        return _train_out
+
     if use_scaled_mm:
         # FP8 tensor-core matmul via torch._scaled_mm (Ada/Hopper/Blackwell,
         # SM 8.9+). Both operands run in fp8; the GEMM is ~2x bf16. Per-tensor

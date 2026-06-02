@@ -1401,8 +1401,10 @@ class KleinTrainer:
                 transformer.enable_block_swap(_orig_blocks_to_swap, device=accelerator.device, supports_backward=True)
                 transformer.move_to_device_except_swap_blocks(accelerator.device)
             else:
-                # No block swap during training — move everything back to GPU
-                transformer.blocks_to_swap = 0
+                # No block swap during training — tear down the sample-time swap
+                # offloaders (their backward hooks would otherwise linger and
+                # corrupt the next backward) and move everything back to GPU.
+                transformer.disable_block_swap()
                 transformer.to(accelerator.device)
             transformer.switch_block_swap_for_training()
         else:

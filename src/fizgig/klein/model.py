@@ -616,6 +616,20 @@ class KleinDiT(nn.Module):
             f"KleinDiT: Block swap enabled. Swapping {num_blocks} blocks, double blocks: {double_blocks_to_swap}, single blocks: {single_blocks_to_swap}."
         )
 
+    def disable_block_swap(self):
+        """Fully tear down block swap: detach offloader backward hooks and drop the
+        offloaders. Use when returning to no-swap training (e.g. the Distilled
+        sample path maxes swap to free VRAM, then restores swap=0). Without this,
+        the sample-time offloaders' register_full_backward_hook handles linger and
+        fire on the next training backward — perturbing the gradient-checkpointing
+        recompute (harmless to plain Linear, but it broke the fp8 scaled_mm path)."""
+        for attr in ("offloader_double", "offloader_single"):
+            off = getattr(self, attr, None)
+            if off is not None and hasattr(off, "remove_hooks"):
+                off.remove_hooks()
+            setattr(self, attr, None)
+        self.blocks_to_swap = 0
+
     def switch_block_swap_for_inference(self):
         if self.blocks_to_swap:
             self.offloader_double.set_forward_only(True)

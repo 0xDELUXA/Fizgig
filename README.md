@@ -73,7 +73,7 @@ Distil any Klein LoRA down to a lower rank with block and timestep targeting. Fa
 
 ## Requirements
 
-- **GPU** — NVIDIA RTX 30-series, 40-series, or 50-series (Blackwell). **16 GB+ VRAM** recommended (24 GB+ comfortable).
+- **GPU** — NVIDIA RTX 30-series, 40-series, or 50-series (Blackwell). **16 GB+ VRAM** recommended (24 GB+ comfortable). The fp8 training **speedup** needs a 40-series or newer (fp8 tensor cores); 30-series still gets the fp8 VRAM savings, just not the extra speed.
 - **NVIDIA driver** — 555+ on Windows, 550+ on Linux (required for CUDA 12.8 PyTorch wheels).
 - **OS** — Windows 10 / 11, or Linux. macOS works for captioning and image prep but training requires CUDA.
 - **Python** — 3.10, 3.11, 3.12, or 3.13.
@@ -112,7 +112,12 @@ Fizgig doesn't bundle model weights — they're ~40 GB combined and licensing va
 | VAE / AE | `ae.safetensors` | ~320 MB | [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev/blob/main/ae.safetensors) (from root, **not** the `vae/` subfolder) |
 | Text Encoder | `qwen_3_8b.safetensors` | ~15 GB | [Comfy-Org/vae-text-encorder-for-flux-klein-9b](https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/blob/main/split_files/text_encoders/qwen_3_8b.safetensors) |
 
-Training runs on the **Base DiT** — the **fp8 version is recommended**: same training quality, ~half the VRAM (it stays resident at ~9.6 GB, so a 9B LoRA trains in ~14 GB and fits 16 GB cards), **and ~1.5× faster training steps** on RTX 40/50-series GPUs (the frozen-base matmuls run in fp8 on the tensor cores — automatic, no config). Fizgig auto-detects pre-quantised files, so you don't need to touch the "FP8 Base" checkbox; the bf16 version works too if you prefer it. The **Distilled DiT** is used for fast 4-step previews (on by default during training, and always in the Profiler, Repair Studio, and Explorer) — so you want both if you'll use the workbench features.
+Training runs on the **Base DiT** — the **fp8 version is recommended on every GPU**: same training quality at ~half the VRAM (it stays resident at ~9.6 GB, so a 9B LoRA trains in ~14 GB and fits 16 GB cards). The speed depends on your GPU:
+
+- **RTX 40 / 50-series** — you *also* get **~1.5× faster training steps**: the frozen-base matmuls run in fp8 directly on the tensor cores (`torch._scaled_mm`, automatic, no config).
+- **RTX 30-series and older** — the speedup is skipped automatically (these GPUs lack fp8 tensor cores), but you still get the **full VRAM savings and the same quality**, so fp8 Base is worth it here too.
+
+Either way it's automatic — Fizgig auto-detects pre-quantised files and the right path for your GPU, so you don't need to touch the "FP8 Base" checkbox; the bf16 version works too if you prefer it. The **Distilled DiT** is used for fast 4-step previews (on by default during training, and always in the Profiler, Repair Studio, and Explorer) — so you want both if you'll use the workbench features.
 
 Three smaller models auto-download on first use: InsightFace (`buffalo_l`, ~300 MB, during install), Florence-2 (~500 MB–1.5 GB, first AI caption), Helsinki-NLP/opus-mt-en-zh (~300 MB, first bilingual translation).
 

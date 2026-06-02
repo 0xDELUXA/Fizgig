@@ -6785,10 +6785,12 @@ class LoRATrainerGUI:
             self.repair_prompt_var.set(baseline.prompt)
             self.repair_seed_var.set(str(baseline.seed))
             self.repair_res_var.set(str(baseline.preview_width))
+            # Carry the reference image (path, MP, strength) across the handover,
+            # reading the Explorer widgets (the authoritative source).
             if hasattr(self, "repair_ref_path_var"):
-                self.repair_ref_path_var.set(getattr(baseline, "ref_image_path", "") or "")
-                self.repair_ref_mp_var.set(str(getattr(baseline, "ref_megapixels", 1.0)))
-                self.repair_ref_strength_var.set(str(getattr(baseline, "ref_strength", 1.0)))
+                self.repair_ref_path_var.set(self.explorer_ref_path_var.get().strip())
+                self.repair_ref_mp_var.set(self.explorer_ref_mp_var.get())
+                self.repair_ref_strength_var.set(self.explorer_ref_strength_var.get())
 
             n_active = len(self.repair_engine.primary_block_ids)
             self._find_repair_profile_match()
@@ -9279,6 +9281,11 @@ class LoRATrainerGUI:
         self.explorer_prompt_var.set(prompt)
         self.explorer_seed_var.set(seed)
         self.explorer_res_var.set(res)
+        # Carry the reference image (path, MP, strength) across the handover.
+        if hasattr(self, "explorer_ref_path_var"):
+            self.explorer_ref_path_var.set(self.repair_ref_path_var.get().strip())
+            self.explorer_ref_mp_var.set(self.repair_ref_mp_var.get())
+            self.explorer_ref_strength_var.set(self.repair_ref_strength_var.get())
 
         # Switch to Explorer tab
         self.notebook.select(self.explorer_tab)

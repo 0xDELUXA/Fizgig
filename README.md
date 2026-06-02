@@ -49,7 +49,7 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 - **Proven presets** for rank 4–16, single subject through multi-character — or build your own.
 - **Distilled training samples** — 4-step Distilled previews that match ComfyUI output exactly. Uses a separate Distilled DiT loaded alongside the training Base model, with the ComfyUI Euler Simple schedule. **On by default** — toggle via the checkbox on the Samples tab. Falls back to Base multi-step samples (~40 steps) when off or when VRAM is tight.
 - **Adaptive LR** — bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
-- **Context LoRA** — load an existing LoRA as a frozen *active* layer during training, so the new LoRA learns to coexist at inference. Other trainers can only approximate this by merging a LoRA into the base first (and throwing away the separation); Fizgig keeps both as live, separate, deployable LoRAs.
+- **Context LoRA** — load an existing LoRA as a frozen *active* layer during training, in one step and with no merge, so the new LoRA learns to coexist at inference. Elsewhere this takes a separate, manual pre-step — merging a LoRA into the base model to make a throwaway checkpoint — which bakes it in, discards the separation, and on an fp8 base costs precision. Fizgig keeps both LoRAs live, separate, and deployable.
 
 > **⚠️ Context LoRA note:** Training sample previews in context mode often don't reflect the final quality of the trained LoRA. The samples can look distorted even when the LoRA itself is excellent. Always evaluate the output LoRA in ComfyUI for accurate results. This is a known issue being worked on.
 

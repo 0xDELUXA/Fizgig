@@ -373,8 +373,8 @@ class ModelOffloader(Offloader):
         self.supports_backward = supports_backward
         self.forward_only = not supports_backward  # can be toggled to True for inference
 
+        self.remove_handles = []
         if self.supports_backward:
-            self.remove_handles = []
             for i, block in enumerate(blocks):
                 hook = self.create_backward_hook(blocks, i)
                 if hook is not None:
@@ -387,10 +387,21 @@ class ModelOffloader(Offloader):
             self._wait_blocks_move(block_idx)
         self.forward_only = forward_only
 
+    def remove_hooks(self):
+        """Detach this offloader's backward hooks. Idempotent.
+
+        Must be called BEFORE a block's offloader is replaced (e.g. when block
+        swap is re-enabled at a different level around sample generation). Relying
+        on __del__ is unsafe — GC isn't prompt, so the old offloader's hooks linger
+        and fire alongside the new ones, double-swapping blocks and leaving base
+        weights stranded on CPU for the next backward ("mat2 is on cpu" crash /
+        corrupted gradients)."""
+        for handle in self.remove_handles:
+            handle.remove()
+        self.remove_handles = []
+
     def __del__(self):
-        if self.supports_backward:
-            for handle in self.remove_handles:
-                handle.remove()
+        self.remove_hooks()
 
     def create_backward_hook(self, blocks: list[nn.Module], block_index: int) -> Optional[callable]:
         # -1 for 0-based index

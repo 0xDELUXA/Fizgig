@@ -547,6 +547,17 @@ class KleinDiT(nn.Module):
         print("KleinDiT: Gradient checkpointing disabled.")
 
     def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+        # Detach any previous offloaders' backward hooks before replacing them.
+        # enable_block_swap is called repeatedly during training (e.g. the Distilled
+        # sample path maxes swap to free VRAM, then restores it), and each call used
+        # to leave the old offloaders' register_full_backward_hook handles attached
+        # until GC. Stale hooks fire alongside the new ones on the next backward,
+        # double-swapping blocks and stranding base weights on CPU -> "mat2 is on
+        # cpu" crash / corrupted gradients on the first post-sample step.
+        for _off in (getattr(self, "offloader_double", None), getattr(self, "offloader_single", None)):
+            if _off is not None and hasattr(_off, "remove_hooks"):
+                _off.remove_hooks()
+
         self.blocks_to_swap = num_blocks
         if num_blocks <= 0:
             double_blocks_to_swap = 0

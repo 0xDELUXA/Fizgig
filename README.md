@@ -16,6 +16,12 @@
 
 ---
 
+## Why Fizgig for Klein 9B?
+
+Fizgig is built end-to-end for one model — **Flux 2 Klein 9B** — so everything is tuned for it instead of bolted on. Training is fast and light: on the fp8 Base DiT it runs the frozen-base matmuls in fp8 on the tensor cores for about **1.5× faster steps** (RTX 40/50-series), and the fp8 model stays resident at ~9.6 GB so a full 9B LoRA trains comfortably on a **16 GB card**. It also includes things most trainers skip — **Context LoRA** training (learn a new LoRA on top of an existing frozen one so they coexist: a face that sits on a style, an outfit that drapes over a character), **bilingual captions** for richer convergence, **distilled 4-step previews** that match ComfyUI, and a self-tuning **adaptive learning rate**.
+
+But the real reason is what happens *after* training. Fizgig is a workbench, not just a trainer: **fix** a broken LoRA block-by-block in the Repair Studio with no retraining, **explore** new variations like a game in LoRA the Explorer, **profile** exactly which blocks carry style vs identity vs detail, and **extract** a LoRA down to a smaller rank or a specific block range — all in one app, each tool reading the others' output.
+
 ### What makes Fizgig different?
 
 - **Fix broken LoRAs without retraining** — overbaked identity? crushed style? Adjust per-block sliders with live side-by-side preview and save a repaired `.safetensors` in seconds.
@@ -43,7 +49,7 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 - **Proven presets** for rank 4–16, single subject through multi-character — or build your own.
 - **Distilled training samples** — 4-step Distilled previews that match ComfyUI output exactly. Uses a separate Distilled DiT loaded alongside the training Base model, with the ComfyUI Euler Simple schedule. **On by default** — toggle via the checkbox on the Samples tab. Falls back to Base multi-step samples (~40 steps) when off or when VRAM is tight.
 - **Adaptive LR** — bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
-- **Context LoRA** — load an existing LoRA as a frozen active layer during training, so the new LoRA learns to coexist at inference. No other trainer does this.
+- **Context LoRA** — load an existing LoRA as a frozen *active* layer during training, so the new LoRA learns to coexist at inference. Other trainers can only approximate this by merging a LoRA into the base first (and throwing away the separation); Fizgig keeps both as live, separate, deployable LoRAs.
 
 > **⚠️ Context LoRA note:** Training sample previews in context mode often don't reflect the final quality of the trained LoRA. The samples can look distorted even when the LoRA itself is excellent. Always evaluate the output LoRA in ComfyUI for accurate results. This is a known issue being worked on.
 

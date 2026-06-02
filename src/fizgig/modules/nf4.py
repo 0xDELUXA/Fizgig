@@ -2,7 +2,8 @@
 
 Quantizes the frozen base-block Linear weights to NF4 (bitsandbytes), roughly
 halving DiT residency (~9.6 GB fp8 → ~5.6 GB) so a full 9B LoRA fits on an
-8–12 GB card with no block swap. The trainable LoRA still runs in bf16 on top —
+10–12 GB card with no block swap (the gap fp8's ~14 GB training can't reach). The
+trainable LoRA still runs in bf16 on top —
 this is QLoRA's recipe applied to a diffusion DiT.
 
 Design mirrors modules/fp8.py: we keep each `nn.Linear` (so LoRA targeting by

@@ -320,7 +320,7 @@ def load_dit(
     if quant_4bit:
         # Quantize the frozen base-block Linears to NF4 (4-bit) on the GPU,
         # layer-by-layer, freeing each CPU weight as we go. Halves DiT residency
-        # (~9.6 GB → ~5.6 GB) so a 9B LoRA trains on an 8–12 GB card with no swap.
+        # (~9.6 GB → ~5.6 GB) so a 9B LoRA trains on a 10–12 GB card with no swap.
         from fizgig.modules.nf4 import apply_nf4_quantization
         n_q = apply_nf4_quantization(
             model, target_keys=FP8_OPTIMIZATION_TARGET_KEYS,

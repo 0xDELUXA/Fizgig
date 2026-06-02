@@ -51,6 +51,7 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 
 - **Pause / Resume** — graceful epoch-boundary pause that frees VRAM and resumes with full optimizer state and no quality regression.
 - **Model Area targeting** — train only Identity blocks, Style blocks, Details blocks, or the full model.
+- **Faster fp8 training (free speedup)** — when you train on the fp8 Base DiT, Fizgig runs the frozen-base matmuls in fp8 on the tensor cores (`torch._scaled_mm`, forward *and* backward) — **~1.5× faster training steps** at typical LoRA resolutions, with no quality cost in our testing. It's automatic — no flag, no config — and works alongside block swap and context LoRA. Needs an RTX 40/50-series (or newer) GPU; older cards fall back to the standard path automatically. Yet another reason to train on fp8 Base.
 - **Auto VRAM management** — block swap auto-detects from GPU VRAM, OOM detection suggests fixes. Supports both bf16 and fp8 Base DiT. Training with fp8 Base and block swap works correctly.
 - **Diffusers LoRA support** — OneTrainer LoRAs with split Q/K/V keys auto-fused on load.
 
@@ -111,7 +112,7 @@ Fizgig doesn't bundle model weights — they're ~40 GB combined and licensing va
 | VAE / AE | `ae.safetensors` | ~320 MB | [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev/blob/main/ae.safetensors) (from root, **not** the `vae/` subfolder) |
 | Text Encoder | `qwen_3_8b.safetensors` | ~15 GB | [Comfy-Org/vae-text-encorder-for-flux-klein-9b](https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/blob/main/split_files/text_encoders/qwen_3_8b.safetensors) |
 
-Training runs on the **Base DiT** — the **fp8 version is recommended**: same training quality, ~half the VRAM (it stays resident at ~9.6 GB, so a 9B LoRA trains in ~14 GB and fits 16 GB cards). Fizgig auto-detects pre-quantised files, so you don't need to touch the "FP8 Base" checkbox; the bf16 version works too if you prefer it. The **Distilled DiT** is used for fast 4-step previews (on by default during training, and always in the Profiler, Repair Studio, and Explorer) — so you want both if you'll use the workbench features.
+Training runs on the **Base DiT** — the **fp8 version is recommended**: same training quality, ~half the VRAM (it stays resident at ~9.6 GB, so a 9B LoRA trains in ~14 GB and fits 16 GB cards), **and ~1.5× faster training steps** on RTX 40/50-series GPUs (the frozen-base matmuls run in fp8 on the tensor cores — automatic, no config). Fizgig auto-detects pre-quantised files, so you don't need to touch the "FP8 Base" checkbox; the bf16 version works too if you prefer it. The **Distilled DiT** is used for fast 4-step previews (on by default during training, and always in the Profiler, Repair Studio, and Explorer) — so you want both if you'll use the workbench features.
 
 Three smaller models auto-download on first use: InsightFace (`buffalo_l`, ~300 MB, during install), Florence-2 (~500 MB–1.5 GB, first AI caption), Helsinki-NLP/opus-mt-en-zh (~300 MB, first bilingual translation).
 

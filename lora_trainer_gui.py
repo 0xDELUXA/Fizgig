@@ -1878,6 +1878,21 @@ class LoRATrainerGUI:
                   foreground="#E67E22", font=(FONT_FAMILY, 8, "italic")).grid(
             row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
+        # Target Megapixels (training resolution) — moved here from Other Options
+        ttk.Label(training_content, text="Target Megapixels:").grid(row=16, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        mp_frame = ttk.Frame(training_content)
+        mp_frame.grid(row=16, column=1, sticky=tk.W, padx=5, pady=(8, 2))
+        ttk.Combobox(mp_frame, textvariable=self.dataset_megapixels_var,
+                     values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0"], width=8).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(mp_frame, text="MP  (0.25 ≈ 512×512, 1.0 ≈ 1024×1024 of area)",
+                  foreground="#95A5A6", font=(FONT_FAMILY, 9)).pack(side=tk.LEFT)
+        ttk.Label(training_content,
+                  text="Images are automatically resized to fit this target area — no need to resize your dataset "
+                       "beforehand. 0.25 MP ≈ 512×512 of pixel area, and your images do NOT have to be square: any "
+                       "aspect ratio works (bucketing handles mixed shapes). Higher = more detail, but more VRAM per step.",
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720).grid(
+            row=17, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
         optimizer_section.pack(fill=tk.X, padx=36, pady=(0, 16))
@@ -1914,18 +1929,8 @@ class LoRATrainerGUI:
         tk.Label(scheduler_content, text="(default .txt)",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(row=1, column=2, sticky=tk.W, padx=5)
 
-        ttk.Label(scheduler_content, text="Target Megapixels:").grid(row=2, column=0, sticky=tk.W, padx=(12, 8), pady=4)
-        mp_frame = tk.Frame(scheduler_content, bg=COLORS["bg_surface"])
-        mp_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
-        ttk.Combobox(mp_frame, textvariable=self.dataset_megapixels_var,
-                     values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0"], width=8).pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(mp_frame, text="MP  (1.0 = 1024×1024 area)",
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
-        tk.Label(scheduler_content,
-                 text="Images are automatically resized to fit this target — no need to resize your dataset beforehand. "
-                      "Higher = more detail but more VRAM per step.",
-                 font=(FONT_FAMILY, 8, "italic"), fg="#95A5A6", bg=COLORS["bg_surface"],
-                 wraplength=500, justify=tk.LEFT).grid(row=3, column=0, columnspan=3, sticky=tk.W, padx=(12, 8), pady=(0, 2))
+        # (Target Megapixels moved to the Training Parameters section — it's a core
+        # training setting, so it lives with the rest of them rather than buried here.)
 
         ttk.Label(scheduler_content, text="Batch Size:").grid(row=4, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         bs_frame = tk.Frame(scheduler_content, bg=COLORS["bg_surface"])

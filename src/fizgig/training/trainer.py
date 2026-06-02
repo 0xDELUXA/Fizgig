@@ -1251,6 +1251,10 @@ class KleinTrainer:
         _sample_dit_path = getattr(args, "sample_dit", None)
         _use_distilled = _sample_dit_path and os.path.exists(_sample_dit_path)
         _orig_blocks_to_swap = self.blocks_to_swap or 0
+        # A 4-bit (NF4) base can't be block-swapped (weights are in _nf4_packed, not
+        # .weight), and it's already small (~5.6 GB), so we skip the swap-maxing that
+        # the fp8/bf16 path does to free VRAM for the Distilled load.
+        _nf4_base = getattr(transformer, "_nf4_quantized", False)
         _distilled_dit = None
         _sample_net = None
         _ctx_sample = None
@@ -1262,9 +1266,10 @@ class KleinTrainer:
             # But enable_block_swap's distribution formula needs a value it can split.
             # Use num_double-2 + num_single-2 as separate calls won't work, so pick
             # a value the formula handles: 16 is the documented max for Klein 9B.
-            _max_swap = 16
-            transformer.enable_block_swap(_max_swap, device=accelerator.device, supports_backward=True)
-            transformer.prepare_block_swap_before_forward()
+            if not _nf4_base:
+                _max_swap = 16
+                transformer.enable_block_swap(_max_swap, device=accelerator.device, supports_backward=True)
+                transformer.prepare_block_swap_before_forward()
             clean_memory_on_device(accelerator.device)
 
             # Load separate Distilled DiT — same path as Explorer/Repair Studio
@@ -1401,12 +1406,13 @@ class KleinTrainer:
                 # Re-enable original block swap level
                 transformer.enable_block_swap(_orig_blocks_to_swap, device=accelerator.device, supports_backward=True)
                 transformer.move_to_device_except_swap_blocks(accelerator.device)
-            else:
+            elif not _nf4_base:
                 # No block swap during training — tear down the sample-time swap
                 # offloaders (their backward hooks would otherwise linger and
                 # corrupt the next backward) and move everything back to GPU.
                 transformer.disable_block_swap()
                 transformer.to(accelerator.device)
+            # (NF4 base: we never swapped it during sampling, so nothing to restore.)
             transformer.switch_block_swap_for_training()
         else:
             transformer.switch_block_swap_for_training()

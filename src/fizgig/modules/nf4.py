@@ -102,6 +102,12 @@ def apply_nf4_quantization(
         del w_bf16
         count += 1
 
+    # Flag the model so callers can detect the 4-bit base (e.g. the sample path,
+    # which must NOT block-swap an NF4 model — the weights live in _nf4_packed,
+    # not .weight).
+    if count > 0:
+        model._nf4_quantized = True
+
     logger.info(
         f"NF4 quantization: {count} base Linears → 4-bit "
         f"(freed ~{freed_bytes/1e9:.2f} GB of fp8/bf16 weights, packed ~{packed_bytes/1e9:.2f} GB)."

@@ -480,12 +480,12 @@ def _auto_detect_blocks_to_swap() -> int:
         import torch
         if torch.cuda.is_available():
             vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            if vram_gb >= 28:
-                return 0   # 32 GB+ — no swap needed
-            if vram_gb >= 20:
-                return 4   # 24 GB cards (RTX 3090 / 4090)
+            # 16 GB and up → no swap. The fp8 base is only ~9 GB resident, so 16 GB
+            # cards fit without swapping — and block swap currently corrupts the
+            # backward pass (see project-block-swap-backward-bug), so we avoid it
+            # wherever VRAM allows. Only genuinely constrained cards (<14 GB) swap.
             if vram_gb >= 14:
-                return 8   # 16-20 GB
+                return 0   # 16 GB / 24 GB / 32 GB — no swap needed
             if vram_gb >= 10:
                 return 12  # 12-14 GB
             return 16      # <10 GB — maximum swap
@@ -2747,18 +2747,19 @@ class LoRATrainerGUI:
             import torch
             if torch.cuda.is_available():
                 vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-                if vram_gb >= 30:
-                    return 0   # 32 GB+ (5090, A100) — no swap needed
-                if vram_gb >= 20:
-                    return 4   # 24 GB (RTX 3090 / 4090)
+                # 16 GB and up → no swap. The fp8 base is only ~9 GB resident, so
+                # 16 GB cards fit training without swapping — and block swap
+                # currently corrupts the backward pass (see
+                # project-block-swap-backward-bug), so we avoid it wherever VRAM
+                # allows. Only genuinely constrained cards (<14 GB) swap.
                 if vram_gb >= 14:
-                    return 8   # 16 GB cards
+                    return 0   # 16 GB / 24 GB / 32 GB — no swap needed
                 if vram_gb >= 10:
                     return 12  # 12 GB cards
                 return 16      # <10 GB — maximum swap
         except Exception:
             pass
-        return 8  # safe fallback
+        return 0  # safe fallback — avoid the buggy swap path on detection failure
 
     def _get_inference_blocks_to_swap(self) -> int:
         """Resolve the Preferences inference_blocks_to_swap pref to an int.

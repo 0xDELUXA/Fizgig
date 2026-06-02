@@ -295,8 +295,15 @@ LAST_TRAIN_FILE = os.path.join(PRESETS_DIR, ".last_train_settings.json")
 # from user-saved presets. Defined in code so they ship with the app and can't be deleted accidentally.
 # Tune these as empirical findings accumulate.
 BUILT_IN_PRESETS = {
-    "✨ Old Reliable (rank 16, single subject)": {
+    "✨ Old Reliable (rank 16, full model, single subject)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "LEARNING_RATE": 1e-4,
+        "MAX_TRAIN_EPOCHS": 55, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
+        "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
+        "OPTIMIZER_TYPE": "adamw8bit",
+    },
+    "✨ Old Reliable - Flavour 8 (rank 8, full model, single subject)": {
+        "NETWORK_DIM": 8, "NETWORK_ALPHA": 8, "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 55, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",

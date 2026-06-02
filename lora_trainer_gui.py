@@ -574,6 +574,7 @@ PRESETS = {
         "DIT_MODEL": "",
         "FP8": True,
         "SCALED": True,  # BF16 model, use fp8_scaled for memory efficiency
+        "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
     },
 }
 
@@ -762,6 +763,7 @@ class LoRATrainerGUI:
             "METADATA_TAGS": "",
             "FP8": True,  # Default FP8 setting (--fp8_base)
             "SCALED": True,  # Default Scaled setting (--fp8_scaled, recommended with fp8_base)
+            "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
             # Sample generation settings
             "SAMPLE_ENABLED": True,
@@ -1992,8 +1994,8 @@ class LoRATrainerGUI:
         # Inline Attention / Logging / Memory / Metadata fields (formerly the Advanced tab)
         self._populate_other_options(scheduler_content, start_row=11)
 
-        # === Memory & FP8 Section (Collapsed by default) ===
-        memory_section = CollapsibleFrame(outer,"Memory & FP8", default_expanded=True)
+        # === Memory & FP8 / FP4 Section (Collapsed by default) ===
+        memory_section = CollapsibleFrame(outer,"Memory & FP8 / FP4", default_expanded=True)
         memory_section.pack(fill=tk.X, padx=36, pady=(0, 16))
         self.collapsible_sections["memory"] = memory_section
 
@@ -2074,6 +2076,25 @@ class LoRATrainerGUI:
         self.fp8_text_encoder_var = tk.BooleanVar(value=self.settings["FP8_TEXT_ENCODER"])
         self.fp8_text_encoder_check = ttk.Checkbutton(memory_content, text="Enable FP8 T5/LLM", variable=self.fp8_text_encoder_var, style="Surface.TCheckbutton")
         self.fp8_text_encoder_check.grid(row=4, column=1, sticky=tk.W, padx=5, pady=4)
+
+        # 4-bit (NF4) base — low-VRAM mode
+        tk.Label(memory_content, text="4-bit Base:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).grid(
+            row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.quant_4bit_var = tk.BooleanVar(value=self.settings.get("QUANT_4BIT", False))
+        self.quant_4bit_check = ttk.Checkbutton(
+            memory_content, text="Quantize base to 4-bit NF4 (low VRAM)",
+            variable=self.quant_4bit_var, command=self._on_quant_4bit_toggle,
+            style="Surface.TCheckbutton")
+        self.quant_4bit_check.grid(row=5, column=1, sticky=tk.W, padx=5, pady=4)
+        tk.Label(memory_content,
+                 text="Halves DiT VRAM (~9.6 → ~5.6 GB) so a full 9B LoRA trains on 8–12 GB cards — "
+                      "a LoRA trained on a frozen 4-bit base (QLoRA-style). Recommended for <16 GB cards. "
+                      "Forces block swap off, and supersedes the FP8 Base options. Slight quality trade vs "
+                      "fp8 — always check the output LoRA in ComfyUI.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT).grid(row=6, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        self._on_quant_4bit_toggle()  # sync initial enabled/disabled state
 
         # === Timestep & Noise Schedule Section (Collapsed by default) ===
         timestep_section = CollapsibleFrame(outer,"Timestep & Noise Schedule", default_expanded=False)
@@ -2492,6 +2513,7 @@ class LoRATrainerGUI:
         _grab("preserve_dist_var", "PRESERVE_DISTRIBUTION")
         _grab("fp8_var", "FP8")
         _grab("scaled_var", "SCALED")
+        _grab("quant_4bit_var", "QUANT_4BIT")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
         _grab("training_preset_var", "TARGET_LAYERS")
@@ -2964,6 +2986,25 @@ class LoRATrainerGUI:
         else:
             self.scaled_check.config(state=tk.DISABLED)
             self.scaled_var.set(False)
+
+    def _on_quant_4bit_toggle(self):
+        """4-bit (NF4) base forces block swap off (NF4 weights live in
+        module._nf4_packed, not .weight, so they can't be swapped) and supersedes
+        the fp8 Base options. Grey those controls while it's on."""
+        on = self.quant_4bit_var.get()
+        try:
+            self.entries["BLOCKS_SWAP"].configure(state="disabled" if on else "normal")
+        except Exception:
+            pass
+        for chk in (getattr(self, "fp8_check", None), getattr(self, "scaled_check", None)):
+            if chk is not None:
+                try:
+                    chk.configure(state=tk.DISABLED if on else tk.NORMAL)
+                except Exception:
+                    pass
+        if not on:
+            # restore the Scaled checkbox's dependent-disabled state
+            self.toggle_scaled()
 
     def _populate_other_options(self, parent, start_row=0):
         """Populate Attention / Logging / Memory / Metadata fields onto the given parent.
@@ -10007,6 +10048,7 @@ class LoRATrainerGUI:
             "METADATA_TAGS": self.entries["METADATA_TAGS"].get(),
             "FP8": self.fp8_var.get(),
             "SCALED": self.scaled_var.get(),
+            "QUANT_4BIT": self.quant_4bit_var.get(),
             "FP8_TEXT_ENCODER": self.fp8_text_encoder_var.get(),
             "ENABLE_BUCKET": self.dataset_enable_bucket_var.get(),
             "BUCKET_NO_UPSCALE": self.dataset_no_upscale_var.get(),
@@ -10093,8 +10135,10 @@ class LoRATrainerGUI:
         if config["uses_text_encoder"]:
             command.extend(["--text_encoder", self.settings["TEXT_ENCODER"]])
 
-        # FP8 base optimization
-        if self.settings["FP8"]:
+        # Base weight optimization — 4-bit NF4 supersedes fp8 (mutually exclusive).
+        if self.settings.get("QUANT_4BIT", False):
+            command.append("--quant_4bit")
+        elif self.settings["FP8"]:
             command.append("--fp8_base")
             if self.settings["SCALED"]:
                 command.append("--fp8_scaled")
@@ -10597,6 +10641,7 @@ class LoRATrainerGUI:
         current_settings["BILINGUAL_SKIP_EXISTING"] = self.skip_bilingual_var.get()
         current_settings["FP8"] = self.fp8_var.get()
         current_settings["SCALED"] = self.scaled_var.get()
+        current_settings["QUANT_4BIT"] = self.quant_4bit_var.get()
         current_settings["FP8_TEXT_ENCODER"] = self.fp8_text_encoder_var.get()
         current_settings["ENABLE_BUCKET"] = self.dataset_enable_bucket_var.get()
         current_settings["BUCKET_NO_UPSCALE"] = self.dataset_no_upscale_var.get()

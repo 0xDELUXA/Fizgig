@@ -92,6 +92,10 @@ class RepairEngine:
         self._prompt_cache_key: Optional[tuple] = None   # (prompt, primary_path)
         self._prompt_cache: Optional[tuple] = None       # (ctx_vec, neg_ctx_vec)
 
+        # Reference-image encode cache — avoids re-running the VAE on slider tweaks
+        self._ref_cache_key: Optional[tuple] = None   # (path, megapixels, strength)
+        self._ref_cache: Optional[tuple] = None       # (ref_tokens, ref_ids)
+
         # Cache the last-generated baseline keyed on (primary_path, seed,
         # prompt, w, h) — only regenerate baseline when these change.
         self._baseline_cache_key = None
@@ -268,6 +272,8 @@ class RepairEngine:
         self._changed_blocks.clear()
         self._prompt_cache_key = None
         self._prompt_cache = None
+        self._ref_cache_key = None
+        self._ref_cache = None
 
         # Final GC + CUDA cache flush.
         gc.collect()
@@ -320,6 +326,61 @@ class RepairEngine:
     # ------------------------------------------------------------------
     # Generation — the single preview entry point (v2 replaces body only)
     # ------------------------------------------------------------------
+
+    def _build_ref_tokens(self, state: SliderState):
+        """Encode the reference image into (ref_tokens, ref_ids) for edit-conditioning.
+
+        Klein is an edit model: the ref latent goes in the POSITIVE conditioning
+        (caller concatenates these onto the cond pass only). Matches the user's
+        ReferenceLatentPlus node: cap to ref_megapixels (downscale only, ×16),
+        VAE-encode, scale the latent by ref_strength (1.0 stock), pack to tokens
+        with offset position ids (the "index"/Independent method). Returns
+        (None, None) when no ref is set."""
+        path = (getattr(state, "ref_image_path", "") or "").strip()
+        strength = float(getattr(state, "ref_strength", 1.0))
+        mp = max(0.05, float(getattr(state, "ref_megapixels", 1.0) or 1.0))
+        if not path or not os.path.exists(path) or strength == 0.0:
+            return None, None
+
+        # Cache: the VAE encode is one-time per ref config — skip it on slider tweaks.
+        ref_key = (path, round(mp, 4), round(strength, 4))
+        if self._ref_cache_key == ref_key and self._ref_cache is not None:
+            return self._ref_cache
+
+        import numpy as np
+        from PIL import Image as _PILImage
+        from fizgig.klein.position import pack_control_latent
+        pipeline = self.pipeline
+        img = _PILImage.open(path).convert("RGB")
+        w, h = img.size
+        cur_mp = (w * h) / 1_000_000.0
+        if cur_mp > mp:  # downscale only (matches ReferenceLatentPlus _cap_megapixels)
+            s = (mp / cur_mp) ** 0.5
+            w, h = int(w * s), int(h * s)
+        w = max(16, (w // 16) * 16)
+        h = max(16, (h // 16) * 16)
+        img = img.resize((w, h), _PILImage.BICUBIC)
+        arr = np.asarray(img, dtype=np.float32)  # H, W, 3 in [0, 255]
+        t = torch.from_numpy(arr).permute(2, 0, 1) / 127.5 - 1.0  # C, H, W in [-1, 1]
+
+        # Encode on the pipeline device (VAE may be CPU-offloaded between previews);
+        # move it on for the encode, then restore so we don't disturb VRAM planning.
+        vae_dev = next(pipeline.vae.parameters()).device
+        pipeline.vae.to(pipeline.device).eval()
+        t = t.unsqueeze(0).to(pipeline.device, dtype=pipeline.vae.dtype)
+        with torch.no_grad():
+            ref_latent = pipeline.vae.encode(t)[0]  # [128, H/16, W/16] (packed)
+        if vae_dev.type != pipeline.device.type:
+            pipeline.vae.to(vae_dev)
+        if strength != 1.0:
+            ref_latent = ref_latent * strength
+        ref_tokens, ref_ids = pack_control_latent([ref_latent.to(pipeline.device)])
+        ref_tokens = ref_tokens.to(device=pipeline.device, dtype=torch.bfloat16)
+        ref_ids = ref_ids.to(pipeline.device)
+
+        self._ref_cache_key = ref_key
+        self._ref_cache = (ref_tokens, ref_ids)
+        return ref_tokens, ref_ids
 
     def generate_preview(self, state: SliderState) -> Image.Image:
         """Apply state, run a 4-step Distilled generation, return PIL image.
@@ -434,6 +495,16 @@ class RepairEngine:
         x, x_ids = prc_img(latents)
         dlog(f"initial latent packed: {_stats(x)} x_ids shape={list(x_ids.shape)}")
 
+        # Reference image (Klein edit conditioning) — encode once, inject into the
+        # positive/cond forward only. Disables Turbo (the activation cache is keyed
+        # without the ref sequence) and shifts no other behavior when absent.
+        ref_tokens, ref_ids = self._build_ref_tokens(state)
+        has_ref = ref_tokens is not None
+        if has_ref:
+            dlog(f"ref active: tokens={list(ref_tokens.shape)} "
+                 f"strength={state.ref_strength} mp={state.ref_megapixels} "
+                 f"path={os.path.basename(state.ref_image_path)}")
+
         # Prepare block-swap (no-op if not enabled).
         if hasattr(pipeline.dit, "_offloader") and pipeline.dit._offloader is not None:
             pipeline.dit._offloader.set_forward_only(True)
@@ -451,10 +522,13 @@ class RepairEngine:
 
         # --- v2 Turbo: determine if activation cache is usable ---
         cache_key = (self.primary_path, self.donor_path, state.seed,
-                     state.prompt, width, height)
+                     state.prompt, width, height,
+                     state.ref_image_path, round(float(state.ref_megapixels), 4),
+                     round(float(state.ref_strength), 4))
         can_use_cache = (
             self._turbo_enabled
             and pipeline.is_distilled
+            and not has_ref
             and self._act_cache is not None
             and self._act_cache_key == cache_key
             and self._changed_blocks
@@ -482,6 +556,7 @@ class RepairEngine:
                 use_cached = (
                     self._turbo_enabled
                     and not turbo_fallback
+                    and not has_ref
                     and (can_use_cache or (not can_use_cache and self._turbo_enabled))
                 )
 
@@ -511,8 +586,15 @@ class RepairEngine:
                         with _torch.no_grad(), _torch.autocast(device_type=x.device.type, dtype=x.dtype):
                             pred = pipeline.dit(x=x, x_ids=x_ids, timesteps=t_vec, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
                 else:
+                    if has_ref:
+                        x_fwd = _torch.cat((x, ref_tokens), dim=1)
+                        x_fwd_ids = _torch.cat((x_ids, ref_ids), dim=1)
+                    else:
+                        x_fwd, x_fwd_ids = x, x_ids
                     with _torch.no_grad(), _torch.autocast(device_type=x.device.type, dtype=x.dtype):
-                        pred = pipeline.dit(x=x, x_ids=x_ids, timesteps=t_vec, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+                        pred = pipeline.dit(x=x_fwd, x_ids=x_fwd_ids, timesteps=t_vec, ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec)
+                    if has_ref:
+                        pred = pred[:, : x.shape[1]]
 
                 dlog(f"step {si}: t_curr={t_curr:.4f} t_prev={t_prev:.4f} dt={(t_prev - t_curr):+.4f}")
                 dlog(f"  pred: {_stats(pred)}")
@@ -523,6 +605,24 @@ class RepairEngine:
             if self._turbo_enabled and not turbo_fallback and new_cache:
                 self._act_cache = new_cache
                 self._act_cache_key = cache_key
+        elif has_ref:
+            # Base + CFG with a reference: the ref conditions the POSITIVE pass
+            # only (uncond stays ref-free), mirroring ComfyUI's ReferenceLatent.
+            # Inlined here rather than via denoise_cfg, which applies the ref to
+            # both passes and is shared with the trainer sample path.
+            for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
+                t_vec = _torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=x.device)
+                x_cond = _torch.cat((x, ref_tokens), dim=1)
+                x_cond_ids = _torch.cat((x_ids, ref_ids), dim=1)
+                with _torch.no_grad(), _torch.autocast(device_type=x.device.type, dtype=x.dtype):
+                    pred_cond = pipeline.dit(x=x_cond, x_ids=x_cond_ids, timesteps=t_vec,
+                                             ctx=ctx, ctx_ids=ctx_ids, guidance=None)
+                    pred_uncond = pipeline.dit(x=x, x_ids=x_ids, timesteps=t_vec,
+                                               ctx=neg_ctx, ctx_ids=neg_ctx_ids, guidance=None)
+                pred_cond = pred_cond[:, : x.shape[1]]
+                pred = pred_uncond + cfg_scale * (pred_cond - pred_uncond)
+                x = x + (t_prev - t_curr) * pred
+            dlog(f"after ref CFG denoise: x {_stats(x)}")
         else:
             x = denoise_cfg(
                 pipeline.dit, x, x_ids, ctx, ctx_ids, neg_ctx, neg_ctx_ids,

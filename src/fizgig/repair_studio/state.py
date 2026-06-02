@@ -50,6 +50,12 @@ class SliderState:
     prompt: str = ""
     preview_width: int = 512
     preview_height: int = 512
+    # Reference image (Klein is an edit model): conditions the preview on a real
+    # image. ref_megapixels caps the ref's encode resolution; ref_strength scales
+    # the encoded ref latent (1.0 = stock, 0.85 ≈ Klein sweet spot, 0 = off).
+    ref_image_path: str = ""
+    ref_megapixels: float = 1.0
+    ref_strength: float = 1.0
 
     @classmethod
     def default_klein9b(cls) -> "SliderState":
@@ -62,6 +68,9 @@ class SliderState:
             "prompt": self.prompt,
             "preview_width": self.preview_width,
             "preview_height": self.preview_height,
+            "ref_image_path": self.ref_image_path,
+            "ref_megapixels": self.ref_megapixels,
+            "ref_strength": self.ref_strength,
         }
 
     @classmethod
@@ -75,6 +84,9 @@ class SliderState:
             prompt=str(d.get("prompt", "")),
             preview_width=int(d.get("preview_width", 512)),
             preview_height=int(d.get("preview_height", 512)),
+            ref_image_path=str(d.get("ref_image_path", "")),
+            ref_megapixels=float(d.get("ref_megapixels", 1.0)),
+            ref_strength=float(d.get("ref_strength", 1.0)),
         )
 
     def copy(self) -> "SliderState":
@@ -85,6 +97,8 @@ class SliderState:
                     for bid, bs in self.blocks.items()},
             seed=self.seed, prompt=self.prompt,
             preview_width=self.preview_width, preview_height=self.preview_height,
+            ref_image_path=self.ref_image_path, ref_megapixels=self.ref_megapixels,
+            ref_strength=self.ref_strength,
         )
 
     def mutate(self, active_blocks: set, num_mutations: int = 3,

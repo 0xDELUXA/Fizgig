@@ -272,7 +272,6 @@ ARCHITECTURES = {
         "supports_discrete_flow_shift": False,  # Uses flux2_shift automatic
         # Sample generation settings
         "supports_samples": True,
-        "sample_guidance_default": 3.5,
         "sample_cfg_default": 4.5,
         "sample_flow_shift_default": None,
         "sample_steps_default": 40,  # Base is not step-distilled — BFL spec is ~50 steps; 40 balances quality vs sample time. Distilled path overrides to 4.
@@ -767,7 +766,6 @@ class LoRATrainerGUI:
             "SAMPLE_EVERY_N_STEPS": 0,
             "SAMPLE_AT_FIRST": True,
             "SAMPLE_FLOW_SHIFT": "",
-            "SAMPLE_GUIDANCE": 4.0,
             "SAMPLE_NEGATIVE": "blurry, low detail, noisy, washed out, oversaturated, distorted anatomy, extra limbs, duplicate objects, text, watermark, logo, frame, cropped subject, flat lighting, muddy colors",
             "SAMPLE_CFG_SCALE": 1.0,
             # Florence captioning settings
@@ -2440,7 +2438,7 @@ class LoRATrainerGUI:
     _NON_TRAINING_ENTRY_KEYS = {
         "SAMPLE_ENABLED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
         "SAMPLE_SEED", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_EVERY_N_STEPS",
-        "SAMPLE_AT_FIRST", "SAMPLE_FLOW_SHIFT", "SAMPLE_GUIDANCE",
+        "SAMPLE_AT_FIRST", "SAMPLE_FLOW_SHIFT",
         "SAMPLE_NEGATIVE", "SAMPLE_CFG_SCALE",
     }
 
@@ -4102,35 +4100,29 @@ class LoRATrainerGUI:
         _arch_note(_flow_frame, "Base samples only — Distilled uses its own schedule").pack(side=tk.LEFT, padx=(10, 0))
         self.sample_flow_shift_row = 0
 
-        self.sample_guidance_label = ttk.Label(arch_card, text="Guidance Scale:")
-        self.sample_guidance_label.grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.sample_guidance_var = tk.StringVar(value=str(self.settings["SAMPLE_GUIDANCE"]))
-        _guid_frame = tk.Frame(arch_card, bg=COLORS["bg_surface"])
-        _guid_frame.grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=4)
-        self.sample_guidance_entry = ttk.Entry(_guid_frame, textvariable=self.sample_guidance_var, width=10)
-        self.sample_guidance_entry.pack(side=tk.LEFT)
-        _arch_note(_guid_frame, "Klein Base ignores guidance (use CFG Scale) — Distilled is locked at 1.0").pack(side=tk.LEFT, padx=(10, 0))
-        self.sample_guidance_row = 1
+        # (Guidance Scale removed — Klein Base has no guidance embed and Distilled
+        # is locked at 1.0, so the field did nothing for Klein. CFG Scale is the
+        # only real steering knob for Base samples.)
 
         self.sample_negative_label = ttk.Label(arch_card, text="Negative Prompt:")
-        self.sample_negative_label.grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_negative_label.grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_negative_var = tk.StringVar(value=self.settings["SAMPLE_NEGATIVE"])
         _neg_frame = tk.Frame(arch_card, bg=COLORS["bg_surface"])
-        _neg_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=4)
+        _neg_frame.grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_negative_entry = ttk.Entry(_neg_frame, textvariable=self.sample_negative_var, width=50)
         self.sample_negative_entry.pack(side=tk.LEFT)
         _arch_note(_neg_frame, "Base samples only — Distilled ignores it").pack(side=tk.LEFT, padx=(10, 0))
-        self.sample_negative_row = 2
+        self.sample_negative_row = 1
 
         self.sample_cfg_label = ttk.Label(arch_card, text="CFG Scale:")
-        self.sample_cfg_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_cfg_label.grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_cfg_scale_var = tk.StringVar(value=str(self.settings["SAMPLE_CFG_SCALE"]))
         _cfg_frame = tk.Frame(arch_card, bg=COLORS["bg_surface"])
-        _cfg_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W, pady=4)
+        _cfg_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_cfg_scale_entry = ttk.Entry(_cfg_frame, textvariable=self.sample_cfg_scale_var, width=10)
         self.sample_cfg_scale_entry.pack(side=tk.LEFT)
         _arch_note(_cfg_frame, "Base samples only — Distilled uses no CFG").pack(side=tk.LEFT, padx=(10, 0))
-        self.sample_cfg_row = 3
+        self.sample_cfg_row = 2
 
         # Card 4: Viewer
         viewer_card = self._start_section_card(
@@ -4159,7 +4151,6 @@ class LoRATrainerGUI:
         self.entries["SAMPLE_EVERY_N_STEPS"] = self.sample_every_n_steps_entry
         self.entries["SAMPLE_AT_FIRST"] = self.sample_at_first_var
         self.entries["SAMPLE_FLOW_SHIFT"] = self.sample_flow_shift_entry
-        self.entries["SAMPLE_GUIDANCE"] = self.sample_guidance_entry
         self.entries["SAMPLE_NEGATIVE"] = self.sample_negative_entry
         self.entries["SAMPLE_CFG_SCALE"] = self.sample_cfg_scale_entry
 
@@ -4201,9 +4192,6 @@ class LoRATrainerGUI:
         # Flow Shift (overridden to auto)
         self.sample_flow_shift_entry.configure(state=state)
         self.sample_flow_shift_label.configure(foreground=grey)
-        # Guidance Scale (overridden to 1.0)
-        self.sample_guidance_entry.configure(state=state)
-        self.sample_guidance_label.configure(foreground=grey)
         # Negative Prompt (not used by Distilled)
         self.sample_negative_entry.configure(state=state)
         self.sample_negative_label.configure(foreground=grey)
@@ -4230,8 +4218,6 @@ class LoRATrainerGUI:
             self.sample_settings_frame.grid()
 
             # Update default values for this architecture
-            if config.get("sample_guidance_default") is not None:
-                self.sample_guidance_var.set(str(config["sample_guidance_default"]))
             if config.get("sample_cfg_default") is not None:
                 self.sample_cfg_scale_var.set(str(config["sample_cfg_default"]))
             if config.get("sample_flow_shift_default") is not None:
@@ -4306,11 +4292,6 @@ class LoRATrainerGUI:
         flow_shift = self.sample_flow_shift_var.get()
         if flow_shift and "--fs" not in prompt:
             prompt += f" --fs {flow_shift}"
-
-        # Add guidance scale
-        guidance = self.sample_guidance_var.get()
-        if guidance and "--g" not in prompt:
-            prompt += f" --g {guidance}"
 
         # Add negative prompt if set
         negative = self.sample_negative_var.get().strip()

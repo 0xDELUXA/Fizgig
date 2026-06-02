@@ -461,10 +461,10 @@ DEFAULT_PREFS = {
     "lora_output_dir": "output_loras",
     "profiles_dir": "profiles",
     "cache_dir": "cache",
-    # Inference DiT block swap — int 0-16 for Klein 9B. 0 = no swap (needs
-    # 32GB+ VRAM), 16 = max swap (fits a 16GB card via PCIe offload). Applies
-    # to Repair Studio, Profiler, and Extractor. The Training tab has its own
-    # separate BLOCKS_SWAP setting that's not affected.
+    # Inference DiT block swap — int 0-16 for Klein 9B. With the Distilled fp8
+    # model (workbench default) 0 = no swap fits ~16GB; loading Base is heavier
+    # (0 ≈ 24GB). 16 = max swap for the smallest cards. Applies to Repair Studio,
+    # Profiler, and Extractor. The Training tab has its own separate BLOCKS_SWAP.
     "inference_blocks_to_swap": "Auto (detect from GPU)",
 }
 
@@ -1989,13 +1989,16 @@ class LoRATrainerGUI:
 
         # Blocks Swap dropdown — labeled VRAM presets first, then leftover numbers (Klein 9B max=16)
         ttk.Label(memory_content, text="Blocks Swap:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=4)
+        # VRAM guidance is per Base DiT precision: fp8 Base (~9.6 GB resident,
+        # recommended) needs far less than bf16 Base (~18 GB). fp8 fits 16 GB cards
+        # with no swap at all.
         blocks_swap_options = [
             "Auto (detect from GPU)",
-            "0  (No swap — 32GB+ VRAM)",
-            "4  (Light — 24GB)",
-            "8  (Moderate — 16GB)",
-            "12 (Aggressive — 12GB)",
-            "16 (Very conservative — 8-10GB)",
+            "0  (No swap — 16GB fp8 / 24GB bf16)",
+            "4  (Light — 14GB fp8 / 20GB bf16)",
+            "8  (Moderate — 12GB fp8 / 16GB bf16)",
+            "12 (Aggressive — 10GB fp8 / 12GB bf16)",
+            "16 (Max — 8GB fp8 / 10GB bf16)",
             "1", "2", "3", "5", "6", "7", "9", "10", "11", "13", "14", "15",
         ]
         _bs_max_len = max(len(v) for v in blocks_swap_options)
@@ -7363,17 +7366,19 @@ class LoRATrainerGUI:
         inf_card.columnconfigure(1, weight=1)
 
         ttk.Label(inf_card, text="DiT Block Swap (inference):").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        # Workbench previews (Repair Studio / Profiler / Extract) default to the
+        # Distilled fp8 model (light); loading Base is heavier. VRAM shown for each.
         inference_swap_options = [
             "Auto (detect from GPU)",
-            "0  (24 GB VRAM)",
-            "4  (20 GB VRAM)",
-            "8  (16 GB VRAM)",
-            "12 (14 GB VRAM)",
-            "16 (12 GB VRAM)",
+            "0  (Distilled fp8: 16GB / Base: 24GB)",
+            "4  (Distilled fp8: 14GB / Base: 20GB)",
+            "8  (Distilled fp8: 11GB / Base: 16GB)",
+            "12 (Distilled fp8: 10GB / Base: 14GB)",
+            "16 (Distilled fp8: 8GB / Base: 12GB)",
         ]
         _inf_combo = ttk.Combobox(
             inf_card, textvariable=self.prefs_vars["inference_blocks_to_swap"],
-            values=inference_swap_options, width=26, state="readonly",
+            values=inference_swap_options, width=40, state="readonly",
         )
         _inf_combo.grid(row=0, column=1, sticky=tk.W, pady=4)
         # Snap whatever's saved to the matching new label by extracting the leading integer.

@@ -348,6 +348,7 @@ class RepairEngine:
             return self._ref_cache
 
         import numpy as np
+        import torch
         from PIL import Image as _PILImage
         from fizgig.klein.position import pack_control_latent
         pipeline = self.pipeline
@@ -675,7 +676,10 @@ class RepairEngine:
         Cached on (primary_path, seed, prompt, w, h) — slider tweaks don't
         invalidate it. Cache cleared on primary swap or reset.
         """
-        key = (self.primary_path, state.seed, state.prompt, state.preview_width, state.preview_height)
+        key = (self.primary_path, state.seed, state.prompt,
+               state.preview_width, state.preview_height,
+               state.ref_image_path, round(float(state.ref_megapixels), 4),
+               round(float(state.ref_strength), 4))
         if self._baseline_cache_key == key and self._baseline_cache_image is not None:
             return self._baseline_cache_image
 
@@ -684,6 +688,11 @@ class RepairEngine:
         baseline_state.prompt = state.prompt
         baseline_state.preview_width = state.preview_width
         baseline_state.preview_height = state.preview_height
+        # Condition the baseline on the same reference, so the side-by-side
+        # differs only by the slider tweaks (not by ref presence).
+        baseline_state.ref_image_path = state.ref_image_path
+        baseline_state.ref_megapixels = state.ref_megapixels
+        baseline_state.ref_strength = state.ref_strength
 
         img = self.generate_preview(baseline_state)
         self._baseline_cache_key = key

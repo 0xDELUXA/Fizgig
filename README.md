@@ -94,6 +94,13 @@ Distil any Klein LoRA down to a lower rank with block and timestep targeting. Fa
 
 ## Install
 
+First, get the code — clone the repo (or download the ZIP via the green **Code** button and extract it):
+
+```bash
+git clone https://github.com/shootthesound/Fizgig.git
+cd Fizgig
+```
+
 ### Windows (one-click)
 
 Double-click `install_fizgig.bat`. The installer creates a venv, installs CUDA 12.8 PyTorch + all dependencies, pre-downloads InsightFace face-detection models, and verifies that CUDA is visible to PyTorch.

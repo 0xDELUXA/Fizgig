@@ -479,11 +479,12 @@ def _auto_detect_blocks_to_swap() -> int:
         import torch
         if torch.cuda.is_available():
             vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-            # 16 GB and up → no swap. The fp8 base is only ~9 GB resident, so 16 GB
-            # cards fit without swapping — and block swap currently corrupts the
-            # backward pass (see project-block-swap-backward-bug), so we avoid it
-            # wherever VRAM allows. Only genuinely constrained cards (<14 GB) swap.
-            if vram_gb >= 14:
+            # 16 GB and up → no swap. The Distilled fp8 model (workbench default) is
+            # light, so 16 GB cards run previews without swapping, and skipping swap
+            # avoids the PCIe latency. Threshold is 15, not 16: a 16 GB card reports
+            # ~15.9 GiB total (drivers reserve a little), so a >=16 gate would wrongly
+            # exclude it. Only genuinely smaller cards (<15 GB) swap.
+            if vram_gb >= 15:
                 return 0   # 16 GB / 24 GB / 32 GB — no swap needed
             if vram_gb >= 10:
                 return 12  # 12-14 GB
@@ -2748,12 +2749,12 @@ class LoRATrainerGUI:
             import torch
             if torch.cuda.is_available():
                 vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-                # 16 GB and up → no swap. The fp8 base is only ~9 GB resident, so
-                # 16 GB cards fit training without swapping — and block swap
-                # currently corrupts the backward pass (see
-                # project-block-swap-backward-bug), so we avoid it wherever VRAM
-                # allows. Only genuinely constrained cards (<14 GB) swap.
-                if vram_gb >= 14:
+                # 16 GB and up → no swap. The fp8 Base is only ~9.6 GB resident, so
+                # 16 GB cards train without swapping, and skipping swap is faster (no
+                # PCIe block transfers). Threshold is 15, not 16: a 16 GB card reports
+                # ~15.9 GiB total (drivers reserve a little), so a >=16 gate would
+                # wrongly exclude it. Only genuinely smaller cards (<15 GB) swap.
+                if vram_gb >= 15:
                     return 0   # 16 GB / 24 GB / 32 GB — no swap needed
                 if vram_gb >= 10:
                     return 12  # 12 GB cards

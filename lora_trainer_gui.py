@@ -7479,7 +7479,8 @@ class LoRATrainerGUI:
         inf_card = self._start_section_card(
             outer, "Inference Performance",
             "DiT Block Swap moves transformer blocks to CPU during forward passes to cut VRAM, at the cost of PCIe "
-            "latency per step. Affects Repair Studio / Profiler / Extract — Training has its own setting.",
+            "latency per step. Affects the workbench tools — Repair Studio / Profiler / Extract / Explorer. "
+            "Training (and its Distilled samples) manage their own swap automatically and ignore this setting.",
         )
         inf_card.columnconfigure(1, weight=1)
 

@@ -54,7 +54,7 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 
 ### Training
 - **Proven presets** for rank 4–16, single subject through multi-character — or build your own.
-- **Distilled training samples** — 4-step Distilled previews that match ComfyUI output exactly. Uses a separate Distilled DiT loaded alongside the training Base model, with the ComfyUI Euler Simple schedule. **On by default** — toggle via the checkbox on the Samples tab. Falls back to Base multi-step samples (~40 steps) when off or when VRAM is tight.
+- **Distilled training samples** — 4-step Distilled previews that match ComfyUI output exactly. Uses a separate Distilled DiT loaded alongside the training Base model, with the ComfyUI Euler Simple schedule. **On by default** — toggle via the checkbox on the Samples tab (turn off for Base multi-step samples, ~40 steps). On tighter cards the Distilled sample model **auto-swaps its own blocks by VRAM** (≥24 GB none, 16–20 GB partial, 12 GB max) so 4-step previews keep working on a 16 GB card without you touching a setting.
 - **Adaptive LR** — bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
 - **Context LoRA** — load an existing LoRA as a frozen *active* layer during training, so the new LoRA learns to coexist at inference. No other trainer does this.
 
@@ -179,7 +179,7 @@ Inference tools (Profiler / Repair Studio / Explorer / Extract) on Distilled 4-s
 
 **Training:** the fp8 Base DiT stays resident at ~9.6 GB (not dequantised to bf16), so training a 9B LoRA fits comfortably in **16 GB** — around **14 GB** observed at block-swap 0 with a context LoRA active (a little less without). VRAM scales with resolution and batch size; raise block swap to fit smaller cards.
 
-**DiT Block Swap (inference)** in Preferences applies to all tool tabs. Training has its own separate block swap setting. On first launch, Fizgig auto-detects your GPU VRAM and picks a sensible default — once you explicitly choose a value, your choice is saved.
+**DiT Block Swap (inference)** in Preferences applies to the workbench tools (Repair Studio / Profiler / Extract / Explorer) only. Training has its own separate block swap setting, and its Distilled samples auto-swap by VRAM — so this preference never touches a training run. On first launch, Fizgig auto-detects your GPU VRAM and picks a sensible default — once you explicitly choose a value, your choice is saved.
 
 ---
 

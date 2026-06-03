@@ -468,6 +468,13 @@ DEFAULT_PREFS = {
     "lora_output_dir": "output_loras",
     "profiles_dir": "profiles",
     "cache_dir": "cache",
+    # Input directories — default folders the Browse dialogs open in, so users
+    # don't re-hunt every session. input_lora_dir seeds LoRA pickers (Repair
+    # Studio primary/donor, LoRA the Explorer, Context LoRA on Training);
+    # input_ref_dir seeds the reference-image pickers (Repair Studio, Explorer).
+    # Absolute paths (may live anywhere); empty = no default (last folder).
+    "input_lora_dir": "",
+    "input_ref_dir": "",
     # Inference DiT block swap — int 0-16 for Klein 9B. With the Distilled fp8
     # model (workbench default) 0 = no swap fits ~16GB; loading Base is heavier
     # (0 ≈ 24GB). 16 = max swap for the smallest cards. Applies to Repair Studio,
@@ -5882,6 +5889,25 @@ class LoRATrainerGUI:
             row=r, column=1, columnspan=2, sticky=tk.EW, padx=4, pady=2)
         r += 1
 
+        # Reference image (Klein edit conditioning). Carried in the baseline
+        # SliderState, so a ref set here follows the LoRA into Repair Studio.
+        ref_frame = ttk.Frame(setup_card)
+        ref_frame.grid(row=r, column=0, columnspan=3, sticky=tk.EW, pady=(2, 2))
+        ttk.Label(ref_frame, text="Reference:").pack(side=tk.LEFT, padx=(0, 4))
+        self.explorer_ref_path_var = tk.StringVar(value="")
+        ttk.Entry(ref_frame, textvariable=self.explorer_ref_path_var, state="readonly",
+                  width=28).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        ttk.Button(ref_frame, text="Browse", command=self._browse_explorer_ref).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(ref_frame, text="Clear", command=self._clear_explorer_ref).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(ref_frame, text="MP:").pack(side=tk.LEFT, padx=(0, 2))
+        self.explorer_ref_mp_var = tk.StringVar(value="1.0")
+        ttk.Combobox(ref_frame, textvariable=self.explorer_ref_mp_var,
+                     values=["0.25", "0.5", "1.0", "2.0"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(ref_frame, text="Strength:").pack(side=tk.LEFT, padx=(0, 2))
+        self.explorer_ref_strength_var = tk.StringVar(value="1.0")
+        ttk.Entry(ref_frame, textvariable=self.explorer_ref_strength_var, width=6).pack(side=tk.LEFT)
+        r += 1
+
         params_frame = ttk.Frame(setup_card)
         params_frame.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(6, 2))
         ttk.Label(params_frame, text="Seed:").pack(side=tk.LEFT, padx=(0, 4))
@@ -6175,6 +6201,7 @@ class LoRATrainerGUI:
             res = int(self.explorer_res_var.get() or 512)
             self._explorer_baseline_state.preview_width = res
             self._explorer_baseline_state.preview_height = res
+            self._explorer_sync_ref_into(self._explorer_baseline_state)
             self._explorer_history.clear()
             self._explorer_locked_blocks.clear()
             self._explorer_last_pick_blocks.clear()
@@ -6212,6 +6239,7 @@ class LoRATrainerGUI:
         res = int(self.explorer_res_var.get() or 512)
         state.preview_width = res
         state.preview_height = res
+        self._explorer_sync_ref_into(state)
 
         # Generate mutations (exclude locked blocks)
         active = self._explorer_engine.primary_block_ids - self._explorer_locked_blocks
@@ -6452,6 +6480,36 @@ class LoRATrainerGUI:
         """Randomize seed and regenerate (same as Apply but for seed)."""
         import random
         self.explorer_seed_var.set(str(random.randint(1, 99999)))
+        if self._explorer_baseline_state is not None and not self._explorer_generating:
+            self._explorer_generate_baseline_and_roll()
+
+    def _explorer_sync_ref_into(self, state):
+        """Copy the Explorer reference-image widgets into a SliderState."""
+        state.ref_image_path = self.explorer_ref_path_var.get().strip()
+        try:
+            state.ref_megapixels = float(self.explorer_ref_mp_var.get())
+        except (ValueError, AttributeError):
+            state.ref_megapixels = 1.0
+        try:
+            state.ref_strength = float(self.explorer_ref_strength_var.get())
+        except (ValueError, AttributeError):
+            state.ref_strength = 1.0
+
+    def _browse_explorer_ref(self):
+        """Pick a reference image to edit-condition the Explorer previews."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select reference image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_ref_dir"))
+        if path:
+            self.explorer_ref_path_var.set(path)
+            if self._explorer_baseline_state is not None and not self._explorer_generating:
+                self._explorer_generate_baseline_and_roll()
+
+    def _clear_explorer_ref(self):
+        """Remove the Explorer reference image."""
+        self.explorer_ref_path_var.set("")
         if self._explorer_baseline_state is not None and not self._explorer_generating:
             self._explorer_generate_baseline_and_roll()
 
@@ -6731,10 +6789,16 @@ class LoRATrainerGUI:
             finally:
                 self._repair_master_mutating = False
 
-            # Set the prompt, seed, and resolution to match Explorer
+            # Set the prompt, seed, resolution, and reference image to match Explorer
             self.repair_prompt_var.set(baseline.prompt)
             self.repair_seed_var.set(str(baseline.seed))
             self.repair_res_var.set(str(baseline.preview_width))
+            # Carry the reference image (path, MP, strength) across the handover,
+            # reading the Explorer widgets (the authoritative source).
+            if hasattr(self, "repair_ref_path_var"):
+                self.repair_ref_path_var.set(self.explorer_ref_path_var.get().strip())
+                self.repair_ref_mp_var.set(self.explorer_ref_mp_var.get())
+                self.repair_ref_strength_var.set(self.explorer_ref_strength_var.get())
 
             n_active = len(self.repair_engine.primary_block_ids)
             self._find_repair_profile_match()
@@ -7458,6 +7522,20 @@ class LoRATrainerGUI:
         next_row = self._add_pref_row(out_card, next_row, "Profiles:", "profiles_dir", "Where profiler HTML reports are saved", is_dir=True)
         next_row = self._add_pref_row(out_card, next_row, "Cache:", "cache_dir", "Cached latents and text encodings", is_dir=True)
 
+        # Card 3b: Input Directories — default starting folders for the Browse
+        # dialogs, so users don't re-hunt for their LoRAs / reference images.
+        in_card = self._start_section_card(
+            outer, "Input Directories",
+            "Default folders the Browse dialogs open in. Saves hunting each session when loading "
+            "LoRAs or reference images. Leave empty to use the last-used folder.",
+        )
+        in_card.columnconfigure(1, weight=1)
+        in_row = 0
+        in_row = self._add_pref_row(in_card, in_row, "LoRA loading:", "input_lora_dir",
+                                    "Default folder for loading LoRAs — Repair Studio, LoRA the Explorer, and the Context LoRA picker", is_dir=True)
+        in_row = self._add_pref_row(in_card, in_row, "Reference images:", "input_ref_dir",
+                                    "Default folder for reference images — Repair Studio and LoRA the Explorer", is_dir=True)
+
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)
         action_row = tk.Frame(actions_card, bg=COLORS["bg_surface"])
@@ -8091,6 +8169,31 @@ class LoRATrainerGUI:
         turbo_chk.pack(side=tk.RIGHT)
         r += 1
 
+        # Reference image row (Klein is an edit model — condition the preview on a
+        # real image). Path + MP cap (downscale-only) + strength (1.0 stock,
+        # ~0.85 Klein sweet spot, 0 = off). Carried in SliderState so it survives
+        # the Explorer ↔ Repair handover.
+        ttk.Label(parent, text="Reference:").grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
+        self.repair_ref_path_var = tk.StringVar(value="")
+        ref_entry = ttk.Entry(parent, textvariable=self.repair_ref_path_var, state="readonly")
+        ref_entry.grid(row=r, column=1, sticky=tk.EW, padx=4, pady=2)
+        ref_params = ttk.Frame(parent)
+        ref_params.grid(row=r, column=2, columnspan=2, sticky=tk.EW, padx=4, pady=2)
+        ttk.Button(ref_params, text="Browse", command=self._browse_repair_ref).pack(side=tk.LEFT, padx=(0, 2))
+        ttk.Button(ref_params, text="Clear", command=self._clear_repair_ref).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Label(ref_params, text="MP:").pack(side=tk.LEFT, padx=(0, 2))
+        self.repair_ref_mp_var = tk.StringVar(value="1.0")
+        mp_combo = ttk.Combobox(ref_params, textvariable=self.repair_ref_mp_var,
+                                values=["0.25", "0.5", "1.0", "2.0"], state="readonly", width=5)
+        mp_combo.pack(side=tk.LEFT, padx=(0, 10))
+        mp_combo.bind("<<ComboboxSelected>>", lambda e: self._on_repair_ref_changed())
+        ttk.Label(ref_params, text="Strength:").pack(side=tk.LEFT, padx=(0, 2))
+        self.repair_ref_strength_var = tk.StringVar(value="1.0")
+        ref_str_entry = ttk.Entry(ref_params, textvariable=self.repair_ref_strength_var, width=6)
+        ref_str_entry.pack(side=tk.LEFT)
+        self.repair_ref_strength_var.trace_add("write", lambda *_: self._on_repair_ref_changed())
+        r += 1
+
         # Preset row
         ttk.Label(parent, text="Preset:").grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
         self.repair_preset_var = tk.StringVar()
@@ -8544,9 +8647,20 @@ class LoRATrainerGUI:
     # Repair Studio actions
     # ------------------------------------------------------------
 
+    def _pref_initialdir(self, pref_key: str) -> str:
+        """Return the preferred starting folder for a Browse dialog, or "" to let
+        Tk use the last-used folder. Reads the prefs var named by pref_key (e.g.
+        'input_lora_dir', 'input_ref_dir', 'lora_output_dir') and validates it."""
+        try:
+            d = self.prefs_vars[pref_key].get().strip()
+        except (KeyError, AttributeError):
+            return ""
+        return d if d and os.path.isdir(d) else ""
+
     def _browse_repair_lora(self, var):
         filepath = filedialog.askopenfilename(
-            title="Select LoRA file", filetypes=[("SafeTensors", "*.safetensors")]
+            title="Select LoRA file", filetypes=[("SafeTensors", "*.safetensors")],
+            initialdir=self._pref_initialdir("input_lora_dir"),
         )
         if filepath:
             var.set(filepath)
@@ -8821,6 +8935,38 @@ class LoRATrainerGUI:
         self._repair_preview_dirty = True
         self._schedule_preview(force=True)
 
+    def _browse_repair_ref(self):
+        """Pick a reference image for edit-conditioning the preview."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select reference image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_ref_dir"))
+        if path:
+            self.repair_ref_path_var.set(path)
+            self._on_repair_ref_changed()
+
+    def _clear_repair_ref(self):
+        """Remove the reference image — preview reverts to text-only."""
+        self.repair_ref_path_var.set("")
+        self._on_repair_ref_changed()
+
+    def _on_repair_ref_changed(self):
+        """Reference path/MP/strength changed — push into state and regenerate.
+
+        The ref conditions BOTH the baseline and tweaked previews, so this
+        invalidates the baseline cache (same as a seed/res change)."""
+        self.repair_state.ref_image_path = self.repair_ref_path_var.get().strip()
+        try:
+            self.repair_state.ref_megapixels = float(self.repair_ref_mp_var.get())
+        except (ValueError, AttributeError):
+            self.repair_state.ref_megapixels = 1.0
+        try:
+            self.repair_state.ref_strength = float(self.repair_ref_strength_var.get())
+        except (ValueError, AttributeError):
+            self.repair_state.ref_strength = 1.0
+        self._on_preview_param_changed()
+
     def _on_turbo_toggled(self):
         """Sync Turbo Preview checkbox to the engine and invalidate cache on toggle."""
         if self.repair_engine is not None:
@@ -8879,6 +9025,16 @@ class LoRATrainerGUI:
             res = 512
         self.repair_state.preview_width = res
         self.repair_state.preview_height = res
+        # Reference-image fields (Klein edit conditioning).
+        self.repair_state.ref_image_path = self.repair_ref_path_var.get().strip()
+        try:
+            self.repair_state.ref_megapixels = float(self.repair_ref_mp_var.get())
+        except ValueError:
+            self.repair_state.ref_megapixels = 1.0
+        try:
+            self.repair_state.ref_strength = float(self.repair_ref_strength_var.get())
+        except ValueError:
+            self.repair_state.ref_strength = 1.0
 
         # Snapshot for thread (dataclass copy via JSON round-trip)
         from fizgig.repair_studio.state import SliderState
@@ -9159,6 +9315,11 @@ class LoRATrainerGUI:
         self.explorer_prompt_var.set(prompt)
         self.explorer_seed_var.set(seed)
         self.explorer_res_var.set(res)
+        # Carry the reference image (path, MP, strength) across the handover.
+        if hasattr(self, "explorer_ref_path_var"):
+            self.explorer_ref_path_var.set(self.repair_ref_path_var.get().strip())
+            self.explorer_ref_mp_var.set(self.repair_ref_mp_var.get())
+            self.explorer_ref_strength_var.set(self.repair_ref_strength_var.get())
 
         # Switch to Explorer tab
         self.notebook.select(self.explorer_tab)
@@ -9447,6 +9608,10 @@ class LoRATrainerGUI:
         self.repair_seed_var.set(str(state.seed))
         self.repair_prompt_var.set(state.prompt)
         self.repair_res_var.set(str(state.preview_width))
+        if hasattr(self, "repair_ref_path_var"):
+            self.repair_ref_path_var.set(getattr(state, "ref_image_path", "") or "")
+            self.repair_ref_mp_var.set(str(getattr(state, "ref_megapixels", 1.0)))
+            self.repair_ref_strength_var.set(str(getattr(state, "ref_strength", 1.0)))
 
     def _repair_builtin_state(self, kind: str):
         from fizgig.repair_studio.state import SliderState
@@ -9698,16 +9863,20 @@ class LoRATrainerGUI:
         path = filedialog.askopenfilename(
             title="Select Context LoRA",
             filetypes=[("SafeTensors", "*.safetensors"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_lora_dir"),
         )
         if path:
             self.entries["CONTEXT_LORA_PATH"].delete(0, tk.END)
             self.entries["CONTEXT_LORA_PATH"].insert(0, path)
 
     def browse_file(self, setting_name, input_type):
+        # Resume Training points at a saved state dir, which lives under the LoRA
+        # output folder — open the Browse there so users don't hunt for it.
+        initial = self._pref_initialdir("lora_output_dir") if setting_name == "RESUME_TRAINING" else ""
         if input_type == "directory":
-            path = filedialog.askdirectory()
+            path = filedialog.askdirectory(initialdir=initial)
         else:
-            path = filedialog.askopenfilename()
+            path = filedialog.askopenfilename(initialdir=initial)
         if path:
             self.settings[setting_name] = path
             self.entries[setting_name].delete(0, tk.END)

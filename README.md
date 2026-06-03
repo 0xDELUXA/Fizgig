@@ -190,3 +190,13 @@ If Fizgig saves you time or helps you make better LoRAs, consider supporting dev
 <a href="https://buymeacoffee.com/lorasandlenses"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"></a>
 
 ---
+
+## License
+
+Fizgig is open source under the **[Apache License 2.0](LICENSE)** — free to use, modify, and redistribute, including commercially, with attribution and no warranty. Every component is written from scratch for Klein 9B.
+
+Copyright © 2026 Peter Neill.
+
+Model weights are **not** covered by this license — each model carries its own terms from its publisher (see the Download links in Preferences).
+
+---

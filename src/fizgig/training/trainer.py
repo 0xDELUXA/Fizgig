@@ -1233,6 +1233,36 @@ class KleinTrainer:
         pixels = pixels.unsqueeze(2)
         return pixels
 
+    def _auto_distilled_sample_swap(self, num_double: int, num_single: int):
+        """Pick how many blocks of the Distilled sample model to swap, by GPU VRAM.
+
+        The Distilled forward is forward-only (no backward) and runs 4 steps once
+        per epoch, so swapping is cheap (~1s) and lets the second model coexist
+        with the Base on a tight card. Returns (num_blocks, double_override,
+        single_override); overrides are None to let enable_block_swap's ratio
+        formula split the count.
+
+        Thresholds account for cards reporting slightly under nominal (a 16GB card
+        reads ~15.x GiB, a 24GB card ~23.x) — same convention as the training and
+        inference auto-detect:
+          >=23 GB  -> 0   (24GB+: Distilled ~9GB fits resident, no swap)
+          15-22 GB -> 16  (16/20GB: ratio formula swaps ~24 blocks, ~3GB resident)
+          <15 GB   -> max (12GB: 2 double + 2 single resident, ~2GB)
+        """
+        try:
+            import torch
+            if not torch.cuda.is_available():
+                return 0, None, None
+            vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        except Exception:
+            return 0, None, None
+        if vram_gb >= 23:
+            return 0, None, None
+        if vram_gb >= 15:
+            return 16, None, None
+        # <15GB — maximum forward-only swap (the ratio formula can't reach it).
+        return (num_double - 2) + (num_single - 2), num_double - 2, num_single - 2
+
     def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
         """Orchestrate sample image generation at the right training steps."""
         if not should_sample_images(args, steps, epoch):
@@ -1278,9 +1308,24 @@ class KleinTrainer:
                 transformer.prepare_block_swap_before_forward()
             clean_memory_on_device(accelerator.device)
 
-            # Load separate Distilled DiT — same path as Explorer/Repair Studio
+            # Load separate Distilled DiT — same path as Explorer/Repair Studio.
+            # Decide how many of ITS blocks to swap. The Distilled forward is
+            # forward-only (no backward) and runs 4 steps once per epoch, so we can
+            # swap freely to keep its resident footprint small while the Base is
+            # also on the GPU. An explicit --sample_blocks_to_swap wins; otherwise
+            # auto-pick by VRAM.
             from fizgig.klein.model_utils import load_dit, KLEIN_MODEL_INFO
-            _sample_blocks = getattr(args, "sample_blocks_to_swap", 0) or 0
+            _nd = getattr(transformer, "num_double_blocks", 8)
+            _ns = getattr(transformer, "num_single_blocks", 24)
+            _arg_blocks = getattr(args, "sample_blocks_to_swap", 0) or 0
+            if _arg_blocks > 0:
+                _sample_blocks, _samp_d, _samp_s = _arg_blocks, None, None
+            else:
+                _sample_blocks, _samp_d, _samp_s = self._auto_distilled_sample_swap(_nd, _ns)
+            if _sample_blocks > 0:
+                logger.info(f"Distilled sample block swap: {_sample_blocks} "
+                            f"(double={_samp_d if _samp_d is not None else 'auto'}, "
+                            f"single={_samp_s if _samp_s is not None else 'auto'})")
             _loading_device = "cpu" if _sample_blocks > 0 else accelerator.device
             _distilled_dit = load_dit(
                 device=accelerator.device,
@@ -1293,7 +1338,10 @@ class KleinTrainer:
                 fp8_scaled=False,
             )
             if _sample_blocks > 0:
-                _distilled_dit.enable_block_swap(_sample_blocks, device=accelerator.device, supports_backward=False)
+                _distilled_dit.enable_block_swap(
+                    _sample_blocks, device=accelerator.device, supports_backward=False,
+                    double_blocks_to_swap=_samp_d, single_blocks_to_swap=_samp_s,
+                )
                 _distilled_dit.move_to_device_except_swap_blocks(accelerator.device)
             _distilled_dit.prepare_block_swap_before_forward()
             _distilled_dit.eval()

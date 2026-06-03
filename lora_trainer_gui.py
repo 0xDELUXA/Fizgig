@@ -10525,9 +10525,13 @@ class LoRATrainerGUI:
                 distilled_path = self.prefs_vars.get("distilled_dit", tk.StringVar()).get()
                 if distilled_path and os.path.exists(distilled_path):
                     command.extend(["--sample_dit", distilled_path])
-                    blocks = self._get_inference_blocks_to_swap()
-                    if blocks > 0:
-                        command.extend(["--sample_blocks_to_swap", str(blocks)])
+                    # Note: we deliberately do NOT forward the Preferences "DiT Block
+                    # Swap (inference)" pref here. That setting governs the in-app
+                    # inference tools (Repair Studio / Profiler / Extract / Explorer).
+                    # The trainer auto-picks the Distilled sample swap from VRAM
+                    # (_auto_distilled_sample_swap), so training samples manage their
+                    # own memory independently. A power user can still force it via
+                    # the raw --sample_blocks_to_swap flag.
 
         return command
 

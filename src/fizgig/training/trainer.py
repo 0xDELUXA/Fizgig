@@ -1261,14 +1261,20 @@ class KleinTrainer:
 
         if _use_distilled:
             logger.info(f"Using Distilled model for samples: {_sample_dit_path}")
-            # Max block-swap Base DiT to free VRAM (keeps 2 double + 2 single on GPU)
-            # Klein 9B: 8 double + 24 single. Max swappable = (8-2) + (24-2) = 28.
-            # But enable_block_swap's distribution formula needs a value it can split.
-            # Use num_double-2 + num_single-2 as separate calls won't work, so pick
-            # a value the formula handles: 16 is the documented max for Klein 9B.
+            # Max block-swap Base DiT to free VRAM for the second (Distilled) model.
+            # Klein 9B: 8 double + 24 single. True max swap = (8-2) + (24-2) = 28,
+            # leaving only 2 double + 2 single resident. The ratio formula caps at 24
+            # (it locks single = 3x double, so 6 double + 18 single), so pass the
+            # per-type counts explicitly to also swap the last 4 single blocks
+            # (~1 GB more) — matters on a tight 16 GB peak where Base + Distilled
+            # both sit on the GPU.
             if not _nf4_base:
-                _max_swap = 16
-                transformer.enable_block_swap(_max_swap, device=accelerator.device, supports_backward=True)
+                _max_double = getattr(transformer, "num_double_blocks", 8) - 2
+                _max_single = getattr(transformer, "num_single_blocks", 24) - 2
+                transformer.enable_block_swap(
+                    _max_double + _max_single, device=accelerator.device, supports_backward=True,
+                    double_blocks_to_swap=_max_double, single_blocks_to_swap=_max_single,
+                )
                 transformer.prepare_block_swap_before_forward()
             clean_memory_on_device(accelerator.device)
 

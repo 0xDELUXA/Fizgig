@@ -9375,8 +9375,7 @@ class LoRATrainerGUI:
 
         trav = self._start_section_card(outer, "Seed travel",
                                         "Take the epoch on the crossfade and morph it smoothly between two seeds "
-                                        "(slerp through noise space). Shows the LoRA's range. Uses the format / "
-                                        "speed / loop / tag settings above.")
+                                        "(slerp through noise space) — shows the LoRA's range, saved as a clip.")
         _tr1 = tk.Frame(trav, bg=_sbg); _tr1.pack(anchor=tk.W, pady=(0, 6))
         tk.Label(_tr1, text="Start seed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 4))
         self.royale_travel_seed_a_var = tk.StringVar(value="42")
@@ -9391,6 +9390,28 @@ class LoRATrainerGUI:
         _frcb.pack(side=tk.LEFT)
         ToolTip(_frcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
                        "24 ≈ a minute or two on a fast card.")
+
+        _trf = tk.Frame(trav, bg=_sbg); _trf.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_trf, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_travel_format_var = tk.StringVar(value="MP4")
+        _tfmt = ttk.Combobox(_trf, textvariable=self.royale_travel_format_var, values=["MP4", "GIF"],
+                             state="readonly", width=6)
+        _tfmt.pack(side=tk.LEFT)
+        ToolTip(_tfmt, "MP4 is full colour, smaller, faster to write, and autoplays on X / Reddit / Instagram.\n"
+                       "GIF embeds anywhere but is limited to 256 colours (slight banding on faces),\n"
+                       "takes noticeably longer to export, and makes a larger file.")
+        tk.Label(_trf, text="Speed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_travel_speed_var = tk.StringVar(value="Normal")
+        ttk.Combobox(_trf, textvariable=self.royale_travel_speed_var, values=["Slow", "Normal", "Fast"],
+                     state="readonly", width=8).pack(side=tk.LEFT)
+        _tro = tk.Frame(trav, bg=_sbg); _tro.pack(anchor=tk.W, pady=(0, 8))
+        self.royale_travel_loop_var = tk.BooleanVar(value=True)
+        self.royale_travel_epoch_var = tk.BooleanVar(value=True)
+        self.royale_travel_wm_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(_tro, text="Loop (ping-pong)", variable=self.royale_travel_loop_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(_tro, text="Epoch badge", variable=self.royale_travel_epoch_var).pack(side=tk.LEFT, padx=(14, 0))
+        ttk.Checkbutton(_tro, text="Fizgig tag", variable=self.royale_travel_wm_var).pack(side=tk.LEFT, padx=(14, 0))
+
         _tr2 = tk.Frame(trav, bg=_sbg); _tr2.pack(anchor=tk.W)
         self._royale_travel_btn = tk.Button(_tr2, text="Render & export seed-travel…", font=(FONT_FAMILY, 10, "bold"),
                                             fg="#FFFFFF", bg="#C0392B", activeforeground="#FFFFFF",
@@ -9886,7 +9907,7 @@ class LoRATrainerGUI:
             res = int(self.royale_res_var.get())
         except ValueError:
             res = 512
-        fmt = self.royale_export_format_var.get().upper()
+        fmt = self.royale_travel_format_var.get().upper()
         ext = ".mp4" if fmt == "MP4" else ".gif"
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -9905,10 +9926,10 @@ class LoRATrainerGUI:
             label=label, path=path, prompt=prompt, seed_a=seed_a, seed_b=seed_b,
             frames=max(2, frames), res=res, fmt=fmt, out=out,
             ref=self.royale_ref_var.get().strip(),
-            speed=self.royale_export_speed_var.get(),
-            pingpong=bool(self.royale_export_loop_var.get()),
-            brand=bool(self.royale_export_wm_var.get()),
-            show_epoch=bool(self.royale_export_epoch_var.get()),
+            speed=self.royale_travel_speed_var.get(),
+            pingpong=bool(self.royale_travel_loop_var.get()),
+            brand=bool(self.royale_travel_wm_var.get()),
+            show_epoch=bool(self.royale_travel_epoch_var.get()),
         )
         self._royale_traveling = True
         self._royale_travel_btn.configure(state="disabled")

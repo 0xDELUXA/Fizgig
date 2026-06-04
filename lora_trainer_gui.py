@@ -4598,7 +4598,7 @@ class LoRATrainerGUI:
 
         # Reference image (Klein edit conditioning) — the persistent default for
         # samples; the status-bar override can swap it live mid-run.
-        ttk.Label(prompt_card, text="Reference:").grid(row=5, column=0, sticky=tk.NW, padx=(0, 10), pady=4)
+        ttk.Label(prompt_card, text="Reference:").grid(row=5, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_ref_image_var = tk.StringVar(value=self.last_used.get("sample_ref_image", ""))
         _ref_row = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
         _ref_row.grid(row=5, column=1, columnspan=2, sticky=tk.EW, pady=4)

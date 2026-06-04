@@ -463,9 +463,18 @@ class _FP8DequantLinear(torch.autograd.Function):
 def _try_fp8_scaled_mm_train(self: nn.Linear, x):
     """Return the fp8 scaled_mm result for a training step, or None to fall back.
 
-    Gated on self.training (NOT torch.is_grad_enabled): gradient checkpointing
-    flips grad mode between its first forward and its recompute; self.training is
-    stable across both and False for inference/preview (eval()).
+    Runs whenever a backward through this frozen Linear is needed:
+      - GC-on training: self.training is True (train() mode).
+      - GC-off training: self.training is False (the trainer uses eval() when
+        gradient checkpointing is off) but grad IS enabled.
+    NOT inference/preview, which is eval()+no_grad → bit-identical dequant path.
+
+    Why self.training is still the PRIMARY signal (not torch.is_grad_enabled):
+    under gradient checkpointing the grad mode flips between the first forward and
+    the recompute, so keying on it there would diverge. self.training is True in
+    both GC-on passes, so the path is consistent. is_grad_enabled is only
+    consulted when self.training is False — i.e. GC-off or inference — and in BOTH
+    of those there is no checkpoint, so the grad mode is stable and safe to read.
 
     CRITICAL — the fp8-vs-dequant decision is PROBED ONCE per module and cached on
     self._fp8_train_decision. A per-call try/except is unsafe under gradient
@@ -492,7 +501,7 @@ def _try_fp8_scaled_mm_train(self: nn.Linear, x):
                 f"wshape={tuple(self.weight.shape)}{tag}")
             _fp8_diag_last[id(self)] = path
 
-    if not (self.training and _train_scaled_mm_supported()):
+    if not (_train_scaled_mm_supported() and (self.training or torch.is_grad_enabled())):
         _diag("DEQUANT")
         return None
     decision = getattr(self, "_fp8_train_decision", None)

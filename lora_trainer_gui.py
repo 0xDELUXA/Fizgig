@@ -9345,8 +9345,11 @@ class LoRATrainerGUI:
         _er1 = tk.Frame(exp, bg=_sbg); _er1.pack(anchor=tk.W, pady=(0, 6))
         tk.Label(_er1, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_export_format_var = tk.StringVar(value="MP4")
-        ttk.Combobox(_er1, textvariable=self.royale_export_format_var, values=["MP4", "GIF"],
-                     state="readonly", width=6).pack(side=tk.LEFT)
+        _fmt_combo = ttk.Combobox(_er1, textvariable=self.royale_export_format_var, values=["MP4", "GIF"],
+                                  state="readonly", width=6)
+        _fmt_combo.pack(side=tk.LEFT)
+        ToolTip(_fmt_combo, "MP4 is smaller and faster to write, and autoplays on X / Reddit / Instagram.\n"
+                            "GIF embeds anywhere but takes noticeably longer to export and makes a larger file.")
         tk.Label(_er1, text="Speed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
         self.royale_export_speed_var = tk.StringVar(value="Normal")
         ttk.Combobox(_er1, textvariable=self.royale_export_speed_var, values=["Slow", "Normal", "Fast"],

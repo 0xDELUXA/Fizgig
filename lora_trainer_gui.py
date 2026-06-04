@@ -1134,6 +1134,8 @@ class LoRATrainerGUI:
             data["royale_res"] = self.royale_res_var.get()
             data["royale_max"] = self.royale_max_var.get()
             data["royale_ref"] = self.royale_ref_var.get()
+        if hasattr(self, 'royale_like_ref_var'):
+            data["royale_like_ref"] = self.royale_like_ref_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9444,7 +9446,8 @@ class LoRATrainerGUI:
         like.columnconfigure(1, weight=1)
         lr = 0
         ttk.Label(like, text="Subject image:").grid(row=lr, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.royale_like_ref_var = tk.StringVar(value="")
+        self.royale_like_ref_var = tk.StringVar(value=self.last_used.get("royale_like_ref", ""))
+        self.royale_like_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         _lrr = tk.Frame(like, bg=_sbg); _lrr.grid(row=lr, column=1, columnspan=2, sticky=tk.EW, pady=4)
         ttk.Entry(_lrr, textvariable=self.royale_like_ref_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(_lrr, text="Browse…", command=self._royale_browse_like_ref).pack(side=tk.LEFT, padx=(6, 0))

@@ -1139,6 +1139,11 @@ class LoRATrainerGUI:
         if hasattr(self, 'royale_travel_seed_a_var'):
             data["royale_travel_seed_a"] = self.royale_travel_seed_a_var.get()
             data["royale_travel_seed_b"] = self.royale_travel_seed_b_var.get()
+        if hasattr(self, 'royale_pt_prompt_var'):
+            data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
+            data["royale_pt_dim"] = self.royale_pt_dim_var.get()
+            data["royale_pt_custom"] = self.royale_pt_custom_var.get()
+            data["royale_pt_frames"] = self.royale_pt_frames_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9273,6 +9278,7 @@ class LoRATrainerGUI:
         self._royale_scoring = False
         self._royale_exporting = False
         self._royale_traveling = False
+        self._royale_pt_running = False
 
         frame, _canvas = self.create_scrollable_frame(self.lora_royale_tab)
         outer = tk.Frame(frame, bg=COLORS["bg_deep"])
@@ -9440,6 +9446,81 @@ class LoRATrainerGUI:
         tk.Label(_tr2, textvariable=self.royale_travel_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import prompt_travel as _ptlib
+        ptrav = self._start_section_card(outer, "Prompt travel",
+                                         "Morph the parked epoch through a series of prompt variations on a fixed "
+                                         "seed — it interpolates the text embedding, so the same subject flows "
+                                         "(e.g. dawn → night). Saved as a clip.")
+        _pp = tk.Frame(ptrav, bg=_sbg); _pp.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(_pp, text="Prompt", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_prompt_var = tk.StringVar(value=self.last_used.get("royale_pt_prompt", ""))
+        _ppe = ttk.Entry(_pp, textvariable=self.royale_pt_prompt_var)
+        _ppe.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ToolTip(_ppe, "Put {x} where the travel word should go, e.g.\n"
+                      "  a portrait of sks man, {x}\n"
+                      "If you omit {x}, the word is appended to the end.")
+
+        _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_dim_var = tk.StringVar(value=self.last_used.get("royale_pt_dim", "Time of day"))
+        ttk.Combobox(_pd, textvariable=self.royale_pt_dim_var,
+                     values=_ptlib.DIMENSION_NAMES + ["Custom"], state="readonly", width=16).pack(side=tk.LEFT)
+        tk.Label(_pd, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_pt_frames_var = tk.StringVar(value=self.last_used.get("royale_pt_frames", "32"))
+        _pfcb = ttk.Combobox(_pd, textvariable=self.royale_pt_frames_var,
+                             values=["24", "32", "48", "64", "96"], state="readonly", width=5)
+        _pfcb.pack(side=tk.LEFT)
+        ToolTip(_pfcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
+                       "Spread across all the waypoints, so multi-step dimensions want more.")
+
+        _pcr = tk.Frame(ptrav, bg=_sbg); _pcr.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(_pcr, text="Custom words", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_custom_var = tk.StringVar(value=self.last_used.get("royale_pt_custom", ""))
+        ttk.Entry(_pcr, textvariable=self.royale_pt_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(_pcr, text="(comma-separated, used when Travel = Custom)", bg=_sbg,
+                 fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
+
+        self.royale_pt_words_var = tk.StringVar(value="")
+        tk.Label(ptrav, textvariable=self.royale_pt_words_var, font=(FONT_FAMILY, 9, "italic"),
+                 fg=COLORS["accent"], bg=_sbg, wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
+
+        _pof = tk.Frame(ptrav, bg=_sbg); _pof.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_pof, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_format_var = tk.StringVar(value="MP4")
+        _ptfmt = ttk.Combobox(_pof, textvariable=self.royale_pt_format_var, values=["MP4", "GIF"],
+                              state="readonly", width=6)
+        _ptfmt.pack(side=tk.LEFT)
+        ToolTip(_ptfmt, "MP4 is full colour, smaller, faster to write, and autoplays on X / Reddit / Instagram.\n"
+                        "GIF embeds anywhere but is limited to 256 colours (slight banding on faces),\n"
+                        "takes noticeably longer to export, and makes a larger file.")
+        tk.Label(_pof, text="Speed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_pt_speed_var = tk.StringVar(value="Normal")
+        ttk.Combobox(_pof, textvariable=self.royale_pt_speed_var, values=["Slow", "Normal", "Fast"],
+                     state="readonly", width=8).pack(side=tk.LEFT)
+        _poo = tk.Frame(ptrav, bg=_sbg); _poo.pack(anchor=tk.W, pady=(0, 8))
+        self.royale_pt_loop_var = tk.BooleanVar(value=True)
+        self.royale_pt_word_var = tk.BooleanVar(value=True)
+        self.royale_pt_wm_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(_poo, text="Loop (ping-pong)", variable=self.royale_pt_loop_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(_poo, text="Word badge", variable=self.royale_pt_word_var).pack(side=tk.LEFT, padx=(14, 0))
+        ttk.Checkbutton(_poo, text="Fizgig tag", variable=self.royale_pt_wm_var).pack(side=tk.LEFT, padx=(14, 0))
+        _pb = tk.Frame(ptrav, bg=_sbg); _pb.pack(anchor=tk.W)
+        self._royale_pt_btn = tk.Button(_pb, text="Render & export prompt-travel…", font=(FONT_FAMILY, 10, "bold"),
+                                        fg="#FFFFFF", bg="#B7791F", activeforeground="#FFFFFF",
+                                        activebackground="#9A6518", relief="flat", bd=0, padx=18, pady=5,
+                                        cursor="hand2", command=self._royale_prompt_travel)
+        self._royale_pt_btn.pack(side=tk.LEFT)
+        self.royale_pt_status_var = tk.StringVar(value="")
+        tk.Label(_pb, textvariable=self.royale_pt_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
+        for _v in (self.royale_pt_dim_var, self.royale_pt_custom_var):
+            _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
+        for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
+        self._royale_pt_refresh_words()
+
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
         self._royale_grid = tk.Frame(grid_card, bg=_sbg)
@@ -9484,9 +9565,10 @@ class LoRATrainerGUI:
         tk.Label(_pbr, textvariable=self.royale_promote_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
-        # Card order: Export morph -> All epochs -> Likeness -> Seed travel -> Promote.
-        # (Seed travel is built earlier so it can reuse helpers; repack it into place.)
+        # Card order: Export morph -> All epochs -> Likeness -> Seed travel -> Prompt travel -> Promote.
+        # (Travel cards are built earlier so they can reuse helpers; repack into place.)
         trav.master.master.pack(before=promote.master.master)
+        ptrav.master.master.pack(before=promote.master.master)
 
         # Scan the pre-filled output folder so the count shows on first open.
         try:
@@ -10011,6 +10093,142 @@ class LoRATrainerGUI:
             messagebox.showerror("Seed-travel failed", msg)
             return
         self.royale_travel_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
+        self._royale_reveal(out)
+
+    # ----- Prompt travel: morph one epoch through a prompt dimension -----
+    def _royale_pt_words(self):
+        """Resolve the ordered waypoint words for the current dimension/custom."""
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import prompt_travel as pt
+        dim = self.royale_pt_dim_var.get()
+        if dim == "Custom":
+            return pt.parse_custom(self.royale_pt_custom_var.get())
+        return list(pt.TEMPLATES.get(dim, []))
+
+    def _royale_pt_refresh_words(self):
+        words = self._royale_pt_words()
+        if words:
+            self.royale_pt_words_var.set("Waypoints:  " + "  →  ".join(words))
+        else:
+            self.royale_pt_words_var.set("Add at least two comma-separated custom words to travel between.")
+
+    def _royale_prompt_travel(self):
+        if getattr(self, "_royale_pt_running", False) or getattr(self, "_royale_traveling", False):
+            return
+        label, path = self._royale_current_epoch()
+        if path is None or not os.path.exists(path):
+            messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to prompt-travel.")
+            return
+        words = self._royale_pt_words()
+        if len(words) < 2:
+            messagebox.showinfo("LoRA Royale", "Prompt travel needs at least two waypoints "
+                                               "(pick a Travel dimension, or enter 2+ Custom words).")
+            return
+        base = self.royale_pt_prompt_var.get().strip()
+        if not base:
+            messagebox.showinfo("LoRA Royale", "Enter a base prompt (include your trigger word, and {x} where the "
+                                               "travel word goes).")
+            return
+        try:
+            frames = int(self.royale_pt_frames_var.get())
+        except ValueError:
+            frames = 32
+        try:
+            seed = int(self.royale_seed_var.get() or "42")
+        except ValueError:
+            seed = 42
+        try:
+            res = int(self.royale_res_var.get())
+        except ValueError:
+            res = 512
+        if not self._royale_ensure_engine():
+            return
+        fmt = self.royale_pt_format_var.get().upper()
+        ext = ".mp4" if fmt == "MP4" else ".gif"
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import run_name_for_folder
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        dim_tag = self.royale_pt_dim_var.get().lower().replace(" ", "")
+        from tkinter import filedialog
+        out = filedialog.asksaveasfilename(
+            title="Export prompt-travel clip",
+            defaultextension=ext,
+            initialfile=f"{run}-epoch{label}-{dim_tag}{ext}",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
+            filetypes=[("MP4 video", "*.mp4")] if fmt == "MP4" else [("Animated GIF", "*.gif")])
+        if not out:
+            return
+        params = dict(
+            label=label, path=path, base=base, words=words,
+            frames=max(2, frames), seed=seed, res=res, fmt=fmt, out=out,
+            ref=self.royale_ref_var.get().strip(),
+            speed=self.royale_pt_speed_var.get(),
+            pingpong=bool(self.royale_pt_loop_var.get()),
+            brand=bool(self.royale_pt_wm_var.get()),
+            word_badge=bool(self.royale_pt_word_var.get()),
+        )
+        self._royale_pt_running = True
+        self._royale_pt_btn.configure(state="disabled")
+        self.royale_pt_status_var.set("Encoding prompts…")
+        import threading
+        threading.Thread(target=self._royale_pt_worker, args=(params,), daemon=True).start()
+
+    def _royale_pt_worker(self, p):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.state import SliderState
+        from fizgig.lora_royale import export as rexport, prompt_travel as pt
+        eng = self.royale_engine
+        try:
+            if eng.primary_network is None:
+                eng.load_primary(p["path"])
+            elif eng.primary_path != p["path"]:
+                if not eng.swap_primary_weights(p["path"]):
+                    eng.reset(); eng.load_primary(p["path"])
+            wp_prompts = pt.build_waypoint_prompts(p["base"], p["words"])
+            ctx_list, neg = eng.encode_travel_prompts(wp_prompts)
+            n = p["frames"]
+            imgs, labels = [], []
+            for i in range(n):
+                t = i / float(n - 1)
+                self.master.after(0, lambda i=i: self.royale_pt_status_var.set(
+                    f"Rendering frame {i + 1}/{n}…"))
+                ctx = eng.interp_waypoints(ctx_list, t)
+                st = SliderState.default_klein9b()
+                st.prompt = p["base"]; st.seed = p["seed"]
+                st.preview_width = p["res"]; st.preview_height = p["res"]
+                if p["ref"] and os.path.exists(p["ref"]):
+                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2; st.ref_strength = 1.0
+                img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)
+                imgs.append(img.copy())
+                labels.append(pt.dominant_word(p["words"], t).upper())
+            self.master.after(0, lambda: self.royale_pt_status_var.set("Encoding clip…"))
+            frame_labels = labels if p["word_badge"] else None
+            frames = rexport.frames_from_sequence(imgs, pingpong=p["pingpong"],
+                                                  brand=p["brand"], labels=frame_labels)
+            if p["fmt"] == "MP4":
+                rexport.write_mp4(frames, p["out"], speed=p["speed"])
+            else:
+                rexport.write_gif(frames, p["out"], speed=p["speed"])
+            self.master.after(0, lambda: self._royale_pt_finish(p["out"], len(frames), None))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.master.after(0, lambda e=e: self._royale_pt_finish(p["out"], 0, e))
+
+    def _royale_pt_finish(self, out, n_frames, err):
+        self._royale_pt_running = False
+        self._royale_pt_btn.configure(state="normal")
+        if err is not None:
+            self.royale_pt_status_var.set("Prompt-travel failed — see console.")
+            msg = str(err)
+            if "codec" in msg.lower() or "writer" in msg.lower():
+                msg += "\n\nTry the GIF format instead."
+            messagebox.showerror("Prompt-travel failed", msg)
+            return
+        self.royale_pt_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
         self._royale_reveal(out)
 
     def _repair_start(self):

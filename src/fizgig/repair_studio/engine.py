@@ -440,25 +440,79 @@ class RepairEngine:
         self._ref_cache = (ref_tokens, ref_ids)
         return ref_tokens, ref_ids
 
-    def generate_preview(self, state: SliderState, seed_b=None, travel_t=None) -> Image.Image:
+    def encode_travel_prompts(self, prompts):
+        """Encode a list of waypoint prompts for prompt travel. Reloads the
+        text encoder once, encodes every prompt, then unloads it. Returns
+        (list_of_ctx_vec, neg_ctx_vec) with the conditioning tensors on CPU
+        (cheap to hold many; moved back to device per render). The negative
+        conditioning is encoded once and shared."""
+        import torch
+        from fizgig.utils.device import clean_memory_on_device
+        if self.pipeline is None or not self.pipeline.is_loaded:
+            raise RuntimeError("Pipeline not loaded.")
+        pipeline = self.pipeline
+        clean_memory_on_device(pipeline.device)
+        try:
+            pipeline.reload_text_encoder()
+        except Exception:
+            logger.exception("reload_text_encoder failed")
+        ctx_list, neg = [], None
+        try:
+            for p in prompts:
+                cv, nv = pipeline.encode_prompt(p or "", " ")
+                ctx_list.append(cv.detach().to("cpu"))
+                if neg is None and nv is not None:
+                    neg = nv.detach().to("cpu")
+        finally:
+            try:
+                pipeline.unload_text_encoder()
+            except Exception:
+                pass
+            clean_memory_on_device(pipeline.device)
+        # Invalidate the slider-preview prompt cache (TE was cycled).
+        self._prompt_cache_key = None
+        self._prompt_cache = None
+        return ctx_list, neg
+
+    @staticmethod
+    def interp_waypoints(vecs, t):
+        """Piecewise-linear interpolation across an ordered list of conditioning
+        tensors. `t` in [0,1] walks the whole chain (0 -> vecs[0], 1 -> vecs[-1]).
+        Lerp (not slerp) — text embeddings aren't sphere-distributed, so slerp
+        would wander off-manifold; lerp gives the smooth conceptual morph."""
+        import torch
+        if len(vecs) == 1:
+            return vecs[0]
+        t = min(max(float(t), 0.0), 1.0)
+        segs = len(vecs) - 1
+        pos = t * segs
+        i = min(int(pos), segs - 1)
+        local = pos - i
+        a, b = vecs[i].float(), vecs[i + 1].float()
+        return torch.lerp(a, b, local).to(vecs[i].dtype)
+
+    def generate_preview(self, state: SliderState, seed_b=None, travel_t=None,
+                         override_ctx=None, override_neg_ctx=None) -> Image.Image:
         """Apply state, run a 4-step Distilled generation, return PIL image.
 
         Seed travel: when `seed_b` is given, the initial noise is a spherical
         interpolation (slerp) between the noise of `state.seed` and `seed_b` at
         fraction `travel_t` (0=state.seed, 1=seed_b). Slerp walks the noise
         hypersphere so the composition flows continuously between the two seeds
-        — lerp would collapse the norm mid-way and go mushy. The activation
-        cache is bypassed on this path (it's keyed on state.seed, which is
-        constant across a travel sweep).
+        — lerp would collapse the norm mid-way and go mushy.
+
+        Prompt travel: when `override_ctx` is given, it's used as the (raw,
+        pre-prc_txt) conditioning instead of encoding state.prompt — pass an
+        interpolated waypoint embedding here for a smooth meaning-morph on a
+        fixed seed. `override_neg_ctx` overrides the negative conditioning.
+
+        The activation cache is bypassed on either travel path (it's keyed on
+        state.seed / state.prompt, which are constant across a sweep).
 
         Inlines the proven training-loop sample path (trainer.do_inference)
         instead of pipeline.generate() — the latter is a dormant untested
         method that produces blocky noise in this call site. See trainer.py
         sample_image_inference / do_inference for the reference path.
-
-        v1: full forward every call. v2 will diff against last state, reuse
-        cached activations from before the earliest changed block, and clear
-        self._changed_blocks at the end.
         """
         if self.pipeline is None or not self.pipeline.is_loaded:
             raise RuntimeError("Pipeline not loaded.")
@@ -512,7 +566,11 @@ class RepairEngine:
         # Encode prompt — cached to avoid reloading TE on slider-only changes.
         prompt = state.prompt or ""
         prompt_key = (prompt, self.primary_path)
-        if self._prompt_cache_key == prompt_key and self._prompt_cache is not None:
+        if override_ctx is not None:
+            # Prompt travel: caller supplies a pre-interpolated conditioning.
+            ctx_vec, neg_ctx_vec = override_ctx, override_neg_ctx
+            dlog("Prompt travel: using supplied (interpolated) conditioning")
+        elif self._prompt_cache_key == prompt_key and self._prompt_cache is not None:
             ctx_vec, neg_ctx_vec = self._prompt_cache
             dlog("Prompt cache hit — skipping TE reload")
         else:
@@ -560,6 +618,7 @@ class RepairEngine:
             return randn_tensor(noise_shape, generator=g, device=device, dtype=torch.bfloat16)
 
         seed_travel = seed_b is not None
+        bypass_cache = seed_travel or (override_ctx is not None)
         if seed_travel:
             latents = _slerp(float(travel_t or 0.0), _seed_noise(state.seed), _seed_noise(seed_b))
             dlog(f"seed travel: {state.seed} -> {seed_b} @ t={travel_t}")
@@ -602,7 +661,7 @@ class RepairEngine:
             self._turbo_enabled
             and pipeline.is_distilled
             and not has_ref
-            and not seed_travel
+            and not bypass_cache
             and self._act_cache is not None
             and self._act_cache_key == cache_key
             and self._changed_blocks
@@ -631,7 +690,7 @@ class RepairEngine:
                     self._turbo_enabled
                     and not turbo_fallback
                     and not has_ref
-                    and not seed_travel
+                    and not bypass_cache
                     and (can_use_cache or (not can_use_cache and self._turbo_enabled))
                 )
 

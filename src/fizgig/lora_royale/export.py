@@ -126,10 +126,14 @@ def build_frames(images: List[Tuple], speed: str = "Normal", pingpong: bool = Tr
 
 def frames_from_sequence(images: List[Image.Image], pingpong: bool = True,
                          brand: bool = True, label: Optional[str] = None,
+                         labels: Optional[List[str]] = None,
                          max_size: Optional[int] = 768) -> List[Image.Image]:
-    """Decorate an already-smooth sequence (e.g. a seed-travel sweep) 1:1 — no
-    blending, since the frames are already continuous. Optional static `label`
-    badge (bottom-left) + brand pill; ping-pong for a seamless loop.
+    """Decorate an already-smooth sequence (e.g. a seed- or prompt-travel sweep)
+    1:1 — no blending, since the frames are already continuous. Ping-pong for a
+    seamless loop.
+
+    Badge: pass `labels` (one per frame, e.g. the dominant prompt-travel word) for
+    a ticking badge, or a single static `label` (e.g. "EPOCH 10"). `labels` wins.
 
     `images`: list of PIL frames in order.
     """
@@ -142,10 +146,11 @@ def frames_from_sequence(images: List[Image.Image], pingpong: bool = True,
     base_w, base_h = max(2, _even(base_w)), max(2, _even(base_h))
 
     out = []
-    for im in images:
+    for i, im in enumerate(images):
         if im.size != (base_w, base_h):
             im = im.resize((base_w, base_h), Image.LANCZOS)
-        out.append(_decorate(im, badge=label, brand=brand))
+        badge = labels[i] if (labels and i < len(labels)) else label
+        out.append(_decorate(im, badge=badge, brand=brand))
     if pingpong and len(out) > 2:
         out = out + out[-2:0:-1]
     return out

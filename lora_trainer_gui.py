@@ -816,12 +816,10 @@ class LoRATrainerGUI:
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Status indicator — overlaid on top-right of notebook, zero vertical space
-        self._status_canvas = tk.Canvas(master, width=16, height=16,
+        self._status_canvas = tk.Canvas(master, width=84, height=22,
                                         bg=COLORS["bg_deep"], highlightthickness=0,
                                         cursor="hand2")
-        self._status_canvas.place(relx=1.0, x=-20, y=14, anchor="ne")
-        self._status_indicator = self._status_canvas.create_oval(
-            2, 2, 14, 14, fill=COLORS["success"], outline="")
+        self._status_canvas.place(relx=1.0, x=-16, y=11, anchor="ne")
         self._status_canvas.bind("<Button-1>", lambda e: self._open_console_popup())
         ToolTip(self._status_canvas, "Click to view console log")
 
@@ -982,10 +980,26 @@ class LoRATrainerGUI:
         return False
 
     def _update_status_indicator(self):
-        """Poll busy state and update the indicator colour."""
+        """Poll busy state and redraw the IDLE/BUSY 'studio light': a lit circle
+        + all-caps word + a matching-colour frame, all in the status colour."""
         try:
-            color = COLORS["error"] if self._is_any_busy() else COLORS["success"]
-            self._status_canvas.itemconfig(self._status_indicator, fill=color)
+            busy = self._is_any_busy()
+            color = COLORS["error"] if busy else COLORS["success"]
+            label = "BUSY" if busy else "IDLE"
+            c = self._status_canvas
+            c.delete("all")
+            w = int(c["width"]); h = int(c["height"])
+            cy = h // 2
+            # outer frame (the warning-light surround)
+            c.create_rectangle(1, 1, w - 1, h - 1, outline=color, width=2)
+            # the lit dot
+            d = 8
+            dx = 10
+            c.create_oval(dx - d // 2, cy - d // 2, dx + d // 2, cy + d // 2,
+                          fill=color, outline=color)
+            # the word
+            c.create_text(dx + d // 2 + 6, cy + 1, text=label, anchor="w",
+                          fill=color, font=(FONT_FAMILY, 9, "bold"))
         except Exception:
             pass
         self.master.after(500, self._update_status_indicator)

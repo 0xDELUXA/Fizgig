@@ -9445,15 +9445,15 @@ class LoRATrainerGUI:
         ref = self.royale_ref_var.get().strip()
         results = []
         eng = self.royale_engine
-        loaded = False
         total = len(sel)
         for i, (label, path) in enumerate(sel):
             self.master.after(0, lambda l=label, i=i: self.royale_status_var.set(
                 f"Rendering epoch {l} ({i + 1}/{total})…"))
             try:
-                if not loaded:
+                # First-ever load patches the DiT; everything after (including a
+                # re-kicked render that reuses the loaded engine) swaps weights.
+                if eng.primary_network is None:
                     eng.load_primary(path)
-                    loaded = True
                 elif not eng.swap_primary_weights(path):
                     eng.reset()
                     eng.load_primary(path)

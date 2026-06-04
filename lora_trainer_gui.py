@@ -9465,6 +9465,10 @@ class LoRATrainerGUI:
         tk.Label(_pbr, textvariable=self.royale_promote_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
+        # Card order: Export morph -> All epochs -> Likeness -> Seed travel -> Promote.
+        # (Seed travel is built earlier so it can reuse helpers; repack it into place.)
+        trav.master.master.pack(before=promote.master.master)
+
         # Scan the pre-filled output folder so the count shows on first open.
         try:
             self._royale_scan()

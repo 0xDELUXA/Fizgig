@@ -784,6 +784,7 @@ class LoRATrainerGUI:
             "SAMPLE_EVERY_N_EPOCHS": 1,
             "SAMPLE_EVERY_N_STEPS": 0,
             "SAMPLE_AT_FIRST": True,
+            "CACHE_SAMPLE_MODEL": "auto",  # keep Distilled sample model in RAM between epochs
             "SAMPLE_FLOW_SHIFT": "",
             "SAMPLE_NEGATIVE": "blurry, low detail, noisy, washed out, oversaturated, distorted anatomy, extra limbs, duplicate objects, text, watermark, logo, frame, cropped subject, flat lighting, muddy colors",
             "SAMPLE_CFG_SCALE": 1.0,
@@ -4223,6 +4224,21 @@ class LoRATrainerGUI:
             variable=self.use_distilled_samples_var,
             command=self._on_distilled_samples_toggled,
         ).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
+
+        # Cache the Distilled sample model in CPU RAM between epochs (skip disk reload).
+        ttk.Label(freq_card, text="Cache sample model in RAM:").grid(
+            row=4, column=0, sticky=tk.W, padx=(0, 10), pady=(8, 0))
+        self.cache_sample_model_var = tk.StringVar(value=self.settings.get("CACHE_SAMPLE_MODEL", "auto"))
+        ttk.Combobox(freq_card, textvariable=self.cache_sample_model_var,
+                     values=["auto", "on", "off"], state="readonly", width=8).grid(
+            row=4, column=1, sticky=tk.W, pady=(8, 0))
+        tk.Label(freq_card,
+                 text="Keeps the ~10 GB Distilled model resident in system RAM between epochs so it isn't "
+                      "re-read from disk every sample (~3–4 s/epoch saved). auto = only when free RAM is "
+                      "comfortable; off = reload each time. Only applies when sampling isn't block-swapping the "
+                      "Distilled (roomy GPUs).",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
 
         # Card 3: Architecture-Specific (Flow Shift / Guidance / Negative / CFG)
         arch_card = self._start_section_card(
@@ -10614,6 +10630,9 @@ class LoRATrainerGUI:
                 distilled_path = self.prefs_vars.get("distilled_dit", tk.StringVar()).get()
                 if distilled_path and os.path.exists(distilled_path):
                     command.extend(["--sample_dit", distilled_path])
+                    cache_mode = getattr(self, "cache_sample_model_var", None)
+                    cache_mode = cache_mode.get() if cache_mode else self.settings.get("CACHE_SAMPLE_MODEL", "auto")
+                    command.extend(["--cache_sample_model", cache_mode])
                     # Note: we deliberately do NOT forward the Preferences "DiT Block
                     # Swap (inference)" pref here. That setting governs the in-app
                     # inference tools (Repair Studio / Profiler / Extract / Explorer).

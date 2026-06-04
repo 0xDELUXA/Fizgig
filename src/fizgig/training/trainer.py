@@ -1280,12 +1280,21 @@ class KleinTrainer:
             return False
         if mode == "on":
             return True
-        try:  # auto
-            import psutil
-            avail_gb = psutil.virtual_memory().available / 1e9
-            return avail_gb >= 18.0  # ~10 GB model + ~8 GB headroom
-        except Exception:
-            return False  # can't check RAM → safe default: don't cache
+        # auto: decide ONCE per run and stick with it. The check must be one-shot
+        # because once the model is cached it consumes ~10 GB of the very
+        # "available" RAM we measure — re-checking each epoch would then see less
+        # free RAM, drop the cache, free the RAM, re-cache… a flip-flop on
+        # marginal-RAM systems. The first reading (before anything is cached) is
+        # the true gate.
+        decided = getattr(self, "_cache_auto_decision", None)
+        if decided is None:
+            try:
+                import psutil
+                decided = psutil.virtual_memory().available / 1e9 >= 18.0  # ~10 GB model + ~8 GB headroom
+            except Exception:
+                decided = False  # can't check RAM → safe default: don't cache
+            self._cache_auto_decision = decided
+        return decided
 
     def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
         """Orchestrate sample image generation at the right training steps."""

@@ -2221,9 +2221,14 @@ class KleinTrainer:
         #   vram peak_alloc vs peak_reserved + gap + alloc retries
         #                    — reserved climbing while alloc flat (+ retries) = FRAGMENTATION
         #   hooks full_bwd   — climbing across epochs = block-swap backward-hook LEAK
-        # Off by default → zero overhead on normal runs.
+        # DIAGNOSTIC BRANCH: default ON (set FIZGIG_PERF_DIAG=0 to silence). The
+        # env-var-before-GUI dance is error-prone, and this branch exists only to
+        # diagnose, so just always log. Flip the default back to "0" before any merge.
         import os as _os, time as _time
-        _perf_diag = _os.environ.get("FIZGIG_PERF_DIAG", "0") != "0"
+        _perf_diag = _os.environ.get("FIZGIG_PERF_DIAG", "1") != "0"
+        if _perf_diag:
+            accelerator.print("[perfdiag] ACTIVE — a summary line prints at the end of each epoch.")
+            import sys as _psys0; _psys0.stdout.flush()
         def _perf_hook_counts():
             mdl = accelerator.unwrap_model(transformer)
             f = b = fb = 0

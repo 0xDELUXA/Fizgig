@@ -1139,12 +1139,14 @@ class LoRATrainerGUI:
         if hasattr(self, 'royale_travel_seed_a_var'):
             data["royale_travel_seed_a"] = self.royale_travel_seed_a_var.get()
             data["royale_travel_seed_b"] = self.royale_travel_seed_b_var.get()
+            data["royale_travel_res"] = self.royale_travel_res_var.get()
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
             data["royale_pt_custom"] = self.royale_pt_custom_var.get()
             data["royale_pt_frames"] = self.royale_pt_frames_var.get()
             data["royale_pt_ref"] = self.royale_pt_ref_var.get()
+            data["royale_pt_res"] = self.royale_pt_res_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9408,6 +9410,7 @@ class LoRATrainerGUI:
         ttk.Entry(_tr1, textvariable=self.royale_travel_seed_b_var, width=10).pack(side=tk.LEFT)
         for _sv in (self.royale_travel_seed_a_var, self.royale_travel_seed_b_var):
             _sv.trace_add("write", lambda *a: self._save_last_used_paths())
+        # (royale_travel_res_var trace added after it's created below.)
         tk.Label(_tr1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
         self.royale_travel_frames_var = tk.StringVar(value="24")
         _frcb = ttk.Combobox(_tr1, textvariable=self.royale_travel_frames_var,
@@ -9429,6 +9432,12 @@ class LoRATrainerGUI:
         self.royale_travel_speed_var = tk.StringVar(value="Normal")
         ttk.Combobox(_trf, textvariable=self.royale_travel_speed_var, values=["Slow", "Normal", "Fast"],
                      state="readonly", width=8).pack(side=tk.LEFT)
+        tk.Label(_trf, text="Res", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_travel_res_var = tk.StringVar(
+            value=self.last_used.get("royale_travel_res", self.last_used.get("royale_res", "512")))
+        ttk.Combobox(_trf, textvariable=self.royale_travel_res_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        self.royale_travel_res_var.trace_add("write", lambda *a: self._save_last_used_paths())
         _tro = tk.Frame(trav, bg=_sbg); _tro.pack(anchor=tk.W, pady=(0, 8))
         self.royale_travel_loop_var = tk.BooleanVar(value=True)
         self.royale_travel_epoch_var = tk.BooleanVar(value=True)
@@ -9511,6 +9520,11 @@ class LoRATrainerGUI:
         self.royale_pt_speed_var = tk.StringVar(value="Normal")
         ttk.Combobox(_pof, textvariable=self.royale_pt_speed_var, values=["Slow", "Normal", "Fast"],
                      state="readonly", width=8).pack(side=tk.LEFT)
+        tk.Label(_pof, text="Res", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_pt_res_var = tk.StringVar(
+            value=self.last_used.get("royale_pt_res", self.last_used.get("royale_res", "512")))
+        ttk.Combobox(_pof, textvariable=self.royale_pt_res_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=6).pack(side=tk.LEFT)
         _poo = tk.Frame(ptrav, bg=_sbg); _poo.pack(anchor=tk.W, pady=(0, 8))
         self.royale_pt_loop_var = tk.BooleanVar(value=True)
         self.royale_pt_word_var = tk.BooleanVar(value=True)
@@ -9529,7 +9543,8 @@ class LoRATrainerGUI:
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
         for _v in (self.royale_pt_dim_var, self.royale_pt_custom_var):
             _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
-        for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var):
+        for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var,
+                   self.royale_pt_res_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_words()
 
@@ -10030,7 +10045,7 @@ class LoRATrainerGUI:
         if not self._royale_ensure_engine():
             return
         try:
-            res = int(self.royale_res_var.get())
+            res = int(self.royale_travel_res_var.get())
         except ValueError:
             res = 512
         fmt = self.royale_travel_format_var.get().upper()
@@ -10160,7 +10175,7 @@ class LoRATrainerGUI:
         except ValueError:
             seed = 42
         try:
-            res = int(self.royale_res_var.get())
+            res = int(self.royale_pt_res_var.get())
         except ValueError:
             res = 512
         if not self._royale_ensure_engine():

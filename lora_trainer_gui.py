@@ -591,8 +591,8 @@ class LoRATrainerGUI:
     def __init__(self, master):
         self.master = master
         master.title("Fizgig — Klein 9B LoRA Studio")
-        master.geometry("1280x1124")  # +100 for the bottom status bar (tabs keep ~1024)
-        master.minsize(1100, 900)  # ensures all tabs visible at top + tab content not cut off
+        master.geometry("1360x1124")  # wide enough that the IDLE/BUSY light clears the last tab ("Preferences"); +100 height for the bottom status bar
+        master.minsize(1180, 900)  # keeps the tab row clear of the status light + tab content not cut off
         master.configure(bg=BG_COLOR)
 
         # Window/taskbar icon

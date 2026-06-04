@@ -60,9 +60,7 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 - **Adaptive LR** — bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
 - **Context LoRA** — load an existing LoRA as a frozen *active* layer during training, so the new LoRA learns to coexist at inference. No other trainer does this.
 
-> **⚠️ Context LoRA note:** Training sample previews in context mode often don't reflect the final quality of the trained LoRA. The samples can look distorted even when the LoRA itself is excellent. Always evaluate the output LoRA in ComfyUI for accurate results. This is a known issue being worked on.
-
-> **⚠️ Training samples note:** Training samples in general often look inferior to the actual LoRA when deployed in ComfyUI — less detail, weaker likeness, or slightly off colours. The LoRA is usually better than the samples suggest. Always evaluate checkpoints in ComfyUI rather than judging quality from training previews alone. This is an active area of investigation — if you have insights into the discrepancy, contributions and ideas are welcome.
+> **⚠️ A note on Base previews:** The default **Distilled 4-step** previews match ComfyUI output closely — including when a Context LoRA is active. The only previews that can look softer than the deployed LoRA are **Base multi-step** ones (i.e. when you turn Distilled samples off): they're taken from a mid-training, fp8-quantised checkpoint, so they can show less detail or slightly off colours even when the LoRA itself is excellent. If you're judging from Base previews, confirm final quality in ComfyUI.
 
 - **Pause / Resume** — graceful epoch-boundary pause that frees VRAM and resumes with full optimizer state and no quality regression.
 - **Model Area targeting** — train only Identity blocks, Style blocks, Details blocks, or the full model.

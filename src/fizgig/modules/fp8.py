@@ -415,12 +415,66 @@ class _FP8ScaledMMLinear(torch.autograd.Function):
         return gx.reshape(*ctx.orig_shape[:-1], -1), None, None
 
 
+def _dequant_fp8_weight(weight_fp8, scale, device):
+    """fp8 -> bf16 dequant, identical math to the inference dequant path.
+    Handles per-tensor (scale.ndim<3) and block-wise (ndim==3) scales, and a
+    weight that may be CPU-resident under block swap (moved to `device`)."""
+    weight = weight_fp8.to(device)
+    scale = scale.to(device)
+    out_dtype = scale.dtype
+    if scale.ndim < 3:
+        return weight.to(out_dtype) * scale
+    out_features, num_blocks, _ = scale.shape
+    w = weight.to(out_dtype).contiguous().view(out_features, num_blocks, -1)
+    w = w * scale
+    return w.view(weight.shape)
+
+
+class _FP8DequantLinear(torch.autograd.Function):
+    """Memory-frugal dequant matmul for a FROZEN fp8 base Linear.
+
+    forward:  dequant fp8->bf16 (LOCAL — freed on return), y = x @ Wᵀ
+    backward: RECOMPUTE the dequant from fp8, grad_x = grad_out @ W. Only grad_x
+              is returned (weight + scale are frozen → None).
+
+    The point: a plain `F.linear(x, dequant)` makes autograd save the bf16
+    dequant for the backward grad_x. With gradient checkpointing OFF that keeps
+    all ~112 dequantized base weights (~18 GB) alive until backward, stacked on
+    the ~9 GB fp8 residency — which OOMs even a 32 GB card. Here the bf16 weight
+    never enters autograd's saved-tensor machinery; it's rebuilt from fp8 in the
+    backward (cheap, bandwidth-bound) instead. fp8 weight + scale are frozen and
+    stashed on ctx (not save_for_backward), the same checkpoint-safe pattern as
+    _FP8ScaledMMLinear. Numerically identical to the plain dequant path."""
+    @staticmethod
+    def forward(ctx, x, weight_fp8, scale_weight):
+        w = _dequant_fp8_weight(weight_fp8, scale_weight, x.device)
+        out = F.linear(x, w)
+        ctx.weight_fp8 = weight_fp8
+        ctx.scale_weight = scale_weight
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        w = _dequant_fp8_weight(ctx.weight_fp8, ctx.scale_weight, grad_out.device)
+        grad_x = grad_out.to(w.dtype) @ w  # F.linear(x,W) -> grad_x = grad_out @ W
+        return grad_x.to(grad_out.dtype), None, None
+
+
 def _try_fp8_scaled_mm_train(self: nn.Linear, x):
     """Return the fp8 scaled_mm result for a training step, or None to fall back.
 
-    Gated on self.training (NOT torch.is_grad_enabled): gradient checkpointing
-    flips grad mode between its first forward and its recompute; self.training is
-    stable across both and False for inference/preview (eval()).
+    Runs whenever a backward through this frozen Linear is needed:
+      - GC-on training: self.training is True (train() mode).
+      - GC-off training: self.training is False (the trainer uses eval() when
+        gradient checkpointing is off) but grad IS enabled.
+    NOT inference/preview, which is eval()+no_grad → bit-identical dequant path.
+
+    Why self.training is still the PRIMARY signal (not torch.is_grad_enabled):
+    under gradient checkpointing the grad mode flips between the first forward and
+    the recompute, so keying on it there would diverge. self.training is True in
+    both GC-on passes, so the path is consistent. is_grad_enabled is only
+    consulted when self.training is False — i.e. GC-off or inference — and in BOTH
+    of those there is no checkpoint, so the grad mode is stable and safe to read.
 
     CRITICAL — the fp8-vs-dequant decision is PROBED ONCE per module and cached on
     self._fp8_train_decision. A per-call try/except is unsafe under gradient
@@ -447,7 +501,7 @@ def _try_fp8_scaled_mm_train(self: nn.Linear, x):
                 f"wshape={tuple(self.weight.shape)}{tag}")
             _fp8_diag_last[id(self)] = path
 
-    if not (self.training and _train_scaled_mm_supported()):
+    if not (_train_scaled_mm_supported() and (self.training or torch.is_grad_enabled())):
         _diag("DEQUANT")
         return None
     decision = getattr(self, "_fp8_train_decision", None)
@@ -553,6 +607,19 @@ def fp8_linear_forward_patch(self: nn.Linear, x, use_scaled_mm=False, max_value=
                 logger.warning(f"_scaled_mm failed ({type(e).__name__}: {e}); falling back to dequant path.")
                 self._scaled_mm_warned = True
             # fall through to the dequant path
+
+    # GC-off training only: route the frozen-base dequant through a custom
+    # autograd Function so the materialized bf16 weight is NOT retained for
+    # backward (it's recomputed from fp8 instead). `not self.training and
+    # grad_enabled` uniquely identifies this case: the trainer puts the DiT in
+    # eval() when gradient checkpointing is off, so a frozen-base forward that
+    # still needs grad = GC-off training. Inference is eval()+no_grad (skipped),
+    # and GC-on keeps train() mode (skipped) — both keep their proven paths.
+    if (not self.training) and torch.is_grad_enabled():
+        out = _FP8DequantLinear.apply(x, self.weight, self.scale_weight)
+        if self.bias is not None:
+            out = out + self.bias.to(device=out.device, dtype=out.dtype)
+        return out
 
     if True:
         # Dequantize on the input's device (handles block swap: weight on CPU, x on CUDA)

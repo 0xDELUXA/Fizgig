@@ -582,6 +582,7 @@ PRESETS = {
         "FP8": True,
         "SCALED": True,  # BF16 model, use fp8_scaled for memory efficiency
         "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
+        "GRADIENT_CHECKPOINTING": True,  # ON by default — needed to fit 9B on most cards
     },
 }
 
@@ -771,6 +772,7 @@ class LoRATrainerGUI:
             "FP8": True,  # Default FP8 setting (--fp8_base)
             "SCALED": True,  # Default Scaled setting (--fp8_scaled, recommended with fp8_base)
             "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
+            "GRADIENT_CHECKPOINTING": True,  # ON by default — recompute activations to fit 9B on most cards
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
             # Sample generation settings
             "SAMPLE_ENABLED": True,
@@ -2103,6 +2105,24 @@ class LoRATrainerGUI:
                  wraplength=600, justify=tk.LEFT).grid(row=6, column=1, sticky=tk.W, padx=5, pady=(0, 4))
         self._on_quant_4bit_toggle()  # sync initial enabled/disabled state
 
+        # Gradient checkpointing — trades compute for VRAM.
+        tk.Label(memory_content, text="Grad Checkpoint:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).grid(
+            row=7, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.grad_checkpoint_var = tk.BooleanVar(value=self.settings.get("GRADIENT_CHECKPOINTING", True))
+        self.grad_checkpoint_check = ttk.Checkbutton(
+            memory_content, text="Gradient checkpointing (recommended — lower VRAM)",
+            variable=self.grad_checkpoint_var, command=self._on_grad_checkpoint_toggle,
+            style="Surface.TCheckbutton")
+        self.grad_checkpoint_check.grid(row=7, column=1, sticky=tk.W, padx=5, pady=4)
+        tk.Label(memory_content,
+                 text="On (default) recomputes activations during the backward pass to save VRAM — it's what lets "
+                      "a 9B LoRA fit on a 16 GB card. Turning it OFF makes training ~20–30% faster but uses far more "
+                      "VRAM, so it's only for big cards (24 GB+, ideally 32 GB) with Blocks Swap at 0. On 16 GB, or "
+                      "with block swap on, leave it ON.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT).grid(row=8, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+
         # === Timestep & Noise Schedule Section (Collapsed by default) ===
         timestep_section = CollapsibleFrame(outer,"Timestep & Noise Schedule", default_expanded=False)
         timestep_section.pack(fill=tk.X, padx=36, pady=(0, 16))
@@ -2521,6 +2541,7 @@ class LoRATrainerGUI:
         _grab("fp8_var", "FP8")
         _grab("scaled_var", "SCALED")
         _grab("quant_4bit_var", "QUANT_4BIT")
+        _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
         _grab("training_preset_var", "TARGET_LAYERS")
@@ -3012,6 +3033,48 @@ class LoRATrainerGUI:
         if not on:
             # restore the Scaled checkbox's dependent-disabled state
             self.toggle_scaled()
+
+    def _on_grad_checkpoint_toggle(self):
+        """Warn (VRAM-aware) when gradient checkpointing is switched OFF. Turning
+        it on is always safe; off greatly increases activation VRAM, so it only
+        fits on big cards with no block swap."""
+        if self.grad_checkpoint_var.get():
+            return  # ON is always safe — no warning
+        # Switched OFF — assess the card.
+        try:
+            import torch
+            vram_gb = (torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                       if torch.cuda.is_available() else 0.0)
+        except Exception:
+            vram_gb = 0.0
+        # Is block swap likely active? Auto on a <24GB card resolves to >0; an
+        # explicit non-zero value also means swapping.
+        swap_raw = str(self.settings.get("BLOCKS_SWAP", "auto")).strip().lower()
+        swap_active = False
+        if swap_raw.startswith("auto"):
+            swap_active = bool(vram_gb) and vram_gb < 23
+        else:
+            try:
+                swap_active = int(''.join(ch for ch in swap_raw if ch.isdigit()) or "0") > 0
+            except ValueError:
+                swap_active = False
+
+        if (vram_gb and vram_gb < 23) or swap_active:
+            vram_txt = f"~{vram_gb:.0f} GB" if vram_gb else "this card"
+            messagebox.showwarning(
+                "Gradient checkpointing off — likely to run out of memory",
+                f"Your GPU reports {vram_txt}"
+                + (" and block swap is active" if swap_active else "") + ".\n\n"
+                "With gradient checkpointing OFF, a 9B LoRA holds every block's activations for the "
+                "backward pass — that usually won't fit under ~24 GB and training will likely hit CUDA "
+                "out-of-memory.\n\nThis option is meant for 24 GB+ cards (ideally 32 GB) with Blocks Swap "
+                "set to 0. On your setup, leave it ON unless you know you have the headroom.")
+        else:
+            messagebox.showinfo(
+                "Gradient checkpointing off",
+                "Gradient checkpointing is now OFF — training runs ~20–30% faster but uses much more VRAM.\n\n"
+                "For it to fit, set Blocks Swap to 0 and keep resolution/batch modest. If you hit CUDA "
+                "out-of-memory, switch it back on.")
 
     def _populate_other_options(self, parent, start_row=0):
         """Populate Attention / Logging / Memory / Metadata fields onto the given parent.
@@ -10219,6 +10282,7 @@ class LoRATrainerGUI:
             "FP8": self.fp8_var.get(),
             "SCALED": self.scaled_var.get(),
             "QUANT_4BIT": self.quant_4bit_var.get(),
+            "GRADIENT_CHECKPOINTING": self.grad_checkpoint_var.get(),
             "FP8_TEXT_ENCODER": self.fp8_text_encoder_var.get(),
             "ENABLE_BUCKET": self.dataset_enable_bucket_var.get(),
             "BUCKET_NO_UPSCALE": self.dataset_no_upscale_var.get(),
@@ -10321,7 +10385,6 @@ class LoRATrainerGUI:
             "--blocks_to_swap", str(self.settings["BLOCKS_SWAP"]),
             "--optimizer_type", self.settings["OPTIMIZER_TYPE"],
             "--learning_rate", str(self.settings["LEARNING_RATE"]),
-            "--gradient_checkpointing",
             "--max_data_loader_n_workers", "2",
             "--persistent_data_loader_workers",
             "--network_module", config["network_module"],
@@ -10330,6 +10393,12 @@ class LoRATrainerGUI:
             "--network_args", f"loraplus_lr_ratio={self.settings['LORA_LR_RATIO']}",
             "--timestep_sampling", self.settings["TIMESTEP_SAMPLING"],
         ])
+
+        # Gradient checkpointing — on by default (recomputes activations in backward
+        # to fit a 9B LoRA on most cards). Off trades ~20-30% faster steps for much
+        # higher VRAM; only sensible on big cards with no block swap.
+        if self.settings.get("GRADIENT_CHECKPOINTING", True):
+            command.append("--gradient_checkpointing")
 
         # Target layers (selective layer training)
         # Block assignments based on empirical testing on Klein 9B:
@@ -10816,6 +10885,7 @@ class LoRATrainerGUI:
         current_settings["FP8"] = self.fp8_var.get()
         current_settings["SCALED"] = self.scaled_var.get()
         current_settings["QUANT_4BIT"] = self.quant_4bit_var.get()
+        current_settings["GRADIENT_CHECKPOINTING"] = self.grad_checkpoint_var.get()
         current_settings["FP8_TEXT_ENCODER"] = self.fp8_text_encoder_var.get()
         current_settings["ENABLE_BUCKET"] = self.dataset_enable_bucket_var.get()
         current_settings["BUCKET_NO_UPSCALE"] = self.dataset_no_upscale_var.get()
@@ -10870,6 +10940,8 @@ class LoRATrainerGUI:
                 self.scaled_var.set(loaded_settings["SCALED"])
             if "FP8_TEXT_ENCODER" in loaded_settings:
                 self.fp8_text_encoder_var.set(loaded_settings["FP8_TEXT_ENCODER"])
+            if "GRADIENT_CHECKPOINTING" in loaded_settings and hasattr(self, "grad_checkpoint_var"):
+                self.grad_checkpoint_var.set(loaded_settings["GRADIENT_CHECKPOINTING"])
             if "ENABLE_BUCKET" in loaded_settings:
                 self.dataset_enable_bucket_var.set(loaded_settings["ENABLE_BUCKET"])
             if "BUCKET_NO_UPSCALE" in loaded_settings:

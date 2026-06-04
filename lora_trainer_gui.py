@@ -858,6 +858,10 @@ class LoRATrainerGUI:
         self.explorer_tab.bind("<Button-1>", self.remove_focus)
         self.notebook.add(self.explorer_tab, text="LoRA the Explorer")
 
+        self.lora_royale_tab = ttk.Frame(self.notebook)
+        self.lora_royale_tab.bind("<Button-1>", self.remove_focus)
+        self.notebook.add(self.lora_royale_tab, text="LoRA Royale")
+
         self.extract_tab = ttk.Frame(self.notebook)
         self.extract_tab.bind("<Button-1>", self.remove_focus)
         self.notebook.add(self.extract_tab, text="Extract")
@@ -878,6 +882,7 @@ class LoRATrainerGUI:
         self.create_profiler_tab()
         self.create_repair_studio_tab()
         self.create_explorer_tab()
+        self.create_lora_royale_tab()
         self.create_extract_tab()
         self.create_prefs_tab()
 
@@ -1071,11 +1076,13 @@ class LoRATrainerGUI:
                 self.refresh_caption_images()
                 self.caption_images_loaded = True
 
-        # When leaving Repair Studio or Explorer, unload pipeline to free VRAM
+        # When leaving Repair Studio / Explorer / Royale, unload pipeline to free VRAM
         if tab_text != "Repair Studio":
             self._unload_repair_studio_models()
         if tab_text != "LoRA the Explorer":
             self._unload_explorer_models()
+        if tab_text != "LoRA Royale":
+            self._royale_unload()
 
     def remove_focus(self, event):
         """Remove focus from active widget when clicking background"""
@@ -9235,6 +9242,294 @@ class LoRATrainerGUI:
             messagebox.showerror("Error", f"Failed to load models:\n{traceback.format_exc()}")
             self.repair_status_var.set("Error loading models.")
             return False
+
+    # ------------------------------------------------------------------
+    # LoRA Royale — render every epoch on one seed, crossfade to the sweet spot
+    # ------------------------------------------------------------------
+    def create_lora_royale_tab(self):
+        self.royale_engine = None
+        self._royale_checkpoints = []
+        self._royale_images = []      # [(label, full-res PIL)]
+        self._royale_thumbs = []      # keep ImageTk refs alive
+        self._royale_preview_imgtk = None
+        self._royale_rendering = False
+
+        frame, _canvas = self.create_scrollable_frame(self.lora_royale_tab)
+        outer = tk.Frame(frame, bg=COLORS["bg_deep"])
+        outer.pack(fill=tk.BOTH, expand=True)
+        self._add_tab_banner(outer, "LoRA Royale",
+                             "Render every epoch of a training run on one seed, then crossfade between them to find the sweet spot.")
+
+        setup = self._start_section_card(outer, "Setup",
+                                         "Point at a training output folder. Renders use the Distilled 4-step model.")
+        setup.columnconfigure(1, weight=1)
+        _sbg = COLORS["bg_surface"]
+        r = 0
+        ttk.Label(setup, text="Checkpoint folder:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.royale_folder_var = tk.StringVar(value=self.settings.get("LORA_OUTPUT_DIR", ""))
+        _ff = tk.Frame(setup, bg=_sbg); _ff.grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        ttk.Entry(_ff, textvariable=self.royale_folder_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(_ff, text="Browse…", command=self._royale_browse_folder).pack(side=tk.LEFT, padx=(6, 0))
+        r += 1
+        self.royale_scan_var = tk.StringVar(value="")
+        tk.Label(setup, textvariable=self.royale_scan_var, font=(FONT_FAMILY, 9, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).grid(row=r, column=1, columnspan=2, sticky=tk.W)
+        self.royale_folder_var.trace_add("write", lambda *a: self._royale_scan())
+        r += 1
+
+        ttk.Label(setup, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.royale_prompt_var = tk.StringVar()
+        ttk.Entry(setup, textvariable=self.royale_prompt_var).grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        r += 1
+
+        ttk.Label(setup, text="Seed:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        _pr = tk.Frame(setup, bg=_sbg); _pr.grid(row=r, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.royale_seed_var = tk.StringVar(value="42")
+        ttk.Entry(_pr, textvariable=self.royale_seed_var, width=10).pack(side=tk.LEFT)
+        tk.Label(_pr, text="Res", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
+        self.royale_res_var = tk.StringVar(value="512")
+        ttk.Combobox(_pr, textvariable=self.royale_res_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(_pr, text="Max renders", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
+        self.royale_max_var = tk.StringVar(value="12")
+        ttk.Combobox(_pr, textvariable=self.royale_max_var, values=["All", "6", "8", "10", "12", "16", "20"],
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        r += 1
+
+        ttk.Label(setup, text="Reference:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.royale_ref_var = tk.StringVar(value="")
+        _rr = tk.Frame(setup, bg=_sbg); _rr.grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        ttk.Entry(_rr, textvariable=self.royale_ref_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(_rr, text="Browse…", command=self._royale_browse_ref).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(_rr, text="Clear", command=lambda: self.royale_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        r += 1
+
+        _br = tk.Frame(setup, bg=_sbg); _br.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        self._royale_render_btn = tk.Button(_br, text="Render epochs", font=(FONT_FAMILY, 11, "bold"),
+                                            fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF",
+                                            activebackground="#256F46", relief="flat", bd=0, padx=24, pady=6,
+                                            cursor="hand2", command=self._royale_render)
+        self._royale_render_btn.pack(side=tk.LEFT)
+        self.royale_status_var = tk.StringVar(value="Pick a folder, set a prompt, then render.")
+        tk.Label(_br, textvariable=self.royale_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
+
+        cf = self._start_section_card(outer, "Crossfade",
+                                      "Drag to blend between consecutive epochs — stop where it looks best.")
+        holder = tk.Frame(cf, width=512, height=512, bg="#1c1c1c", highlightthickness=0)
+        holder.pack(pady=(0, 8))
+        holder.pack_propagate(False)
+        self._royale_preview_label = ttk.Label(holder, text="(render to begin)", anchor=tk.CENTER, background="#1c1c1c")
+        self._royale_preview_label.pack(fill=tk.BOTH, expand=True)
+        self._royale_holder = holder
+        self.royale_scrub_label_var = tk.StringVar(value="")
+        tk.Label(cf, textvariable=self.royale_scrub_label_var, font=(FONT_FAMILY, 11, "bold"),
+                 fg=COLORS["text_primary"], bg=_sbg).pack()
+        self.royale_scrub_var = tk.DoubleVar(value=0.0)
+        self._royale_scale = ttk.Scale(cf, from_=0.0, to=0.0, variable=self.royale_scrub_var,
+                                       orient=tk.HORIZONTAL, command=lambda v: self._royale_scrub())
+        self._royale_scale.pack(fill=tk.X, padx=20, pady=(4, 8))
+
+        grid_card = self._start_section_card(outer, "All epochs",
+                                             "Click a thumbnail to jump the crossfade there.")
+        self._royale_grid = tk.Frame(grid_card, bg=_sbg)
+        self._royale_grid.pack(fill=tk.X)
+
+        # Scan the pre-filled output folder so the count shows on first open.
+        try:
+            self._royale_scan()
+        except Exception:
+            pass
+
+    def _royale_browse_folder(self):
+        from tkinter import filedialog
+        d = filedialog.askdirectory(title="Select training output folder",
+                                    initialdir=self.royale_folder_var.get() or self.settings.get("LORA_OUTPUT_DIR", ""))
+        if d:
+            self.royale_folder_var.set(d)
+
+    def _royale_browse_ref(self):
+        from tkinter import filedialog
+        p = filedialog.askopenfilename(title="Reference image",
+                                       filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+                                       initialdir=self._pref_initialdir("input_ref_dir"))
+        if p:
+            self.royale_ref_var.set(p)
+
+    def _royale_scan(self):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale.scan import scan_checkpoints
+        cps = scan_checkpoints(self.royale_folder_var.get().strip())
+        self._royale_checkpoints = cps
+        if cps:
+            labels = [e for e, _ in cps]
+            self.royale_scan_var.set(f"{len(cps)} checkpoints found (epochs {labels[0]}–{labels[-1]}).")
+        else:
+            self.royale_scan_var.set("No .safetensors checkpoints found in this folder.")
+
+    def _royale_ensure_engine(self):
+        if (self.royale_engine is not None and self.royale_engine.pipeline is not None
+                and self.royale_engine.pipeline.is_loaded):
+            return True
+        dit_path = self.prefs_vars["distilled_dit"].get() if "distilled_dit" in self.prefs_vars else ""
+        vae_path = self._get_path("VAE_MODEL")
+        te_path = self._get_path("TEXT_ENCODER")
+        for label, p in (("Distilled DiT", dit_path), ("VAE", vae_path), ("Text encoder", te_path)):
+            if not p or not os.path.exists(p):
+                messagebox.showerror("Error", f"{label} path not set or not found.\nConfigure on Preferences tab.")
+                return False
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.engine import RepairEngine
+        if self.royale_engine is None:
+            self.royale_engine = RepairEngine()
+        is_fp8 = "fp8" in os.path.basename(dit_path).lower()
+        try:
+            self.royale_status_var.set("Loading Distilled model…")
+            self.master.update_idletasks()
+            self.royale_engine.ensure_pipeline(dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+                                               model_version="klein-9b", device="cuda",
+                                               fp8_scaled=False if is_fp8 else True,
+                                               blocks_to_swap=self._get_inference_blocks_to_swap())
+            return True
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Failed to load models:\n{traceback.format_exc()}")
+            self.royale_status_var.set("Error loading models.")
+            return False
+
+    def _royale_unload(self):
+        if getattr(self, "royale_engine", None) is not None:
+            try:
+                self.royale_engine.reset()
+            except Exception:
+                pass
+
+    def _royale_render(self):
+        if self._royale_rendering:
+            return
+        cps = self._royale_checkpoints
+        if not cps:
+            messagebox.showinfo("LoRA Royale", "No checkpoints found — pick a folder with trained LoRAs.")
+            return
+        prompt = self.royale_prompt_var.get().strip()
+        if not prompt:
+            messagebox.showinfo("LoRA Royale", "Enter a prompt (include your trigger word).")
+            return
+        # Subset to 'Max renders', evenly spaced across the run (always keep first + last).
+        sel = cps
+        mx = self.royale_max_var.get()
+        if mx != "All":
+            n = int(mx)
+            if len(cps) > n:
+                idx = sorted({round(i * (len(cps) - 1) / (n - 1)) for i in range(n)})
+                sel = [cps[i] for i in idx]
+        if not self._royale_ensure_engine():
+            return
+        self._royale_rendering = True
+        self._royale_render_btn.configure(state="disabled")
+        import threading
+        threading.Thread(target=self._royale_render_worker, args=(sel, prompt), daemon=True).start()
+
+    def _royale_render_worker(self, sel, prompt):
+        from fizgig.repair_studio.state import SliderState
+        try:
+            seed = int(self.royale_seed_var.get() or "42")
+        except ValueError:
+            seed = 42
+        try:
+            res = int(self.royale_res_var.get())
+        except ValueError:
+            res = 512
+        ref = self.royale_ref_var.get().strip()
+        results = []
+        eng = self.royale_engine
+        loaded = False
+        total = len(sel)
+        for i, (label, path) in enumerate(sel):
+            self.master.after(0, lambda l=label, i=i: self.royale_status_var.set(
+                f"Rendering epoch {l} ({i + 1}/{total})…"))
+            try:
+                if not loaded:
+                    eng.load_primary(path)
+                    loaded = True
+                elif not eng.swap_primary_weights(path):
+                    eng.reset()
+                    eng.load_primary(path)
+                st = SliderState.default_klein9b()
+                st.prompt = prompt
+                st.seed = seed
+                st.preview_width = res
+                st.preview_height = res
+                if ref and os.path.exists(ref):
+                    st.ref_image_path = ref
+                    st.ref_megapixels = 0.2
+                    st.ref_strength = 1.0
+                img = eng.generate_preview(st)
+                results.append((label, img.copy()))
+            except Exception:
+                import traceback
+                print(f"[royale] render failed for {path}:\n{traceback.format_exc()}")
+        self.master.after(0, lambda: self._royale_finish(results))
+
+    def _royale_finish(self, results):
+        self._royale_rendering = False
+        self._royale_render_btn.configure(state="normal")
+        self._royale_images = results
+        if not results:
+            self.royale_status_var.set("No renders produced — see console.")
+            return
+        self.royale_status_var.set(f"Rendered {len(results)} epochs. Drag the crossfade slider, or click a thumbnail.")
+        self._royale_scale.configure(to=float(len(results) - 1))
+        self.royale_scrub_var.set(0.0)
+        self._royale_build_grid()
+        self._royale_scrub()
+
+    def _royale_scrub(self):
+        from PIL import Image, ImageTk
+        imgs = self._royale_images
+        if not imgs:
+            return
+        p = float(self.royale_scrub_var.get())
+        lo = max(0, min(int(p), len(imgs) - 1))
+        hi = min(lo + 1, len(imgs) - 1)
+        alpha = p - lo
+        a_label, a_img = imgs[lo]
+        b_label, b_img = imgs[hi]
+        if alpha <= 0.01 or lo == hi:
+            blended = a_img
+            self.royale_scrub_label_var.set(f"Epoch {a_label}")
+        else:
+            if a_img.size != b_img.size:
+                b_img = b_img.resize(a_img.size)
+            blended = Image.blend(a_img, b_img, alpha)
+            self.royale_scrub_label_var.set(f"Epoch {a_label}  →  {b_label}    ({alpha:.0%})")
+        hw = self._royale_holder.winfo_width() or 512
+        hh = self._royale_holder.winfo_height() or 512
+        disp = blended.copy()
+        disp.thumbnail((max(64, hw), max(64, hh)), Image.LANCZOS)
+        self._royale_preview_imgtk = ImageTk.PhotoImage(disp)
+        self._royale_preview_label.configure(image=self._royale_preview_imgtk, text="")
+
+    def _royale_build_grid(self):
+        from PIL import Image, ImageTk
+        for w in self._royale_grid.winfo_children():
+            w.destroy()
+        self._royale_thumbs = []
+        cols = 8
+        for i, (label, img) in enumerate(self._royale_images):
+            t = img.copy()
+            t.thumbnail((92, 92), Image.LANCZOS)
+            tk_img = ImageTk.PhotoImage(t)
+            self._royale_thumbs.append(tk_img)
+            row = (i // cols) * 2
+            col = i % cols
+            lbl = tk.Label(self._royale_grid, image=tk_img, cursor="hand2", bg=COLORS["bg_surface"])
+            lbl.grid(row=row, column=col, padx=4, pady=(4, 0))
+            lbl.bind("<Button-1>", lambda e, idx=i: (self.royale_scrub_var.set(float(idx)), self._royale_scrub()))
+            tk.Label(self._royale_grid, text=f"e{label}", font=(FONT_FAMILY, 8),
+                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(row=row + 1, column=col, pady=(0, 4))
 
     def _repair_start(self):
         """Smart Start: load/swap primary, load/swap donor, or regenerate."""

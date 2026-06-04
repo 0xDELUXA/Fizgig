@@ -4236,7 +4236,7 @@ class LoRATrainerGUI:
                  text="Keeps the ~10 GB Distilled model resident in system RAM between epochs so it isn't "
                       "re-read from disk every sample (~3–4 s/epoch saved). auto = only when free RAM is "
                       "comfortable; off = reload each time. Only applies when sampling isn't block-swapping the "
-                      "Distilled (roomy GPUs).",
+                      "Distilled — i.e. 24 GB+ cards, where the sample peaks around ~18 GB).",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
 

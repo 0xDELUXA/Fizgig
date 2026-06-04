@@ -1720,8 +1720,9 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 11), fg=COLORS["text_secondary"],
                  bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 14))
 
-        para("I'm a photographer (Sony ambassador) by trade, and an AI tinkerer by night — "
-             "I build a lot of open-source tooling for ComfyUI and Klein/Flux workflows.")
+        para("By trade I'm a photographer and videographer — mostly live music, portraits, and a "
+             "bit of teaching — and an AI tinkerer by night. I build a lot of open-source tooling "
+             "for ComfyUI and Klein/Flux workflows.")
         link("Photography — shootthesound.com", "https://shootthesound.com")
         link("Code & ComfyUI nodes — github.com/shootthesound", "https://github.com/shootthesound", pady=(0, 4))
         para("(Realtime-LoRA, LongLook, Angelo, mesh and a couple of dozen more — Fizgig grew out of that world.)",

@@ -591,8 +591,8 @@ class LoRATrainerGUI:
     def __init__(self, master):
         self.master = master
         master.title("Fizgig — Klein 9B LoRA Studio")
-        master.geometry("1280x1024")
-        master.minsize(1100, 800)  # ensures all tabs visible at top + tab content not cut off
+        master.geometry("1280x1124")  # +100 for the bottom status bar (tabs keep ~1024)
+        master.minsize(1100, 900)  # ensures all tabs visible at top + tab content not cut off
         master.configure(bg=BG_COLOR)
 
         # Window/taskbar icon
@@ -1092,6 +1092,8 @@ class LoRATrainerGUI:
         # Save LoRA output directory if entry exists
         if "LORA_OUTPUT_DIR" in self.entries:
             data["lora_output_dir"] = self.entries["LORA_OUTPUT_DIR"].get()
+        # Remember whether the bottom status bar is shown
+        data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
 
     def _save_pref(self, key):
@@ -1104,52 +1106,103 @@ class LoRATrainerGUI:
     # Live VRAM / RAM status bar (bottom of window)
     # ------------------------------------------------------------------
     def _build_status_bar(self, master):
-        """Create the bottom status bar: live VRAM + system-RAM fill bars with
-        per-run peak markers. A daemon thread does the (possibly slow) reads;
-        the Tk poll just redraws from the latest snapshot, so the UI never
-        stalls on an nvidia-smi call."""
-        bar = tk.Frame(master, bg=COLORS["bg_deep"], height=28)
-        bar.pack(side=tk.BOTTOM, fill=tk.X)
+        """Bottom status panel: stacked VRAM + system-RAM gradient fill bars (with
+        per-run peak ticks) on the left, the live sample override on the right,
+        and a remembered hide/show toggle. A daemon thread does the reads so the
+        Tk redraw never stalls on an nvidia-smi call."""
+        container = tk.Frame(master, bg=COLORS["bg_deep"])
+        container.pack(side=tk.BOTTOM, fill=tk.X)
+        self._status_container = container
+
+        # Thin always-visible handle carrying the show/hide toggle.
+        handle = tk.Frame(container, bg=COLORS["bg_deep"])
+        handle.pack(side=tk.BOTTOM, fill=tk.X)
+        self._status_handle = handle
+        self._status_toggle_btn = tk.Button(
+            handle, text="▾ Hide stats", font=(FONT_FAMILY, 8),
+            bg=COLORS["bg_deep"], fg=COLORS["text_muted"],
+            activebackground=COLORS["bg_surface"], activeforeground=COLORS["text_primary"],
+            relief="flat", bd=0, padx=10, pady=1, cursor="hand2",
+            command=self._toggle_status_bar)
+        self._status_toggle_btn.pack(side=tk.RIGHT, padx=(0, 12))
+
+        # The expandable bar (sits above the handle).
+        bar = tk.Frame(container, bg=COLORS["bg_deep"], height=82)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, before=handle)
         bar.pack_propagate(False)
         self._status_bar_frame = bar
 
-        self._vram_canvas = tk.Canvas(bar, width=255, height=20, bg=COLORS["bg_surface"],
+        # --- left: stacked VRAM (top) + RAM (bottom) gradient bars ---
+        bars_col = tk.Frame(bar, bg=COLORS["bg_deep"])
+        bars_col.pack(side=tk.LEFT, padx=(14, 18), pady=10)
+        self._vram_canvas = tk.Canvas(bars_col, width=360, height=27, bg=COLORS["bg_surface"],
                                       highlightthickness=0)
-        self._vram_canvas.pack(side=tk.LEFT, padx=(10, 6), pady=4)
-        self._ram_canvas = tk.Canvas(bar, width=255, height=20, bg=COLORS["bg_surface"],
+        self._vram_canvas.pack(side=tk.TOP, pady=(0, 6))
+        self._ram_canvas = tk.Canvas(bars_col, width=360, height=27, bg=COLORS["bg_surface"],
                                      highlightthickness=0)
-        self._ram_canvas.pack(side=tk.LEFT, padx=(0, 6), pady=4)
+        self._ram_canvas.pack(side=tk.TOP)
 
-        # Live sample override (prompt / seed / res). While the checkbox is on,
-        # the GUI writes <output_dir>/.sample_override.json and the trainer uses
-        # it for the next samples; unchecked falls back to the Samples tab.
-        ov = tk.Frame(bar, bg=COLORS["bg_deep"])
-        ov.pack(side=tk.RIGHT, padx=(6, 10))
+        # --- right: live sample override (surface-coloured mini panel) ---
+        ov = tk.Frame(bar, bg=COLORS["bg_surface"])
+        ov.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 14), pady=10, ipadx=8, ipady=4)
+        _sbg = COLORS["bg_surface"]
+        r1 = tk.Frame(ov, bg=_sbg); r1.pack(fill=tk.X, padx=8, pady=(4, 0))
         self.sample_override_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(ov, text="Override sample:", variable=self.sample_override_var,
-                        command=self._on_sample_override_changed).pack(side=tk.LEFT, padx=(0, 4))
-        self.sample_override_prompt_var = tk.StringVar()
-        ttk.Entry(ov, textvariable=self.sample_override_prompt_var, width=30).pack(side=tk.LEFT, padx=(0, 4))
-        tk.Label(ov, text="seed", bg=COLORS["bg_deep"], fg=COLORS["text_muted"],
-                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT)
+        ttk.Checkbutton(r1, text="Override next samples", variable=self.sample_override_var,
+                        command=self._on_sample_override_changed,
+                        style="Surface.TCheckbutton").pack(side=tk.LEFT)
+        tk.Label(r1, text="seed", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(16, 3))
         self.sample_override_seed_var = tk.StringVar(value="1234")
-        ttk.Entry(ov, textvariable=self.sample_override_seed_var, width=7).pack(side=tk.LEFT, padx=(2, 4))
-        tk.Label(ov, text="res", bg=COLORS["bg_deep"], fg=COLORS["text_muted"],
-                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT)
-        self.sample_override_res_var = tk.StringVar(value="768")
-        ttk.Entry(ov, textvariable=self.sample_override_res_var, width=5).pack(side=tk.LEFT, padx=(2, 0))
+        ttk.Entry(r1, textvariable=self.sample_override_seed_var, width=8).pack(side=tk.LEFT)
+        _res_vals = ["512", "640", "768", "896", "1024"]
+        tk.Label(r1, text="W", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
+        self.sample_override_w_var = tk.StringVar(value="768")
+        ttk.Combobox(r1, textvariable=self.sample_override_w_var, values=_res_vals,
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(r1, text="H", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(12, 3))
+        self.sample_override_h_var = tk.StringVar(value="768")
+        ttk.Combobox(r1, textvariable=self.sample_override_h_var, values=_res_vals,
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        r2 = tk.Frame(ov, bg=_sbg); r2.pack(fill=tk.X, padx=8, pady=(8, 4))
+        tk.Label(r2, text="Prompt", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(0, 6))
+        self.sample_override_prompt_var = tk.StringVar()
+        ttk.Entry(r2, textvariable=self.sample_override_prompt_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
         for _v in (self.sample_override_prompt_var, self.sample_override_seed_var,
-                   self.sample_override_res_var):
+                   self.sample_override_w_var, self.sample_override_h_var):
             _v.trace_add("write", lambda *a: self._on_sample_override_changed())
 
         self._vram_peak = 0
         self._ram_peak = 0
         self._status_latest = (None, None)
         self._status_stop = False
+        # Restore remembered visibility (default shown).
+        self._status_bar_visible = bool(self.last_used.get("status_bar_visible", True))
+        if not self._status_bar_visible:
+            bar.pack_forget()
+            self._status_toggle_btn.configure(text="▴ Show stats")
         import threading
         self._status_thread = threading.Thread(target=self._status_reader_loop, daemon=True)
         self._status_thread.start()
         self.master.after(800, self._poll_status_bar)
+
+    def _toggle_status_bar(self):
+        """Show/hide the stats bar; remember the choice across launches."""
+        self._status_bar_visible = not getattr(self, "_status_bar_visible", True)
+        if self._status_bar_visible:
+            self._status_bar_frame.pack(side=tk.BOTTOM, fill=tk.X, before=self._status_handle)
+            self._status_toggle_btn.configure(text="▾ Hide stats")
+        else:
+            self._status_bar_frame.pack_forget()
+            self._status_toggle_btn.configure(text="▴ Show stats")
+        try:
+            self._save_last_used_paths()
+        except Exception:
+            pass
 
     def _read_vram(self):
         """Return (used_bytes, total_bytes) for GPU 0, or None. Prefers pynvml
@@ -1190,42 +1243,54 @@ class LoRATrainerGUI:
             self._status_latest = (vram, ram)
             time.sleep(1.0)
 
-    def _draw_status_segment(self, canvas, used, total, peak, label):
+    @staticmethod
+    def _lerp_color(c1, c2, t):
+        t = max(0.0, min(1.0, t))
+        r = round(int(c1[1:3], 16) + (int(c2[1:3], 16) - int(c1[1:3], 16)) * t)
+        g = round(int(c1[3:5], 16) + (int(c2[3:5], 16) - int(c1[3:5], 16)) * t)
+        b = round(int(c1[5:7], 16) + (int(c2[5:7], 16) - int(c1[5:7], 16)) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _draw_status_segment(self, canvas, used, total, peak, label, c_start, c_end):
         canvas.delete("all")
         try:
             w = int(canvas["width"]); h = int(canvas["height"])
         except Exception:
             return
         frac = max(0.0, min(1.0, used / total)) if total else 0.0
-        # background track
+        # track
         canvas.create_rectangle(0, 0, w, h, fill=COLORS["bg_deep"], outline="")
-        # fill, colour-graded by load
-        if frac < 0.70:
-            col = "#2E8B57"   # green
-        elif frac < 0.90:
-            col = "#C9A227"   # amber
-        else:
-            col = "#B23B3B"   # red
-        canvas.create_rectangle(0, 0, int(w * frac), h, fill=col, outline="")
+        # gradient fill: colour interpolates c_start -> c_end across the FULL
+        # width, drawn up to the current fill (fuller = closer to c_end).
+        fill_w = int(w * frac)
+        step = 3
+        for x in range(0, fill_w, step):
+            col = self._lerp_color(c_start, c_end, x / max(1, w - 1))
+            canvas.create_rectangle(x, 1, min(x + step, fill_w), h - 1, fill=col, outline="")
         # per-run peak tick
         if peak and total:
             px = int(w * max(0.0, min(1.0, peak / total)))
             canvas.create_line(px, 0, px, h, fill="#FFFFFF", width=2)
-        txt = f"{label}  {used/1e9:.1f} / {total/1e9:.1f} GB · peak {peak/1e9:.1f}"
-        canvas.create_text(8, h // 2, text=txt, anchor="w",
-                           fill="#FFFFFF", font=(FONT_FAMILY, 8, "bold"))
+        canvas.create_text(10, h // 2,
+                           text=f"{label}  {used/1e9:.1f} / {total/1e9:.1f} GB · peak {peak/1e9:.1f}",
+                           anchor="w", fill="#FFFFFF", font=(FONT_FAMILY, 9, "bold"))
 
     def _poll_status_bar(self):
         vram, ram = getattr(self, "_status_latest", (None, None))
+        visible = getattr(self, "_status_bar_visible", True)
         if vram:
             u, t = vram
             self._vram_peak = max(self._vram_peak, u)
-            self._draw_status_segment(self._vram_canvas, u, t, self._vram_peak, "VRAM")
+            if visible:
+                self._draw_status_segment(self._vram_canvas, u, t, self._vram_peak,
+                                          "VRAM", "#3FB950", "#E5534B")  # green → red
         if ram:
             u, t = ram
             self._ram_peak = max(self._ram_peak, u)
-            self._draw_status_segment(self._ram_canvas, u, t, self._ram_peak, "RAM")
-        self.master.after(500, self._poll_status_bar)
+            if visible:
+                self._draw_status_segment(self._ram_canvas, u, t, self._ram_peak,
+                                          "RAM", "#3B82F6", "#EAC54F")   # blue → yellow
+        self.master.after(1000, self._poll_status_bar)
 
     def reset_status_peaks(self):
         """Zero the VRAM/RAM peak markers — call at the start of a training run."""
@@ -1258,11 +1323,15 @@ class LoRATrainerGUI:
                 except ValueError:
                     seed = 1234
                 try:
-                    res = int(self.sample_override_res_var.get() or "768")
+                    width = int(self.sample_override_w_var.get() or "768")
                 except ValueError:
-                    res = 768
+                    width = 768
+                try:
+                    height = int(self.sample_override_h_var.get() or "768")
+                except ValueError:
+                    height = 768
                 data = {"prompt": self.sample_override_prompt_var.get().strip(),
-                        "seed": seed, "width": res, "height": res}
+                        "seed": seed, "width": width, "height": height}
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f)

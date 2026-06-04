@@ -1742,16 +1742,13 @@ class LoRATrainerGUI:
 
         btn_row = tk.Frame(pad, bg=COLORS["bg_deep"])
         btn_row.pack(anchor=tk.W)
-        tk.Button(btn_row, text="☕  Buy me a coffee", font=(FONT_FAMILY, 11, "bold"),
-                  fg="#000000", bg="#FFDD00", activeforeground="#000000", activebackground="#E5C700",
-                  relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
-                  command=lambda: webbrowser.open("https://buymeacoffee.com/lorasandlenses")
-                  ).pack(side=tk.LEFT)
+        # No coffee button here on purpose — it's already on the Start tab, so
+        # repeating it in the popup would feel pushy. The note above is enough.
         tk.Button(btn_row, text="Close", font=(FONT_FAMILY, 11),
                   fg=COLORS["text_primary"], bg=COLORS["bg_surface"],
                   activeforeground=COLORS["text_primary"], activebackground=COLORS["border"],
                   relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
-                  command=win.destroy).pack(side=tk.LEFT, padx=(12, 0))
+                  command=win.destroy).pack(side=tk.LEFT)
 
         win.update_idletasks()
         # Centre over the main window.

@@ -1155,7 +1155,7 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(16, 3))
         self.sample_override_seed_var = tk.StringVar(value="1234")
         ttk.Entry(r1, textvariable=self.sample_override_seed_var, width=8).pack(side=tk.LEFT)
-        _res_vals = ["512", "640", "768", "896", "1024"]
+        _res_vals = ["512", "640", "768", "896", "1024", "1280"]
         tk.Label(r1, text="W", bg=_sbg, fg=COLORS["text_muted"],
                  font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
         self.sample_override_w_var = tk.StringVar(value="768")

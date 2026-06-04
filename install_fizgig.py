@@ -184,7 +184,7 @@ try:
     print("Initializing FaceAnalysis (this downloads models)...")
     app = FaceAnalysis(
         name='buffalo_l',
-        allowed_modules=['detection', 'genderage'],
+        allowed_modules=['detection', 'genderage', 'recognition'],
         providers=['CPUExecutionProvider']
     )
     app.prepare(ctx_id=-1)  # -1 = CPU only

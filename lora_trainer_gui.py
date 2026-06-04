@@ -1316,7 +1316,8 @@ class LoRATrainerGUI:
             px = int(w * max(0.0, min(1.0, peak / total)))
             canvas.create_line(px, 0, px, h, fill="#FFFFFF", width=2)
         canvas.create_text(10, h // 2,
-                           text=f"{label}  {used/1e9:.1f} / {total/1e9:.1f} GB · peak {peak/1e9:.1f}",
+                           text=(f"{label}  {used/1073741824:.1f} / {total/1073741824:.1f} GB"
+                                 f" · peak {peak/1073741824:.1f}"),  # GiB (binary) — matches '32 GB' labels
                            anchor="w", fill="#FFFFFF", font=(FONT_FAMILY, 9, "bold"))
 
     def _poll_status_bar(self):

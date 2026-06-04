@@ -807,6 +807,10 @@ class LoRATrainerGUI:
 
         self.setup_styles()
 
+        # Live VRAM/RAM status bar pinned to the bottom (packed first so it
+        # reserves the strip; the notebook then fills the space above it).
+        self._build_status_bar(master)
+
         # Create notebook and tabs
         self.notebook = ttk.Notebook(master)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
@@ -1095,6 +1099,116 @@ class LoRATrainerGUI:
         if key in self.prefs_vars:
             self.prefs[key] = self.prefs_vars[key].get()
             save_prefs(self.prefs)
+
+    # ------------------------------------------------------------------
+    # Live VRAM / RAM status bar (bottom of window)
+    # ------------------------------------------------------------------
+    def _build_status_bar(self, master):
+        """Create the bottom status bar: live VRAM + system-RAM fill bars with
+        per-run peak markers. A daemon thread does the (possibly slow) reads;
+        the Tk poll just redraws from the latest snapshot, so the UI never
+        stalls on an nvidia-smi call."""
+        bar = tk.Frame(master, bg=COLORS["bg_deep"], height=28)
+        bar.pack(side=tk.BOTTOM, fill=tk.X)
+        bar.pack_propagate(False)
+        self._status_bar_frame = bar
+
+        self._vram_canvas = tk.Canvas(bar, width=300, height=20, bg=COLORS["bg_surface"],
+                                      highlightthickness=0)
+        self._vram_canvas.pack(side=tk.LEFT, padx=(10, 6), pady=4)
+        self._ram_canvas = tk.Canvas(bar, width=300, height=20, bg=COLORS["bg_surface"],
+                                     highlightthickness=0)
+        self._ram_canvas.pack(side=tk.LEFT, padx=(0, 6), pady=4)
+
+        self._vram_peak = 0
+        self._ram_peak = 0
+        self._status_latest = (None, None)
+        self._status_stop = False
+        import threading
+        self._status_thread = threading.Thread(target=self._status_reader_loop, daemon=True)
+        self._status_thread.start()
+        self.master.after(800, self._poll_status_bar)
+
+    def _read_vram(self):
+        """Return (used_bytes, total_bytes) for GPU 0, or None. Prefers pynvml
+        (fast); falls back to a one-shot nvidia-smi query."""
+        try:
+            import pynvml
+            if not getattr(self, "_nvml_init", False):
+                pynvml.nvmlInit()
+                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                self._nvml_init = True
+            m = pynvml.nvmlDeviceGetMemoryInfo(self._nvml_handle)
+            return int(m.used), int(m.total)
+        except Exception:
+            pass
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            used, total = out.stdout.strip().splitlines()[0].split(",")
+            return int(used) * 1024 * 1024, int(total) * 1024 * 1024
+        except Exception:
+            return None
+
+    def _status_reader_loop(self):
+        import time
+        while not getattr(self, "_status_stop", False):
+            vram = self._read_vram()
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram = (vm.total - vm.available, vm.total)
+            except Exception:
+                ram = None
+            self._status_latest = (vram, ram)
+            time.sleep(1.0)
+
+    def _draw_status_segment(self, canvas, used, total, peak, label):
+        canvas.delete("all")
+        try:
+            w = int(canvas["width"]); h = int(canvas["height"])
+        except Exception:
+            return
+        frac = max(0.0, min(1.0, used / total)) if total else 0.0
+        # background track
+        canvas.create_rectangle(0, 0, w, h, fill=COLORS["bg_deep"], outline="")
+        # fill, colour-graded by load
+        if frac < 0.70:
+            col = "#2E8B57"   # green
+        elif frac < 0.90:
+            col = "#C9A227"   # amber
+        else:
+            col = "#B23B3B"   # red
+        canvas.create_rectangle(0, 0, int(w * frac), h, fill=col, outline="")
+        # per-run peak tick
+        if peak and total:
+            px = int(w * max(0.0, min(1.0, peak / total)))
+            canvas.create_line(px, 0, px, h, fill="#FFFFFF", width=2)
+        txt = f"{label}  {used/1e9:.1f} / {total/1e9:.1f} GB · peak {peak/1e9:.1f}"
+        canvas.create_text(8, h // 2, text=txt, anchor="w",
+                           fill="#FFFFFF", font=(FONT_FAMILY, 8, "bold"))
+
+    def _poll_status_bar(self):
+        vram, ram = getattr(self, "_status_latest", (None, None))
+        if vram:
+            u, t = vram
+            self._vram_peak = max(self._vram_peak, u)
+            self._draw_status_segment(self._vram_canvas, u, t, self._vram_peak, "VRAM")
+        if ram:
+            u, t = ram
+            self._ram_peak = max(self._ram_peak, u)
+            self._draw_status_segment(self._ram_canvas, u, t, self._ram_peak, "RAM")
+        self.master.after(500, self._poll_status_bar)
+
+    def reset_status_peaks(self):
+        """Zero the VRAM/RAM peak markers — call at the start of a training run."""
+        self._vram_peak = 0
+        self._ram_peak = 0
 
     def setup_styles(self):
         """Set up styles for refined dark theme (Fizgig Visual Style Guide)"""
@@ -10203,6 +10317,11 @@ class LoRATrainerGUI:
 
         # Reset OOM warning flag for this run
         self._oom_warning_shown = False
+        # Reset the VRAM/RAM peak markers so the status bar tracks THIS run.
+        try:
+            self.reset_status_peaks()
+        except Exception:
+            pass
 
         # Auto-uncheck FP8 Base if the Base DiT file is already fp8-quantised
         base_dit_path = self.prefs_vars.get("base_dit", tk.StringVar()).get()

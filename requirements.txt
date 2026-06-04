@@ -46,3 +46,7 @@ timm>=0.9.0
 # Misc
 pyyaml==6.0.3
 packaging==25.0  # Explicit — used by src/fizgig/training/trainer.py for Version parsing
+
+# Status bar / system metrics
+psutil>=5.9  # system-RAM checks (sample-model cache) + status bar
+nvidia-ml-py>=12.0  # fast GPU VRAM reads for the status bar (falls back to nvidia-smi)

@@ -1125,6 +1125,9 @@ class LoRATrainerGUI:
         # Save LoRA output directory if entry exists
         if "LORA_OUTPUT_DIR" in self.entries:
             data["lora_output_dir"] = self.entries["LORA_OUTPUT_DIR"].get()
+        # Remember the last LoRA Royale checkpoint folder
+        if hasattr(self, 'royale_folder_var'):
+            data["royale_folder"] = self.royale_folder_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9266,7 +9269,8 @@ class LoRATrainerGUI:
         _sbg = COLORS["bg_surface"]
         r = 0
         ttk.Label(setup, text="Checkpoint folder:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.royale_folder_var = tk.StringVar(value=self.settings.get("LORA_OUTPUT_DIR", ""))
+        self.royale_folder_var = tk.StringVar(
+            value=self.last_used.get("royale_folder", "") or self.settings.get("LORA_OUTPUT_DIR", ""))
         _ff = tk.Frame(setup, bg=_sbg); _ff.grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
         ttk.Entry(_ff, textvariable=self.royale_folder_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(_ff, text="Browse…", command=self._royale_browse_folder).pack(side=tk.LEFT, padx=(6, 0))
@@ -9274,7 +9278,7 @@ class LoRATrainerGUI:
         self.royale_scan_var = tk.StringVar(value="")
         tk.Label(setup, textvariable=self.royale_scan_var, font=(FONT_FAMILY, 9, "italic"),
                  fg=COLORS["accent"], bg=_sbg).grid(row=r, column=1, columnspan=2, sticky=tk.W)
-        self.royale_folder_var.trace_add("write", lambda *a: self._royale_scan())
+        self.royale_folder_var.trace_add("write", lambda *a: (self._royale_scan(), self._save_last_used_paths()))
         r += 1
 
         ttk.Label(setup, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)

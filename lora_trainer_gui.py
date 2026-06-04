@@ -1189,6 +1189,20 @@ class LoRATrainerGUI:
         self.sample_override_h_var = tk.StringVar(value="768")
         ttk.Combobox(r1, textvariable=self.sample_override_h_var, values=_res_vals,
                      state="readonly", width=6).pack(side=tk.LEFT)
+        # Reference image (Klein edit conditioning) — auto-capped to ~0.20 MP by
+        # the trainer so a big image can't OOM the sample.
+        tk.Label(r1, text="Ref", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
+        self.sample_override_ref_var = tk.StringVar(value="")
+        ttk.Button(r1, text="Browse…", width=9,
+                   command=self._browse_override_ref).pack(side=tk.LEFT)
+        self._override_ref_label = tk.Label(r1, text="(none)", bg=_sbg,
+                                            fg=COLORS["text_muted"], font=(FONT_FAMILY, 8))
+        self._override_ref_label.pack(side=tk.LEFT, padx=(6, 2))
+        tk.Button(r1, text="✕", font=(FONT_FAMILY, 8), bg=_sbg, fg=COLORS["text_muted"],
+                  activebackground=COLORS["border"], activeforeground=COLORS["text_primary"],
+                  relief="flat", bd=0, cursor="hand2",
+                  command=self._clear_override_ref).pack(side=tk.LEFT)
         r2 = tk.Frame(ov, bg=_sbg); r2.pack(fill=tk.X, padx=8, pady=(8, 4))
         tk.Label(r2, text="Prompt", bg=_sbg, fg=COLORS["text_muted"],
                  font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(0, 6))
@@ -1196,7 +1210,8 @@ class LoRATrainerGUI:
         ttk.Entry(r2, textvariable=self.sample_override_prompt_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True)
         for _v in (self.sample_override_prompt_var, self.sample_override_seed_var,
-                   self.sample_override_w_var, self.sample_override_h_var):
+                   self.sample_override_w_var, self.sample_override_h_var,
+                   self.sample_override_ref_var):
             _v.trace_add("write", lambda *a: self._on_sample_override_changed())
 
         self._vram_peak = 0
@@ -1354,7 +1369,8 @@ class LoRATrainerGUI:
                 except ValueError:
                     height = 768
                 data = {"prompt": self.sample_override_prompt_var.get().strip(),
-                        "seed": seed, "width": width, "height": height}
+                        "seed": seed, "width": width, "height": height,
+                        "ref_image": self.sample_override_ref_var.get().strip()}
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(data, f)
@@ -1362,6 +1378,24 @@ class LoRATrainerGUI:
                 os.remove(path)
         except Exception:
             pass
+
+    def _browse_override_ref(self):
+        """Pick a reference image for the live sample override (Klein edit
+        conditioning). The trainer auto-caps it to ~0.20 MP, so any size is safe."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select reference image for samples",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_ref_dir"))
+        if path:
+            self.sample_override_ref_var.set(path)
+            self._override_ref_label.configure(text=os.path.basename(path)[:24])
+            self._on_sample_override_changed()
+
+    def _clear_override_ref(self):
+        self.sample_override_ref_var.set("")
+        self._override_ref_label.configure(text="(none)")
+        self._on_sample_override_changed()
 
     def setup_styles(self):
         """Set up styles for refined dark theme (Fizgig Visual Style Guide)"""

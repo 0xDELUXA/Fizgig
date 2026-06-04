@@ -1164,7 +1164,45 @@ class KleinTrainer:
         param["seed"] = seed
         param["width"] = width
         param["height"] = height
+        # Reference image (Klein edit conditioning) — the override owns the ref
+        # state, so clear any inherited one and add it only if set + present.
+        param.pop("control_image_path", None)
+        ref = str(ov.get("ref_image", "") or "").strip()
+        if ref and os.path.exists(ref):
+            param["control_image_path"] = [ref]
         return [param]
+
+    def _encode_control_latents(self, sample_parameter, vae, device):
+        """Build (ref_tokens, ref_ids) from sample_parameter['control_image_path'],
+        or (None, None) if none. Used by BOTH the Base (do_inference) and Distilled
+        (inline) sample paths so an edit-conditioning reference image works either way.
+
+        Reference images are hard-capped to ~0.20 MP (downscale only) BEFORE the VAE
+        encode: the ref is encoded and its tokens are concatenated onto the sample
+        sequence, so a big image means a huge encode + huge attention = OOM. Capping
+        the area bounds both, whatever size the user drops in. Strength is fixed at
+        1.0 (stock Klein conditioning)."""
+        paths = sample_parameter.get("control_image_path")
+        if not paths:
+            return None, None
+        _MAX_REF_PIXELS = 200_000
+        vae.to(device)
+        vae.eval()
+        latents = []
+        with torch.no_grad():
+            for p in paths:
+                img = Image.open(p).convert("RGB")
+                w_c, h_c = img.size
+                if w_c * h_c > _MAX_REF_PIXELS:
+                    s = (_MAX_REF_PIXELS / (w_c * h_c)) ** 0.5
+                    w_c, h_c = int(w_c * s), int(h_c * s)
+                w_c = max(16, (w_c // 16) * 16)
+                h_c = max(16, (h_c // 16) * 16)
+                img = img.resize((w_c, h_c), Image.LANCZOS)
+                t = torch.from_numpy(np.array(img)).float() / 127.5 - 1.0
+                t = t.permute(2, 0, 1).unsqueeze(0)  # NCHW
+                latents.append(vae.encode(t.to(device, vae.dtype)).squeeze(0))
+        return pack_control_latent(latents)
 
     def do_inference(
         self,
@@ -1207,39 +1245,9 @@ class KleinTrainer:
         )
         x, x_ids = prc_img(latents)
 
-        # Prepare control latents if present
-        ref_tokens = None
-        ref_ids = None
-        if "control_image_path" in sample_parameter:
-            vae.to(device)
-            vae.eval()
-
-            control_image_paths = sample_parameter["control_image_path"]
-            limit_size = (2024, 2024) if len(control_image_paths) == 1 else (1024, 1024)
-            control_latent_list = []
-            with torch.no_grad():
-                for ctrl_path in control_image_paths:
-                    from fizgig.utils.image import preprocess_image
-                    ctrl_img = Image.open(ctrl_path).convert("RGB")
-                    ctrl_np = np.array(ctrl_img)
-                    # Resize to limit
-                    w_c, h_c = ctrl_img.size
-                    max_side = max(limit_size)
-                    if max(w_c, h_c) > max_side:
-                        scale = max_side / max(w_c, h_c)
-                        w_c = int(w_c * scale)
-                        h_c = int(h_c * scale)
-                    # Round to 16
-                    w_c = (w_c // 16) * 16
-                    h_c = (h_c // 16) * 16
-                    ctrl_img = ctrl_img.resize((w_c, h_c), Image.LANCZOS)
-                    ctrl_tensor = torch.from_numpy(np.array(ctrl_img)).float() / 127.5 - 1.0
-                    ctrl_tensor = ctrl_tensor.permute(2, 0, 1).unsqueeze(0)  # NCHW
-                    control_latent = vae.encode(ctrl_tensor.to(device, vae.dtype))
-                    control_latent_list.append(control_latent.squeeze(0))
-
-            ref_tokens, ref_ids = pack_control_latent(control_latent_list)
-
+        # Prepare control/reference latents if present (shared with the Distilled path).
+        ref_tokens, ref_ids = self._encode_control_latents(sample_parameter, vae, device)
+        if ref_tokens is not None:
             vae.to("cpu")
             clean_memory_on_device(device)
 
@@ -1705,6 +1713,16 @@ class KleinTrainer:
             )
             x, x_ids = prc_img(latents)
 
+            # Reference image (Klein edit conditioning) — encode + pack, then
+            # concatenate onto the cond pass (positive only). Capped to ~0.20 MP
+            # inside the helper so it can't OOM the sample. VAE goes back to CPU
+            # before the denoise; it's reloaded for decode below.
+            _ref_tokens, _ref_ids = self._encode_control_latents(sample_parameter, vae, device)
+            _has_ref = _ref_tokens is not None
+            if _has_ref:
+                vae.to("cpu")
+                clean_memory_on_device(device)
+
             if hasattr(transformer, 'prepare_block_swap_before_forward'):
                 transformer.prepare_block_swap_before_forward()
 
@@ -1714,11 +1732,18 @@ class KleinTrainer:
 
             for t_curr, t_prev in zip(timesteps[:-1], timesteps[1:]):
                 t_vec = torch.full((x.shape[0],), t_curr, dtype=x.dtype, device=device)
+                if _has_ref:
+                    x_fwd = torch.cat((x, _ref_tokens), dim=1)
+                    x_fwd_ids = torch.cat((x_ids, _ref_ids), dim=1)
+                else:
+                    x_fwd, x_fwd_ids = x, x_ids
                 with torch.no_grad(), torch.autocast(device_type=device.type, dtype=x.dtype):
                     pred = transformer(
-                        x=x, x_ids=x_ids, timesteps=t_vec,
+                        x=x_fwd, x_ids=x_fwd_ids, timesteps=t_vec,
                         ctx=ctx, ctx_ids=ctx_ids, guidance=guidance_vec,
                     )
+                if _has_ref:
+                    pred = pred[:, : x.shape[1]]
                 x = x + (t_prev - t_curr) * pred
 
             # Unpack and decode

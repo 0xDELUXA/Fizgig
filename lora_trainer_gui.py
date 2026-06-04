@@ -1140,6 +1140,8 @@ class LoRATrainerGUI:
             data["royale_travel_seed_a"] = self.royale_travel_seed_a_var.get()
             data["royale_travel_seed_b"] = self.royale_travel_seed_b_var.get()
             data["royale_travel_res"] = self.royale_travel_res_var.get()
+            data["royale_travel_ref"] = self.royale_travel_ref_var.get()
+            data["royale_travel_use_epoch_ref"] = bool(self.royale_travel_use_epoch_ref_var.get())
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -1147,6 +1149,7 @@ class LoRATrainerGUI:
             data["royale_pt_frames"] = self.royale_pt_frames_var.get()
             data["royale_pt_ref"] = self.royale_pt_ref_var.get()
             data["royale_pt_res"] = self.royale_pt_res_var.get()
+            data["royale_pt_use_epoch_ref"] = bool(self.royale_pt_use_epoch_ref_var.get())
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9419,6 +9422,30 @@ class LoRATrainerGUI:
         ToolTip(_frcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
                        "24 ≈ a minute or two on a fast card.")
 
+        _trr = tk.Frame(trav, bg=_sbg); _trr.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(_trr, text="Reference", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_travel_ref_var = tk.StringVar(value=self.last_used.get("royale_travel_ref", ""))
+        self._royale_travel_ref_entry = ttk.Entry(_trr, textvariable=self.royale_travel_ref_var, state="readonly")
+        self._royale_travel_ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._royale_travel_ref_browse = ttk.Button(_trr, text="Browse…", command=self._royale_travel_browse_ref)
+        self._royale_travel_ref_browse.pack(side=tk.LEFT, padx=(6, 0))
+        self._royale_travel_ref_clear = ttk.Button(_trr, text="Clear", command=lambda: self.royale_travel_ref_var.set(""))
+        self._royale_travel_ref_clear.pack(side=tk.LEFT, padx=(4, 0))
+        ToolTip(self._royale_travel_ref_entry,
+                "Klein is an edit model — a reference image anchors the subject, so the seed morph stays "
+                "more stable. Optional. Auto-resized to ~0.2 MP. Falls back to the Setup reference if left empty.")
+        self.royale_travel_use_epoch_ref_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_travel_use_epoch_ref", False)))
+        _tru = tk.Frame(trav, bg=_sbg); _tru.pack(anchor=tk.W, pady=(0, 4))
+        ttk.Checkbutton(_tru, text="Use the rendered epoch as the reference",
+                        variable=self.royale_travel_use_epoch_ref_var,
+                        command=self._royale_travel_toggle_ref_widgets).pack(side=tk.LEFT)
+        tk.Label(_tru, text="(anchors the morph to this epoch's own render)", bg=_sbg,
+                 fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
+        self.royale_travel_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self.royale_travel_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self._royale_travel_toggle_ref_widgets()
+
         _trf = tk.Frame(trav, bg=_sbg); _trf.pack(anchor=tk.W, pady=(0, 6))
         tk.Label(_trf, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_travel_format_var = tk.StringVar(value="MP4")
@@ -9475,13 +9502,24 @@ class LoRATrainerGUI:
         _ptr = tk.Frame(ptrav, bg=_sbg); _ptr.pack(fill=tk.X, pady=(0, 4))
         tk.Label(_ptr, text="Reference", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_ref_var = tk.StringVar(value=self.last_used.get("royale_pt_ref", ""))
-        _ptre = ttk.Entry(_ptr, textvariable=self.royale_pt_ref_var, state="readonly")
-        _ptre.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(_ptr, text="Browse…", command=self._royale_pt_browse_ref).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(_ptr, text="Clear", command=lambda: self.royale_pt_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
-        ToolTip(_ptre, "Klein is an edit model — a reference image anchors the subject, so the prompt morph "
-                       "stays much more stable (composition holds while the words change). Optional but recommended. "
-                       "Auto-resized to ~0.2 MP. Falls back to the Setup reference if left empty.")
+        self._royale_pt_ref_entry = ttk.Entry(_ptr, textvariable=self.royale_pt_ref_var, state="readonly")
+        self._royale_pt_ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._royale_pt_ref_browse = ttk.Button(_ptr, text="Browse…", command=self._royale_pt_browse_ref)
+        self._royale_pt_ref_browse.pack(side=tk.LEFT, padx=(6, 0))
+        self._royale_pt_ref_clear = ttk.Button(_ptr, text="Clear", command=lambda: self.royale_pt_ref_var.set(""))
+        self._royale_pt_ref_clear.pack(side=tk.LEFT, padx=(4, 0))
+        ToolTip(self._royale_pt_ref_entry,
+                "Klein is an edit model — a reference image anchors the subject, so the prompt morph "
+                "stays much more stable (composition holds while the words change). Optional but recommended. "
+                "Auto-resized to ~0.2 MP. Falls back to the Setup reference if left empty.")
+        self.royale_pt_use_epoch_ref_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_pt_use_epoch_ref", False)))
+        _ptu = tk.Frame(ptrav, bg=_sbg); _ptu.pack(anchor=tk.W, pady=(0, 4))
+        ttk.Checkbutton(_ptu, text="Use the rendered epoch as the reference",
+                        variable=self.royale_pt_use_epoch_ref_var,
+                        command=self._royale_pt_toggle_ref_widgets).pack(side=tk.LEFT)
+        tk.Label(_ptu, text="(anchors the morph to this epoch's own render)", bg=_sbg,
+                 fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
 
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
         tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
@@ -9546,7 +9584,9 @@ class LoRATrainerGUI:
         for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var,
                    self.royale_pt_res_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
+        self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_words()
+        self._royale_pt_toggle_ref_widgets()
 
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
@@ -9626,6 +9666,68 @@ class LoRATrainerGUI:
                                        initialdir=init if os.path.isdir(init) else os.path.dirname(init) if init else "")
         if p:
             self.royale_pt_ref_var.set(p)
+
+    def _royale_travel_browse_ref(self):
+        from tkinter import filedialog
+        init = self.royale_travel_ref_var.get() or self.royale_ref_var.get() or self._pref_initialdir("input_ref_dir")
+        p = filedialog.askopenfilename(title="Seed-travel reference image",
+                                       filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+                                       initialdir=init if os.path.isdir(init) else os.path.dirname(init) if init else "")
+        if p:
+            self.royale_travel_ref_var.set(p)
+
+    def _royale_toggle_ref_widgets(self, entry, browse, clear, use_epoch):
+        """Grey out a file-reference row (entry/browse/clear) when 'use rendered
+        epoch' is ticked for that travel card."""
+        state = "disabled" if use_epoch else "normal"
+        try:
+            entry.configure(state=("disabled" if use_epoch else "readonly"))
+        except Exception:
+            pass
+        for w in (browse, clear):
+            try:
+                w.configure(state=state)
+            except Exception:
+                pass
+
+    def _royale_pt_toggle_ref_widgets(self):
+        self._royale_toggle_ref_widgets(self._royale_pt_ref_entry, self._royale_pt_ref_browse,
+                                        self._royale_pt_ref_clear,
+                                        bool(self.royale_pt_use_epoch_ref_var.get()))
+
+    def _royale_travel_toggle_ref_widgets(self):
+        self._royale_toggle_ref_widgets(self._royale_travel_ref_entry, self._royale_travel_ref_browse,
+                                        self._royale_travel_ref_clear,
+                                        bool(self.royale_travel_use_epoch_ref_var.get()))
+
+    def _royale_current_epoch_image(self):
+        """PIL image of the epoch the crossfade is parked on, or None."""
+        if not self._royale_images:
+            return None
+        idx = int(round(float(self.royale_scrub_var.get())))
+        idx = max(0, min(idx, len(self._royale_images) - 1))
+        return self._royale_images[idx][1]
+
+    def _royale_epoch_ref_tempfile(self):
+        """Save the parked epoch's render to a temp PNG and return its path
+        (so it can be used as edit-conditioning reference), or '' on failure."""
+        img = self._royale_current_epoch_image()
+        if img is None:
+            return ""
+        import tempfile
+        tmp = os.path.join(tempfile.gettempdir(), "fizgig_royale_epoch_ref.png")
+        try:
+            img.save(tmp)
+            return tmp
+        except Exception:
+            return ""
+
+    def _royale_resolve_travel_ref(self, use_epoch, file_ref):
+        """Resolve a travel card's reference to a path: the parked-epoch render
+        if `use_epoch`, else the card's file ref, else the Setup reference."""
+        if use_epoch:
+            return self._royale_epoch_ref_tempfile()
+        return (file_ref or "").strip() or self.royale_ref_var.get().strip()
 
     def _royale_scan(self):
         import sys
@@ -10066,7 +10168,8 @@ class LoRATrainerGUI:
         params = dict(
             label=label, path=path, prompt=prompt, seed_a=seed_a, seed_b=seed_b,
             frames=max(2, frames), res=res, fmt=fmt, out=out,
-            ref=self.royale_ref_var.get().strip(),
+            ref=self._royale_resolve_travel_ref(self.royale_travel_use_epoch_ref_var.get(),
+                                                self.royale_travel_ref_var.get()),
             speed=self.royale_travel_speed_var.get(),
             pingpong=bool(self.royale_travel_loop_var.get()),
             brand=bool(self.royale_travel_wm_var.get()),
@@ -10199,7 +10302,8 @@ class LoRATrainerGUI:
         params = dict(
             label=label, path=path, base=base, words=words,
             frames=max(2, frames), seed=seed, res=res, fmt=fmt, out=out,
-            ref=(self.royale_pt_ref_var.get().strip() or self.royale_ref_var.get().strip()),
+            ref=self._royale_resolve_travel_ref(self.royale_pt_use_epoch_ref_var.get(),
+                                                self.royale_pt_ref_var.get()),
             speed=self.royale_pt_speed_var.get(),
             pingpong=bool(self.royale_pt_loop_var.get()),
             brand=bool(self.royale_pt_wm_var.get()),

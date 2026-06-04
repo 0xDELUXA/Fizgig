@@ -1125,9 +1125,15 @@ class LoRATrainerGUI:
         # Save LoRA output directory if entry exists
         if "LORA_OUTPUT_DIR" in self.entries:
             data["lora_output_dir"] = self.entries["LORA_OUTPUT_DIR"].get()
-        # Remember the last LoRA Royale checkpoint folder
+        # Remember the last LoRA Royale checkpoint folder + render inputs
         if hasattr(self, 'royale_folder_var'):
             data["royale_folder"] = self.royale_folder_var.get()
+        if hasattr(self, 'royale_prompt_var'):
+            data["royale_prompt"] = self.royale_prompt_var.get()
+            data["royale_seed"] = self.royale_seed_var.get()
+            data["royale_res"] = self.royale_res_var.get()
+            data["royale_max"] = self.royale_max_var.get()
+            data["royale_ref"] = self.royale_ref_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9288,31 +9294,36 @@ class LoRATrainerGUI:
         r += 1
 
         ttk.Label(setup, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.royale_prompt_var = tk.StringVar()
+        self.royale_prompt_var = tk.StringVar(value=self.last_used.get("royale_prompt", ""))
         ttk.Entry(setup, textvariable=self.royale_prompt_var).grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
         r += 1
 
         ttk.Label(setup, text="Seed:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         _pr = tk.Frame(setup, bg=_sbg); _pr.grid(row=r, column=1, columnspan=2, sticky=tk.W, pady=4)
-        self.royale_seed_var = tk.StringVar(value="42")
+        self.royale_seed_var = tk.StringVar(value=self.last_used.get("royale_seed", "42"))
         ttk.Entry(_pr, textvariable=self.royale_seed_var, width=10).pack(side=tk.LEFT)
         tk.Label(_pr, text="Res", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
-        self.royale_res_var = tk.StringVar(value="512")
+        self.royale_res_var = tk.StringVar(value=self.last_used.get("royale_res", "512"))
         ttk.Combobox(_pr, textvariable=self.royale_res_var, values=["384", "512", "768", "1024"],
                      state="readonly", width=6).pack(side=tk.LEFT)
         tk.Label(_pr, text="Max renders", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
-        self.royale_max_var = tk.StringVar(value="12")
+        self.royale_max_var = tk.StringVar(value=self.last_used.get("royale_max", "12"))
         ttk.Combobox(_pr, textvariable=self.royale_max_var, values=["All", "6", "8", "10", "12", "16", "20"],
                      state="readonly", width=6).pack(side=tk.LEFT)
         r += 1
 
         ttk.Label(setup, text="Reference:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.royale_ref_var = tk.StringVar(value="")
+        self.royale_ref_var = tk.StringVar(value=self.last_used.get("royale_ref", ""))
         _rr = tk.Frame(setup, bg=_sbg); _rr.grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
         ttk.Entry(_rr, textvariable=self.royale_ref_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(_rr, text="Browse…", command=self._royale_browse_ref).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(_rr, text="Clear", command=lambda: self.royale_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
         r += 1
+
+        # Remember the render inputs across sessions.
+        for _v in (self.royale_prompt_var, self.royale_seed_var, self.royale_res_var,
+                   self.royale_max_var, self.royale_ref_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
         _br = tk.Frame(setup, bg=_sbg); _br.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
         self._royale_render_btn = tk.Button(_br, text="Render epochs", font=(FONT_FAMILY, 11, "bold"),

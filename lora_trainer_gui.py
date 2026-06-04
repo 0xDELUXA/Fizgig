@@ -1004,8 +1004,10 @@ class LoRATrainerGUI:
             # the lit dot
             c.create_oval(dx - d / 2, cy - d / 2, dx + d / 2, cy + d / 2,
                           fill=color, outline=color)
-            # the word
-            c.create_text(dx + d / 2 + 7, cy + 1, text=label, anchor="w",
+            # the word — centred in the gap between the dot's right edge and the
+            # right edge of the frame
+            text_cx = ((dx + d / 2) + (w - 2)) / 2
+            c.create_text(text_cx, cy + 1, text=label, anchor="center",
                           fill=color, font=(FONT_FAMILY, 9, "bold"))
         except Exception:
             pass

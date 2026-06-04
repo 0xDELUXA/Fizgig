@@ -9260,6 +9260,7 @@ class LoRATrainerGUI:
         self._royale_scores = {}      # label -> likeness cosine (Phase 3)
         self._royale_best_label = None
         self._royale_scoring = False
+        self._royale_exporting = False
 
         frame, _canvas = self.create_scrollable_frame(self.lora_royale_tab)
         outer = tk.Frame(frame, bg=COLORS["bg_deep"])
@@ -9337,6 +9338,35 @@ class LoRATrainerGUI:
         self._royale_scale = ttk.Scale(cf, from_=0.0, to=0.0, variable=self.royale_scrub_var,
                                        orient=tk.HORIZONTAL, command=lambda v: self._royale_scrub())
         self._royale_scale.pack(fill=tk.X, padx=20, pady=(4, 8))
+
+        exp = self._start_section_card(outer, "Export the morph",
+                                       "Save the crossfade as a looping clip — face resolving epoch by epoch, "
+                                       "with a Fizgig · LoRA Royale tag. Made to share.")
+        _er1 = tk.Frame(exp, bg=_sbg); _er1.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_er1, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_export_format_var = tk.StringVar(value="MP4")
+        ttk.Combobox(_er1, textvariable=self.royale_export_format_var, values=["MP4", "GIF"],
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(_er1, text="Speed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_export_speed_var = tk.StringVar(value="Normal")
+        ttk.Combobox(_er1, textvariable=self.royale_export_speed_var, values=["Slow", "Normal", "Fast"],
+                     state="readonly", width=8).pack(side=tk.LEFT)
+        _er2 = tk.Frame(exp, bg=_sbg); _er2.pack(anchor=tk.W, pady=(0, 8))
+        self.royale_export_loop_var = tk.BooleanVar(value=True)
+        self.royale_export_epoch_var = tk.BooleanVar(value=True)
+        self.royale_export_wm_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(_er2, text="Loop (ping-pong)", variable=self.royale_export_loop_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(_er2, text="Epoch ticker", variable=self.royale_export_epoch_var).pack(side=tk.LEFT, padx=(14, 0))
+        ttk.Checkbutton(_er2, text="Fizgig tag", variable=self.royale_export_wm_var).pack(side=tk.LEFT, padx=(14, 0))
+        _er3 = tk.Frame(exp, bg=_sbg); _er3.pack(anchor=tk.W)
+        self._royale_export_btn = tk.Button(_er3, text="Export clip…", font=(FONT_FAMILY, 10, "bold"),
+                                            fg="#FFFFFF", bg="#8E44AD", activeforeground="#FFFFFF",
+                                            activebackground="#763A91", relief="flat", bd=0, padx=18, pady=5,
+                                            cursor="hand2", command=self._royale_export)
+        self._royale_export_btn.pack(side=tk.LEFT)
+        self.royale_export_status_var = tk.StringVar(value="")
+        tk.Label(_er3, textvariable=self.royale_export_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
@@ -9716,6 +9746,78 @@ class LoRATrainerGUI:
             messagebox.showerror("Promote failed", f"Could not copy checkpoint:\n{e}")
             return
         self.royale_promote_status_var.set(f"Saved epoch {label} → {os.path.basename(out)}")
+
+    # ----- Export the morph as a shareable clip -----
+    def _royale_export(self):
+        if getattr(self, "_royale_exporting", False):
+            return
+        if not self._royale_images:
+            messagebox.showinfo("LoRA Royale", "Render some epochs first, then export the morph.")
+            return
+        fmt = self.royale_export_format_var.get().upper()
+        ext = ".mp4" if fmt == "MP4" else ".gif"
+        from tkinter import filedialog
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import run_name_for_folder
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        out = filedialog.asksaveasfilename(
+            title="Export morph clip",
+            defaultextension=ext,
+            initialfile=f"{run}-royale{ext}",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
+            filetypes=[("MP4 video", "*.mp4")] if fmt == "MP4" else [("Animated GIF", "*.gif")])
+        if not out:
+            return
+        params = dict(
+            images=list(self._royale_images),
+            fmt=fmt, out=out,
+            speed=self.royale_export_speed_var.get(),
+            pingpong=bool(self.royale_export_loop_var.get()),
+            brand=bool(self.royale_export_wm_var.get()),
+            show_epoch=bool(self.royale_export_epoch_var.get()),
+        )
+        self._royale_exporting = True
+        self._royale_export_btn.configure(state="disabled")
+        self.royale_export_status_var.set("Building frames…")
+        import threading
+        threading.Thread(target=self._royale_export_worker, args=(params,), daemon=True).start()
+
+    def _royale_export_worker(self, p):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import export as rexport
+        try:
+            frames = rexport.build_frames(p["images"], speed=p["speed"], pingpong=p["pingpong"],
+                                          brand=p["brand"], show_epoch=p["show_epoch"])
+            if not frames:
+                raise RuntimeError("No frames were produced.")
+            if p["fmt"] == "MP4":
+                rexport.write_mp4(frames, p["out"], speed=p["speed"])
+            else:
+                rexport.write_gif(frames, p["out"], speed=p["speed"])
+            self.master.after(0, lambda: self._royale_export_finish(p["out"], len(frames), None))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.master.after(0, lambda e=e: self._royale_export_finish(p["out"], 0, e))
+
+    def _royale_export_finish(self, out, n_frames, err):
+        self._royale_exporting = False
+        self._royale_export_btn.configure(state="normal")
+        if err is not None:
+            self.royale_export_status_var.set("Export failed — see console.")
+            msg = str(err)
+            if "codec" in msg.lower() or "writer" in msg.lower():
+                msg += "\n\nTry the GIF format instead."
+            messagebox.showerror("Export failed", msg)
+            return
+        self.royale_export_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
+        try:
+            import subprocess
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(out)])
+        except Exception:
+            pass
 
     def _repair_start(self):
         """Smart Start: load/swap primary, load/swap donor, or regenerate."""

@@ -33,6 +33,7 @@ Fizgig is **free and open source** — and a good first run is the **✨ Old Rel
 - **Discover → Refine → Discover** — the Explorer and Repair Studio are bidirectionally connected. Find something interesting in the Explorer? One click sends it to the Repair Studio with all 32 sliders pre-set. Fine-tuning in the Repair Studio? One click sends your state back to the Explorer for more evolutionary discovery.
 - **See exactly what a LoRA does** — the Profiler shows which transformer blocks carry style, identity, and detail signal, so you know what to fix before you touch a slider.
 - **Train with intelligence** — adaptive learning rate adjusts itself based on loss, gradient clipping, and weight-norm growth.
+- **Steer previews mid-run** — change the prompt, seed, or resolution of your *next* training sample live from the status bar, no restart — sanity-check how a run handles a different subject or prompt while it keeps training.
 - **Just works on your GPU** — block swap auto-detects from your VRAM at both training and inference time. 16 GB, 24 GB, 32 GB — Fizgig picks the right setting. If you do run out of memory, it tells you exactly what to change.
 - **Make LoRAs work together** — Context LoRA training loads an existing LoRA as a frozen layer, so the new one learns to coexist. Train a face on top of a style and they stop fighting at inference. Train an outfit on top of a character and the clothes drape correctly. Fix compatibility between two LoRAs that conflict.
 

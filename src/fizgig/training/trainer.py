@@ -1263,6 +1263,30 @@ class KleinTrainer:
         # <15GB — maximum forward-only swap (the ratio formula can't reach it).
         return (num_double - 2) + (num_single - 2), num_double - 2, num_single - 2
 
+    def _should_cache_sample_model(self, args, sample_blocks: int) -> bool:
+        """Whether to keep the Distilled sample model resident in CPU RAM between
+        epochs instead of reloading it from disk each sample (~3-4s saved).
+
+        Only when the Distilled is NOT block-swapped (sample_blocks==0 — a roomy
+        GPU; swapped = tight card, which also tends to be RAM-tight). Mode comes
+        from --cache_sample_model:
+          off  → never
+          on   → always (power user who knows the RAM is there)
+          auto → only when free system RAM has a comfortable margin over the
+                 ~10 GB fp8 model (degrades to disk reload — never risks OOM).
+        """
+        mode = str(getattr(args, "cache_sample_model", "auto") or "auto").lower()
+        if mode == "off" or sample_blocks > 0:
+            return False
+        if mode == "on":
+            return True
+        try:  # auto
+            import psutil
+            avail_gb = psutil.virtual_memory().available / 1e9
+            return avail_gb >= 18.0  # ~10 GB model + ~8 GB headroom
+        except Exception:
+            return False  # can't check RAM → safe default: don't cache
+
     def sample_images(self, accelerator: Accelerator, args, epoch, steps, vae, transformer, sample_parameters, dit_dtype):
         """Orchestrate sample image generation at the right training steps."""
         if not should_sample_images(args, steps, epoch):
@@ -1326,62 +1350,97 @@ class KleinTrainer:
                 logger.info(f"Distilled sample block swap: {_sample_blocks} "
                             f"(double={_samp_d if _samp_d is not None else 'auto'}, "
                             f"single={_samp_s if _samp_s is not None else 'auto'})")
-            _loading_device = "cpu" if _sample_blocks > 0 else accelerator.device
-            _distilled_dit = load_dit(
-                device=accelerator.device,
-                model_version_info=KLEIN_MODEL_INFO["klein-9b"],
-                dit_path=_sample_dit_path,
-                attn_mode="torch",
-                split_attn=False,
-                loading_device=_loading_device,
-                dit_weight_dtype=torch.bfloat16,
-                fp8_scaled=False,
-            )
-            if _sample_blocks > 0:
-                _distilled_dit.enable_block_swap(
-                    _sample_blocks, device=accelerator.device, supports_backward=False,
-                    double_blocks_to_swap=_samp_d, single_blocks_to_swap=_samp_s,
-                )
-                _distilled_dit.move_to_device_except_swap_blocks(accelerator.device)
-            _distilled_dit.prepare_block_swap_before_forward()
-            _distilled_dit.eval()
-
-            # Apply trainable LoRA from saved checkpoint — matches Repair Studio's loading path
             from fizgig.networks.lora_klein import create_arch_network_from_weights as _sample_create
             from fizgig.networks.lora import ensure_kohya_lora_state_dict as _sample_ensure
             from fizgig.training.train_utils import get_epoch_ckpt_name as _get_ckpt
+            from safetensors.torch import load_file as _sample_load_lora
             _ckpt_path = os.path.join(args.output_dir, _get_ckpt(args.output_name, epoch))
-            if epoch > 0 and os.path.exists(_ckpt_path):
-                from safetensors.torch import load_file as _sample_load_lora
-                logger.info(f"  Loading trainable LoRA from disk: {_ckpt_path}")
-                _lora_sd = _sample_load_lora(_ckpt_path)
-                _lora_sd = _sample_ensure(_lora_sd)
-                _sample_net = _sample_create(
-                    multiplier=1.0, weights_sd=_lora_sd, unet=_distilled_dit, for_inference=True,
-                )
-                _sample_net.apply_to(text_encoders=None, unet=_distilled_dit,
-                                     apply_text_encoder=False, apply_unet=True)
-                _sample_net.load_state_dict(_lora_sd, strict=False)
-                _sample_net.to(accelerator.device, dtype=torch.bfloat16)
-                _sample_net.eval()
-            else:
-                logger.info(f"  Epoch {epoch}: no checkpoint yet, sampling without trainable LoRA")
 
-            # Apply context LoRA to Distilled DiT if active
-            logger.info(f"  Context LoRA check: self.context_network is {'set' if self.context_network is not None else 'None'}")
-            if self.context_network is not None:
-                # Context LoRA weights are frozen — get them from the stored network
-                _ctx_sd = self.context_network.state_dict()
-                _ctx_sd = {k: v.cpu().to(torch.bfloat16) for k, v in _ctx_sd.items()}
-                _ctx_sample = _sample_create(
-                    multiplier=self.context_network.multiplier,
-                    weights_sd=_ctx_sd, unet=_distilled_dit, for_inference=True,
+            # Optionally reuse a CPU-cached Distilled model (skips the disk reload).
+            # Only when it isn't block-swapped (sample_blocks==0). Any failure falls
+            # back to a fresh disk load, so the cache can never break a run.
+            _cache_enabled = self._should_cache_sample_model(args, _sample_blocks)
+            _cache = getattr(self, "_distilled_cache", None)
+            _reuse = bool(_cache_enabled and _cache is not None
+                          and _cache.get("path") == _sample_dit_path)
+            if _reuse:
+                try:
+                    _distilled_dit = _cache["dit"]
+                    _sample_net = _cache["net"]
+                    _ctx_sample = _cache["ctx"]
+                    _distilled_dit.to(accelerator.device).eval()
+                    if _ctx_sample is not None:
+                        _ctx_sample.to(accelerator.device, dtype=torch.bfloat16).eval()
+                    # Refresh the trainable LoRA to THIS epoch's checkpoint.
+                    if epoch > 0 and os.path.exists(_ckpt_path):
+                        _lora_sd = _sample_ensure(_sample_load_lora(_ckpt_path))
+                        if _sample_net is None:
+                            # First checkpoint after an epoch-0 (no-LoRA) cache: build+patch now.
+                            _sample_net = _sample_create(multiplier=1.0, weights_sd=_lora_sd,
+                                                         unet=_distilled_dit, for_inference=True)
+                            _sample_net.apply_to(text_encoders=None, unet=_distilled_dit,
+                                                 apply_text_encoder=False, apply_unet=True)
+                        _sample_net.load_state_dict(_lora_sd, strict=False)
+                        _sample_net.to(accelerator.device, dtype=torch.bfloat16).eval()
+                    elif _sample_net is not None:
+                        _sample_net.to(accelerator.device, dtype=torch.bfloat16).eval()
+                    logger.info("  Distilled reused from RAM cache (skipped disk reload)")
+                except Exception:
+                    logger.warning("  Distilled cache reuse failed — reloading from disk", exc_info=True)
+                    self._distilled_cache = None
+                    _reuse = False
+
+            if not _reuse:
+                _loading_device = "cpu" if _sample_blocks > 0 else accelerator.device
+                _distilled_dit = load_dit(
+                    device=accelerator.device,
+                    model_version_info=KLEIN_MODEL_INFO["klein-9b"],
+                    dit_path=_sample_dit_path,
+                    attn_mode="torch",
+                    split_attn=False,
+                    loading_device=_loading_device,
+                    dit_weight_dtype=torch.bfloat16,
+                    fp8_scaled=False,
                 )
-                _ctx_sample.apply_to(text_encoders=None, unet=_distilled_dit,
-                                     apply_text_encoder=False, apply_unet=True)
-                _ctx_sample.load_state_dict(_ctx_sd, strict=False)
-                _ctx_sample.to(accelerator.device, dtype=torch.bfloat16)
-                _ctx_sample.eval()
+                if _sample_blocks > 0:
+                    _distilled_dit.enable_block_swap(
+                        _sample_blocks, device=accelerator.device, supports_backward=False,
+                        double_blocks_to_swap=_samp_d, single_blocks_to_swap=_samp_s,
+                    )
+                    _distilled_dit.move_to_device_except_swap_blocks(accelerator.device)
+                _distilled_dit.prepare_block_swap_before_forward()
+                _distilled_dit.eval()
+
+                # Apply trainable LoRA from saved checkpoint — matches Repair Studio's loading path
+                if epoch > 0 and os.path.exists(_ckpt_path):
+                    logger.info(f"  Loading trainable LoRA from disk: {_ckpt_path}")
+                    _lora_sd = _sample_ensure(_sample_load_lora(_ckpt_path))
+                    _sample_net = _sample_create(
+                        multiplier=1.0, weights_sd=_lora_sd, unet=_distilled_dit, for_inference=True,
+                    )
+                    _sample_net.apply_to(text_encoders=None, unet=_distilled_dit,
+                                         apply_text_encoder=False, apply_unet=True)
+                    _sample_net.load_state_dict(_lora_sd, strict=False)
+                    _sample_net.to(accelerator.device, dtype=torch.bfloat16)
+                    _sample_net.eval()
+                else:
+                    logger.info(f"  Epoch {epoch}: no checkpoint yet, sampling without trainable LoRA")
+
+                # Apply context LoRA to Distilled DiT if active
+                logger.info(f"  Context LoRA check: self.context_network is {'set' if self.context_network is not None else 'None'}")
+                if self.context_network is not None:
+                    # Context LoRA weights are frozen — get them from the stored network
+                    _ctx_sd = self.context_network.state_dict()
+                    _ctx_sd = {k: v.cpu().to(torch.bfloat16) for k, v in _ctx_sd.items()}
+                    _ctx_sample = _sample_create(
+                        multiplier=self.context_network.multiplier,
+                        weights_sd=_ctx_sd, unet=_distilled_dit, for_inference=True,
+                    )
+                    _ctx_sample.apply_to(text_encoders=None, unet=_distilled_dit,
+                                         apply_text_encoder=False, apply_unet=True)
+                    _ctx_sample.load_state_dict(_ctx_sd, strict=False)
+                    _ctx_sample.to(accelerator.device, dtype=torch.bfloat16)
+                    _ctx_sample.eval()
 
             sample_transformer = _distilled_dit
             logger.info("  Distilled loaded — sampling with 4 steps, guidance 1.0")
@@ -1438,20 +1497,38 @@ class KleinTrainer:
             torch.cuda.set_rng_state(cuda_rng_state)
 
         if _use_distilled:
-            # Unload Distilled DiT — break LoRA circular references first
-            for _net in (_sample_net, _ctx_sample):
-                if _net is not None:
-                    for lora in getattr(_net, 'unet_loras', []):
-                        if hasattr(lora, 'org_forward'):
-                            lora.org_forward = None
-                    if hasattr(_net, 'unet_loras'):
-                        _net.unet_loras.clear()
-            del _sample_net, _ctx_sample
-            _sample_net = _ctx_sample = None
-            # Move Distilled to CPU before deleting to free GPU immediately
-            _distilled_dit.to("cpu")
-            del _distilled_dit
-            _distilled_dit = None
+            if _cache_enabled:
+                # Keep the Distilled (+ its LoRA networks) resident in CPU RAM for
+                # the next epoch's sample instead of deleting it — that's the win:
+                # no disk reload next time. Move off GPU to free training VRAM.
+                try:
+                    _distilled_dit.to("cpu")
+                    if _sample_net is not None:
+                        _sample_net.to("cpu")
+                    if _ctx_sample is not None:
+                        _ctx_sample.to("cpu")
+                    self._distilled_cache = {
+                        "dit": _distilled_dit, "net": _sample_net,
+                        "ctx": _ctx_sample, "path": _sample_dit_path,
+                    }
+                except Exception:
+                    logger.warning("  Failed to cache Distilled to RAM; will reload next time", exc_info=True)
+                    self._distilled_cache = None
+            else:
+                # Unload Distilled DiT — break LoRA circular references first
+                for _net in (_sample_net, _ctx_sample):
+                    if _net is not None:
+                        for lora in getattr(_net, 'unet_loras', []):
+                            if hasattr(lora, 'org_forward'):
+                                lora.org_forward = None
+                        if hasattr(_net, 'unet_loras'):
+                            _net.unet_loras.clear()
+                del _sample_net, _ctx_sample
+                _sample_net = _ctx_sample = None
+                # Move Distilled to CPU before deleting to free GPU immediately
+                _distilled_dit.to("cpu")
+                del _distilled_dit
+                _distilled_dit = None
             import gc; gc.collect(); gc.collect()
             torch.cuda.empty_cache()
             clean_memory_on_device(accelerator.device)
@@ -2215,6 +2292,28 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
+        # --- Perf diagnostic (opt-in: FIZGIG_PERF_DIAG=1) ---------------------
+        # Pins the epoch-2-onward per-step slowdown to a cause. Per epoch logs:
+        #   step_ms min/med  — min step = pure compute; watch it climb
+        #   vram peak_alloc vs peak_reserved + gap + alloc retries
+        #                    — reserved climbing while alloc flat (+ retries) = FRAGMENTATION
+        #   hooks full_bwd   — climbing across epochs = block-swap backward-hook LEAK
+        # Opt-in: set FIZGIG_PERF_DIAG=1 in the environment before launching to
+        # enable. Off by default → zero overhead on normal runs.
+        import os as _os, time as _time
+        _perf_diag = _os.environ.get("FIZGIG_PERF_DIAG", "0") != "0"
+        if _perf_diag:
+            accelerator.print("[perfdiag] ACTIVE — a summary line prints at the end of each epoch.")
+            import sys as _psys0; _psys0.stdout.flush()
+        def _perf_hook_counts():
+            mdl = accelerator.unwrap_model(transformer)
+            f = b = fb = 0
+            for mod in mdl.modules():
+                f += len(getattr(mod, "_forward_hooks", {}) or {})
+                b += len(getattr(mod, "_backward_hooks", {}) or {})
+                fb += len(getattr(mod, "_full_backward_hooks", {}) or {})
+            return f, b, fb
+
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
@@ -2222,7 +2321,12 @@ class KleinTrainer:
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
+            _perf_step_times = []
+            if _perf_diag and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+
             for step, batch in enumerate(train_dataloader):
+                _perf_t0 = _time.perf_counter() if _perf_diag else 0.0
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):
@@ -2340,10 +2444,35 @@ class KleinTrainer:
                     )
                     accelerator.log(logs, step=global_step)
 
+                if _perf_diag:
+                    _perf_step_times.append(_time.perf_counter() - _perf_t0)
+
                 if global_step >= args.max_train_steps:
                     break
 
             # End of epoch
+            if _perf_diag:
+                import statistics as _pstats
+                _st = sorted(_perf_step_times)
+                _mn = (_st[0] * 1000) if _st else 0.0
+                _md = (_pstats.median(_st) * 1000) if _st else 0.0
+                _f, _b, _fb = _perf_hook_counts()
+                if torch.cuda.is_available():
+                    _pa = torch.cuda.max_memory_allocated() / 1e9
+                    _pr = torch.cuda.max_memory_reserved() / 1e9
+                    _ms = torch.cuda.memory_stats()
+                    _rt = _ms.get("num_alloc_retries", 0)
+                    _oo = _ms.get("num_ooms", 0)
+                else:
+                    _pa = _pr = _rt = _oo = 0
+                accelerator.print(
+                    f"[perfdiag] epoch {epoch + 1} | steps={len(_st)} | "
+                    f"step_ms min={_mn:.1f} med={_md:.1f} | "
+                    f"vram peak_alloc={_pa:.2f}G peak_reserved={_pr:.2f}G gap={_pr - _pa:.2f}G "
+                    f"retries={_rt} ooms={_oo} | hooks fwd={_f} bwd={_b} full_bwd={_fb}"
+                )
+                import sys as _psys; _psys.stdout.flush()
+
             if len(accelerator.trackers) > 0:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 
@@ -2727,6 +2856,11 @@ def setup_parser() -> argparse.ArgumentParser:
                              "Loads separately alongside the training Base model.")
     parser.add_argument("--sample_blocks_to_swap", type=int, default=0,
                         help="Block swap for Distilled sampling DiT (from inference prefs).")
+    parser.add_argument("--cache_sample_model", type=str, default="auto",
+                        choices=["auto", "on", "off"],
+                        help="Keep the Distilled sample model in CPU RAM between epochs "
+                             "to skip the per-epoch disk reload. auto = only when free RAM "
+                             "is comfortable; on = always; off = reload each time.")
 
     # ---- Optimizer ----
     parser.add_argument("--optimizer_type", type=str, default="",

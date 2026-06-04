@@ -9261,6 +9261,7 @@ class LoRATrainerGUI:
         self._royale_best_label = None
         self._royale_scoring = False
         self._royale_exporting = False
+        self._royale_traveling = False
 
         frame, _canvas = self.create_scrollable_frame(self.lora_royale_tab)
         outer = tk.Frame(frame, bg=COLORS["bg_deep"])
@@ -9370,6 +9371,34 @@ class LoRATrainerGUI:
         self._royale_export_btn.pack(side=tk.LEFT)
         self.royale_export_status_var = tk.StringVar(value="")
         tk.Label(_er3, textvariable=self.royale_export_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
+
+        trav = self._start_section_card(outer, "Seed travel",
+                                        "Take the epoch on the crossfade and morph it smoothly between two seeds "
+                                        "(slerp through noise space). Shows the LoRA's range. Uses the format / "
+                                        "speed / loop / tag settings above.")
+        _tr1 = tk.Frame(trav, bg=_sbg); _tr1.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_tr1, text="Start seed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 4))
+        self.royale_travel_seed_a_var = tk.StringVar(value="42")
+        ttk.Entry(_tr1, textvariable=self.royale_travel_seed_a_var, width=10).pack(side=tk.LEFT)
+        tk.Label(_tr1, text="End seed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
+        self.royale_travel_seed_b_var = tk.StringVar(value="4242")
+        ttk.Entry(_tr1, textvariable=self.royale_travel_seed_b_var, width=10).pack(side=tk.LEFT)
+        tk.Label(_tr1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
+        self.royale_travel_frames_var = tk.StringVar(value="24")
+        _frcb = ttk.Combobox(_tr1, textvariable=self.royale_travel_frames_var,
+                             values=["16", "24", "36", "48", "64"], state="readonly", width=5)
+        _frcb.pack(side=tk.LEFT)
+        ToolTip(_frcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
+                       "24 ≈ a minute or two on a fast card.")
+        _tr2 = tk.Frame(trav, bg=_sbg); _tr2.pack(anchor=tk.W)
+        self._royale_travel_btn = tk.Button(_tr2, text="Render & export seed-travel…", font=(FONT_FAMILY, 10, "bold"),
+                                            fg="#FFFFFF", bg="#C0392B", activeforeground="#FFFFFF",
+                                            activebackground="#A03124", relief="flat", bd=0, padx=18, pady=5,
+                                            cursor="hand2", command=self._royale_seed_travel)
+        self._royale_travel_btn.pack(side=tk.LEFT)
+        self.royale_travel_status_var = tk.StringVar(value="")
+        tk.Label(_tr2, textvariable=self.royale_travel_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
         grid_card = self._start_section_card(outer, "All epochs",
@@ -9817,11 +9846,128 @@ class LoRATrainerGUI:
             messagebox.showerror("Export failed", msg)
             return
         self.royale_export_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
+        self._royale_reveal(out)
+
+    def _royale_reveal(self, path):
         try:
             import subprocess
-            subprocess.Popen(["explorer", "/select,", os.path.normpath(out)])
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
         except Exception:
             pass
+
+    # ----- Seed travel: morph one epoch between two seeds (slerp) -----
+    def _royale_seed_travel(self):
+        if getattr(self, "_royale_traveling", False) or getattr(self, "_royale_exporting", False):
+            return
+        label, path = self._royale_current_epoch()
+        if path is None or not os.path.exists(path):
+            messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to seed-travel.")
+            return
+        prompt = self.royale_prompt_var.get().strip()
+        if not prompt:
+            messagebox.showinfo("LoRA Royale", "Enter a prompt (include your trigger word).")
+            return
+        try:
+            seed_a = int(self.royale_travel_seed_a_var.get())
+            seed_b = int(self.royale_travel_seed_b_var.get())
+        except ValueError:
+            messagebox.showinfo("LoRA Royale", "Start and end seed must be whole numbers.")
+            return
+        if seed_a == seed_b:
+            messagebox.showinfo("LoRA Royale", "Start and end seed are the same — pick two different seeds to travel between.")
+            return
+        try:
+            frames = int(self.royale_travel_frames_var.get())
+        except ValueError:
+            frames = 24
+        if not self._royale_ensure_engine():
+            return
+        try:
+            res = int(self.royale_res_var.get())
+        except ValueError:
+            res = 512
+        fmt = self.royale_export_format_var.get().upper()
+        ext = ".mp4" if fmt == "MP4" else ".gif"
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import run_name_for_folder
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        from tkinter import filedialog
+        out = filedialog.asksaveasfilename(
+            title="Export seed-travel clip",
+            defaultextension=ext,
+            initialfile=f"{run}-epoch{label}-seedtravel{ext}",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
+            filetypes=[("MP4 video", "*.mp4")] if fmt == "MP4" else [("Animated GIF", "*.gif")])
+        if not out:
+            return
+        params = dict(
+            label=label, path=path, prompt=prompt, seed_a=seed_a, seed_b=seed_b,
+            frames=max(2, frames), res=res, fmt=fmt, out=out,
+            ref=self.royale_ref_var.get().strip(),
+            speed=self.royale_export_speed_var.get(),
+            pingpong=bool(self.royale_export_loop_var.get()),
+            brand=bool(self.royale_export_wm_var.get()),
+            show_epoch=bool(self.royale_export_epoch_var.get()),
+        )
+        self._royale_traveling = True
+        self._royale_travel_btn.configure(state="disabled")
+        self.royale_travel_status_var.set("Loading epoch…")
+        import threading
+        threading.Thread(target=self._royale_travel_worker, args=(params,), daemon=True).start()
+
+    def _royale_travel_worker(self, p):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.state import SliderState
+        from fizgig.lora_royale import export as rexport
+        eng = self.royale_engine
+        try:
+            # Make sure the engine holds the parked epoch's weights.
+            if eng.primary_network is None:
+                eng.load_primary(p["path"])
+            elif eng.primary_path != p["path"]:
+                if not eng.swap_primary_weights(p["path"]):
+                    eng.reset(); eng.load_primary(p["path"])
+            n = p["frames"]
+            imgs = []
+            for i in range(n):
+                t = i / float(n - 1)
+                self.master.after(0, lambda i=i: self.royale_travel_status_var.set(
+                    f"Rendering frame {i + 1}/{n}…"))
+                st = SliderState.default_klein9b()
+                st.prompt = p["prompt"]; st.seed = p["seed_a"]
+                st.preview_width = p["res"]; st.preview_height = p["res"]
+                if p["ref"] and os.path.exists(p["ref"]):
+                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2; st.ref_strength = 1.0
+                img = eng.generate_preview(st, seed_b=p["seed_b"], travel_t=t)
+                imgs.append(img.copy())
+            self.master.after(0, lambda: self.royale_travel_status_var.set("Encoding clip…"))
+            badge = f"EPOCH {p['label']}" if p["show_epoch"] else None
+            frames = rexport.frames_from_sequence(imgs, pingpong=p["pingpong"],
+                                                  brand=p["brand"], label=badge)
+            if p["fmt"] == "MP4":
+                rexport.write_mp4(frames, p["out"], speed=p["speed"])
+            else:
+                rexport.write_gif(frames, p["out"], speed=p["speed"])
+            self.master.after(0, lambda: self._royale_travel_finish(p["out"], len(frames), None))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.master.after(0, lambda e=e: self._royale_travel_finish(p["out"], 0, e))
+
+    def _royale_travel_finish(self, out, n_frames, err):
+        self._royale_traveling = False
+        self._royale_travel_btn.configure(state="normal")
+        if err is not None:
+            self.royale_travel_status_var.set("Seed-travel failed — see console.")
+            msg = str(err)
+            if "codec" in msg.lower() or "writer" in msg.lower():
+                msg += "\n\nTry the GIF format instead."
+            messagebox.showerror("Seed-travel failed", msg)
+            return
+        self.royale_travel_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
+        self._royale_reveal(out)
 
     def _repair_start(self):
         """Smart Start: load/swap primary, load/swap donor, or regenerate."""

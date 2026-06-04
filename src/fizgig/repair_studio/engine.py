@@ -18,6 +18,28 @@ from fizgig.repair_studio.state import SliderState, block_regex
 logger = logging.getLogger(__name__)
 
 
+def _slerp(t, a, b):
+    """Spherical linear interpolation between two noise tensors at fraction t
+    (0 -> a, 1 -> b). Walks the hypersphere so the interpolated noise keeps a
+    constant norm — lerp would shrink it mid-way and the sample would go mushy.
+    Falls back to lerp for (anti)parallel endpoints."""
+    import torch
+    a_f = a.flatten().float()
+    b_f = b.flatten().float()
+    na, nb = a_f.norm(), b_f.norm()
+    if na.item() == 0.0 or nb.item() == 0.0:
+        out = (1.0 - t) * a_f + t * b_f
+    else:
+        dot = torch.dot(a_f / na, b_f / nb).clamp(-1.0, 1.0)
+        omega = torch.acos(dot)
+        so = torch.sin(omega)
+        if so.item() < 1e-6:
+            out = (1.0 - t) * a_f + t * b_f
+        else:
+            out = (torch.sin((1.0 - t) * omega) / so) * a_f + (torch.sin(t * omega) / so) * b_f
+    return out.reshape(a.shape).to(a.dtype)
+
+
 def find_profile_for_hash(profiles_dir: str, target_hash: str) -> Optional[dict]:
     """Scan `profiles_dir` for *.json sidecars written by the Profiler and
     return the first payload whose `hash` field matches `target_hash`.
@@ -418,8 +440,16 @@ class RepairEngine:
         self._ref_cache = (ref_tokens, ref_ids)
         return ref_tokens, ref_ids
 
-    def generate_preview(self, state: SliderState) -> Image.Image:
+    def generate_preview(self, state: SliderState, seed_b=None, travel_t=None) -> Image.Image:
         """Apply state, run a 4-step Distilled generation, return PIL image.
+
+        Seed travel: when `seed_b` is given, the initial noise is a spherical
+        interpolation (slerp) between the noise of `state.seed` and `seed_b` at
+        fraction `travel_t` (0=state.seed, 1=seed_b). Slerp walks the noise
+        hypersphere so the composition flows continuously between the two seeds
+        — lerp would collapse the norm mid-way and go mushy. The activation
+        cache is bypassed on this path (it's keyed on state.seed, which is
+        constant across a travel sweep).
 
         Inlines the proven training-loop sample path (trainer.do_inference)
         instead of pipeline.generate() — the latter is a dormant untested
@@ -519,15 +549,22 @@ class RepairEngine:
         if neg_ctx is not None:
             neg_ctx, neg_ctx_ids = prc_txt(neg_ctx)
 
-        # Seeded latent noise.
-        generator = torch.Generator(device=device)
-        if state.seed is not None:
-            generator.manual_seed(int(state.seed))
+        # Seeded latent noise (slerp between two seeds when seed-travelling).
         packed_h, packed_w = height // 16, width // 16
-        latents = randn_tensor(
-            (1, 128, packed_h, packed_w),
-            generator=generator, device=device, dtype=torch.bfloat16,
-        )
+        noise_shape = (1, 128, packed_h, packed_w)
+
+        def _seed_noise(seed):
+            g = torch.Generator(device=device)
+            if seed is not None:
+                g.manual_seed(int(seed))
+            return randn_tensor(noise_shape, generator=g, device=device, dtype=torch.bfloat16)
+
+        seed_travel = seed_b is not None
+        if seed_travel:
+            latents = _slerp(float(travel_t or 0.0), _seed_noise(state.seed), _seed_noise(seed_b))
+            dlog(f"seed travel: {state.seed} -> {seed_b} @ t={travel_t}")
+        else:
+            latents = _seed_noise(state.seed)
         x, x_ids = prc_img(latents)
         dlog(f"initial latent packed: {_stats(x)} x_ids shape={list(x_ids.shape)}")
 
@@ -565,6 +602,7 @@ class RepairEngine:
             self._turbo_enabled
             and pipeline.is_distilled
             and not has_ref
+            and not seed_travel
             and self._act_cache is not None
             and self._act_cache_key == cache_key
             and self._changed_blocks
@@ -593,6 +631,7 @@ class RepairEngine:
                     self._turbo_enabled
                     and not turbo_fallback
                     and not has_ref
+                    and not seed_travel
                     and (can_use_cache or (not can_use_cache and self._turbo_enabled))
                 )
 

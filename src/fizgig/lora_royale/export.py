@@ -45,9 +45,13 @@ def _pill(draw: ImageDraw.ImageDraw, xy, text, font, anchor_right=False,
     draw.text((x + px - l, y + py - t), text, font=font, fill=fg)
 
 
-def _decorate(img: Image.Image, epoch_label=None, brand=True) -> Image.Image:
-    """Burn the epoch ticker (bottom-left, gold) + brand pill (bottom-right)."""
-    if epoch_label is None and not brand:
+def _decorate(img: Image.Image, epoch_label=None, brand=True, badge=None) -> Image.Image:
+    """Burn a corner badge (bottom-left, gold) + brand pill (bottom-right).
+
+    `badge` is raw text; `epoch_label` is a convenience that renders as
+    "EPOCH <n>". Pass at most one."""
+    badge_text = badge if badge is not None else (f"EPOCH {epoch_label}" if epoch_label is not None else None)
+    if badge_text is None and not brand:
         return img.convert("RGB")
     base = img.convert("RGBA")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
@@ -56,8 +60,8 @@ def _decorate(img: Image.Image, epoch_label=None, brand=True) -> Image.Image:
     margin = max(8, H // 40)
     fs = max(13, H // 26)
     font = _load_font(fs)
-    if epoch_label is not None:
-        _pill(d, (margin, 0), f"EPOCH {epoch_label}", font,
+    if badge_text is not None:
+        _pill(d, (margin, 0), badge_text, font,
               anchor_right=False, bottom=H - margin, fg=(255, 210, 74, 245))
     if brand:
         _pill(d, (W - margin, 0), "Fizgig · LoRA Royale", font,
@@ -118,6 +122,33 @@ def build_frames(images: List[Tuple], speed: str = "Normal", pingpong: bool = Tr
     if pingpong and len(frames) > 2:
         frames = frames + frames[-2:0:-1]
     return frames
+
+
+def frames_from_sequence(images: List[Image.Image], pingpong: bool = True,
+                         brand: bool = True, label: Optional[str] = None,
+                         max_size: Optional[int] = 768) -> List[Image.Image]:
+    """Decorate an already-smooth sequence (e.g. a seed-travel sweep) 1:1 — no
+    blending, since the frames are already continuous. Optional static `label`
+    badge (bottom-left) + brand pill; ping-pong for a seamless loop.
+
+    `images`: list of PIL frames in order.
+    """
+    if not images:
+        return []
+    base_w, base_h = images[0].size
+    if max_size and max(base_w, base_h) > max_size:
+        scale = max_size / float(max(base_w, base_h))
+        base_w, base_h = int(base_w * scale), int(base_h * scale)
+    base_w, base_h = max(2, _even(base_w)), max(2, _even(base_h))
+
+    out = []
+    for im in images:
+        if im.size != (base_w, base_h):
+            im = im.resize((base_w, base_h), Image.LANCZOS)
+        out.append(_decorate(im, badge=label, brand=brand))
+    if pingpong and len(out) > 2:
+        out = out + out[-2:0:-1]
+    return out
 
 
 def write_gif(frames: List[Image.Image], path: str, speed: str = "Normal", loop: int = 0):

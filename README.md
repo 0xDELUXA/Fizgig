@@ -22,7 +22,7 @@ Fizgig is a dedicated **training, LoRA-surgery, and gamified-exploration** studi
 
 On the data side, the **Image Prep** tab can auto-cut tight face crops from your wider shots and add them as extra datapoints, with optional **gender targeting** (largest male/female face) so it locks onto your subject even in group shots — pairing a close-up with a full shot adds a lot to a character dataset (works best from high-res originals). Training defaults to ~512² (0.25 MP) and resizes in-cache, so a dataset of any resolution or aspect ratio just works — nothing has to be square or pre-sized.
 
-But the real reason is what happens *after* training. Fizgig is a workbench, not just a trainer: **fix** a broken LoRA block-by-block in the Repair Studio with no retraining, **explore** new variations like a game in LoRA the Explorer, **profile** exactly which blocks carry style vs identity vs detail, and **extract** a LoRA down to a smaller rank or a specific block range — all in one app, each tool reading the others' output.
+But the real reason is what happens *after* training. Fizgig is a workbench, not just a trainer: **fix** a broken LoRA block-by-block in the Repair Studio with no retraining, **explore** new variations like a game in LoRA the Explorer, **compare** every epoch of a run and crossfade to the sweet spot in LoRA Royale, **profile** exactly which blocks carry style vs identity vs detail, and **extract** a LoRA down to a smaller rank or a specific block range — all in one app, each tool reading the others' output.
 
 Fizgig is **free and open source** — and a good first run is the **✨ Old Reliable** preset on the Training tab; after that, try the lighter **✨ Old Reliable - Flavour 8** (rank 8). A lot of the old rank-16 instinct dates from models with far fewer parameters than Klein 9B — rank 8 is often plenty.
 
@@ -30,6 +30,7 @@ Fizgig is **free and open source** — and a good first run is the **✨ Old Rel
 
 - **Fix broken LoRAs without retraining** — overbaked identity? crushed style? Adjust per-block sliders with live side-by-side preview and save a repaired `.safetensors` in seconds.
 - **Explore variations like a game** — the computer proposes random mutations, you pick favourites, and the LoRA evolves through selection. **Freeze** locks tweaked blocks when you're ready, so future mutations only touch what's left.
+- **Find the sweet-spot epoch by eye** — LoRA Royale renders every epoch of a run on one seed and lets you **crossfade between them with a slider**, so the best checkpoint is something you *feel* rather than guess. An optional **likeness score** ranks each epoch's face against a training photo, and you can **export the morph** as a looping GIF/MP4 — a ready-made share clip with the face resolving epoch by epoch.
 - **Discover → Refine → Discover** — the Explorer and Repair Studio are bidirectionally connected. Find something interesting in the Explorer? One click sends it to the Repair Studio with all 32 sliders pre-set. Fine-tuning in the Repair Studio? One click sends your state back to the Explorer for more evolutionary discovery.
 - **See exactly what a LoRA does** — the Profiler shows which transformer blocks carry style, identity, and detail signal, so you know what to fix before you touch a slider.
 - **Train with intelligence** — adaptive learning rate adjusts itself based on loss, gradient clipping, and weight-norm growth.
@@ -49,6 +50,9 @@ Klein 9B is an **edit model**, so the Repair Studio and LoRA the Explorer can co
 
 ### LoRA the Explorer
 Evolutionary LoRA discovery. The computer randomly mutates blocks and shows you 4 variants — pick your favourite and it becomes the new baseline. **Freeze Tweaked Blocks** locks your changes when you're ready — future mutations only touch what's still unlocked. A **Structure** slider controls how much the composition/style anchor changes each round. Seed cycling verifies variants across different seeds. When you find a direction you love, **"Refine this baseline in Repair Studio"** sends your current slider state directly to the Repair Studio with all 32 sliders pre-set — seamless handoff from discovery to precision editing.
+
+### LoRA Royale
+Find the sweet-spot epoch the human way. Point it at a training output folder and it renders **every epoch on one fixed seed** (Distilled 4-step), then gives you a **crossfade slider** that blends smoothly between consecutive epochs — drag until it looks best and stop. A thumbnail grid of all epochs sits below; click any one to jump there. Optionally drop in a **reference image** (Klein is an edit model) so every epoch edits the same photo. A **likeness score** (InsightFace ArcFace, CPU — no extra VRAM) rates each epoch's face against a training shot of your subject and highlights the closest match in gold, with a one-click **Jump to best**. When you've found the winner, **Promote** copies that epoch to a clean `.safetensors` for ComfyUI. And because the morph *is* the magic, **Export the morph** saves the whole sweep as a looping **GIF or MP4** — face resolving epoch by epoch, with an epoch ticker and a *Fizgig · LoRA Royale* tag — a share clip the tool makes for you. Works on a trained run's epochs, or any folder of LoRAs you point it at.
 
 ### Profiler
 Per-block activation profile with a colour-coded 5-bucket HTML report. Identifies which blocks carry style, identity, and detail signal — and where they overlap. Writes a JSON sidecar that the Repair Studio reads automatically, showing you the profiler's findings inline when you load the same LoRA.
@@ -166,6 +170,7 @@ The unnumbered tabs are post-training tools (also work on any Klein LoRA you've 
 - **Profiler** — analyse which blocks are active and how strong their contributions are.
 - **Repair Studio** — live per-block editing with Turbo Preview and optional donor blending.
 - **LoRA the Explorer** — evolutionary discovery via human-guided selection.
+- **LoRA Royale** — render every epoch of a run on one seed, crossfade to the sweet spot, score likeness against a training photo, promote the winner, and export the morph as a share clip.
 - **Extract** — distil to a lower rank with block and timestep targeting.
 - **Preferences** — model paths, output directories, inference block-swap preset, and default input folders for LoRAs and reference images (so the Browse dialogs open where you keep them).
 

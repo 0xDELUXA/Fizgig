@@ -14,11 +14,13 @@ from typing import List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
 
-# Speed preset -> (frames_per_transition, hold_frames, fps)
+# Speed preset -> (frames_per_transition, hold_frames, fps). fps is what sets
+# playback speed for the fixed-length travel clips; the epoch morph also reacts
+# to frames_per_transition/hold. All three vary so the control is felt.
 SPEED_PRESETS = {
-    "Slow":   (24, 12, 30),
-    "Normal": (16, 8, 30),
-    "Fast":   (10, 4, 30),
+    "Slow":   (24, 12, 14),
+    "Normal": (16, 8, 22),
+    "Fast":   (10, 4, 32),
 }
 
 

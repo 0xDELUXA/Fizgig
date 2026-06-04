@@ -1144,6 +1144,7 @@ class LoRATrainerGUI:
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
             data["royale_pt_custom"] = self.royale_pt_custom_var.get()
             data["royale_pt_frames"] = self.royale_pt_frames_var.get()
+            data["royale_pt_ref"] = self.royale_pt_ref_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9462,6 +9463,17 @@ class LoRATrainerGUI:
                       "  a portrait of sks man, {x}\n"
                       "If you omit {x}, the word is appended to the end.")
 
+        _ptr = tk.Frame(ptrav, bg=_sbg); _ptr.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(_ptr, text="Reference", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_ref_var = tk.StringVar(value=self.last_used.get("royale_pt_ref", ""))
+        _ptre = ttk.Entry(_ptr, textvariable=self.royale_pt_ref_var, state="readonly")
+        _ptre.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(_ptr, text="Browse…", command=self._royale_pt_browse_ref).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(_ptr, text="Clear", command=lambda: self.royale_pt_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        ToolTip(_ptre, "Klein is an edit model — a reference image anchors the subject, so the prompt morph "
+                       "stays much more stable (composition holds while the words change). Optional but recommended. "
+                       "Auto-resized to ~0.2 MP. Falls back to the Setup reference if left empty.")
+
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
         tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_dim_var = tk.StringVar(value=self.last_used.get("royale_pt_dim", "Time of day"))
@@ -9517,7 +9529,7 @@ class LoRATrainerGUI:
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
         for _v in (self.royale_pt_dim_var, self.royale_pt_custom_var):
             _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
-        for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var):
+        for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_words()
 
@@ -9590,6 +9602,15 @@ class LoRATrainerGUI:
                                        initialdir=self._pref_initialdir("input_ref_dir"))
         if p:
             self.royale_ref_var.set(p)
+
+    def _royale_pt_browse_ref(self):
+        from tkinter import filedialog
+        init = self.royale_pt_ref_var.get() or self.royale_ref_var.get() or self._pref_initialdir("input_ref_dir")
+        p = filedialog.askopenfilename(title="Prompt-travel reference image",
+                                       filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+                                       initialdir=init if os.path.isdir(init) else os.path.dirname(init) if init else "")
+        if p:
+            self.royale_pt_ref_var.set(p)
 
     def _royale_scan(self):
         import sys
@@ -10163,7 +10184,7 @@ class LoRATrainerGUI:
         params = dict(
             label=label, path=path, base=base, words=words,
             frames=max(2, frames), seed=seed, res=res, fmt=fmt, out=out,
-            ref=self.royale_ref_var.get().strip(),
+            ref=(self.royale_pt_ref_var.get().strip() or self.royale_ref_var.get().strip()),
             speed=self.royale_pt_speed_var.get(),
             pingpong=bool(self.royale_pt_loop_var.get()),
             brand=bool(self.royale_pt_wm_var.get()),

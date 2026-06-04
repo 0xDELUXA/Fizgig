@@ -591,8 +591,8 @@ class LoRATrainerGUI:
     def __init__(self, master):
         self.master = master
         master.title("Fizgig — Klein 9B LoRA Studio")
-        master.geometry("1280x1024")
-        master.minsize(1100, 800)  # ensures all tabs visible at top + tab content not cut off
+        master.geometry("1280x1124")  # +100 for the bottom status bar (tabs keep ~1024)
+        master.minsize(1100, 900)  # ensures all tabs visible at top + tab content not cut off
         master.configure(bg=BG_COLOR)
 
         # Window/taskbar icon
@@ -807,17 +807,19 @@ class LoRATrainerGUI:
 
         self.setup_styles()
 
+        # Live VRAM/RAM status bar pinned to the bottom (packed first so it
+        # reserves the strip; the notebook then fills the space above it).
+        self._build_status_bar(master)
+
         # Create notebook and tabs
         self.notebook = ttk.Notebook(master)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Status indicator — overlaid on top-right of notebook, zero vertical space
-        self._status_canvas = tk.Canvas(master, width=16, height=16,
+        self._status_canvas = tk.Canvas(master, width=84, height=32,
                                         bg=COLORS["bg_deep"], highlightthickness=0,
                                         cursor="hand2")
-        self._status_canvas.place(relx=1.0, x=-20, y=14, anchor="ne")
-        self._status_indicator = self._status_canvas.create_oval(
-            2, 2, 14, 14, fill=COLORS["success"], outline="")
+        self._status_canvas.place(relx=1.0, x=-16, y=11, anchor="ne")
         self._status_canvas.bind("<Button-1>", lambda e: self._open_console_popup())
         ToolTip(self._status_canvas, "Click to view console log")
 
@@ -978,10 +980,35 @@ class LoRATrainerGUI:
         return False
 
     def _update_status_indicator(self):
-        """Poll busy state and update the indicator colour."""
+        """Poll busy state and redraw the IDLE/BUSY 'studio light': a lit circle
+        with a soft glow + all-caps word + a matching-colour frame, all in the
+        status colour (green idle / red busy)."""
         try:
-            color = COLORS["error"] if self._is_any_busy() else COLORS["success"]
-            self._status_canvas.itemconfig(self._status_indicator, fill=color)
+            busy = self._is_any_busy()
+            color = COLORS["error"] if busy else COLORS["success"]
+            label = "BUSY" if busy else "IDLE"
+            bg = COLORS["bg_deep"]
+            c = self._status_canvas
+            c.delete("all")
+            w = int(c["width"]); h = int(c["height"])
+            cy = h // 2
+            dx = 13
+            d = 9
+            # soft glow: concentric rings fading from the background up to the
+            # status colour (drawn outer→inner so the brightest sits nearest).
+            for gd, t in ((d + 12, 0.16), (d + 8, 0.32), (d + 4, 0.55)):
+                c.create_oval(dx - gd / 2, cy - gd / 2, dx + gd / 2, cy + gd / 2,
+                              fill=self._lerp_color(bg, color, t), outline="")
+            # outer frame (the warning-light surround)
+            c.create_rectangle(1, 1, w - 1, h - 1, outline=color, width=2)
+            # the lit dot
+            c.create_oval(dx - d / 2, cy - d / 2, dx + d / 2, cy + d / 2,
+                          fill=color, outline=color)
+            # the word — centred in the gap between the dot's right edge and the
+            # right edge of the frame
+            text_cx = ((dx + d / 2) + (w - 2)) / 2
+            c.create_text(text_cx, cy + 1, text=label, anchor="center",
+                          fill=color, font=(FONT_FAMILY, 9, "bold"))
         except Exception:
             pass
         self.master.after(500, self._update_status_indicator)
@@ -1088,6 +1115,8 @@ class LoRATrainerGUI:
         # Save LoRA output directory if entry exists
         if "LORA_OUTPUT_DIR" in self.entries:
             data["lora_output_dir"] = self.entries["LORA_OUTPUT_DIR"].get()
+        # Remember whether the bottom status bar is shown
+        data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
 
     def _save_pref(self, key):
@@ -1095,6 +1124,244 @@ class LoRATrainerGUI:
         if key in self.prefs_vars:
             self.prefs[key] = self.prefs_vars[key].get()
             save_prefs(self.prefs)
+
+    # ------------------------------------------------------------------
+    # Live VRAM / RAM status bar (bottom of window)
+    # ------------------------------------------------------------------
+    def _build_status_bar(self, master):
+        """Bottom status panel: stacked VRAM + system-RAM gradient fill bars (with
+        per-run peak ticks) on the left, the live sample override on the right,
+        and a remembered hide/show toggle. A daemon thread does the reads so the
+        Tk redraw never stalls on an nvidia-smi call."""
+        container = tk.Frame(master, bg=COLORS["bg_deep"])
+        container.pack(side=tk.BOTTOM, fill=tk.X)
+        self._status_container = container
+
+        # Thin always-visible handle carrying the show/hide toggle.
+        handle = tk.Frame(container, bg=COLORS["bg_deep"])
+        handle.pack(side=tk.BOTTOM, fill=tk.X)
+        self._status_handle = handle
+        self._status_toggle_btn = tk.Button(
+            handle, text="▾ Hide stats", font=(FONT_FAMILY, 8),
+            bg=COLORS["bg_deep"], fg=COLORS["text_muted"],
+            activebackground=COLORS["bg_surface"], activeforeground=COLORS["text_primary"],
+            relief="flat", bd=0, padx=10, pady=1, cursor="hand2",
+            command=self._toggle_status_bar)
+        self._status_toggle_btn.pack(side=tk.RIGHT, padx=(0, 12))
+
+        # The expandable bar (sits above the handle).
+        bar = tk.Frame(container, bg=COLORS["bg_deep"], height=82)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, before=handle)
+        bar.pack_propagate(False)
+        self._status_bar_frame = bar
+
+        # --- left: stacked VRAM (top) + RAM (bottom) gradient bars ---
+        bars_col = tk.Frame(bar, bg=COLORS["bg_deep"])
+        bars_col.pack(side=tk.LEFT, padx=(14, 18), pady=10)
+        self._vram_canvas = tk.Canvas(bars_col, width=360, height=27, bg=COLORS["bg_surface"],
+                                      highlightthickness=0)
+        self._vram_canvas.pack(side=tk.TOP, pady=(0, 6))
+        self._ram_canvas = tk.Canvas(bars_col, width=360, height=27, bg=COLORS["bg_surface"],
+                                     highlightthickness=0)
+        self._ram_canvas.pack(side=tk.TOP)
+
+        # --- right: live sample override (surface-coloured mini panel) ---
+        ov = tk.Frame(bar, bg=COLORS["bg_surface"])
+        ov.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 14), pady=10, ipadx=8, ipady=4)
+        _sbg = COLORS["bg_surface"]
+        r1 = tk.Frame(ov, bg=_sbg); r1.pack(fill=tk.X, padx=8, pady=(4, 0))
+        self.sample_override_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(r1, text="Override next samples", variable=self.sample_override_var,
+                        command=self._on_sample_override_changed,
+                        style="Surface.TCheckbutton").pack(side=tk.LEFT)
+        tk.Label(r1, text="seed", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(16, 3))
+        self.sample_override_seed_var = tk.StringVar(value="1234")
+        ttk.Entry(r1, textvariable=self.sample_override_seed_var, width=8).pack(side=tk.LEFT)
+        _res_vals = ["512", "640", "768", "896", "1024"]
+        tk.Label(r1, text="W", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
+        self.sample_override_w_var = tk.StringVar(value="768")
+        ttk.Combobox(r1, textvariable=self.sample_override_w_var, values=_res_vals,
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(r1, text="H", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(12, 3))
+        self.sample_override_h_var = tk.StringVar(value="768")
+        ttk.Combobox(r1, textvariable=self.sample_override_h_var, values=_res_vals,
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        r2 = tk.Frame(ov, bg=_sbg); r2.pack(fill=tk.X, padx=8, pady=(8, 4))
+        tk.Label(r2, text="Prompt", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(0, 6))
+        self.sample_override_prompt_var = tk.StringVar()
+        ttk.Entry(r2, textvariable=self.sample_override_prompt_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        for _v in (self.sample_override_prompt_var, self.sample_override_seed_var,
+                   self.sample_override_w_var, self.sample_override_h_var):
+            _v.trace_add("write", lambda *a: self._on_sample_override_changed())
+
+        self._vram_peak = 0
+        self._ram_peak = 0
+        self._status_latest = (None, None)
+        self._status_stop = False
+        # Restore remembered visibility (default shown).
+        self._status_bar_visible = bool(self.last_used.get("status_bar_visible", True))
+        if not self._status_bar_visible:
+            bar.pack_forget()
+            self._status_toggle_btn.configure(text="▴ Show stats")
+        import threading
+        self._status_thread = threading.Thread(target=self._status_reader_loop, daemon=True)
+        self._status_thread.start()
+        self.master.after(800, self._poll_status_bar)
+
+    def _toggle_status_bar(self):
+        """Show/hide the stats bar; remember the choice across launches."""
+        self._status_bar_visible = not getattr(self, "_status_bar_visible", True)
+        if self._status_bar_visible:
+            self._status_bar_frame.pack(side=tk.BOTTOM, fill=tk.X, before=self._status_handle)
+            self._status_toggle_btn.configure(text="▾ Hide stats")
+        else:
+            self._status_bar_frame.pack_forget()
+            self._status_toggle_btn.configure(text="▴ Show stats")
+        try:
+            self._save_last_used_paths()
+        except Exception:
+            pass
+
+    def _read_vram(self):
+        """Return (used_bytes, total_bytes) for GPU 0, or None. Prefers pynvml
+        (fast); falls back to a one-shot nvidia-smi query."""
+        try:
+            import pynvml
+            if not getattr(self, "_nvml_init", False):
+                pynvml.nvmlInit()
+                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                self._nvml_init = True
+            m = pynvml.nvmlDeviceGetMemoryInfo(self._nvml_handle)
+            return int(m.used), int(m.total)
+        except Exception:
+            pass
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=4,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            used, total = out.stdout.strip().splitlines()[0].split(",")
+            return int(used) * 1024 * 1024, int(total) * 1024 * 1024
+        except Exception:
+            return None
+
+    def _status_reader_loop(self):
+        import time
+        while not getattr(self, "_status_stop", False):
+            vram = self._read_vram()
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram = (vm.total - vm.available, vm.total)
+            except Exception:
+                ram = None
+            self._status_latest = (vram, ram)
+            time.sleep(1.0)
+
+    @staticmethod
+    def _lerp_color(c1, c2, t):
+        t = max(0.0, min(1.0, t))
+        r = round(int(c1[1:3], 16) + (int(c2[1:3], 16) - int(c1[1:3], 16)) * t)
+        g = round(int(c1[3:5], 16) + (int(c2[3:5], 16) - int(c1[3:5], 16)) * t)
+        b = round(int(c1[5:7], 16) + (int(c2[5:7], 16) - int(c1[5:7], 16)) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _draw_status_segment(self, canvas, used, total, peak, label, c_start, c_end):
+        canvas.delete("all")
+        try:
+            w = int(canvas["width"]); h = int(canvas["height"])
+        except Exception:
+            return
+        frac = max(0.0, min(1.0, used / total)) if total else 0.0
+        # track
+        canvas.create_rectangle(0, 0, w, h, fill=COLORS["bg_deep"], outline="")
+        # gradient fill: colour interpolates c_start -> c_end across the FULL
+        # width, drawn up to the current fill (fuller = closer to c_end).
+        fill_w = int(w * frac)
+        step = 3
+        for x in range(0, fill_w, step):
+            col = self._lerp_color(c_start, c_end, x / max(1, w - 1))
+            canvas.create_rectangle(x, 1, min(x + step, fill_w), h - 1, fill=col, outline="")
+        # per-run peak tick
+        if peak and total:
+            px = int(w * max(0.0, min(1.0, peak / total)))
+            canvas.create_line(px, 0, px, h, fill="#FFFFFF", width=2)
+        canvas.create_text(10, h // 2,
+                           text=f"{label}  {used/1e9:.1f} / {total/1e9:.1f} GB · peak {peak/1e9:.1f}",
+                           anchor="w", fill="#FFFFFF", font=(FONT_FAMILY, 9, "bold"))
+
+    def _poll_status_bar(self):
+        vram, ram = getattr(self, "_status_latest", (None, None))
+        visible = getattr(self, "_status_bar_visible", True)
+        if vram:
+            u, t = vram
+            self._vram_peak = max(self._vram_peak, u)
+            if visible:
+                self._draw_status_segment(self._vram_canvas, u, t, self._vram_peak,
+                                          "VRAM", "#3FB950", "#E5534B")  # green → red
+        if ram:
+            u, t = ram
+            self._ram_peak = max(self._ram_peak, u)
+            if visible:
+                self._draw_status_segment(self._ram_canvas, u, t, self._ram_peak,
+                                          "RAM", "#3B82F6", "#EAC54F")   # blue → yellow
+        self.master.after(1000, self._poll_status_bar)
+
+    def reset_status_peaks(self):
+        """Zero the VRAM/RAM peak markers — call at the start of a training run."""
+        self._vram_peak = 0
+        self._ram_peak = 0
+
+    def _sample_override_path(self):
+        # Prefer the live entry (always current) so this matches the --output_dir
+        # the trainer is launched with, even before settings is synced.
+        out_dir = ""
+        try:
+            out_dir = self.entries["LORA_OUTPUT_DIR"].get().strip()
+        except Exception:
+            pass
+        if not out_dir:
+            out_dir = self.settings.get("LORA_OUTPUT_DIR", "") or "."
+        return os.path.join(out_dir, ".sample_override.json")
+
+    def _on_sample_override_changed(self):
+        """Write or remove the live sample-override sentinel the trainer reads.
+
+        While the toggle is on (and a prompt is set) the trainer uses this
+        prompt/seed/res for the next samples; off removes it → Samples tab."""
+        path = self._sample_override_path()
+        try:
+            active = self.sample_override_var.get() and self.sample_override_prompt_var.get().strip()
+            if active:
+                try:
+                    seed = int(self.sample_override_seed_var.get() or "1234")
+                except ValueError:
+                    seed = 1234
+                try:
+                    width = int(self.sample_override_w_var.get() or "768")
+                except ValueError:
+                    width = 768
+                try:
+                    height = int(self.sample_override_h_var.get() or "768")
+                except ValueError:
+                    height = 768
+                data = {"prompt": self.sample_override_prompt_var.get().strip(),
+                        "seed": seed, "width": width, "height": height}
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+            elif os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
 
     def setup_styles(self):
         """Set up styles for refined dark theme (Fizgig Visual Style Guide)"""
@@ -1405,6 +1672,92 @@ class LoRATrainerGUI:
                     "https://buymeacoffee.com/lorasandlenses"),
             )
             coffee.pack(side=tk.LEFT, padx=(12, 0))
+            about = tk.Button(
+                row, text="About",
+                font=(FONT_FAMILY, 12, "bold"),
+                fg="#FFFFFF", bg=COLORS["accent"],
+                activeforeground="#FFFFFF", activebackground=COLORS["accent_hover"],
+                relief="flat", bd=0, padx=20, pady=10, cursor="hand2",
+                command=self._open_about_dialog,
+            )
+            about.pack(side=tk.LEFT, padx=(12, 0))
+
+    def _open_about_dialog(self):
+        """A small, personal About window: who made Fizgig, why, and a no-pressure
+        nudge to the tip jar."""
+        import webbrowser
+        win = tk.Toplevel(self.master)
+        win.title("About Fizgig")
+        win.configure(bg=COLORS["bg_deep"])
+        win.transient(self.master)
+        win.resizable(False, False)
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+
+        pad = tk.Frame(win, bg=COLORS["bg_deep"])
+        pad.pack(fill=tk.BOTH, expand=True, padx=28, pady=24)
+        WRAP = 460
+
+        def heading(text, size=20, fg=None, pady=(0, 2)):
+            tk.Label(pad, text=text, font=(FONT_FAMILY, size, "bold"),
+                     fg=fg or COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=pady)
+
+        def para(text, fg=None, italic=False, pady=(0, 10)):
+            tk.Label(pad, text=text, font=(FONT_FAMILY, 10, "italic" if italic else "normal"),
+                     fg=fg or COLORS["text_secondary"], bg=COLORS["bg_deep"],
+                     wraplength=WRAP, justify=tk.LEFT).pack(anchor=tk.W, pady=pady)
+
+        def link(text, url, pady=(0, 2)):
+            lbl = tk.Label(pad, text=text, font=(FONT_FAMILY, 10, "underline"),
+                           fg=COLORS["accent_hover"], bg=COLORS["bg_deep"], cursor="hand2")
+            lbl.pack(anchor=tk.W, pady=pady)
+            lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+
+        heading("Fizgig", 22)
+        tk.Label(pad, text="Klein 9B LoRA Studio — by Peter Neill",
+                 font=(FONT_FAMILY, 11), fg=COLORS["text_secondary"],
+                 bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 14))
+
+        para("By trade I'm a photographer and videographer — mostly live music, portraits, and a "
+             "bit of teaching — and an AI tinkerer by night. I build a lot of open-source tooling "
+             "for ComfyUI and Klein/Flux workflows.")
+        link("Photography — shootthesound.com", "https://shootthesound.com")
+        link("Code & ComfyUI nodes — github.com/shootthesound", "https://github.com/shootthesound", pady=(0, 4))
+        para("(Realtime-LoRA, LongLook, Angelo, mesh and a couple of dozen more — Fizgig grew out of that world.)",
+             fg=COLORS["text_muted"], pady=(0, 16))
+
+        tk.Frame(pad, bg=COLORS["border"], height=1).pack(fill=tk.X, pady=(0, 16))
+
+        para("A quiet note: a lot of this got built in the small hours. The last year has been a hard "
+             "one for our family — one of my children has been facing some serious health challenges — "
+             "and honestly, losing myself in making and obsessing over tools like this is how I carve out "
+             "a little headspace. It keeps my hands busy and my head somewhere steady.", italic=True)
+
+        para("Fizgig is free and always will be. If it's useful to you and you'd like to drop a coffee in "
+             "the tip jar, it genuinely means a lot right now — but it's in no way an obligation. Using it "
+             "and enjoying it is more than enough. Thank you for being here.",
+             fg=COLORS["text_secondary"], pady=(0, 18))
+
+        btn_row = tk.Frame(pad, bg=COLORS["bg_deep"])
+        btn_row.pack(anchor=tk.W)
+        # No coffee button here on purpose — it's already on the Start tab, so
+        # repeating it in the popup would feel pushy. The note above is enough.
+        tk.Button(btn_row, text="Close", font=(FONT_FAMILY, 11),
+                  fg=COLORS["text_primary"], bg=COLORS["bg_surface"],
+                  activeforeground=COLORS["text_primary"], activebackground=COLORS["border"],
+                  relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
+                  command=win.destroy).pack(side=tk.LEFT)
+
+        win.update_idletasks()
+        # Centre over the main window.
+        try:
+            px = self.master.winfo_rootx() + (self.master.winfo_width() - win.winfo_width()) // 2
+            py = self.master.winfo_rooty() + (self.master.winfo_height() - win.winfo_height()) // 3
+            win.geometry(f"+{max(0, px)}+{max(0, py)}")
+        except Exception:
+            pass
 
     def _start_section_card(self, parent, title, description=None, accent_border=False):
         """Start-tab-style surface card with an optional description line.
@@ -10203,6 +10556,17 @@ class LoRATrainerGUI:
 
         # Reset OOM warning flag for this run
         self._oom_warning_shown = False
+        # Reset the VRAM/RAM peak markers so the status bar tracks THIS run.
+        try:
+            self.reset_status_peaks()
+        except Exception:
+            pass
+        # Sync the sample-override sentinel to the current toggle (clears any
+        # stale file from a previous session so it matches what the user sees).
+        try:
+            self._on_sample_override_changed()
+        except Exception:
+            pass
 
         # Auto-uncheck FP8 Base if the Base DiT file is already fp8-quantised
         base_dit_path = self.prefs_vars.get("base_dit", tk.StringVar()).get()

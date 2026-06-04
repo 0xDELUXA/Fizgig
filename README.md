@@ -33,6 +33,7 @@ Fizgig is **free and open source** — and a good first run is the **✨ Old Rel
 - **Discover → Refine → Discover** — the Explorer and Repair Studio are bidirectionally connected. Find something interesting in the Explorer? One click sends it to the Repair Studio with all 32 sliders pre-set. Fine-tuning in the Repair Studio? One click sends your state back to the Explorer for more evolutionary discovery.
 - **See exactly what a LoRA does** — the Profiler shows which transformer blocks carry style, identity, and detail signal, so you know what to fix before you touch a slider.
 - **Train with intelligence** — adaptive learning rate adjusts itself based on loss, gradient clipping, and weight-norm growth.
+- **Steer previews mid-run** — change the prompt, seed, or resolution of your *next* training sample live from the status bar, no restart — sanity-check how a run handles a different subject or prompt while it keeps training.
 - **Just works on your GPU** — block swap auto-detects from your VRAM at both training and inference time. 16 GB, 24 GB, 32 GB — Fizgig picks the right setting. If you do run out of memory, it tells you exactly what to change.
 - **Make LoRAs work together** — Context LoRA training loads an existing LoRA as a frozen layer, so the new one learns to coexist. Train a face on top of a style and they stop fighting at inference. Train an outfit on top of a character and the clothes drape correctly. Fix compatibility between two LoRAs that conflict.
 
@@ -68,6 +69,11 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 - **Gradient checkpointing toggle** — on by default (recomputes activations in the backward pass to save VRAM — it's what lets a 9B LoRA fit a 16 GB card). On a roomy card (24 GB+) you can turn it **off** for meaningfully faster steps — it skips the recompute. The fp8 path is built so GC-off stays memory-frugal (the dequantized base weights aren't pinned for the backward) *and* keeps the fp8 `scaled_mm` speedup active, so 24 GB cards (3090/4090) and 32 GB get both wins stacked instead of trading one for the other. A VRAM-aware warning fires if you switch it off on a card that can't afford the extra activation memory.
 - **Auto VRAM management** — block swap auto-detects from GPU VRAM, OOM detection suggests fixes. Supports both bf16 and fp8 Base DiT. Training with fp8 Base and block swap works correctly.
 - **Diffusers LoRA support** — OneTrainer LoRAs with split Q/K/V keys auto-fused on load.
+
+### Live status bar
+A bottom bar with stacked **VRAM and system-RAM gauges** — smooth gradient fills (VRAM green→red, RAM blue→yellow as they fill) with a **per-run peak marker** so you can see exactly how high a run pushed memory. VRAM is read at the device level, so it also catches other apps holding the GPU. A top-right **IDLE / BUSY "on-air" light** (glowing, colour-coded) shows at a glance whether the app is working. The whole bar hides/shows with one click and remembers your choice.
+
+Alongside it sits a **live sample override** — tick it and set a prompt, seed, and width/height to change what the *next* training samples render, mid-run, without restarting. Untick to fall back to your Samples-tab prompts. The text encoder only re-runs when the prompt text actually changes, so seed/resolution tweaks are instant.
 
 ### Dataset Prep
 - **Florence-2 AI captioning** — bulk-generate detailed captions with one click.

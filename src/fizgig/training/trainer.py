@@ -1107,6 +1107,65 @@ class KleinTrainer:
         clean_memory_on_device(accelerator.device)
         return sample_parameters
 
+    def _get_override_sample_params(self, args, accelerator, base_params):
+        """Live sample override (written by the GUI to <output_dir>/.sample_override.json).
+
+        While the file exists, samples use its prompt/seed/resolution instead of
+        the Samples-tab set. The positive prompt is re-encoded ONLY when its text
+        changes (cached on self._override_te_cache) — the negative embedding and
+        step settings are inherited from the configured params, so seed/res-only
+        tweaks cost nothing. Returns [one sample_parameter] or None (no override).
+        """
+        import json
+        if not base_params:
+            return None
+        path = os.path.join(args.output_dir, ".sample_override.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                ov = json.load(f)
+        except Exception:
+            return None
+        prompt = str(ov.get("prompt", "")).strip()
+        if not prompt:
+            return None
+        try:
+            seed = int(ov.get("seed", base_params[0].get("seed", 42)) or 42)
+        except (TypeError, ValueError):
+            seed = 42
+        try:
+            width = (int(ov.get("width", base_params[0].get("width", 768)) or 768) // 16) * 16
+            height = (int(ov.get("height", base_params[0].get("height", 768)) or 768) // 16) * 16
+        except (TypeError, ValueError):
+            width = height = 768
+
+        cache = getattr(self, "_override_te_cache", None)
+        if cache is None or cache.get("prompt") != prompt:
+            # Re-encode only on a genuine prompt-text change.
+            te_dtype = torch.float8_e4m3fn if args.fp8_text_encoder else torch.bfloat16
+            text_embedder = load_text_encoder(args.text_encoder, dtype=te_dtype,
+                                              device=accelerator.device, disable_mmap=True)
+            with torch.no_grad():
+                if te_dtype.itemsize == 1:
+                    with torch.amp.autocast(device_type=accelerator.device.type, dtype=torch.bfloat16):
+                        ctx_vec = text_embedder([prompt])
+                else:
+                    ctx_vec = text_embedder([prompt])
+            cache = {"prompt": prompt, "ctx_vec": ctx_vec.cpu()}
+            self._override_te_cache = cache
+            del text_embedder
+            clean_memory_on_device(accelerator.device)
+            logger.info(f"  [sample override] encoded new prompt: {prompt[:70]}")
+
+        param = dict(base_params[0])  # inherit negative_ctx_vec + step/guidance settings
+        param["prompt"] = prompt
+        param["ctx_vec"] = cache["ctx_vec"]
+        param["seed"] = seed
+        param["width"] = width
+        param["height"] = height
+        return [param]
+
     def do_inference(
         self,
         accelerator,
@@ -1306,6 +1365,16 @@ class KleinTrainer:
         if sample_parameters is None:
             logger.error(f"No prompt file: {args.sample_prompts}")
             return
+
+        # Live sample override (GUI-written sentinel): while active, use its
+        # prompt/seed/resolution instead of the configured Samples-tab set.
+        try:
+            _override_params = self._get_override_sample_params(args, accelerator, sample_parameters)
+            if _override_params is not None:
+                logger.info("  [sample override] active — using override prompt/seed/res")
+                sample_parameters = _override_params
+        except Exception:
+            logger.warning("  [sample override] failed; using configured prompts", exc_info=True)
 
         distributed_state = PartialState()
         transformer = accelerator.unwrap_model(transformer)

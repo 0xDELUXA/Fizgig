@@ -170,6 +170,41 @@ class RepairEngine:
                     path, len(self.primary_block_ids),
                     self.primary_hash[:12] + "…" if self.primary_hash else "?")
 
+    def swap_primary_weights(self, path: str) -> bool:
+        """LoRA Royale fast path: swap the primary network's weights to another
+        checkpoint of the SAME structure (epochs of one run) WITHOUT reloading
+        the pipeline or re-patching the DiT — load_state_dict in place.
+
+        Returns True on a clean swap, False if the checkpoint's structure doesn't
+        match the patched network (e.g. an unrelated LoRA / different rank), in
+        which case the caller should reset() + load_primary() instead.
+        """
+        import torch
+        if self.primary_network is None:
+            raise RuntimeError("No primary loaded; call load_primary() first.")
+        from fizgig.networks.lora import ensure_kohya_lora_state_dict
+        from safetensors.torch import load_file
+        try:
+            sd = ensure_kohya_lora_state_dict(load_file(path))
+        except Exception:
+            logger.exception("swap_primary_weights: failed to load %s", path)
+            return False
+        info = self.primary_network.load_state_dict(sd, strict=False)
+        # If most of the checkpoint's keys didn't map onto the patched network,
+        # the structure differs — bail so the caller can do a full reload.
+        if sd and len(info.unexpected_keys) > 0.5 * len(sd):
+            return False
+        self.primary_network.to(self.pipeline.device, dtype=torch.bfloat16)
+        self.primary_path = path
+        try:
+            from fizgig.profiler.visualize import compute_lora_hash
+            self.primary_hash = compute_lora_hash(path)
+        except Exception:
+            self.primary_hash = None
+        self._invalidate_baseline_cache()
+        self._invalidate_activation_cache()
+        return True
+
     def load_donor(self, path: str) -> None:
         """Load a second LoRA on top (chained, additive). All blocks start disabled."""
         if self.pipeline is None or not self.pipeline.is_loaded:

@@ -1113,12 +1113,34 @@ class LoRATrainerGUI:
         bar.pack_propagate(False)
         self._status_bar_frame = bar
 
-        self._vram_canvas = tk.Canvas(bar, width=300, height=20, bg=COLORS["bg_surface"],
+        self._vram_canvas = tk.Canvas(bar, width=255, height=20, bg=COLORS["bg_surface"],
                                       highlightthickness=0)
         self._vram_canvas.pack(side=tk.LEFT, padx=(10, 6), pady=4)
-        self._ram_canvas = tk.Canvas(bar, width=300, height=20, bg=COLORS["bg_surface"],
+        self._ram_canvas = tk.Canvas(bar, width=255, height=20, bg=COLORS["bg_surface"],
                                      highlightthickness=0)
         self._ram_canvas.pack(side=tk.LEFT, padx=(0, 6), pady=4)
+
+        # Live sample override (prompt / seed / res). While the checkbox is on,
+        # the GUI writes <output_dir>/.sample_override.json and the trainer uses
+        # it for the next samples; unchecked falls back to the Samples tab.
+        ov = tk.Frame(bar, bg=COLORS["bg_deep"])
+        ov.pack(side=tk.RIGHT, padx=(6, 10))
+        self.sample_override_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(ov, text="Override sample:", variable=self.sample_override_var,
+                        command=self._on_sample_override_changed).pack(side=tk.LEFT, padx=(0, 4))
+        self.sample_override_prompt_var = tk.StringVar()
+        ttk.Entry(ov, textvariable=self.sample_override_prompt_var, width=30).pack(side=tk.LEFT, padx=(0, 4))
+        tk.Label(ov, text="seed", bg=COLORS["bg_deep"], fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT)
+        self.sample_override_seed_var = tk.StringVar(value="1234")
+        ttk.Entry(ov, textvariable=self.sample_override_seed_var, width=7).pack(side=tk.LEFT, padx=(2, 4))
+        tk.Label(ov, text="res", bg=COLORS["bg_deep"], fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT)
+        self.sample_override_res_var = tk.StringVar(value="768")
+        ttk.Entry(ov, textvariable=self.sample_override_res_var, width=5).pack(side=tk.LEFT, padx=(2, 0))
+        for _v in (self.sample_override_prompt_var, self.sample_override_seed_var,
+                   self.sample_override_res_var):
+            _v.trace_add("write", lambda *a: self._on_sample_override_changed())
 
         self._vram_peak = 0
         self._ram_peak = 0
@@ -1209,6 +1231,45 @@ class LoRATrainerGUI:
         """Zero the VRAM/RAM peak markers — call at the start of a training run."""
         self._vram_peak = 0
         self._ram_peak = 0
+
+    def _sample_override_path(self):
+        # Prefer the live entry (always current) so this matches the --output_dir
+        # the trainer is launched with, even before settings is synced.
+        out_dir = ""
+        try:
+            out_dir = self.entries["LORA_OUTPUT_DIR"].get().strip()
+        except Exception:
+            pass
+        if not out_dir:
+            out_dir = self.settings.get("LORA_OUTPUT_DIR", "") or "."
+        return os.path.join(out_dir, ".sample_override.json")
+
+    def _on_sample_override_changed(self):
+        """Write or remove the live sample-override sentinel the trainer reads.
+
+        While the toggle is on (and a prompt is set) the trainer uses this
+        prompt/seed/res for the next samples; off removes it → Samples tab."""
+        path = self._sample_override_path()
+        try:
+            active = self.sample_override_var.get() and self.sample_override_prompt_var.get().strip()
+            if active:
+                try:
+                    seed = int(self.sample_override_seed_var.get() or "1234")
+                except ValueError:
+                    seed = 1234
+                try:
+                    res = int(self.sample_override_res_var.get() or "768")
+                except ValueError:
+                    res = 768
+                data = {"prompt": self.sample_override_prompt_var.get().strip(),
+                        "seed": seed, "width": res, "height": res}
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f)
+            elif os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
 
     def setup_styles(self):
         """Set up styles for refined dark theme (Fizgig Visual Style Guide)"""
@@ -10320,6 +10381,12 @@ class LoRATrainerGUI:
         # Reset the VRAM/RAM peak markers so the status bar tracks THIS run.
         try:
             self.reset_status_peaks()
+        except Exception:
+            pass
+        # Sync the sample-override sentinel to the current toggle (clears any
+        # stale file from a previous session so it matches what the user sees).
+        try:
+            self._on_sample_override_changed()
         except Exception:
             pass
 

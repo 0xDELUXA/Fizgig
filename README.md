@@ -162,7 +162,7 @@ The unnumbered tabs are post-training tools (also work on any Klein LoRA you've 
 - **Repair Studio** — live per-block editing with Turbo Preview and optional donor blending.
 - **LoRA the Explorer** — evolutionary discovery via human-guided selection.
 - **Extract** — distil to a lower rank with block and timestep targeting.
-- **Preferences** — model paths, output directories, inference block-swap preset.
+- **Preferences** — model paths, output directories, inference block-swap preset, and default input folders for LoRAs and reference images (so the Browse dialogs open where you keep them).
 
 ---
 

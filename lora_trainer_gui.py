@@ -1673,10 +1673,10 @@ class LoRATrainerGUI:
             )
             coffee.pack(side=tk.LEFT, padx=(12, 0))
             about = tk.Button(
-                row, text="ℹ  About",
+                row, text="About",
                 font=(FONT_FAMILY, 12, "bold"),
-                fg=COLORS["text_primary"], bg=COLORS["bg_surface"],
-                activeforeground=COLORS["text_primary"], activebackground=COLORS["border"],
+                fg="#FFFFFF", bg=COLORS["accent"],
+                activeforeground="#FFFFFF", activebackground=COLORS["accent_hover"],
                 relief="flat", bd=0, padx=20, pady=10, cursor="hand2",
                 command=self._open_about_dialog,
             )

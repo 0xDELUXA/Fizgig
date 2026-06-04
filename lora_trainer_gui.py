@@ -816,7 +816,7 @@ class LoRATrainerGUI:
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # Status indicator — overlaid on top-right of notebook, zero vertical space
-        self._status_canvas = tk.Canvas(master, width=84, height=22,
+        self._status_canvas = tk.Canvas(master, width=84, height=32,
                                         bg=COLORS["bg_deep"], highlightthickness=0,
                                         cursor="hand2")
         self._status_canvas.place(relx=1.0, x=-16, y=11, anchor="ne")
@@ -981,24 +981,31 @@ class LoRATrainerGUI:
 
     def _update_status_indicator(self):
         """Poll busy state and redraw the IDLE/BUSY 'studio light': a lit circle
-        + all-caps word + a matching-colour frame, all in the status colour."""
+        with a soft glow + all-caps word + a matching-colour frame, all in the
+        status colour (green idle / red busy)."""
         try:
             busy = self._is_any_busy()
             color = COLORS["error"] if busy else COLORS["success"]
             label = "BUSY" if busy else "IDLE"
+            bg = COLORS["bg_deep"]
             c = self._status_canvas
             c.delete("all")
             w = int(c["width"]); h = int(c["height"])
             cy = h // 2
+            dx = 13
+            d = 9
+            # soft glow: concentric rings fading from the background up to the
+            # status colour (drawn outer→inner so the brightest sits nearest).
+            for gd, t in ((d + 12, 0.16), (d + 8, 0.32), (d + 4, 0.55)):
+                c.create_oval(dx - gd / 2, cy - gd / 2, dx + gd / 2, cy + gd / 2,
+                              fill=self._lerp_color(bg, color, t), outline="")
             # outer frame (the warning-light surround)
             c.create_rectangle(1, 1, w - 1, h - 1, outline=color, width=2)
             # the lit dot
-            d = 8
-            dx = 10
-            c.create_oval(dx - d // 2, cy - d // 2, dx + d // 2, cy + d // 2,
+            c.create_oval(dx - d / 2, cy - d / 2, dx + d / 2, cy + d / 2,
                           fill=color, outline=color)
             # the word
-            c.create_text(dx + d // 2 + 6, cy + 1, text=label, anchor="w",
+            c.create_text(dx + d / 2 + 7, cy + 1, text=label, anchor="w",
                           fill=color, font=(FONT_FAMILY, 9, "bold"))
         except Exception:
             pass

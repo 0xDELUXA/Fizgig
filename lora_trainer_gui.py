@@ -1672,6 +1672,94 @@ class LoRATrainerGUI:
                     "https://buymeacoffee.com/lorasandlenses"),
             )
             coffee.pack(side=tk.LEFT, padx=(12, 0))
+            about = tk.Button(
+                row, text="ℹ  About",
+                font=(FONT_FAMILY, 12, "bold"),
+                fg=COLORS["text_primary"], bg=COLORS["bg_surface"],
+                activeforeground=COLORS["text_primary"], activebackground=COLORS["border"],
+                relief="flat", bd=0, padx=20, pady=10, cursor="hand2",
+                command=self._open_about_dialog,
+            )
+            about.pack(side=tk.LEFT, padx=(12, 0))
+
+    def _open_about_dialog(self):
+        """A small, personal About window: who made Fizgig, why, and a no-pressure
+        nudge to the tip jar."""
+        import webbrowser
+        win = tk.Toplevel(self.master)
+        win.title("About Fizgig")
+        win.configure(bg=COLORS["bg_deep"])
+        win.transient(self.master)
+        win.resizable(False, False)
+        try:
+            win.grab_set()
+        except Exception:
+            pass
+
+        pad = tk.Frame(win, bg=COLORS["bg_deep"])
+        pad.pack(fill=tk.BOTH, expand=True, padx=28, pady=24)
+        WRAP = 460
+
+        def heading(text, size=20, fg=None, pady=(0, 2)):
+            tk.Label(pad, text=text, font=(FONT_FAMILY, size, "bold"),
+                     fg=fg or COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=pady)
+
+        def para(text, fg=None, italic=False, pady=(0, 10)):
+            tk.Label(pad, text=text, font=(FONT_FAMILY, 10, "italic" if italic else "normal"),
+                     fg=fg or COLORS["text_secondary"], bg=COLORS["bg_deep"],
+                     wraplength=WRAP, justify=tk.LEFT).pack(anchor=tk.W, pady=pady)
+
+        def link(text, url, pady=(0, 2)):
+            lbl = tk.Label(pad, text=text, font=(FONT_FAMILY, 10, "underline"),
+                           fg=COLORS["accent_hover"], bg=COLORS["bg_deep"], cursor="hand2")
+            lbl.pack(anchor=tk.W, pady=pady)
+            lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+
+        heading("Fizgig", 22)
+        tk.Label(pad, text="Klein 9B LoRA Studio — by Peter Neill",
+                 font=(FONT_FAMILY, 11), fg=COLORS["text_secondary"],
+                 bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 14))
+
+        para("I'm a photographer (Sony ambassador) by trade, and an AI tinkerer by night — "
+             "I build a lot of open-source tooling for ComfyUI and Klein/Flux workflows.")
+        link("Photography — shootthesound.com", "https://shootthesound.com")
+        link("Code & ComfyUI nodes — github.com/shootthesound", "https://github.com/shootthesound", pady=(0, 4))
+        para("(Realtime-LoRA, LongLook, Angelo, mesh and a couple of dozen more — Fizgig grew out of that world.)",
+             fg=COLORS["text_muted"], pady=(0, 16))
+
+        tk.Frame(pad, bg=COLORS["border"], height=1).pack(fill=tk.X, pady=(0, 16))
+
+        para("A quiet note: a lot of this got built in the small hours. The last year has been a hard "
+             "one for our family — one of my children has been facing some serious health challenges — "
+             "and honestly, losing myself in making and obsessing over tools like this is how I carve out "
+             "a little headspace. It keeps my hands busy and my head somewhere steady.", italic=True)
+
+        para("Fizgig is free and always will be. If it's useful to you and you'd like to drop a coffee in "
+             "the tip jar, it genuinely means a lot right now — but it's in no way an obligation. Using it "
+             "and enjoying it is more than enough. Thank you for being here. 🙏",
+             fg=COLORS["text_secondary"], pady=(0, 18))
+
+        btn_row = tk.Frame(pad, bg=COLORS["bg_deep"])
+        btn_row.pack(anchor=tk.W)
+        tk.Button(btn_row, text="☕  Buy me a coffee", font=(FONT_FAMILY, 11, "bold"),
+                  fg="#000000", bg="#FFDD00", activeforeground="#000000", activebackground="#E5C700",
+                  relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
+                  command=lambda: webbrowser.open("https://buymeacoffee.com/lorasandlenses")
+                  ).pack(side=tk.LEFT)
+        tk.Button(btn_row, text="Close", font=(FONT_FAMILY, 11),
+                  fg=COLORS["text_primary"], bg=COLORS["bg_surface"],
+                  activeforeground=COLORS["text_primary"], activebackground=COLORS["border"],
+                  relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
+                  command=win.destroy).pack(side=tk.LEFT, padx=(12, 0))
+
+        win.update_idletasks()
+        # Centre over the main window.
+        try:
+            px = self.master.winfo_rootx() + (self.master.winfo_width() - win.winfo_width()) // 2
+            py = self.master.winfo_rooty() + (self.master.winfo_height() - win.winfo_height()) // 3
+            win.geometry(f"+{max(0, px)}+{max(0, py)}")
+        except Exception:
+            pass
 
     def _start_section_card(self, parent, title, description=None, accent_border=False):
         """Start-tab-style surface card with an optional description line.

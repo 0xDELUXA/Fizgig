@@ -1174,7 +1174,7 @@ class LoRATrainerGUI:
         _sbg = COLORS["bg_surface"]
         r1 = tk.Frame(ov, bg=_sbg); r1.pack(fill=tk.X, padx=8, pady=(4, 0))
         self.sample_override_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(r1, text="Override next samples", variable=self.sample_override_var,
+        ttk.Checkbutton(r1, text="Override next sample", variable=self.sample_override_var,
                         command=self._on_sample_override_changed,
                         style="Surface.TCheckbutton").pack(side=tk.LEFT)
         tk.Label(r1, text="seed", bg=_sbg, fg=COLORS["text_muted"],

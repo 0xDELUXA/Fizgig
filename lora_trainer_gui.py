@@ -1112,6 +1112,9 @@ class LoRATrainerGUI:
         # Save sample prompt if widget exists
         if hasattr(self, 'sample_prompt_text'):
             data["sample_prompt"] = self.sample_prompt_text.get("1.0", tk.END).strip()
+        # Save the sample reference image path
+        if hasattr(self, 'sample_ref_image_var'):
+            data["sample_ref_image"] = self.sample_ref_image_var.get()
         # Save LoRA output directory if entry exists
         if "LORA_OUTPUT_DIR" in self.entries:
             data["lora_output_dir"] = self.entries["LORA_OUTPUT_DIR"].get()
@@ -1194,7 +1197,10 @@ class LoRATrainerGUI:
         tk.Label(r1, text="Ref", bg=_sbg, fg=COLORS["text_muted"],
                  font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
         self.sample_override_ref_var = tk.StringVar(value="")
-        ttk.Button(r1, text="Browse…", width=9,
+        # Compact button so it matches the seed/resolution input height (the
+        # default ttk.Button padding is taller and pushes the prompt row down).
+        ttk.Style().configure("OverrideRef.TButton", padding=(8, 0), font=(FONT_FAMILY, 8))
+        ttk.Button(r1, text="Browse…", width=9, style="OverrideRef.TButton",
                    command=self._browse_override_ref).pack(side=tk.LEFT)
         self._override_ref_label = tk.Label(r1, text="(none)", bg=_sbg,
                                             fg=COLORS["text_muted"], font=(FONT_FAMILY, 8))
@@ -1396,6 +1402,16 @@ class LoRATrainerGUI:
         self.sample_override_ref_var.set("")
         self._override_ref_label.configure(text="(none)")
         self._on_sample_override_changed()
+
+    def _browse_sample_ref(self):
+        """Pick the persistent reference image for training samples (Samples tab)."""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select reference image for samples",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_ref_dir"))
+        if path:
+            self.sample_ref_image_var.set(path)
 
     def setup_styles(self):
         """Set up styles for refined dark theme (Fizgig Visual Style Guide)"""
@@ -4578,6 +4594,24 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
             row=4, column=2, sticky=tk.W, padx=(10, 0)
         )
+
+        # Reference image (Klein edit conditioning) — the persistent default for
+        # samples; the status-bar override can swap it live mid-run.
+        ttk.Label(prompt_card, text="Reference:").grid(row=5, column=0, sticky=tk.NW, padx=(0, 10), pady=4)
+        self.sample_ref_image_var = tk.StringVar(value=self.last_used.get("sample_ref_image", ""))
+        _ref_row = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
+        _ref_row.grid(row=5, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        ttk.Entry(_ref_row, textvariable=self.sample_ref_image_var, state="readonly").pack(
+            side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(_ref_row, text="Browse…", command=self._browse_sample_ref).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(_ref_row, text="Clear", command=lambda: self.sample_ref_image_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        self.sample_ref_image_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        tk.Label(prompt_card,
+                 text="Optional — Klein is an edit model, so samples can be conditioned on a real image (they edit "
+                      "it rather than generate from scratch). Auto-resized to ~0.20 MP so any size is safe. Leave "
+                      "empty for normal samples.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=560, justify=tk.LEFT).grid(row=6, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
 
         # Card 2: Generation Frequency
         freq_card = self._start_section_card(
@@ -11022,6 +11056,13 @@ class LoRATrainerGUI:
 
             if self.sample_at_first_var.get():
                 command.append("--sample_at_first")
+
+            # Reference image for samples (Klein edit conditioning) — auto-capped
+            # to ~0.20 MP in the trainer, so any size is safe.
+            ref_img = getattr(self, "sample_ref_image_var", None)
+            ref_img = ref_img.get().strip() if ref_img else ""
+            if ref_img and os.path.exists(ref_img):
+                command.extend(["--sample_ref_image", ref_img])
 
             # Use Distilled model for sample generation
             if getattr(self, 'use_distilled_samples_var', None) and self.use_distilled_samples_var.get():

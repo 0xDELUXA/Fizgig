@@ -1093,6 +1093,8 @@ class KleinTrainer:
         clean_memory_on_device(device)
 
         # Build sample parameters
+        _global_ref = getattr(args, "sample_ref_image", None)
+        _global_ref = _global_ref if (_global_ref and os.path.exists(_global_ref)) else None
         sample_parameters = []
         for prompt_dict in prompts:
             prompt_dict_copy = prompt_dict.copy()
@@ -1101,6 +1103,11 @@ class KleinTrainer:
             prompt_dict_copy["ctx_vec"] = sample_prompts_te_outputs[p]
             p = prompt_dict.get("negative_prompt", " ")
             prompt_dict_copy["negative_ctx_vec"] = sample_prompts_te_outputs[p]
+
+            # Global sample reference image (Samples tab) — unless the prompt line
+            # already specified its own control image.
+            if _global_ref is not None:
+                prompt_dict_copy.setdefault("control_image_path", [_global_ref])
 
             sample_parameters.append(prompt_dict_copy)
 
@@ -2964,6 +2971,10 @@ def setup_parser() -> argparse.ArgumentParser:
                         help="Keep the Distilled sample model in CPU RAM between epochs "
                              "to skip the per-epoch disk reload. auto = only when free RAM "
                              "is comfortable; on = always; off = reload each time.")
+    parser.add_argument("--sample_ref_image", type=str, default=None,
+                        help="Reference image to edit-condition training samples on (Klein "
+                             "is an edit model). Auto-capped to ~0.20 MP before encode so any "
+                             "size is safe. The live sample override can swap it per-run.")
 
     # ---- Optimizer ----
     parser.add_argument("--optimizer_type", type=str, default="",

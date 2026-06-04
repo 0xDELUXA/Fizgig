@@ -69,6 +69,11 @@ Per-block activation profile with a colour-coded 5-bucket HTML report. Identifie
 - **Auto VRAM management** — block swap auto-detects from GPU VRAM, OOM detection suggests fixes. Supports both bf16 and fp8 Base DiT. Training with fp8 Base and block swap works correctly.
 - **Diffusers LoRA support** — OneTrainer LoRAs with split Q/K/V keys auto-fused on load.
 
+### Live status bar
+A bottom bar with stacked **VRAM and system-RAM gauges** — smooth gradient fills (VRAM green→red, RAM blue→yellow as they fill) with a **per-run peak marker** so you can see exactly how high a run pushed memory. VRAM is read at the device level, so it also catches other apps holding the GPU. A top-right **IDLE / BUSY "on-air" light** (glowing, colour-coded) shows at a glance whether the app is working. The whole bar hides/shows with one click and remembers your choice.
+
+Alongside it sits a **live sample override** — tick it and set a prompt, seed, and width/height to change what the *next* training samples render, mid-run, without restarting. Untick to fall back to your Samples-tab prompts. The text encoder only re-runs when the prompt text actually changes, so seed/resolution tweaks are instant.
+
 ### Dataset Prep
 - **Florence-2 AI captioning** — bulk-generate detailed captions with one click.
 - **Bilingual translation** — optionally append Chinese translations via Helsinki-NLP. Klein's Qwen3 text encoder has deep Chinese training; bilingual captions act as text-level data augmentation, improving visual quality without changing loss.

@@ -1136,6 +1136,9 @@ class LoRATrainerGUI:
             data["royale_ref"] = self.royale_ref_var.get()
         if hasattr(self, 'royale_like_ref_var'):
             data["royale_like_ref"] = self.royale_like_ref_var.get()
+        if hasattr(self, 'royale_travel_seed_a_var'):
+            data["royale_travel_seed_a"] = self.royale_travel_seed_a_var.get()
+            data["royale_travel_seed_b"] = self.royale_travel_seed_b_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9391,11 +9394,13 @@ class LoRATrainerGUI:
                                         "(slerp through noise space) — shows the LoRA's range, saved as a clip.")
         _tr1 = tk.Frame(trav, bg=_sbg); _tr1.pack(anchor=tk.W, pady=(0, 6))
         tk.Label(_tr1, text="Start seed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 4))
-        self.royale_travel_seed_a_var = tk.StringVar(value="42")
+        self.royale_travel_seed_a_var = tk.StringVar(value=self.last_used.get("royale_travel_seed_a", "42"))
         ttk.Entry(_tr1, textvariable=self.royale_travel_seed_a_var, width=10).pack(side=tk.LEFT)
         tk.Label(_tr1, text="End seed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
-        self.royale_travel_seed_b_var = tk.StringVar(value="4242")
+        self.royale_travel_seed_b_var = tk.StringVar(value=self.last_used.get("royale_travel_seed_b", "4242"))
         ttk.Entry(_tr1, textvariable=self.royale_travel_seed_b_var, width=10).pack(side=tk.LEFT)
+        for _sv in (self.royale_travel_seed_a_var, self.royale_travel_seed_b_var):
+            _sv.trace_add("write", lambda *a: self._save_last_used_paths())
         tk.Label(_tr1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
         self.royale_travel_frames_var = tk.StringVar(value="24")
         _frcb = ttk.Combobox(_tr1, textvariable=self.royale_travel_frames_var,

@@ -2215,6 +2215,24 @@ class KleinTrainer:
         ADAPTIVE_CLIP_RATIO_THRESHOLD = 0.5   # >50% of steps clipping = too high
         ADAPTIVE_WEIGHT_GROWTH_THRESHOLD = 0.30  # >30% LoRA weight norm growth/epoch = too high
 
+        # --- Perf diagnostic (opt-in: FIZGIG_PERF_DIAG=1) ---------------------
+        # Pins the epoch-2-onward per-step slowdown to a cause. Per epoch logs:
+        #   step_ms min/med  — min step = pure compute; watch it climb
+        #   vram peak_alloc vs peak_reserved + gap + alloc retries
+        #                    — reserved climbing while alloc flat (+ retries) = FRAGMENTATION
+        #   hooks full_bwd   — climbing across epochs = block-swap backward-hook LEAK
+        # Off by default → zero overhead on normal runs.
+        import os as _os, time as _time
+        _perf_diag = _os.environ.get("FIZGIG_PERF_DIAG", "0") != "0"
+        def _perf_hook_counts():
+            mdl = accelerator.unwrap_model(transformer)
+            f = b = fb = 0
+            for mod in mdl.modules():
+                f += len(getattr(mod, "_forward_hooks", {}) or {})
+                b += len(getattr(mod, "_backward_hooks", {}) or {})
+                fb += len(getattr(mod, "_full_backward_hooks", {}) or {})
+            return f, b, fb
+
         for epoch in range(epoch_to_start, num_train_epochs):
             accelerator.print(f"\nepoch {epoch + 1}/{num_train_epochs}")
             current_epoch.value = epoch + 1
@@ -2222,7 +2240,12 @@ class KleinTrainer:
 
             accelerator.unwrap_model(network).on_epoch_start(transformer)
 
+            _perf_step_times = []
+            if _perf_diag and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+
             for step, batch in enumerate(train_dataloader):
+                _perf_t0 = _time.perf_counter() if _perf_diag else 0.0
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):
@@ -2340,10 +2363,35 @@ class KleinTrainer:
                     )
                     accelerator.log(logs, step=global_step)
 
+                if _perf_diag:
+                    _perf_step_times.append(_time.perf_counter() - _perf_t0)
+
                 if global_step >= args.max_train_steps:
                     break
 
             # End of epoch
+            if _perf_diag:
+                import statistics as _pstats
+                _st = sorted(_perf_step_times)
+                _mn = (_st[0] * 1000) if _st else 0.0
+                _md = (_pstats.median(_st) * 1000) if _st else 0.0
+                _f, _b, _fb = _perf_hook_counts()
+                if torch.cuda.is_available():
+                    _pa = torch.cuda.max_memory_allocated() / 1e9
+                    _pr = torch.cuda.max_memory_reserved() / 1e9
+                    _ms = torch.cuda.memory_stats()
+                    _rt = _ms.get("num_alloc_retries", 0)
+                    _oo = _ms.get("num_ooms", 0)
+                else:
+                    _pa = _pr = _rt = _oo = 0
+                accelerator.print(
+                    f"[perfdiag] epoch {epoch + 1} | steps={len(_st)} | "
+                    f"step_ms min={_mn:.1f} med={_md:.1f} | "
+                    f"vram peak_alloc={_pa:.2f}G peak_reserved={_pr:.2f}G gap={_pr - _pa:.2f}G "
+                    f"retries={_rt} ooms={_oo} | hooks fwd={_f} bwd={_b} full_bwd={_fb}"
+                )
+                import sys as _psys; _psys.stdout.flush()
+
             if len(accelerator.trackers) > 0:
                 accelerator.log({"loss/epoch": loss_recorder.moving_average}, step=epoch + 1)
 

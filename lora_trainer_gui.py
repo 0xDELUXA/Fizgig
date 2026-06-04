@@ -9256,6 +9256,10 @@ class LoRATrainerGUI:
         self._royale_thumbs = []      # keep ImageTk refs alive
         self._royale_preview_imgtk = None
         self._royale_rendering = False
+        self._royale_paths = {}       # label -> checkpoint path (for promote)
+        self._royale_scores = {}      # label -> likeness cosine (Phase 3)
+        self._royale_best_label = None
+        self._royale_scoring = False
 
         frame, _canvas = self.create_scrollable_frame(self.lora_royale_tab)
         outer = tk.Frame(frame, bg=COLORS["bg_deep"])
@@ -9338,6 +9342,44 @@ class LoRATrainerGUI:
                                              "Click a thumbnail to jump the crossfade there.")
         self._royale_grid = tk.Frame(grid_card, bg=_sbg)
         self._royale_grid.pack(fill=tk.X)
+
+        like = self._start_section_card(outer, "Likeness score",
+                                        "Pick a training image of your subject — Fizgig scores each epoch's face "
+                                        "against it (ArcFace, CPU) and highlights the closest match in gold.")
+        like.columnconfigure(1, weight=1)
+        lr = 0
+        ttk.Label(like, text="Subject image:").grid(row=lr, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.royale_like_ref_var = tk.StringVar(value="")
+        _lrr = tk.Frame(like, bg=_sbg); _lrr.grid(row=lr, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        ttk.Entry(_lrr, textvariable=self.royale_like_ref_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(_lrr, text="Browse…", command=self._royale_browse_like_ref).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(_lrr, text="Clear", command=lambda: self.royale_like_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        lr += 1
+        _lbr = tk.Frame(like, bg=_sbg); _lbr.grid(row=lr, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        self._royale_score_btn = tk.Button(_lbr, text="Score likeness", font=(FONT_FAMILY, 10, "bold"),
+                                           fg="#FFFFFF", bg="#3A6EA5", activeforeground="#FFFFFF",
+                                           activebackground="#2F5A86", relief="flat", bd=0, padx=18, pady=5,
+                                           cursor="hand2", command=self._royale_score_likeness)
+        self._royale_score_btn.pack(side=tk.LEFT)
+        self._royale_jump_best_btn = ttk.Button(_lbr, text="Jump to best", command=self._royale_jump_best,
+                                                state="disabled")
+        self._royale_jump_best_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.royale_like_status_var = tk.StringVar(value="")
+        tk.Label(_lbr, textvariable=self.royale_like_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
+
+        promote = self._start_section_card(outer, "Promote winner",
+                                           "Copy the epoch currently shown on the crossfade to a new .safetensors "
+                                           "you can drop straight into ComfyUI.")
+        _pbr = tk.Frame(promote, bg=_sbg); _pbr.pack(anchor=tk.W)
+        self._royale_promote_btn = tk.Button(_pbr, text="Promote current epoch…", font=(FONT_FAMILY, 10, "bold"),
+                                             fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF",
+                                             activebackground="#256F46", relief="flat", bd=0, padx=18, pady=5,
+                                             cursor="hand2", command=self._royale_promote)
+        self._royale_promote_btn.pack(side=tk.LEFT)
+        self.royale_promote_status_var = tk.StringVar(value="")
+        tk.Label(_pbr, textvariable=self.royale_promote_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
         # Scan the pre-filled output folder so the count shows on first open.
         try:
@@ -9448,6 +9490,7 @@ class LoRATrainerGUI:
             res = 512
         ref = self.royale_ref_var.get().strip()
         results = []
+        paths = {}
         eng = self.royale_engine
         total = len(sel)
         for i, (label, path) in enumerate(sel):
@@ -9472,15 +9515,22 @@ class LoRATrainerGUI:
                     st.ref_strength = 1.0
                 img = eng.generate_preview(st)
                 results.append((label, img.copy()))
+                paths[label] = path
             except Exception:
                 import traceback
                 print(f"[royale] render failed for {path}:\n{traceback.format_exc()}")
-        self.master.after(0, lambda: self._royale_finish(results))
+        self.master.after(0, lambda: self._royale_finish(results, paths))
 
-    def _royale_finish(self, results):
+    def _royale_finish(self, results, paths=None):
         self._royale_rendering = False
         self._royale_render_btn.configure(state="normal")
         self._royale_images = results
+        self._royale_paths = paths or {}
+        # New renders invalidate any prior likeness scores.
+        self._royale_scores = {}
+        self._royale_best_label = None
+        if hasattr(self, "royale_like_status_var"):
+            self.royale_like_status_var.set("")
         if not results:
             self.royale_status_var.set("No renders produced — see console.")
             return
@@ -9522,6 +9572,8 @@ class LoRATrainerGUI:
             w.destroy()
         self._royale_thumbs = []
         cols = 8
+        scores = getattr(self, "_royale_scores", {})
+        best = getattr(self, "_royale_best_label", None)
         for i, (label, img) in enumerate(self._royale_images):
             t = img.copy()
             t.thumbnail((92, 92), Image.LANCZOS)
@@ -9529,11 +9581,141 @@ class LoRATrainerGUI:
             self._royale_thumbs.append(tk_img)
             row = (i // cols) * 2
             col = i % cols
-            lbl = tk.Label(self._royale_grid, image=tk_img, cursor="hand2", bg=COLORS["bg_surface"])
-            lbl.grid(row=row, column=col, padx=4, pady=(4, 0))
+            is_best = (best is not None and label == best)
+            bd = 3 if is_best else 0
+            holder = tk.Frame(self._royale_grid, bg=("#FFD24A" if is_best else COLORS["bg_surface"]),
+                              padx=bd, pady=bd)
+            holder.grid(row=row, column=col, padx=4, pady=(4, 0))
+            lbl = tk.Label(holder, image=tk_img, cursor="hand2", bg=COLORS["bg_surface"])
+            lbl.pack()
             lbl.bind("<Button-1>", lambda e, idx=i: (self.royale_scrub_var.set(float(idx)), self._royale_scrub()))
-            tk.Label(self._royale_grid, text=f"e{label}", font=(FONT_FAMILY, 8),
-                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(row=row + 1, column=col, pady=(0, 4))
+            # Caption: epoch + likeness score (if scored).
+            cap = f"e{label}"
+            sc = scores.get(label)
+            if sc is not None:
+                cap = f"e{label}  {sc:.2f}" if sc == sc else f"e{label}  —"  # NaN check
+            tk.Label(self._royale_grid, text=cap, font=(FONT_FAMILY, 8, "bold" if is_best else "normal"),
+                     fg=("#FFD24A" if is_best else COLORS["text_muted"]),
+                     bg=COLORS["bg_surface"]).grid(row=row + 1, column=col, pady=(0, 4))
+
+    # ----- Likeness scoring (Phase 3) -----
+    def _royale_browse_like_ref(self):
+        from tkinter import filedialog
+        # Default to the dataset/training image folder if we know it.
+        init = (self.image_folder_var.get() if hasattr(self, "image_folder_var") else "") \
+            or self._pref_initialdir("input_ref_dir")
+        p = filedialog.askopenfilename(title="Subject image (a clean training shot)",
+                                       filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+                                       initialdir=init)
+        if p:
+            self.royale_like_ref_var.set(p)
+
+    def _royale_score_likeness(self):
+        if getattr(self, "_royale_scoring", False):
+            return
+        if not self._royale_images:
+            messagebox.showinfo("LoRA Royale", "Render some epochs first, then score them.")
+            return
+        ref = self.royale_like_ref_var.get().strip()
+        if not ref or not os.path.exists(ref):
+            messagebox.showinfo("LoRA Royale", "Pick a subject image to score likeness against.")
+            return
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import likeness
+        if not likeness.available():
+            messagebox.showerror("Likeness scoring unavailable",
+                                 "InsightFace / OpenCV aren't installed.\nRun install_fizgig.py to enable face scoring.")
+            return
+        self._royale_scoring = True
+        self._royale_score_btn.configure(state="disabled")
+        self.royale_like_status_var.set("Scoring… (first run downloads the face model)")
+        import threading
+        threading.Thread(target=self._royale_score_worker, args=(ref, list(self._royale_images)),
+                         daemon=True).start()
+
+    def _royale_score_worker(self, ref, images):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import likeness
+        try:
+            scored = likeness.score_renders(ref, images)
+        except Exception:
+            import traceback
+            err = traceback.format_exc()
+            print(f"[royale] likeness scoring failed:\n{err}")
+            self.master.after(0, lambda: self._royale_score_finish(None))
+            return
+        self.master.after(0, lambda: self._royale_score_finish(scored))
+
+    def _royale_score_finish(self, scored):
+        self._royale_scoring = False
+        self._royale_score_btn.configure(state="normal")
+        if scored is None:
+            self.royale_like_status_var.set("Scoring failed — see console.")
+            return
+        self._royale_scores = {label: sc for label, sc in scored}
+        valid = [(label, sc) for label, sc in scored if sc == sc]  # drop NaN (no face)
+        if not valid:
+            self._royale_best_label = None
+            self._royale_jump_best_btn.configure(state="disabled")
+            self.royale_like_status_var.set("No faces detected in the renders or subject image.")
+            self._royale_build_grid()
+            return
+        best_label, best_sc = max(valid, key=lambda t: t[1])
+        self._royale_best_label = best_label
+        self._royale_jump_best_btn.configure(state="normal")
+        n_noface = len(scored) - len(valid)
+        extra = f"  ({n_noface} no-face)" if n_noface else ""
+        self.royale_like_status_var.set(f"Best: epoch {best_label} ({best_sc:.3f}){extra}")
+        self._royale_build_grid()
+
+    def _royale_jump_best(self):
+        best = getattr(self, "_royale_best_label", None)
+        if best is None:
+            return
+        for idx, (label, _img) in enumerate(self._royale_images):
+            if label == best:
+                self.royale_scrub_var.set(float(idx))
+                self._royale_scrub()
+                break
+
+    def _royale_current_epoch(self):
+        """(label, path) for the epoch the crossfade is currently parked on
+        (rounded to the nearest rendered epoch), or (None, None)."""
+        if not self._royale_images:
+            return None, None
+        idx = int(round(float(self.royale_scrub_var.get())))
+        idx = max(0, min(idx, len(self._royale_images) - 1))
+        label = self._royale_images[idx][0]
+        return label, self._royale_paths.get(label)
+
+    def _royale_promote(self):
+        label, path = self._royale_current_epoch()
+        if path is None or not os.path.exists(path):
+            messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to promote.")
+            return
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import run_name_for_folder
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        default_name = f"{run}-epoch{label}-pick.safetensors"
+        from tkinter import filedialog
+        out = filedialog.asksaveasfilename(
+            title="Promote epoch — save as",
+            defaultextension=".safetensors",
+            initialfile=default_name,
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", "") or os.path.dirname(path),
+            filetypes=[("Safetensors", "*.safetensors")])
+        if not out:
+            return
+        try:
+            import shutil
+            shutil.copy2(path, out)
+        except Exception as e:
+            messagebox.showerror("Promote failed", f"Could not copy checkpoint:\n{e}")
+            return
+        self.royale_promote_status_var.set(f"Saved epoch {label} → {os.path.basename(out)}")
 
     def _repair_start(self):
         """Smart Start: load/swap primary, load/swap donor, or regenerate."""

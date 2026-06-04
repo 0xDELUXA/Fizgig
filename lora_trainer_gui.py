@@ -2122,6 +2122,10 @@ class LoRATrainerGUI:
                       "with block swap on, leave it ON.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT).grid(row=8, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        # Re-sync now that the GC checkbox exists: the earlier _on_quant_4bit_toggle
+        # call ran before it was created, so this applies the NF4→force-GC-on lock
+        # when a saved config has 4-bit already enabled.
+        self._on_quant_4bit_toggle()
 
         # === Timestep & Noise Schedule Section (Collapsed by default) ===
         timestep_section = CollapsibleFrame(outer,"Timestep & Noise Schedule", default_expanded=False)
@@ -3030,6 +3034,21 @@ class LoRATrainerGUI:
                     chk.configure(state=tk.DISABLED if on else tk.NORMAL)
                 except Exception:
                     pass
+        # 4-bit base REQUIRES gradient checkpointing. Its dequant forward (like the
+        # old fp8 dequant) materializes a bf16 weight per matmul; without GC,
+        # autograd pins all ~112 of them (~18 GB) for the backward — instant OOM on
+        # the 10-12 GB cards NF4 targets. There's no frugal-dequant Function for NF4
+        # (only fp8), so force GC on and lock the checkbox while NF4 is selected.
+        gc_chk = getattr(self, "grad_checkpoint_check", None)
+        if gc_chk is not None:
+            try:
+                if on:
+                    self.grad_checkpoint_var.set(True)
+                    gc_chk.configure(state=tk.DISABLED)
+                else:
+                    gc_chk.configure(state=tk.NORMAL)
+            except Exception:
+                pass
         if not on:
             # restore the Scaled checkbox's dependent-disabled state
             self.toggle_scaled()

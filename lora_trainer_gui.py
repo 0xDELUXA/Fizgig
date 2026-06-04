@@ -1737,7 +1737,7 @@ class LoRATrainerGUI:
 
         para("Fizgig is free and always will be. If it's useful to you and you'd like to drop a coffee in "
              "the tip jar, it genuinely means a lot right now — but it's in no way an obligation. Using it "
-             "and enjoying it is more than enough. Thank you for being here. 🙏",
+             "and enjoying it is more than enough. Thank you for being here.",
              fg=COLORS["text_secondary"], pady=(0, 18))
 
         btn_row = tk.Frame(pad, bg=COLORS["bg_deep"])

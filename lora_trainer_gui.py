@@ -9426,7 +9426,8 @@ class LoRATrainerGUI:
         tk.Label(_tr1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
         self.royale_travel_frames_var = tk.StringVar(value="24")
         _frcb = ttk.Combobox(_tr1, textvariable=self.royale_travel_frames_var,
-                             values=["16", "24", "36", "48", "64"], state="readonly", width=5)
+                             values=["16", "24", "36", "48", "64", "96", "128", "192", "256"],
+                             state="readonly", width=5)
         _frcb.pack(side=tk.LEFT)
         ToolTip(_frcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
                        "24 ≈ a minute or two on a fast card.")
@@ -9565,7 +9566,8 @@ class LoRATrainerGUI:
         tk.Label(_pd, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
         self.royale_pt_frames_var = tk.StringVar(value=self.last_used.get("royale_pt_frames", "32"))
         _pfcb = ttk.Combobox(_pd, textvariable=self.royale_pt_frames_var,
-                             values=["24", "32", "48", "64", "96"], state="readonly", width=5)
+                             values=["24", "32", "48", "64", "96", "128", "192", "256"],
+                             state="readonly", width=5)
         _pfcb.pack(side=tk.LEFT)
         ToolTip(_pfcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
                        "Spread across all the waypoints, so multi-step dimensions want more.")

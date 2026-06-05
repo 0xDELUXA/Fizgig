@@ -1,8 +1,8 @@
 <h1 align="center">Fizgig — Klein 9B LoRA Studio</h1>
 
 <p align="center">
-  Fix broken LoRAs without retraining. Remix any LoRA into new variations in seconds.<br>
-  Train, profile, repair, and explore — all in one app for <strong>Flux 2 Klein 9B</strong>.
+  <strong>Fix broken LoRAs without retraining. Remix any LoRA into new variations in seconds.</strong><br>
+  A train · repair · explore workbench built end-to-end for <strong>Flux 2 Klein 9B</strong>.
 </p>
 
 <p align="center">
@@ -16,111 +16,100 @@
 
 ---
 
-## Why Fizgig for Klein 9B?
+## What Fizgig is
 
-Fizgig is a dedicated **training, LoRA-surgery, and gamified-exploration** studio built end-to-end for one model — **Flux 2 Klein 9B** — so everything is tuned for it instead of bolted on. Training is fast and light: on the fp8 Base DiT it runs the frozen-base matmuls in fp8 on the tensor cores for about **1.5× faster steps** (RTX 40/50-series), and the fp8 model stays resident at ~9.6 GB so a full 9B LoRA trains comfortably on a **16 GB card** — or, with the opt-in **4-bit (NF4) base** mode, in ~7.5 GB — so **10–12 GB cards** train Klein 9B with **no block swap**, where fp8 (~14 GB) would force slow swapping. It also includes things most trainers skip — **Context LoRA** training (learn a new LoRA on top of an existing frozen one so they coexist: a face that sits on a style, an outfit that drapes over a character), **bilingual captions** for richer convergence, **distilled 4-step previews** that match ComfyUI, a self-tuning **adaptive learning rate**, and **pause/resume** that frees your GPU mid-run and picks up exactly where it left off, full optimizer state and no quality regression — so you can fire up Rocket League without sacrificing your training run.
+Every trainer makes LoRAs. Fizgig is built around what you do with them **afterwards** — and that's the part nobody else has.
 
-On the data side, the **Image Prep** tab can auto-cut tight face crops from your wider shots and add them as extra datapoints, with optional **gender targeting** (largest male/female face) so it locks onto your subject even in group shots — pairing a close-up with a full shot adds a lot to a character dataset (works best from high-res originals). Training defaults to ~512² (0.25 MP) and resizes in-cache, so a dataset of any resolution or aspect ratio just works — nothing has to be square or pre-sized.
+- **Fix** a baked LoRA block-by-block, no retraining — overbaked identity, crushed style, drag a slider, save a new `.safetensors`.
+- **Explore** new variations like a game — the app proposes mutations, you pick favourites, the LoRA evolves through selection.
+- **Find** the sweet-spot epoch by eye — render every epoch of a run on one seed and crossfade to the one that *feels* right.
+- **Profile** exactly which blocks carry identity, style, and detail — so you know what to touch before you touch it.
 
-But the real reason is what happens *after* training. Fizgig is a workbench, not just a trainer: **fix** a broken LoRA block-by-block in the Repair Studio with no retraining, **explore** new variations like a game in LoRA the Explorer, **compare** every epoch of a run and crossfade to the sweet spot in LoRA Royale, **profile** exactly which blocks carry style vs identity vs detail, and **extract** a LoRA down to a smaller rank or a specific block range — all in one app, each tool reading the others' output.
+Under that workbench sits a fast, light trainer tuned for a single model. Because everything is built for Klein 9B instead of bolted on to a dozen models, the whole thing can do things the generalists can't: a full 9B LoRA trains comfortably on a **16 GB card**, fp8 steps run **~1.5× faster** on RTX 40/50-series, and the post-training tools all read each other's output.
 
-Fizgig is **free and open source** — and a good first run is the **✨ Old Reliable** preset on the Training tab; after that, try the lighter **✨ Old Reliable - Flavour 8** (rank 8). A lot of the old rank-16 instinct dates from models with far fewer parameters than Klein 9B — rank 8 is often plenty.
-
-### What makes Fizgig different?
-
-- **Fix broken LoRAs without retraining** — overbaked identity? crushed style? Adjust per-block sliders with live side-by-side preview and save a repaired `.safetensors` in seconds.
-- **Explore variations like a game** — the computer proposes random mutations, you pick favourites, and the LoRA evolves through selection. **Freeze** locks tweaked blocks when you're ready, so future mutations only touch what's left.
-- **Find the sweet-spot epoch by eye** — LoRA Royale renders every epoch of a run on one seed and lets you **crossfade between them with a slider**, so the best checkpoint is something you *feel* rather than guess. An optional **likeness score** ranks each epoch's face against a training photo, and you can **export the morph** — or a **seed-travel** slerp, or a **prompt-travel** sweep (dawn → night, child → elder, your call) — as a looping GIF/MP4, a ready-made share clip the tool makes for you.
-- **Discover → Refine → Discover** — the Explorer and Repair Studio are bidirectionally connected. Find something interesting in the Explorer? One click sends it to the Repair Studio with all 32 sliders pre-set. Fine-tuning in the Repair Studio? One click sends your state back to the Explorer for more evolutionary discovery.
-- **See exactly what a LoRA does** — the Profiler shows which transformer blocks carry style, identity, and detail signal, so you know what to fix before you touch a slider.
-- **Train with intelligence** — adaptive learning rate adjusts itself based on loss, gradient clipping, and weight-norm growth.
-- **Steer previews mid-run** — change the prompt, seed, resolution, or **reference image** of your *next* training sample live from the status bar, no restart. Klein is an edit model, so a reference makes the sample *edit* a real photo (auto-capped to ~0.20 MP so it can't OOM) — sanity-check how a run handles a different subject, prompt, or edit while it keeps training.
-- **Just works on your GPU** — block swap auto-detects from your VRAM at both training and inference time. 16 GB, 24 GB, 32 GB — Fizgig picks the right setting. If you do run out of memory, it tells you exactly what to change.
-- **Make LoRAs work together** — Context LoRA training loads an existing LoRA as a frozen layer, so the new one learns to coexist. Train a face on top of a style and they stop fighting at inference. Train an outfit on top of a character and the clothes drape correctly. Fix compatibility between two LoRAs that conflict.
+**Free and open source.** A good first run is the **✨ Old Reliable** preset on the Training tab — then try **✨ Old Reliable · Flavour 8** (rank 8). Much of the old rank-16 instinct predates models this size; on Klein 9B, rank 8 is often plenty.
 
 ---
 
-## Features
+## The workbench
+
+The reason to use Fizgig. Each tool works on a trained run's output **or any Klein LoRA you've downloaded** — and they hand off to each other.
 
 ### Repair Studio
-32 live sliders — one per transformer block — with side-by-side Distilled preview. See the effect of every change instantly. Optional donor-LoRA blending via rank concatenation lets you mix blocks from two LoRAs. Quick-set `[0]` `[1]` `[±]` `[⚖]` buttons on every slider — **Balance** keeps the total primary+donor contribution at 1.0 per block, perfect for cross-fading between two LoRAs. **Turbo Preview** caches activations and prompt encodings — up to 97% faster on late-block changes. Click the tweaked preview to pop it out into a resizable window. Browse a new LoRA and it auto-swaps — no manual reset needed. Saves a baked `.safetensors` that works in ComfyUI at strength 1.0. Jump to the Explorer for evolutionary discovery, or receive a baseline from the Explorer for precision editing — the two tools are seamlessly connected.
-
-### Reference image preview
-Klein 9B is an **edit model**, so the Repair Studio and LoRA the Explorer can condition their live previews on a real reference image — drop in a photo and watch how your LoRA edits *it* rather than a from-scratch generation. A megapixel cap controls the encode resolution and a strength value scales the reference's influence (1.0 stock, ~0.85 is the Klein sweet spot, 0 = off). The reference rides along through the Explorer ↔ Repair handover, so you can discover an edit direction in the Explorer and refine it in the Repair Studio without re-loading anything.
+Thirty-two live sliders — one per transformer block — with a side-by-side Distilled preview that updates instantly. **Turbo Preview** caches activations and prompt encodings for up to **97% faster** late-block edits. Quick-set buttons on every slider (`[0]` `[1]` `[±]` `[⚖]`); **Balance** holds the combined primary + donor weight at 1.0 per block, ideal for cross-fading two LoRAs. Optional donor-LoRA blending mixes blocks from a second LoRA via rank concatenation. Previews can be conditioned on a **reference image** (Klein is an edit model), so you see how your LoRA edits a real photo. Click a preview to pop it into a resizable window. Browse a new LoRA and it auto-swaps — no manual reset. Saves a baked `.safetensors` that works in ComfyUI at strength 1.0.
 
 ### LoRA the Explorer
-Evolutionary LoRA discovery. The computer randomly mutates blocks and shows you 4 variants — pick your favourite and it becomes the new baseline. **Freeze Tweaked Blocks** locks your changes when you're ready — future mutations only touch what's still unlocked. A **Structure** slider controls how much the composition/style anchor changes each round. Seed cycling verifies variants across different seeds. When you find a direction you love, **"Refine this baseline in Repair Studio"** sends your current slider state directly to the Repair Studio with all 32 sliders pre-set — seamless handoff from discovery to precision editing.
+Evolutionary discovery. The app mutates blocks and shows four variants — pick a favourite and it becomes the new baseline. **Freeze Tweaked Blocks** locks what you like so future mutations only touch the rest. A **Structure** slider sets how far the composition anchor drifts each round; seed cycling checks variants across seeds. Found a direction you love? **Refine this baseline in Repair Studio** sends all 32 slider values straight over — and Repair Studio sends state back the same way. Discover → refine → discover, in a loop.
 
 ### LoRA Royale
-Find the sweet-spot epoch the human way. Point it at a training output folder and it renders **every epoch on one fixed seed** (Distilled 4-step), then gives you a **crossfade slider** that blends smoothly between consecutive epochs — drag until it looks best and stop. A thumbnail grid of all epochs sits below; click any one to jump there. Optionally drop in a **reference image** (Klein is an edit model) so every epoch edits the same photo. A **likeness score** (InsightFace ArcFace, CPU — no extra VRAM) rates each epoch's face against a training shot of your subject and highlights the closest match in gold, with a one-click **Jump to best**. When you've found the winner, **Promote** copies that epoch to a clean `.safetensors` for ComfyUI. And because the morph *is* the magic, **Export the morph** saves the whole sweep as a looping **GIF or MP4** — face resolving epoch by epoch, with an epoch ticker and a *Fizgig · LoRA Royale* tag — a share clip the tool makes for you. Two siblings extend the same idea on a single epoch and a fixed seed: **Seed travel** morphs between two seeds (a slerp through noise space, so the composition flows instead of cutting) to show the LoRA's *range*; **Prompt travel** morphs through a series of prompt variations — pick a dimension like **Time of day** (dawn → night), **Season**, **Expression**, **Age**, or your own custom words, and it interpolates the text embedding between waypoints so the same subject flows through the change, with the current word ticking in the corner. Both can be **anchored to a reference image** — a file, or the epoch's own render in one tick — with an adjustable strength, which (Klein being an edit model) holds the subject steady so the morph stays coherent instead of drifting. Both export as looping clips just like the epoch morph. (Where the epoch morph shows your LoRA *learning*, the travels show what it can *do*.) Works on a trained run's epochs, or any folder of LoRAs you point it at.
+Find the best epoch the human way. Point it at a training output folder; it renders **every epoch on one fixed seed** (Distilled 4-step) and gives you a **crossfade slider** that blends smoothly between consecutive epochs — drag until it looks best and stop. A thumbnail grid sits below; click any epoch to jump there. Drop in a **reference image** (Klein is an edit model) and every epoch edits the same photo. An optional **likeness score** (InsightFace ArcFace, CPU — no extra VRAM) rates each epoch against a training shot and flags the closest in gold, with one-click **Jump to best**. **Promote** copies the winner to a clean `.safetensors`.
+
+Because the morph *is* the magic, **Export the morph** saves the whole sweep as a looping GIF/MP4 — a face resolving epoch by epoch — as a ready-made share clip. Two siblings extend the idea on a single epoch and seed: **Seed travel** slerps between two seeds to show the LoRA's range; **Prompt travel** interpolates the text embedding through waypoints (Time of day, Season, Expression, Age, or your own words) so one subject flows through the change. Both can be anchored to a reference image to hold the subject steady, and both export as looping clips. (The epoch morph shows the LoRA *learning*; the travels show what it can *do*.)
 
 ### Profiler
-Per-block activation profile with a colour-coded 5-bucket HTML report. Identifies which blocks carry style, identity, and detail signal — and where they overlap. Writes a JSON sidecar that the Repair Studio reads automatically, showing you the profiler's findings inline when you load the same LoRA.
-
-### Training
-- **Proven presets** for rank 4–16, single subject through multi-character — or build your own.
-- **Distilled training samples** — 4-step Distilled previews that match ComfyUI output exactly. Uses a separate Distilled DiT loaded alongside the training Base model, with the ComfyUI Euler Simple schedule. **On by default** — toggle via the checkbox on the Samples tab (turn off for Base multi-step samples, ~40 steps). On tighter cards the Distilled sample model **auto-swaps its own blocks by VRAM** (≥24 GB none, 16–20 GB partial, 12 GB max) so 4-step previews keep working on a 16 GB card without you touching a setting. On **24 GB+ cards** (where the Distilled stays fully resident, ~18 GB sample peak) it's also **cached in system RAM between epochs** (Samples tab → *Cache sample model in RAM*, auto by default) so it isn't re-read from disk every sample — ~3–4 s/epoch saved, RAM-checked so it never risks an out-of-memory.
-- **Reference-conditioned samples** — Klein is an edit model, so you can give your previews a **reference image** (Samples tab, or the live status-bar override) and they'll *edit* it instead of generating from scratch — a fast way to see how your LoRA handles a real photo. Auto-resized to ~0.20 MP so any image is safe (no OOM), and it works on both Base and Distilled samples.
-- **Adaptive LR** — bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
-- **Context LoRA** — load an existing LoRA as a frozen *active* layer during training, so the new LoRA learns to coexist at inference. No other trainer does this.
-
-> **⚠️ A note on Base previews:** The default **Distilled 4-step** previews match ComfyUI output closely — including when a Context LoRA is active. The only previews that can look softer than the deployed LoRA are **Base multi-step** ones (i.e. when you turn Distilled samples off): they're taken from a mid-training, fp8-quantised checkpoint, so they can show less detail or slightly off colours even when the LoRA itself is excellent. If you're judging from Base previews, confirm final quality in ComfyUI.
-
-- **Pause / Resume** — graceful epoch-boundary pause that frees VRAM and resumes with full optimizer state and no quality regression.
-- **Model Area targeting** — train only Identity blocks, Style blocks, Details blocks, or the full model.
-- **Faster fp8 training (free speedup)** — when you train on the fp8 Base DiT, Fizgig runs the frozen-base matmuls in fp8 on the tensor cores (`torch._scaled_mm`, forward *and* backward) — **~1.5× faster training steps** at typical LoRA resolutions, with no quality cost in our testing. It's automatic — no flag, no config — and works alongside block swap and context LoRA. Needs an RTX 40/50-series (or newer) GPU; older cards fall back to the standard path automatically. Yet another reason to train on fp8 Base.
-- **Gradient checkpointing toggle** — on by default (recomputes activations in the backward pass to save VRAM — it's what lets a 9B LoRA fit a 16 GB card). On a roomy card (24 GB+) you can turn it **off** for meaningfully faster steps — it skips the recompute. The fp8 path is built so GC-off stays memory-frugal (the dequantized base weights aren't pinned for the backward) *and* keeps the fp8 `scaled_mm` speedup active, so 24 GB cards (3090/4090) and 32 GB get both wins stacked instead of trading one for the other. A VRAM-aware warning fires if you switch it off on a card that can't afford the extra activation memory.
-- **Auto VRAM management** — block swap auto-detects from GPU VRAM, OOM detection suggests fixes. Supports both bf16 and fp8 Base DiT. Training with fp8 Base and block swap works correctly.
-- **Diffusers LoRA support** — OneTrainer LoRAs with split Q/K/V keys auto-fused on load.
-
-### Live status bar
-A bottom bar with stacked **VRAM and system-RAM gauges** — smooth gradient fills (VRAM green→red, RAM blue→yellow as they fill) with a **per-run peak marker** so you can see exactly how high a run pushed memory. VRAM is read at the device level, so it also catches other apps holding the GPU. A top-right **IDLE / BUSY "on-air" light** (glowing, colour-coded) shows at a glance whether the app is working. The whole bar hides/shows with one click and remembers your choice.
-
-Alongside it sits a **live sample override** — tick it and set a prompt, seed, width/height, and an optional **reference image** to change what the *next* training samples render, mid-run, without restarting. Klein is an edit model, so a reference conditions the sample on a real photo (auto-resized to ~0.20 MP, never an OOM). Untick to fall back to your Samples-tab prompts. The text encoder only re-runs when the prompt text actually changes, so seed / resolution / reference tweaks are instant.
-
-### Dataset Prep
-- **Florence-2 AI captioning** — bulk-generate detailed captions with one click.
-- **Bilingual translation** — optionally append Chinese translations via Helsinki-NLP. Klein's Qwen3 text encoder has deep Chinese training; bilingual captions act as text-level data augmentation, improving visual quality without changing loss.
-- **Image Prep** — batch resize, PNG conversion, and face-crop derivatives via InsightFace.
+A per-block activation profile with a colour-coded, five-bucket HTML report — which blocks carry style, identity, and detail signal, and where they overlap. Writes a JSON sidecar that Repair Studio reads automatically, showing the findings inline when you load the same LoRA.
 
 ### Extract
-Distil any Klein LoRA down to a lower rank with block and timestep targeting. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
+Distil any Klein LoRA to a lower rank with block and timestep targeting. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
+
+---
+
+## Training
+
+The foundation: fast, light, and tuned for one model.
+
+- **Proven presets** for rank 4–16, single subject through multi-character — or roll your own.
+- **Context LoRA** — load an existing LoRA as a frozen *active* layer so the new one learns to coexist. Train a face on top of a style and they stop fighting at inference; train an outfit on top of a character and the clothes drape correctly. No other trainer does this.
+- **Distilled training samples** — 4-step previews that match ComfyUI output closely (a separate Distilled DiT, ComfyUI Euler Simple schedule). On by default; toggle on the Samples tab. On tight cards the sample model auto-swaps its own blocks by VRAM so 4-step previews keep working on 16 GB. On 24 GB+ it stays resident and is cached in system RAM between epochs (RAM-checked, saves ~3–4 s/epoch).
+- **Reference-conditioned samples** — Klein is an edit model, so previews can *edit* a reference photo instead of generating from scratch. Auto-resized to ~0.20 MP so it can't OOM; works on Base and Distilled samples.
+- **Adaptive LR** — a bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
+- **Faster fp8 training** — on the fp8 Base DiT the frozen-base matmuls run in fp8 on the tensor cores (`torch._scaled_mm`, forward *and* backward) for **~1.5× faster steps**, no quality cost in testing. Automatic, no flag. Needs RTX 40/50-series; older cards fall back automatically.
+- **Gradient checkpointing toggle** — on by default (it's what fits a 9B LoRA on 16 GB). Turn it **off** on a 24 GB+ card for meaningfully faster steps; the fp8 path keeps the `scaled_mm` speedup active either way, so 24/32 GB cards stack both wins. A VRAM-aware warning fires if you switch it off on a card that can't spare the activation memory.
+- **Pause / Resume** — graceful epoch-boundary pause that frees your GPU mid-run and resumes with full optimizer state and no quality regression. Fire up Rocket League, come back, carry on.
+- **Model Area targeting** — train only Identity, Style, or Detail blocks, or the full model.
+- **Auto VRAM management** — block swap auto-detects from GPU VRAM; OOM detection tells you exactly what to change. Supports bf16 and fp8 Base DiT, with block swap.
+- **Diffusers LoRA support** — OneTrainer LoRAs with split Q/K/V keys are auto-fused on load.
+
+> **A note on Base previews:** the default Distilled 4-step previews track ComfyUI closely, including with a Context LoRA active. Only **Base multi-step** previews (Distilled toggled off) can look softer than the deployed LoRA — they come from a mid-training fp8 checkpoint, so colours and detail can be slightly off even when the LoRA is excellent. Judging from Base previews? Confirm final quality in ComfyUI.
+
+### Live status bar
+A bottom bar with stacked **VRAM and system-RAM gauges** (smooth gradient fills, plus a per-run peak marker so you can see how high a run pushed memory). VRAM is read at the device level, so it catches other apps holding the GPU too. A top-right **IDLE / BUSY** light shows at a glance whether the app is working. Hide or show the whole bar with one click; it remembers.
+
+Beside it sits a **live sample override** — tick it to set a prompt, seed, width/height, and optional reference image for the *next* samples, mid-run, no restart. The text encoder only re-runs when the prompt text changes, so seed / resolution / reference tweaks are instant.
+
+### Dataset prep
+- **Florence-2 AI captioning** — bulk-generate detailed captions in one click.
+- **Bilingual captions** — optionally append Chinese via Helsinki-NLP. Klein's Qwen3 text encoder has deep Chinese training, so bilingual captions act as text-level data augmentation, improving visual quality without changing loss.
+- **Image Prep** — batch resize, PNG conversion, and InsightFace face-crop derivatives, with optional **gender targeting** (largest male/female face) so it locks onto your subject in group shots. Pairing a tight crop with a full shot adds a lot to a character dataset. Training defaults to ~512² (0.25 MP) and resizes in-cache, so any resolution or aspect ratio just works — nothing has to be square or pre-sized.
 
 ### Compatibility
-- **Formats** — loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / LoHa) LoRAs. All formats auto-converted on load. LyCORIS files work for preview, profiling, and extraction; bake converts them to standard LoRA via SVD.
-- **Output** — kohya-style `.safetensors` that drop straight into ComfyUI Klein nodes.
-- **LyCORIS bake** — LoKR and LoHa LoRAs can be saved/baked via GPU-accelerated SVD materialization.
-- **YouTube help** — every tab links to the relevant section of the walkthrough video.
+Loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / LoHa) — all auto-converted on load. LyCORIS files work for preview, profiling, and extraction; **bake** materialises them to a standard LoRA via GPU-accelerated SVD. Output is kohya-style `.safetensors` that drop straight into ComfyUI Klein nodes. Every tab links to the relevant section of the walkthrough video.
 
 ---
 
 ## Requirements
 
-- **GPU** — NVIDIA RTX 30-series, 40-series, or 50-series (Blackwell). **16 GB+ VRAM** recommended (24 GB+ comfortable). The fp8 training **speedup** needs a 40-series or newer (fp8 tensor cores); 30-series still gets the fp8 VRAM savings, just not the extra speed.
-- **NVIDIA driver** — 555+ on Windows, 550+ on Linux (required for CUDA 12.8 PyTorch wheels).
-- **OS** — Windows 10 / 11, or Linux. macOS works for captioning and image prep but training requires CUDA.
+- **GPU** — NVIDIA RTX 30 / 40 / 50-series. **16 GB+ VRAM** recommended (24 GB+ comfortable). The fp8 *speedup* needs 40-series or newer (fp8 tensor cores); 30-series still gets the fp8 VRAM savings, just not the extra speed.
+- **NVIDIA driver** — 555+ on Windows, 550+ on Linux (for the CUDA 12.8 PyTorch wheels).
+- **OS** — Windows 10 / 11 or Linux. macOS handles captioning and image prep, but training needs CUDA.
 - **Python** — 3.10, 3.11, 3.12, or 3.13.
-- **Disk** — ~10 GB for the venv, plus ~40 GB for the model files (see below).
-- **Visual Studio Build Tools** (Windows only) — required for compiling InsightFace. Install [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) and select **"Desktop development with C++"** workload. If you see errors about `cl.exe` or missing C++ compiler during install, this is what's needed.
+- **Disk** — ~10 GB for the venv, plus ~40 GB for model files.
+- **Visual Studio Build Tools** (Windows only) — needed to compile InsightFace. Install [Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) with the **"Desktop development with C++"** workload. Errors about `cl.exe` or a missing C++ compiler mean this is what's needed.
 
 ---
 
 ## Install
 
-First, get the code — clone the repo (or download the ZIP via the green **Code** button and extract it):
+Clone the repo (or download the ZIP via the green **Code** button and extract):
 
 ```bash
 git clone https://github.com/shootthesound/Fizgig.git
 cd Fizgig
 ```
 
-### Windows (one-click)
+**Windows (one-click)** — double-click `install_fizgig.bat`. It creates a venv, installs CUDA 12.8 PyTorch and all dependencies, pre-downloads the InsightFace models, and verifies CUDA is visible to PyTorch. Launch with `run_fizgig.bat`; update later with `update_fizgig.bat`.
 
-Double-click `install_fizgig.bat`. The installer creates a venv, installs CUDA 12.8 PyTorch + all dependencies, pre-downloads InsightFace face-detection models, and verifies that CUDA is visible to PyTorch.
-
-Launch with `run_fizgig.bat` when install completes. To update later, double-click `update_fizgig.bat`.
-
-### Linux / macOS
+**Linux / macOS:**
 
 ```bash
 python install_fizgig.py
@@ -128,11 +117,13 @@ chmod +x run_fizgig.sh
 ./run_fizgig.sh
 ```
 
+Three small models auto-download on first use: InsightFace `buffalo_l` (~300 MB, during install), Florence-2 (~500 MB–1.5 GB, first AI caption), and Helsinki-NLP `opus-mt-en-zh` (~300 MB, first bilingual translation).
+
 ---
 
 ## Model downloads (you provide)
 
-Fizgig doesn't bundle model weights — they're ~40 GB combined and licensing varies. Each row in the **Preferences** tab has a **Download** link that opens the correct HuggingFace page.
+Fizgig doesn't bundle weights — they're ~40 GB combined and licensing varies. Each row in the **Preferences** tab has a **Download** link to the right HuggingFace page.
 
 | Model | File | Size | Source |
 |---|---|---|---|
@@ -142,43 +133,18 @@ Fizgig doesn't bundle model weights — they're ~40 GB combined and licensing va
 | VAE / AE | `ae.safetensors` | ~320 MB | [black-forest-labs/FLUX.2-dev](https://huggingface.co/black-forest-labs/FLUX.2-dev/blob/main/ae.safetensors) (from root, **not** the `vae/` subfolder) |
 | Text Encoder | `qwen_3_8b.safetensors` | ~15 GB | [Comfy-Org/vae-text-encorder-for-flux-klein-9b](https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/blob/main/split_files/text_encoders/qwen_3_8b.safetensors) |
 
-Training runs on the **Base DiT** — the **fp8 version is recommended on every GPU**: same training quality at ~half the VRAM (it stays resident at ~9.6 GB, so a 9B LoRA trains in ~14 GB and fits 16 GB cards). The speed depends on your GPU:
+Training runs on the **Base DiT**, and the **fp8 version is recommended on every GPU**: same training quality at roughly half the VRAM (resident at ~9.6 GB, so a 9B LoRA trains in ~14 GB and fits a 16 GB card).
 
-- **RTX 40 / 50-series** — you *also* get **~1.5× faster training steps**: the frozen-base matmuls run in fp8 directly on the tensor cores (`torch._scaled_mm`, automatic, no config).
-- **RTX 30-series and older** — the speedup is skipped automatically (these GPUs lack fp8 tensor cores), but you still get the **full VRAM savings and the same quality**, so fp8 Base is worth it here too.
+- **RTX 40 / 50-series** — you *also* get **~1.5× faster steps**: the frozen-base matmuls run in fp8 on the tensor cores (`torch._scaled_mm`, automatic).
+- **RTX 30-series and older** — the speedup is skipped automatically (no fp8 tensor cores), but you keep the full VRAM savings and the same quality, so fp8 Base is still worth it.
 
-Either way it's automatic — Fizgig auto-detects pre-quantised files and the right path for your GPU, so you don't need to touch the "FP8 Base" checkbox; the bf16 version works too if you prefer it. The **Distilled DiT** is used for fast 4-step previews (on by default during training, and always in the Profiler, Repair Studio, and Explorer) — so you want both if you'll use the workbench features.
-
-**Smaller cards — 4-bit (NF4) base.** fp8 training needs ~14 GB — it fits a 16 GB card with no swap, but a **10–12 GB card has to block-swap** to run it, paying a PCIe-transfer penalty every step. The opt-in **4-bit (NF4) base** mode (the *4-bit Base* toggle in Memory & FP8 / FP4) quantizes the frozen base to 4-bit, halving DiT VRAM to **~5.6 GB** so a full 9B LoRA trains in **~7.5 GB** — which **fits 10–12 GB cards with no swap at all, so it's faster than fp8-with-swap on those cards** (the LoRA still trains in bf16 on top, QLoRA-style). It loads layer-by-layer so the card never has to hold the whole model. It's a lower-precision base than fp8, so it's a **slight quality trade** — always check the output LoRA in ComfyUI — and **16 GB+ cards should stick with fp8** (same quality, plus the speedup, with no swap).
-
-Three smaller models auto-download on first use: InsightFace (`buffalo_l`, ~300 MB, during install), Florence-2 (~500 MB–1.5 GB, first AI caption), Helsinki-NLP/opus-mt-en-zh (~300 MB, first bilingual translation).
-
----
-
-## Getting started
-
-After install, launch Fizgig and work left-to-right through the numbered tabs:
-
-1. **Start** — set your training image folder. If model paths aren't configured, a prompt guides you to Preferences.
-2. **Image Prep** (optional) — resize, PNG-convert, or face-crop your training images.
-3. **Captions** — write trigger-word captions or generate with Florence-2 AI. Optionally translate to bilingual English+Chinese.
-4. **Samples** — configure the preview prompts that render during training. Distilled 4-step previews (faster, ComfyUI-accurate) are on by default; toggle on the Samples tab.
-5. **Training** — pick a preset, tune settings, click **Start Training**.
-
-The unnumbered tabs are post-training tools (also work on any Klein LoRA you've downloaded):
-
-- **Profiler** — analyse which blocks are active and how strong their contributions are.
-- **Repair Studio** — live per-block editing with Turbo Preview and optional donor blending.
-- **LoRA the Explorer** — evolutionary discovery via human-guided selection.
-- **LoRA Royale** — render every epoch of a run on one seed, crossfade to the sweet spot, score likeness against a training photo, promote the winner, and export the epoch morph (or a seed-travel / prompt-travel sweep) as a share clip.
-- **Extract** — distil to a lower rank with block and timestep targeting.
-- **Preferences** — model paths, output directories, inference block-swap preset, and default input folders for LoRAs and reference images (so the Browse dialogs open where you keep them).
+It's all automatic — Fizgig detects pre-quantised files and the right path for your GPU, so you never need to touch the "FP8 Base" checkbox (the bf16 version works too if you prefer). The **Distilled DiT** powers the fast 4-step previews — on by default during training, and always used in the Profiler, Repair Studio, and Explorer — so grab both if you'll use the workbench.
 
 ---
 
 ## VRAM guidance
 
-Inference tools (Profiler / Repair Studio / Explorer / Extract) on Distilled 4-step:
+**Inference tools** (Profiler / Repair Studio / Explorer / Extract) on Distilled 4-step:
 
 | Block Swap | Min VRAM | Notes |
 |---|---|---|
@@ -186,11 +152,27 @@ Inference tools (Profiler / Repair Studio / Explorer / Extract) on Distilled 4-s
 | 4 | 20 GB | Light swap |
 | 8 | 16 GB | Moderate swap |
 | 12 | 14 GB | Aggressive swap |
-| 16 | 12 GB | Maximum swap — slower but fits |
+| 16 | 12 GB | Maximum swap — slower, but fits |
 
-**Training:** the fp8 Base DiT stays resident at ~9.6 GB (not dequantised to bf16), so training a 9B LoRA fits comfortably in **16 GB** — around **14 GB** observed at block-swap 0 with a context LoRA active (a little less without). VRAM scales with resolution and batch size; raise block swap to fit smaller cards.
+**Training** — the fp8 Base DiT stays resident at ~9.6 GB (not dequantised to bf16), so a 9B LoRA fits comfortably in **16 GB** — around 14 GB observed at block-swap 0 with a Context LoRA active, a little less without. VRAM scales with resolution and batch size; raise block swap to fit smaller cards.
 
-**DiT Block Swap (inference)** in Preferences applies to the workbench tools (Repair Studio / Profiler / Extract / Explorer) only. Training has its own separate block swap setting, and its Distilled samples auto-swap by VRAM — so this preference never touches a training run. On first launch, Fizgig auto-detects your GPU VRAM and picks a sensible default — once you explicitly choose a value, your choice is saved.
+**Smaller cards — 4-bit (NF4) base.** fp8 training needs ~14 GB: it fits a 16 GB card with no swap, but a **10–12 GB card has to block-swap**, paying a PCIe-transfer penalty every step. The opt-in **4-bit (NF4) base** mode (the *4-bit Base* toggle in Memory & FP8 / FP4) quantizes the frozen base to 4-bit — halving DiT VRAM to ~5.6 GB so a full 9B LoRA trains in **~7.5 GB**, which fits 10–12 GB cards with **no swap at all** (and so beats fp8-with-swap on those cards). The LoRA still trains in bf16 on top, QLoRA-style, and the base loads layer-by-layer so the card never holds the whole model. It's a lower-precision base, so it's a slight quality trade — always check the output in ComfyUI — and **16 GB+ cards should stick with fp8** (same quality, plus the speedup, no swap).
+
+**DiT Block Swap (inference)** in Preferences applies only to the workbench tools. Training has its own separate block-swap setting, and its Distilled samples auto-swap by VRAM — so this preference never touches a training run. On first launch Fizgig auto-detects your VRAM and picks a sensible default; once you choose a value, your choice sticks.
+
+---
+
+## Getting started
+
+Launch Fizgig and work left-to-right through the numbered tabs:
+
+1. **Start** — set your training image folder. If model paths aren't configured, a prompt points you to Preferences.
+2. **Image Prep** (optional) — resize, PNG-convert, or face-crop your images.
+3. **Captions** — write trigger-word captions or generate with Florence-2; optionally translate to bilingual English + Chinese.
+4. **Samples** — configure the preview prompts that render during training (Distilled 4-step on by default).
+5. **Training** — pick a preset, tune, click **Start Training**.
+
+The unnumbered tabs are the post-training workbench — and work on any Klein LoRA you've downloaded: **Profiler**, **Repair Studio**, **LoRA the Explorer**, **LoRA Royale**, **Extract**, and **Preferences** (model paths, output directories, inference block-swap preset, default Browse folders).
 
 ---
 
@@ -209,5 +191,3 @@ Fizgig is open source under the **[Apache License 2.0](LICENSE)** — free to us
 Copyright © 2026 Peter Neill.
 
 Model weights are **not** covered by this license — each model carries its own terms from its publisher (see the Download links in Preferences).
-
----

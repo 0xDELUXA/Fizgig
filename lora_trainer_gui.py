@@ -10338,19 +10338,38 @@ class LoRATrainerGUI:
         if self.royale_engine is None:
             self.royale_engine = RepairEngine()
         is_fp8 = "fp8" in os.path.basename(dit_path).lower()
+        # Stash the kwargs so a worker thread can rebuild the pipeline after reset()
+        # (needed when switching to a different-rank LoRA) without touching Tk.
+        self._royale_pipeline_kwargs = dict(
+            dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+            model_version="klein-9b", device="cuda",
+            fp8_scaled=False if is_fp8 else True,
+            blocks_to_swap=self._get_inference_blocks_to_swap())
         try:
             self.royale_status_var.set("Loading Distilled model…")
             self.master.update_idletasks()
-            self.royale_engine.ensure_pipeline(dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
-                                               model_version="klein-9b", device="cuda",
-                                               fp8_scaled=False if is_fp8 else True,
-                                               blocks_to_swap=self._get_inference_blocks_to_swap())
+            self.royale_engine.ensure_pipeline(**self._royale_pipeline_kwargs)
             return True
         except Exception:
             import traceback
             messagebox.showerror("Error", f"Failed to load models:\n{traceback.format_exc()}")
             self.royale_status_var.set("Error loading models.")
             return False
+
+    def _royale_load_or_swap_primary(self, eng, path):
+        """Point `eng` at `path`. Fast in-place weight swap when the structure matches
+        (same-rank epochs); otherwise reset() + rebuild the pipeline + load_primary so a
+        different-rank / unrelated LoRA loads cleanly. Worker-thread safe (no Tk)."""
+        if eng.primary_network is None:
+            eng.load_primary(path)
+            return
+        if eng.primary_path == path:
+            return
+        if eng.swap_primary_weights(path):
+            return
+        eng.reset()
+        eng.ensure_pipeline(**self._royale_pipeline_kwargs)
+        eng.load_primary(path)
 
     def _royale_unload(self):
         if getattr(self, "royale_engine", None) is not None:
@@ -10424,11 +10443,7 @@ class LoRATrainerGUI:
             try:
                 # First-ever load patches the DiT; everything after (including a
                 # re-kicked render that reuses the loaded engine) swaps weights.
-                if eng.primary_network is None:
-                    eng.load_primary(path)
-                elif not eng.swap_primary_weights(path):
-                    eng.reset()
-                    eng.load_primary(path)
+                self._royale_load_or_swap_primary(eng, path)
                 st = SliderState.default_klein9b()
                 st.prompt = prompt
                 st.seed = seed
@@ -10842,11 +10857,7 @@ class LoRATrainerGUI:
         eng = self.royale_engine
         try:
             # Make sure the engine holds the parked epoch's weights.
-            if eng.primary_network is None:
-                eng.load_primary(p["path"])
-            elif eng.primary_path != p["path"]:
-                if not eng.swap_primary_weights(p["path"]):
-                    eng.reset(); eng.load_primary(p["path"])
+            self._royale_load_or_swap_primary(eng, p["path"])
             n = p["frames"]
             seeds = self._royale_journey_seeds(p["seed_a"], p["seed_b"], p.get("waypoints", 2))
             nseg = len(seeds) - 1
@@ -10945,11 +10956,7 @@ class LoRATrainerGUI:
         from fizgig.repair_studio.state import SliderState
         eng = self.royale_engine
         try:
-            if eng.primary_network is None:
-                eng.load_primary(p["path"])
-            elif eng.primary_path != p["path"]:
-                if not eng.swap_primary_weights(p["path"]):
-                    eng.reset(); eng.load_primary(p["path"])
+            self._royale_load_or_swap_primary(eng, p["path"])
             n = p["frames"]
             imgs, labels = [], []
             for i in range(n):
@@ -11244,11 +11251,7 @@ class LoRATrainerGUI:
         from fizgig.lora_royale import prompt_travel as pt
         eng = self.royale_engine
         try:
-            if eng.primary_network is None:
-                eng.load_primary(p["path"])
-            elif eng.primary_path != p["path"]:
-                if not eng.swap_primary_weights(p["path"]):
-                    eng.reset(); eng.load_primary(p["path"])
+            self._royale_load_or_swap_primary(eng, p["path"])
             wp_prompts = pt.build_waypoint_prompts(p["base"], p["words"])
             ctx_list, neg = eng.encode_travel_prompts(wp_prompts)
             interp_mode = {"Linear": "lerp", "Norm-preserved": "norm",

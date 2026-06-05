@@ -9893,14 +9893,7 @@ class LoRATrainerGUI:
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
 
         _lsf = tk.Frame(ltrav, bg=_sbg); _lsf.pack(anchor=tk.W, pady=(0, 6))
-        tk.Label(_lsf, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
-        self.royale_lora_format_var = tk.StringVar(value="MP4")
-        _lfmt = ttk.Combobox(_lsf, textvariable=self.royale_lora_format_var, values=["MP4", "GIF"],
-                             state="readonly", width=6)
-        _lfmt.pack(side=tk.LEFT)
-        ToolTip(_lfmt, "MP4 is full colour, smaller, faster to write, and autoplays on X / Reddit / Instagram.\n"
-                       "GIF embeds anywhere but is limited to 256 colours and is larger / slower to write.")
-        tk.Label(_lsf, text="Speed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        tk.Label(_lsf, text="Speed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_lora_speed_var = tk.StringVar(value="Normal")
         ttk.Combobox(_lsf, textvariable=self.royale_lora_speed_var, values=["Slow", "Normal", "Fast"],
                      state="readonly", width=8).pack(side=tk.LEFT)
@@ -9931,7 +9924,7 @@ class LoRATrainerGUI:
                      values=["None", "Normal", "Strong"], state="readonly", width=10).pack(side=tk.LEFT)
 
         _lsb = tk.Frame(ltrav, bg=_sbg); _lsb.pack(anchor=tk.W)
-        self._royale_lora_btn = tk.Button(_lsb, text="Render & export strength-travel…", font=(FONT_FAMILY, 10, "bold"),
+        self._royale_lora_btn = tk.Button(_lsb, text="Render strength-travel…", font=(FONT_FAMILY, 10, "bold"),
                                           fg="#FFFFFF", bg="#B7791F", activeforeground="#FFFFFF",
                                           activebackground="#9A6518", relief="flat", bd=0, padx=18, pady=5,
                                           cursor="hand2", command=self._royale_lora_travel)
@@ -9942,6 +9935,41 @@ class LoRATrainerGUI:
         for _v in (self.royale_lora_start_var, self.royale_lora_end_var, self.royale_lora_frames_var,
                    self.royale_lora_w_var, self.royale_lora_h_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
+
+        # Preview scrubber (filled after a render) + save-time export.
+        self._royale_lt_frames = []
+        self._royale_lt_labels = []
+        _ltp = tk.Frame(ltrav, bg=_sbg); _ltp.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
+        self._royale_lt_holder = tk.Frame(_ltp, bg=COLORS["bg_deep"], width=320, height=320)
+        self._royale_lt_holder.pack_propagate(False)
+        self._royale_lt_holder.pack(anchor=tk.W)
+        self._royale_lt_preview_label = tk.Label(self._royale_lt_holder, bg=COLORS["bg_deep"],
+                                                 fg=COLORS["text_muted"],
+                                                 text="Render to preview the frames here, then save.")
+        self._royale_lt_preview_label.pack(expand=True)
+        self._royale_lt_scrub_var = tk.DoubleVar(value=0.0)
+        self._royale_lt_scale = ttk.Scale(_ltp, from_=0, to=1, orient=tk.HORIZONTAL,
+                                          variable=self._royale_lt_scrub_var,
+                                          command=lambda e: self._royale_lt_scrub())
+        self._royale_lt_scale.pack(fill=tk.X, pady=(6, 2))
+        self._royale_lt_scale.configure(state="disabled")
+        self._royale_lt_frame_label_var = tk.StringVar(value="")
+        tk.Label(_ltp, textvariable=self._royale_lt_frame_label_var, font=(FONT_FAMILY, 9, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(anchor=tk.W)
+        _lsv = tk.Frame(ltrav, bg=_sbg); _lsv.pack(anchor=tk.W, pady=(6, 0))
+        self._royale_lt_save_mp4 = ttk.Button(_lsv, text="Save MP4", state="disabled",
+                                              command=lambda: self._royale_lt_save("MP4"))
+        self._royale_lt_save_mp4.pack(side=tk.LEFT)
+        self._royale_lt_save_gif = ttk.Button(_lsv, text="Save GIF", state="disabled",
+                                              command=lambda: self._royale_lt_save("GIF"))
+        self._royale_lt_save_gif.pack(side=tk.LEFT, padx=(6, 0))
+        self._royale_lt_save_frame = ttk.Button(_lsv, text="Save frame", state="disabled",
+                                               command=self._royale_lt_save_frame)
+        self._royale_lt_save_frame.pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(ltrav, text="Render once, scrub to review, then save — Speed / Loop / Strength badge / Fizgig tag / "
+                             "Deflicker all apply at save, so you can re-save in either format without re-rendering.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
 
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
@@ -10824,6 +10852,8 @@ class LoRATrainerGUI:
         self._royale_reveal(out)
 
     # ----- LoRA strength travel: ramp the LoRA multiplier on a fixed prompt+seed -----
+    # Render produces the raw frames into a scrubber; save (MP4/GIF/frame) is deferred
+    # and applies the cosmetic/encode options at save time (no re-render).
     def _royale_lora_travel(self):
         if getattr(self, "_royale_lora_running", False) or getattr(self, "_royale_traveling", False) \
                 or getattr(self, "_royale_exporting", False):
@@ -10859,30 +10889,10 @@ class LoRATrainerGUI:
             width = int(self.royale_lora_w_var.get()); height = int(self.royale_lora_h_var.get())
         except ValueError:
             width = height = 512
-        fmt = self.royale_lora_format_var.get().upper()
-        ext = ".mp4" if fmt == "MP4" else ".gif"
-        import sys
-        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
-        from fizgig.lora_royale import run_name_for_folder
-        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
-        from tkinter import filedialog
-        out = filedialog.asksaveasfilename(
-            title="Export strength-travel clip",
-            defaultextension=ext,
-            initialfile=f"{run}-epoch{label}-strengthtravel{ext}",
-            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
-            filetypes=[("MP4 video", "*.mp4")] if fmt == "MP4" else [("Animated GIF", "*.gif")])
-        if not out:
-            return
         params = dict(
             label=label, path=path, prompt=prompt, seed=seed,
             s_start=s_start, s_end=s_end, frames=max(2, frames),
-            width=width, height=height, fmt=fmt, out=out,
-            speed=self.royale_lora_speed_var.get(),
-            pingpong=bool(self.royale_lora_loop_var.get()),
-            brand=bool(self.royale_lora_wm_var.get()),
-            badge=bool(self.royale_lora_badge_var.get()),
-            deflicker=self.royale_lora_deflicker_var.get(),
+            width=width, height=height,
         )
         self._royale_lora_running = True
         self._royale_lora_btn.configure(state="disabled")
@@ -10894,7 +10904,6 @@ class LoRATrainerGUI:
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.repair_studio.state import SliderState
-        from fizgig.lora_royale import export as rexport
         eng = self.royale_engine
         try:
             if eng.primary_network is None:
@@ -10917,39 +10926,127 @@ class LoRATrainerGUI:
                 img = eng.generate_preview(st)
                 imgs.append(img.copy())
                 labels.append(f"{strength:.2f}×")
-            _dfm = p.get("deflicker", "None")
-            if _dfm and _dfm != "None":
-                self.master.after(0, lambda: self.royale_lora_status_var.set("Deflickering…"))
-                _sig = (len(imgs) / 3.0) if _dfm == "Strong" else None
-                imgs = rexport.deflicker_frames(imgs, sigma=_sig)
-            self.master.after(0, lambda: self.royale_lora_status_var.set("Encoding clip…"))
-            frame_labels = labels if p["badge"] else None
-            max_size = None if p["fmt"] == "MP4" else 768
-            frames = rexport.frames_from_sequence(imgs, pingpong=p["pingpong"],
-                                                  brand=p["brand"], labels=frame_labels, max_size=max_size)
-            if p["fmt"] == "MP4":
-                rexport.write_mp4(frames, p["out"], speed=p["speed"])
-            else:
-                rexport.write_gif(frames, p["out"], speed=p["speed"])
-            self.master.after(0, lambda: self._royale_lora_travel_finish(p["out"], len(frames), None))
+            self.master.after(0, lambda: self._royale_lora_travel_finish(imgs, labels, None))
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.master.after(0, lambda e=e: self._royale_lora_travel_finish(p["out"], 0, e))
+            self.master.after(0, lambda e=e: self._royale_lora_travel_finish([], [], e))
         finally:
             self._royale_release_vram()
 
-    def _royale_lora_travel_finish(self, out, n_frames, err):
+    def _royale_lora_travel_finish(self, frames, labels, err):
         self._royale_lora_running = False
         self._royale_lora_btn.configure(state="normal")
         if err is not None:
             self.royale_lora_status_var.set("Strength-travel failed — see console.")
-            msg = str(err)
-            if "codec" in msg.lower() or "writer" in msg.lower():
-                msg += "\n\nTry the GIF format instead."
-            messagebox.showerror("Strength-travel failed", msg)
+            messagebox.showerror("Strength-travel failed", str(err))
             return
-        self.royale_lora_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
+        if not frames:
+            self.royale_lora_status_var.set("No frames produced — see console.")
+            return
+        self._royale_lt_frames = frames
+        self._royale_lt_labels = labels
+        self._royale_lt_scale.configure(to=float(len(frames) - 1), state="normal")
+        self._royale_lt_scrub_var.set(0.0)
+        for b in (self._royale_lt_save_mp4, self._royale_lt_save_gif, self._royale_lt_save_frame):
+            b.configure(state="normal")
+        self._royale_lt_fit_holder()
+        self._royale_lt_scrub()
+        self.royale_lora_status_var.set(f"Rendered {len(frames)} frames — scrub to review, then save.")
+
+    def _royale_lt_fit_holder(self):
+        """Size the scrubber holder to the rendered frame's aspect (max 320 long side)."""
+        m = 320
+        frames = getattr(self, "_royale_lt_frames", None)
+        if not frames:
+            box = (m, m)
+        else:
+            iw, ih = frames[0].size
+            box = (m, max(64, round(m * ih / iw))) if iw >= ih else (max(64, round(m * iw / ih)), m)
+        self._royale_lt_holder_box = box
+        try:
+            self._royale_lt_holder.configure(width=box[0], height=box[1])
+        except Exception:
+            pass
+
+    def _royale_lt_scrub(self):
+        from PIL import Image, ImageTk
+        frames = getattr(self, "_royale_lt_frames", None)
+        if not frames:
+            return
+        i = max(0, min(int(round(float(self._royale_lt_scrub_var.get()))), len(frames) - 1))
+        hw, hh = getattr(self, "_royale_lt_holder_box", (320, 320))
+        disp = frames[i].copy()
+        disp.thumbnail((max(64, hw), max(64, hh)), Image.LANCZOS)
+        self._royale_lt_preview_imgtk = ImageTk.PhotoImage(disp)
+        self._royale_lt_preview_label.configure(image=self._royale_lt_preview_imgtk, text="")
+        lbl = self._royale_lt_labels[i] if i < len(self._royale_lt_labels) else ""
+        self._royale_lt_frame_label_var.set(f"Frame {i + 1}/{len(frames)}    {lbl}")
+
+    def _royale_lt_save(self, fmt):
+        """Encode the rendered frames to MP4/GIF, applying the export options live."""
+        frames = getattr(self, "_royale_lt_frames", None)
+        if not frames:
+            return
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import export as rexport, run_name_for_folder
+        from tkinter import filedialog
+        ext = ".mp4" if fmt == "MP4" else ".gif"
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        out = filedialog.asksaveasfilename(
+            title=f"Save strength-travel {fmt}", defaultextension=ext,
+            initialfile=f"{run}-strengthtravel{ext}",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
+            filetypes=[("MP4 video", "*.mp4")] if fmt == "MP4" else [("Animated GIF", "*.gif")])
+        if not out:
+            return
+        try:
+            imgs = list(frames)
+            dfm = self.royale_lora_deflicker_var.get()
+            if dfm and dfm != "None":
+                imgs = rexport.deflicker_frames(imgs, sigma=(len(imgs) / 3.0) if dfm == "Strong" else None)
+            labels = self._royale_lt_labels if self.royale_lora_badge_var.get() else None
+            speed = self.royale_lora_speed_var.get()
+            max_size = None if fmt == "MP4" else 768
+            clip = rexport.frames_from_sequence(imgs, pingpong=bool(self.royale_lora_loop_var.get()),
+                                                brand=bool(self.royale_lora_wm_var.get()),
+                                                labels=labels, max_size=max_size)
+            if fmt == "MP4":
+                rexport.write_mp4(clip, out, speed=speed)
+            else:
+                rexport.write_gif(clip, out, speed=speed)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            msg = str(e)
+            if "codec" in msg.lower() or "writer" in msg.lower():
+                msg += "\n\nTry GIF instead."
+            messagebox.showerror("Save failed", msg)
+            return
+        self.royale_lora_status_var.set(f"Saved {os.path.basename(out)}")
+        self._royale_reveal(out)
+
+    def _royale_lt_save_frame(self):
+        """Save the currently-scrubbed frame as a PNG."""
+        frames = getattr(self, "_royale_lt_frames", None)
+        if not frames:
+            return
+        from tkinter import filedialog
+        i = max(0, min(int(round(float(self._royale_lt_scrub_var.get()))), len(frames) - 1))
+        out = filedialog.asksaveasfilename(
+            title="Save frame", defaultextension=".png",
+            initialfile=f"strengthtravel-frame{i + 1:03d}.png",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
+            filetypes=[("PNG image", "*.png")])
+        if not out:
+            return
+        try:
+            frames[i].save(out)
+        except Exception as e:
+            messagebox.showerror("Save failed", str(e))
+            return
+        self.royale_lora_status_var.set(f"Saved frame {i + 1} → {os.path.basename(out)}")
         self._royale_reveal(out)
 
     # ----- Prompt travel: morph one epoch through a prompt dimension -----

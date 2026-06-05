@@ -1131,15 +1131,17 @@ class LoRATrainerGUI:
         if hasattr(self, 'royale_prompt_var'):
             data["royale_prompt"] = self.royale_prompt_var.get()
             data["royale_seed"] = self.royale_seed_var.get()
-            data["royale_res"] = self.royale_res_var.get()
             data["royale_max"] = self.royale_max_var.get()
             data["royale_ref"] = self.royale_ref_var.get()
+            data["royale_w"] = self.royale_w_var.get()
+            data["royale_h"] = self.royale_h_var.get()
         if hasattr(self, 'royale_like_ref_var'):
             data["royale_like_ref"] = self.royale_like_ref_var.get()
         if hasattr(self, 'royale_travel_seed_a_var'):
             data["royale_travel_seed_a"] = self.royale_travel_seed_a_var.get()
             data["royale_travel_seed_b"] = self.royale_travel_seed_b_var.get()
-            data["royale_travel_res"] = self.royale_travel_res_var.get()
+            data["royale_travel_w"] = self.royale_travel_w_var.get()
+            data["royale_travel_h"] = self.royale_travel_h_var.get()
             data["royale_travel_ref"] = self.royale_travel_ref_var.get()
             data["royale_travel_use_epoch_ref"] = bool(self.royale_travel_use_epoch_ref_var.get())
             data["royale_travel_ref_strength"] = self.royale_travel_ref_strength_var.get()
@@ -1149,7 +1151,8 @@ class LoRATrainerGUI:
             data["royale_pt_custom"] = self.royale_pt_custom_var.get()
             data["royale_pt_frames"] = self.royale_pt_frames_var.get()
             data["royale_pt_ref"] = self.royale_pt_ref_var.get()
-            data["royale_pt_res"] = self.royale_pt_res_var.get()
+            data["royale_pt_w"] = self.royale_pt_w_var.get()
+            data["royale_pt_h"] = self.royale_pt_h_var.get()
             data["royale_pt_use_epoch_ref"] = bool(self.royale_pt_use_epoch_ref_var.get())
             data["royale_pt_ref_strength"] = self.royale_pt_ref_strength_var.get()
         # Remember whether the bottom status bar is shown
@@ -9321,10 +9324,14 @@ class LoRATrainerGUI:
         _pr = tk.Frame(setup, bg=_sbg); _pr.grid(row=r, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.royale_seed_var = tk.StringVar(value=self.last_used.get("royale_seed", "42"))
         ttk.Entry(_pr, textvariable=self.royale_seed_var, width=10).pack(side=tk.LEFT)
-        tk.Label(_pr, text="Res", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
-        self.royale_res_var = tk.StringVar(value=self.last_used.get("royale_res", "512"))
-        ttk.Combobox(_pr, textvariable=self.royale_res_var, values=["384", "512", "768", "1024"],
-                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(_pr, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
+        self.royale_w_var = tk.StringVar(value=self.last_used.get("royale_w", "512"))
+        ttk.Combobox(_pr, textvariable=self.royale_w_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        tk.Label(_pr, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_h_var = tk.StringVar(value=self.last_used.get("royale_h", "512"))
+        ttk.Combobox(_pr, textvariable=self.royale_h_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
         tk.Label(_pr, text="Max renders", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
         self.royale_max_var = tk.StringVar(value=self.last_used.get("royale_max", "12"))
         ttk.Combobox(_pr, textvariable=self.royale_max_var, values=["All", "6", "8", "10", "12", "16", "20"],
@@ -9340,7 +9347,7 @@ class LoRATrainerGUI:
         r += 1
 
         # Remember the render inputs across sessions.
-        for _v in (self.royale_prompt_var, self.royale_seed_var, self.royale_res_var,
+        for _v in (self.royale_prompt_var, self.royale_seed_var, self.royale_w_var, self.royale_h_var,
                    self.royale_max_var, self.royale_ref_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
@@ -9415,7 +9422,7 @@ class LoRATrainerGUI:
         ttk.Entry(_tr1, textvariable=self.royale_travel_seed_b_var, width=10).pack(side=tk.LEFT)
         for _sv in (self.royale_travel_seed_a_var, self.royale_travel_seed_b_var):
             _sv.trace_add("write", lambda *a: self._save_last_used_paths())
-        # (royale_travel_res_var trace added after it's created below.)
+        # (royale_travel_w/h var traces added after they're created below.)
         tk.Label(_tr1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
         self.royale_travel_frames_var = tk.StringVar(value="24")
         _frcb = ttk.Combobox(_tr1, textvariable=self.royale_travel_frames_var,
@@ -9468,12 +9475,18 @@ class LoRATrainerGUI:
         self.royale_travel_speed_var = tk.StringVar(value="Normal")
         ttk.Combobox(_trf, textvariable=self.royale_travel_speed_var, values=["Slow", "Normal", "Fast"],
                      state="readonly", width=8).pack(side=tk.LEFT)
-        tk.Label(_trf, text="Res", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
-        self.royale_travel_res_var = tk.StringVar(
-            value=self.last_used.get("royale_travel_res", self.last_used.get("royale_res", "512")))
-        ttk.Combobox(_trf, textvariable=self.royale_travel_res_var, values=["384", "512", "768", "1024"],
-                     state="readonly", width=6).pack(side=tk.LEFT)
-        self.royale_travel_res_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        tk.Label(_trf, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 3))
+        self.royale_travel_w_var = tk.StringVar(
+            value=self.last_used.get("royale_travel_w", self.last_used.get("royale_w", "512")))
+        ttk.Combobox(_trf, textvariable=self.royale_travel_w_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        tk.Label(_trf, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_travel_h_var = tk.StringVar(
+            value=self.last_used.get("royale_travel_h", self.last_used.get("royale_h", "512")))
+        ttk.Combobox(_trf, textvariable=self.royale_travel_h_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        for _v in (self.royale_travel_w_var, self.royale_travel_h_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
         _tro = tk.Frame(trav, bg=_sbg); _tro.pack(anchor=tk.W, pady=(0, 8))
         self.royale_travel_loop_var = tk.BooleanVar(value=True)
         self.royale_travel_epoch_var = tk.BooleanVar(value=True)
@@ -9573,11 +9586,16 @@ class LoRATrainerGUI:
         self.royale_pt_speed_var = tk.StringVar(value="Normal")
         ttk.Combobox(_pof, textvariable=self.royale_pt_speed_var, values=["Slow", "Normal", "Fast"],
                      state="readonly", width=8).pack(side=tk.LEFT)
-        tk.Label(_pof, text="Res", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
-        self.royale_pt_res_var = tk.StringVar(
-            value=self.last_used.get("royale_pt_res", self.last_used.get("royale_res", "512")))
-        ttk.Combobox(_pof, textvariable=self.royale_pt_res_var, values=["384", "512", "768", "1024"],
-                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(_pof, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 3))
+        self.royale_pt_w_var = tk.StringVar(
+            value=self.last_used.get("royale_pt_w", self.last_used.get("royale_w", "512")))
+        ttk.Combobox(_pof, textvariable=self.royale_pt_w_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        tk.Label(_pof, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_pt_h_var = tk.StringVar(
+            value=self.last_used.get("royale_pt_h", self.last_used.get("royale_h", "512")))
+        ttk.Combobox(_pof, textvariable=self.royale_pt_h_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
         _poo = tk.Frame(ptrav, bg=_sbg); _poo.pack(anchor=tk.W, pady=(0, 8))
         self.royale_pt_loop_var = tk.BooleanVar(value=True)
         self.royale_pt_word_var = tk.BooleanVar(value=True)
@@ -9597,7 +9615,7 @@ class LoRATrainerGUI:
         for _v in (self.royale_pt_dim_var, self.royale_pt_custom_var):
             _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
         for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var,
-                   self.royale_pt_res_var, self.royale_pt_ref_strength_var):
+                   self.royale_pt_w_var, self.royale_pt_h_var, self.royale_pt_ref_strength_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_words()
@@ -9835,9 +9853,9 @@ class LoRATrainerGUI:
         except ValueError:
             seed = 42
         try:
-            res = int(self.royale_res_var.get())
+            width = int(self.royale_w_var.get()); height = int(self.royale_h_var.get())
         except ValueError:
-            res = 512
+            width = height = 512
         ref = self.royale_ref_var.get().strip()
         results = []
         paths = {}
@@ -9857,8 +9875,8 @@ class LoRATrainerGUI:
                 st = SliderState.default_klein9b()
                 st.prompt = prompt
                 st.seed = seed
-                st.preview_width = res
-                st.preview_height = res
+                st.preview_width = width
+                st.preview_height = height
                 if ref and os.path.exists(ref):
                     st.ref_image_path = ref
                     st.ref_megapixels = 0.2
@@ -10170,9 +10188,9 @@ class LoRATrainerGUI:
         if not self._royale_ensure_engine():
             return
         try:
-            res = int(self.royale_travel_res_var.get())
+            width = int(self.royale_travel_w_var.get()); height = int(self.royale_travel_h_var.get())
         except ValueError:
-            res = 512
+            width = height = 512
         fmt = self.royale_travel_format_var.get().upper()
         ext = ".mp4" if fmt == "MP4" else ".gif"
         import sys
@@ -10190,7 +10208,7 @@ class LoRATrainerGUI:
             return
         params = dict(
             label=label, path=path, prompt=prompt, seed_a=seed_a, seed_b=seed_b,
-            frames=max(2, frames), res=res, fmt=fmt, out=out,
+            frames=max(2, frames), width=width, height=height, fmt=fmt, out=out,
             ref=self._royale_resolve_travel_ref(self.royale_travel_use_epoch_ref_var.get(),
                                                 self.royale_travel_ref_var.get()),
             ref_strength=self._royale_parse_ref_strength(self.royale_travel_ref_strength_var.get()),
@@ -10226,7 +10244,7 @@ class LoRATrainerGUI:
                     f"Rendering frame {i + 1}/{n}…"))
                 st = SliderState.default_klein9b()
                 st.prompt = p["prompt"]; st.seed = p["seed_a"]
-                st.preview_width = p["res"]; st.preview_height = p["res"]
+                st.preview_width = p["width"]; st.preview_height = p["height"]
                 if p["ref"] and os.path.exists(p["ref"]):
                     st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2
                     st.ref_strength = p.get("ref_strength", 1.0)
@@ -10303,9 +10321,9 @@ class LoRATrainerGUI:
         except ValueError:
             seed = 42
         try:
-            res = int(self.royale_pt_res_var.get())
+            width = int(self.royale_pt_w_var.get()); height = int(self.royale_pt_h_var.get())
         except ValueError:
-            res = 512
+            width = height = 512
         if not self._royale_ensure_engine():
             return
         fmt = self.royale_pt_format_var.get().upper()
@@ -10326,7 +10344,7 @@ class LoRATrainerGUI:
             return
         params = dict(
             label=label, path=path, base=base, words=words,
-            frames=max(2, frames), seed=seed, res=res, fmt=fmt, out=out,
+            frames=max(2, frames), seed=seed, width=width, height=height, fmt=fmt, out=out,
             ref=self._royale_resolve_travel_ref(self.royale_pt_use_epoch_ref_var.get(),
                                                 self.royale_pt_ref_var.get()),
             ref_strength=self._royale_parse_ref_strength(self.royale_pt_ref_strength_var.get()),
@@ -10364,7 +10382,7 @@ class LoRATrainerGUI:
                 ctx = eng.interp_waypoints(ctx_list, t)
                 st = SliderState.default_klein9b()
                 st.prompt = p["base"]; st.seed = p["seed"]
-                st.preview_width = p["res"]; st.preview_height = p["res"]
+                st.preview_width = p["width"]; st.preview_height = p["height"]
                 if p["ref"] and os.path.exists(p["ref"]):
                     st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2
                     st.ref_strength = p.get("ref_strength", 1.0)

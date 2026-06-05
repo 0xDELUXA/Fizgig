@@ -59,8 +59,11 @@ def _decorate(img: Image.Image, epoch_label=None, brand=True, badge=None) -> Ima
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(overlay)
     W, H = base.size
-    margin = max(8, H // 40)
-    fs = max(13, H // 26)
+    # Size text/margins off the SHORTER side so portrait (narrow) frames don't
+    # get oversized pills that collide in the middle.
+    short = min(W, H)
+    margin = max(8, short // 40)
+    fs = max(13, short // 26)
     font = _load_font(fs)
     if badge_text is not None:
         _pill(d, (margin, 0), badge_text, font,

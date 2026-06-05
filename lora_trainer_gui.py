@@ -1151,6 +1151,7 @@ class LoRATrainerGUI:
             data["royale_pt_ref"] = self.royale_pt_ref_var.get()
             data["royale_pt_res"] = self.royale_pt_res_var.get()
             data["royale_pt_use_epoch_ref"] = bool(self.royale_pt_use_epoch_ref_var.get())
+            data["royale_pt_ref_strength"] = self.royale_pt_ref_strength_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9525,8 +9526,14 @@ class LoRATrainerGUI:
         ttk.Checkbutton(_ptu, text="Use the rendered epoch as the reference",
                         variable=self.royale_pt_use_epoch_ref_var,
                         command=self._royale_pt_toggle_ref_widgets).pack(side=tk.LEFT)
-        tk.Label(_ptu, text="(anchors the morph to this epoch's own render)", bg=_sbg,
-                 fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(_ptu, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self.royale_pt_ref_strength_var = tk.StringVar(
+            value=self.last_used.get("royale_pt_ref_strength", "1.0"))
+        _ptse = ttk.Entry(_ptu, textvariable=self.royale_pt_ref_strength_var, width=5)
+        _ptse.pack(side=tk.LEFT)
+        ToolTip(_ptse, "How strongly the reference anchors the morph.\n"
+                       "1.0 = stock, ~0.85 = Klein sweet spot, a softer anchor lets the prompt words pull "
+                       "harder, 0 = off.")
 
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
         tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
@@ -9589,7 +9596,7 @@ class LoRATrainerGUI:
         for _v in (self.royale_pt_dim_var, self.royale_pt_custom_var):
             _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
         for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var,
-                   self.royale_pt_res_var):
+                   self.royale_pt_res_var, self.royale_pt_ref_strength_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_words()
@@ -10321,6 +10328,7 @@ class LoRATrainerGUI:
             frames=max(2, frames), seed=seed, res=res, fmt=fmt, out=out,
             ref=self._royale_resolve_travel_ref(self.royale_pt_use_epoch_ref_var.get(),
                                                 self.royale_pt_ref_var.get()),
+            ref_strength=self._royale_parse_ref_strength(self.royale_pt_ref_strength_var.get()),
             speed=self.royale_pt_speed_var.get(),
             pingpong=bool(self.royale_pt_loop_var.get()),
             brand=bool(self.royale_pt_wm_var.get()),
@@ -10357,7 +10365,8 @@ class LoRATrainerGUI:
                 st.prompt = p["base"]; st.seed = p["seed"]
                 st.preview_width = p["res"]; st.preview_height = p["res"]
                 if p["ref"] and os.path.exists(p["ref"]):
-                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2; st.ref_strength = 1.0
+                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2
+                    st.ref_strength = p.get("ref_strength", 1.0)
                 img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)
                 imgs.append(img.copy())
                 labels.append(pt.dominant_word(p["words"], t).upper())

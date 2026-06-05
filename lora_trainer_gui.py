@@ -10065,6 +10065,8 @@ class LoRATrainerGUI:
         extra = f"  ({n_noface} no-face)" if n_noface else ""
         self.royale_like_status_var.set(f"Best: epoch {best_label} ({best_sc:.3f}){extra}")
         self._royale_build_grid()
+        # Park the crossfade on the winner so it's selected, not just highlighted.
+        self._royale_jump_best()
 
     def _royale_jump_best(self):
         best = getattr(self, "_royale_best_label", None)

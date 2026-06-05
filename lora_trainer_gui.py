@@ -346,6 +346,20 @@ BUILT_IN_PRESETS = {
     },
 }
 
+# LoRA Royale seed-travel presets — recipes of the *mechanics* knobs (reference /
+# anchor / journey / identity-lock), NOT a prompt system (seed travel uses the Setup
+# prompt). Reference is kept light (0.1–0.4) so the seeds can actually travel.
+SEED_TRAVEL_PRESETS = {
+    "Identity tour":     dict(ref_strength="0.25", ref_mp="0.2", sequential=False,
+                              anchor=True,  anchor_str="1.0", waypoints="5", idlock=True),
+    "Wild morph":        dict(ref_strength="0.1",  ref_mp="0.2", sequential=False,
+                              anchor=False, anchor_str="1.0", waypoints="6", idlock=False),
+    "Subtle variations": dict(ref_strength="0.4",  ref_mp="0.2", sequential=False,
+                              anchor=True,  anchor_str="1.0", waypoints="2", idlock=True),
+    "Feedback dream":    dict(ref_strength="0.25", ref_mp="0.5", sequential=True,
+                              anchor=True,  anchor_str="1.0", waypoints="4", idlock=True),
+}
+
 # Directory for dataset configurations
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "dataset")
 
@@ -1150,6 +1164,8 @@ class LoRATrainerGUI:
             data["royale_travel_seq_ref"] = bool(self.royale_travel_seq_ref_var.get())
             data["royale_travel_anchor"] = bool(self.royale_travel_anchor_var.get())
             data["royale_travel_anchor_str"] = self.royale_travel_anchor_str_var.get()
+            data["royale_travel_waypoints"] = self.royale_travel_waypoints_var.get()
+            data["royale_travel_idlock"] = bool(self.royale_travel_idlock_var.get())
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -9436,27 +9452,59 @@ class LoRATrainerGUI:
         trav = self._start_section_card(outer, "Seed travel",
                                         "Take the epoch on the crossfade and morph it smoothly between two seeds "
                                         "(slerp through noise space) — shows the LoRA's range, saved as a clip.")
-        _tr1 = tk.Frame(trav, bg=_sbg); _tr1.pack(anchor=tk.W, pady=(0, 6))
-        tk.Label(_tr1, text="Start seed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 4))
+        _tps = tk.Frame(trav, bg=_sbg); _tps.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_tps, text="Preset", bg=_sbg, fg=COLORS["text_muted"], width=10,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_travel_preset_var = tk.StringVar(value="")
+        _tpcb = ttk.Combobox(_tps, textvariable=self.royale_travel_preset_var,
+                             values=list(SEED_TRAVEL_PRESETS.keys()), state="readonly", width=20)
+        _tpcb.pack(side=tk.LEFT)
+        _tpcb.bind("<<ComboboxSelected>>", lambda e: self._royale_travel_apply_preset())
+        ToolTip(_tpcb,
+                "One-click recipes for the seed-travel mechanics (reference / anchor / journey length /\n"
+                "identity-lock). They don't touch your prompt — seed travel uses the Setup prompt.\n"
+                "Tune anything after picking.")
+
+        _tr1 = tk.Frame(trav, bg=_sbg); _tr1.pack(anchor=tk.W, pady=(0, 2))
+        tk.Label(_tr1, text="Seeds", bg=_sbg, fg=COLORS["text_muted"], width=10,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
         self.royale_travel_seed_a_var = tk.StringVar(value=self.last_used.get("royale_travel_seed_a", "42"))
-        ttk.Entry(_tr1, textvariable=self.royale_travel_seed_a_var, width=10).pack(side=tk.LEFT)
-        tk.Label(_tr1, text="End seed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
+        ttk.Entry(_tr1, textvariable=self.royale_travel_seed_a_var, width=9).pack(side=tk.LEFT)
+        tk.Label(_tr1, text="→", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 8))
         self.royale_travel_seed_b_var = tk.StringVar(value=self.last_used.get("royale_travel_seed_b", "4242"))
-        ttk.Entry(_tr1, textvariable=self.royale_travel_seed_b_var, width=10).pack(side=tk.LEFT)
+        ttk.Entry(_tr1, textvariable=self.royale_travel_seed_b_var, width=9).pack(side=tk.LEFT)
+        ttk.Button(_tr1, text="🎲", width=3,
+                   command=self._royale_travel_randomize_seeds).pack(side=tk.LEFT, padx=(6, 0))
         for _sv in (self.royale_travel_seed_a_var, self.royale_travel_seed_b_var):
             _sv.trace_add("write", lambda *a: self._save_last_used_paths())
         # (royale_travel_w/h var traces added after they're created below.)
-        tk.Label(_tr1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 4))
+        tk.Label(_tr1, text="Waypoints", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 4))
+        self.royale_travel_waypoints_var = tk.StringVar(
+            value=self.last_used.get("royale_travel_waypoints", "2"))
+        _twcb = ttk.Combobox(_tr1, textvariable=self.royale_travel_waypoints_var,
+                             values=["2", "3", "4", "5", "6", "8"], state="readonly", width=4)
+        _twcb.pack(side=tk.LEFT)
+        _twcb.bind("<<ComboboxSelected>>", lambda e: self._save_last_used_paths())
+        ToolTip(_twcb,
+                "Seeds in the journey. 2 = a straight Start→End morph. More = a flowing tour through\n"
+                "extra seeds in between (Start → … → End), all slerped so it stays smooth. The\n"
+                "intermediates derive from the Start seed, so the journey is reproducible.")
+        tk.Label(_tr1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 4))
         self.royale_travel_frames_var = tk.StringVar(value="24")
         _frcb = ttk.Combobox(_tr1, textvariable=self.royale_travel_frames_var,
                              values=["16", "24", "36", "48", "64", "96", "128", "192", "256"],
                              state="readonly", width=5)
         _frcb.pack(side=tk.LEFT)
         ToolTip(_frcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
-                       "24 ≈ a minute or two on a fast card.")
+                       "More journey waypoints want more frames to stay smooth.")
+        tk.Label(trav, text="Waypoints = seeds in the journey; 🎲 rerolls Start/End. With a reference holding "
+                            "the subject, more waypoints = a longer tour through compositions.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
 
         _trr = tk.Frame(trav, bg=_sbg); _trr.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(_trr, text="Reference", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(_trr, text="Reference", bg=_sbg, fg=COLORS["text_muted"], width=10,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
         self.royale_travel_ref_var = tk.StringVar(value=self.last_used.get("royale_travel_ref", ""))
         self._royale_travel_ref_entry = ttk.Entry(_trr, textvariable=self.royale_travel_ref_var, state="readonly")
         self._royale_travel_ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -9504,6 +9552,15 @@ class LoRATrainerGUI:
         ToolTip(_trast, "With 'Anchor to original' on, every frame also references the ORIGINAL image at this "
                         "strength alongside the previous frame — re-injects clean detail each frame so the "
                         "feedback chain can't drift. 1.0 = full anchor.")
+        self.royale_travel_idlock_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_travel_idlock", False)))
+        _tidl = ttk.Checkbutton(_trsq, text="Lock identity (image 1)",
+                                variable=self.royale_travel_idlock_var)
+        _tidl.pack(side=tk.LEFT, padx=(16, 0))
+        ToolTip(_tidl,
+                "Appends 'keep the face and identity from image 1' to the prompt, pinning the subject "
+                "while the seeds morph everything else around them. image 1 is the original reference "
+                "(with Anchor on) or your reference image. Needs a reference set to bite.")
         tk.Label(trav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
                             "(a feedback chain — smoother, evolving). Anchor to original keeps the pristine "
                             "reference in every frame to stop drift. Recommended: strength ~0.7, Max MP ~0.5, "
@@ -9513,7 +9570,7 @@ class LoRATrainerGUI:
         for _v in (self.royale_travel_ref_var, self.royale_travel_use_epoch_ref_var,
                    self.royale_travel_ref_strength_var, self.royale_travel_ref_mp_var,
                    self.royale_travel_seq_ref_var, self.royale_travel_anchor_var,
-                   self.royale_travel_anchor_str_var):
+                   self.royale_travel_anchor_str_var, self.royale_travel_idlock_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_travel_toggle_ref_widgets()
 
@@ -10539,6 +10596,38 @@ class LoRATrainerGUI:
         except Exception:
             pass
 
+    @staticmethod
+    def _royale_journey_seeds(start, end, n):
+        """Ordered seed list for a journey: [start, …n-2 deterministic mids…, end].
+        Mids derive from `start`, so the same Start seed reproduces the same journey."""
+        n = max(2, int(n))
+        start, end = int(start), int(end)
+        if n == 2:
+            return [start, end]
+        import random as _r
+        rng = _r.Random(start * 2654435761 + 12345)
+        mids = [rng.randint(0, 2**31 - 1) for _ in range(n - 2)]
+        return [start] + mids + [end]
+
+    def _royale_travel_randomize_seeds(self):
+        """Reroll Start/End seeds (and thus the whole journey, since mids derive from Start)."""
+        import random
+        self.royale_travel_seed_a_var.set(str(random.randint(0, 999999)))
+        self.royale_travel_seed_b_var.set(str(random.randint(0, 999999)))
+
+    def _royale_travel_apply_preset(self):
+        """Fill the seed-travel mechanics knobs from a preset (no prompt involved)."""
+        preset = SEED_TRAVEL_PRESETS.get(self.royale_travel_preset_var.get())
+        if not preset:
+            return
+        self.royale_travel_ref_strength_var.set(preset["ref_strength"])
+        self.royale_travel_ref_mp_var.set(preset["ref_mp"])
+        self.royale_travel_seq_ref_var.set(bool(preset["sequential"]))
+        self.royale_travel_anchor_var.set(bool(preset["anchor"]))
+        self.royale_travel_anchor_str_var.set(preset["anchor_str"])
+        self.royale_travel_waypoints_var.set(preset["waypoints"])
+        self.royale_travel_idlock_var.set(bool(preset["idlock"]))
+
     # ----- Seed travel: morph one epoch between two seeds (slerp) -----
     def _royale_seed_travel(self):
         if getattr(self, "_royale_traveling", False) or getattr(self, "_royale_exporting", False):
@@ -10551,14 +10640,21 @@ class LoRATrainerGUI:
         if not prompt:
             messagebox.showinfo("LoRA Royale", "Enter a prompt (include your trigger word).")
             return
+        if self.royale_travel_idlock_var.get():
+            prompt = prompt.rstrip().rstrip(".") + ". keep the face and identity from image 1."
         try:
             seed_a = int(self.royale_travel_seed_a_var.get())
             seed_b = int(self.royale_travel_seed_b_var.get())
         except ValueError:
             messagebox.showinfo("LoRA Royale", "Start and end seed must be whole numbers.")
             return
-        if seed_a == seed_b:
-            messagebox.showinfo("LoRA Royale", "Start and end seed are the same — pick two different seeds to travel between.")
+        try:
+            waypoints = int(self.royale_travel_waypoints_var.get())
+        except ValueError:
+            waypoints = 2
+        if seed_a == seed_b and waypoints <= 2:
+            messagebox.showinfo("LoRA Royale", "Start and end seed are the same — pick two different seeds, "
+                                               "or raise Waypoints for a longer journey.")
             return
         try:
             frames = int(self.royale_travel_frames_var.get())
@@ -10587,6 +10683,7 @@ class LoRATrainerGUI:
             return
         params = dict(
             label=label, path=path, prompt=prompt, seed_a=seed_a, seed_b=seed_b,
+            waypoints=max(2, waypoints),
             frames=max(2, frames), width=width, height=height, fmt=fmt, out=out,
             ref=self._royale_resolve_travel_ref(self.royale_travel_use_epoch_ref_var.get(),
                                                 self.royale_travel_ref_var.get()),
@@ -10622,17 +10719,22 @@ class LoRATrainerGUI:
                 if not eng.swap_primary_weights(p["path"]):
                     eng.reset(); eng.load_primary(p["path"])
             n = p["frames"]
+            seeds = self._royale_journey_seeds(p["seed_a"], p["seed_b"], p.get("waypoints", 2))
+            nseg = len(seeds) - 1
             imgs = []
             prev_path = None
             for i in range(n):
                 t = i / float(n - 1)
                 self.master.after(0, lambda i=i: self.royale_travel_status_var.set(
                     f"Rendering frame {i + 1}/{n}…"))
+                # Map global t onto the journey: which consecutive seed pair + local fraction.
+                pos = t * nseg
+                si = min(int(pos), nseg - 1)
                 st = SliderState.default_klein9b()
-                st.prompt = p["prompt"]; st.seed = p["seed_a"]
+                st.prompt = p["prompt"]; st.seed = seeds[si]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
                 self._royale_apply_travel_ref(st, p, i, prev_path)
-                img = eng.generate_preview(st, seed_b=p["seed_b"], travel_t=t)
+                img = eng.generate_preview(st, seed_b=seeds[si + 1], travel_t=pos - si)
                 imgs.append(img.copy())
                 if p.get("sequential"):
                     prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)

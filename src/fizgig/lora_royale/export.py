@@ -33,25 +33,51 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
-def _pill(draw: ImageDraw.ImageDraw, xy, text, font, anchor_right=False,
-          bottom=0, fg=(255, 255, 255, 235), bg=(0, 0, 0, 140), pad=(10, 5)):
-    """Draw a rounded translucent pill anchored to a bottom corner."""
-    l, t, r, b = draw.textbbox((0, 0), text, font=font)
-    tw, th = r - l, b - t
+def _wrap_text(draw, text, font, max_width):
+    """Greedy word-wrap `text` to fit `max_width` at `font`. A single word wider
+    than max_width is left on its own line (font-shrinking handles it)."""
+    words = text.split()
+    lines, cur = [], ""
+    for w in words:
+        trial = f"{cur} {w}".strip()
+        if not cur or draw.textlength(trial, font=font) <= max_width:
+            cur = trial
+        else:
+            lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines or [text]
+
+
+def _pill_lines(draw, lines, font, x_left, bottom, fg, bg, pad):
+    """Draw a rounded translucent multi-line pill, bottom edge at `bottom`,
+    left edge at `x_left`, growing upward."""
     px, py = pad
-    w, h = tw + px * 2, th + py * 2
-    x = xy[0] - w if anchor_right else xy[0]
-    y = bottom - h
-    rad = max(6, h // 3)
-    draw.rounded_rectangle([x, y, x + w, y + h], radius=rad, fill=bg)
-    draw.text((x + px - l, y + py - t), text, font=font, fill=fg)
+    asc, desc = font.getmetrics()
+    lh = asc + desc
+    gap = max(1, lh // 6)
+    tw = max((draw.textlength(ln, font=font) for ln in lines), default=0)
+    th = lh * len(lines) + gap * (len(lines) - 1)
+    w, h = int(tw + px * 2), int(th + py * 2)
+    y1 = bottom
+    y0 = y1 - h
+    rad = max(6, min(h // 2, lh // 2 + py))
+    draw.rounded_rectangle([x_left, y0, x_left + w, y1], radius=rad, fill=bg)
+    cy = y0 + py
+    for ln in lines:
+        draw.text((x_left + px, cy), ln, font=font, fill=fg)
+        cy += lh + gap
+    return w, h
 
 
 def _decorate(img: Image.Image, epoch_label=None, brand=True, badge=None) -> Image.Image:
     """Burn a corner badge (bottom-left, gold) + brand pill (bottom-right).
 
     `badge` is raw text; `epoch_label` is a convenience that renders as
-    "EPOCH <n>". Pass at most one."""
+    "EPOCH <n>". Pass at most one. The badge keeps the default font size for
+    short text; only when it's long enough to reach the Fizgig tag does it
+    shrink the font and wrap to multiple lines to avoid colliding."""
     badge_text = badge if badge is not None else (f"EPOCH {epoch_label}" if epoch_label is not None else None)
     if badge_text is None and not brand:
         return img.convert("RGB")
@@ -64,14 +90,41 @@ def _decorate(img: Image.Image, epoch_label=None, brand=True, badge=None) -> Ima
     short = min(W, H)
     margin = max(8, short // 40)
     fs = max(13, short // 26)
-    font = _load_font(fs)
-    if badge_text is not None:
-        _pill(d, (margin, 0), badge_text, font,
-              anchor_right=False, bottom=H - margin, fg=(255, 210, 74, 245))
+    pad = (max(6, fs // 2), max(4, fs // 3))
+
+    # Brand pill (bottom-right) drawn first so we know how much room it claims.
+    brand_w = 0
     if brand:
-        _pill(d, (W - margin, 0), "Fizgig · LoRA Royale", font,
-              anchor_right=True, bottom=H - margin, fg=(255, 255, 255, 235))
+        bfont = _load_font(fs)
+        btext = "Fizgig · LoRA Royale"
+        bw = int(draw_len(d, btext, bfont) + pad[0] * 2)
+        _pill_lines(d, [btext], bfont, W - margin - bw, H - margin,
+                    (255, 255, 255, 235), (0, 0, 0, 140), pad)
+        brand_w = bw
+
+    if badge_text is not None:
+        gap = margin
+        avail = (W - margin - brand_w - gap) - margin if brand else (W - 2 * margin)
+        avail = max(60, avail)
+        min_fs = max(10, short // 60)
+        # Keep the default size for short text; shrink only until each line fits.
+        bfs = fs
+        while bfs > min_fs:
+            f = _load_font(bfs)
+            lines = _wrap_text(d, badge_text, f, avail)
+            if max(draw_len(d, ln, f) for ln in lines) <= avail:
+                break
+            bfs -= 2
+        bfont = _load_font(bfs)
+        blines = _wrap_text(d, badge_text, bfont, avail)
+        bpad = (max(6, bfs // 2), max(4, bfs // 3))
+        _pill_lines(d, blines, bfont, margin, H - margin, (255, 210, 74, 245), (0, 0, 0, 140), bpad)
+
     return Image.alpha_composite(base, overlay).convert("RGB")
+
+
+def draw_len(draw, text, font):
+    return draw.textlength(text, font=font)
 
 
 def _even(n: int) -> int:

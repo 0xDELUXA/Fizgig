@@ -10853,7 +10853,12 @@ class LoRATrainerGUI:
             frames = int(self.royale_travel_frames_var.get())
         except ValueError:
             frames = 24
+        # Paint feedback before ensure_engine — the first single-LoRA render loads the
+        # whole pipeline on this thread, which would otherwise sit silent.
+        self.royale_travel_status_var.set("Loading model…")
+        self.master.update_idletasks()
         if not self._royale_ensure_engine():
+            self.royale_travel_status_var.set("")
             return
         try:
             width = int(self.royale_travel_w_var.get()); height = int(self.royale_travel_h_var.get())
@@ -10960,7 +10965,10 @@ class LoRATrainerGUI:
             frames = int(self.royale_lora_frames_var.get())
         except ValueError:
             frames = 24
+        self.royale_lora_status_var.set("Loading model…")
+        self.master.update_idletasks()
         if not self._royale_ensure_engine():
+            self.royale_lora_status_var.set("")
             return
         try:
             width = int(self.royale_lora_w_var.get()); height = int(self.royale_lora_h_var.get())
@@ -11248,7 +11256,10 @@ class LoRATrainerGUI:
             width = int(self.royale_pt_w_var.get()); height = int(self.royale_pt_h_var.get())
         except ValueError:
             width = height = 512
+        self.royale_pt_status_var.set("Loading model…")
+        self.master.update_idletasks()
         if not self._royale_ensure_engine():
+            self.royale_pt_status_var.set("")
             return
         params = dict(
             label=label, path=path, base=base, words=words,

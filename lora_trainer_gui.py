@@ -9283,6 +9283,7 @@ class LoRATrainerGUI:
         self._royale_thumbs = []      # keep ImageTk refs alive
         self._royale_preview_imgtk = None
         self._royale_rendering = False
+        self._royale_render_gen = 0   # bumps each render so epoch-ref temp files get fresh paths
         self._royale_paths = {}       # label -> checkpoint path (for promote)
         self._royale_scores = {}      # label -> likeness cosine (Phase 3)
         self._royale_best_label = None
@@ -9753,12 +9754,21 @@ class LoRATrainerGUI:
 
     def _royale_epoch_ref_tempfile(self):
         """Save the parked epoch's render to a temp PNG and return its path
-        (so it can be used as edit-conditioning reference), or '' on failure."""
-        img = self._royale_current_epoch_image()
-        if img is None:
+        (so it can be used as edit-conditioning reference), or '' on failure.
+
+        The filename encodes the render generation + epoch label so the path
+        changes whenever the underlying image does — otherwise the engine's
+        ref-token cache (keyed on path) would reuse a stale earlier render."""
+        imgs = getattr(self, "_royale_images", None)
+        if not imgs:
             return ""
-        import tempfile
-        tmp = os.path.join(tempfile.gettempdir(), "fizgig_royale_epoch_ref.png")
+        idx = int(round(float(self.royale_scrub_var.get())))
+        idx = max(0, min(idx, len(imgs) - 1))
+        label, img = imgs[idx]
+        import tempfile, re
+        gen = getattr(self, "_royale_render_gen", 0)
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(label))
+        tmp = os.path.join(tempfile.gettempdir(), f"fizgig_royale_epoch_ref_{gen}_{safe}.png")
         try:
             img.save(tmp)
             return tmp
@@ -9904,6 +9914,7 @@ class LoRATrainerGUI:
         self._royale_render_btn.configure(state="normal")
         self._royale_images = results
         self._royale_paths = paths or {}
+        self._royale_render_gen += 1   # new images -> epoch-ref temp files get a fresh path
         # New renders invalidate any prior likeness scores.
         self._royale_scores = {}
         self._royale_best_label = None

@@ -494,11 +494,28 @@ class RepairEngine:
         return ctx_list, neg
 
     @staticmethod
-    def interp_waypoints(vecs, t):
-        """Piecewise-linear interpolation across an ordered list of conditioning
-        tensors. `t` in [0,1] walks the whole chain (0 -> vecs[0], 1 -> vecs[-1]).
-        Lerp (not slerp) — text embeddings aren't sphere-distributed, so slerp
-        would wander off-manifold; lerp gives the smooth conceptual morph."""
+    def interp_waypoints(vecs, t, mode="lerp"):
+        """Piecewise interpolation across an ordered list of conditioning tensors.
+        `t` in [0,1] walks the whole chain (0 -> vecs[0], 1 -> vecs[-1]).
+
+        mode:
+          "lerp"  — plain linear interpolation (original). The blended embedding's
+                    norm sags toward each segment midpoint, which under-conditions
+                    the model and tends to dip brightness/contrast there.
+          "norm"  — per-token norm-preserving lerp: same direction blend as lerp,
+                    but each token's magnitude is rescaled to the interpolated
+                    endpoint norm, so conditioning strength stays constant across
+                    the sweep (flatter brightness, minimal change to the look).
+          "slerp" — per-token spherical interpolation: constant angular velocity
+                    along the arc, full-strength conditioning throughout. Smoothest
+                    semantic glide; a bigger departure from plain lerp. Done per
+                    token (norm over the feature dim) so the sequence structure is
+                    preserved — unlike a whole-tensor slerp which rotates all tokens
+                    through one shared angle and smears per-token alignment.
+
+        Text embeddings aren't truly sphere-distributed, so "norm" is the low-risk
+        tweak (keeps lerp's direction, only fixes the magnitude sag) and "slerp"
+        the more aggressive option."""
         import torch
         if len(vecs) == 1:
             return vecs[0]
@@ -508,6 +525,32 @@ class RepairEngine:
         i = min(int(pos), segs - 1)
         local = pos - i
         a, b = vecs[i].float(), vecs[i + 1].float()
+        if mode in (None, "lerp"):
+            return torch.lerp(a, b, local).to(vecs[i].dtype)
+
+        eps = 1e-6
+        na = a.norm(dim=-1, keepdim=True)
+        nb = b.norm(dim=-1, keepdim=True)
+        target = (1.0 - local) * na + local * nb        # interpolated per-token norm
+
+        if mode == "norm":
+            out = torch.lerp(a, b, local)
+            out = out * (target / out.norm(dim=-1, keepdim=True).clamp_min(eps))
+            return out.to(vecs[i].dtype)
+
+        if mode == "slerp":
+            ua = a / na.clamp_min(eps)
+            ub = b / nb.clamp_min(eps)
+            dot = (ua * ub).sum(dim=-1, keepdim=True).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+            omega = torch.acos(dot)
+            so = torch.sin(omega)
+            w_a = torch.sin((1.0 - local) * omega) / so
+            w_b = torch.sin(local * omega) / so
+            arc = w_a * ua + w_b * ub                    # unit per-token direction
+            lin = torch.lerp(ua, ub, local)              # fallback for ~parallel tokens
+            dir_ = torch.where(so < 1e-4, lin, arc)
+            return (dir_ * target).to(vecs[i].dtype)
+
         return torch.lerp(a, b, local).to(vecs[i].dtype)
 
     def generate_preview(self, state: SliderState, seed_b=None, travel_t=None,

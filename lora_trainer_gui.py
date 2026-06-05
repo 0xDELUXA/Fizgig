@@ -1167,6 +1167,8 @@ class LoRATrainerGUI:
             data["royale_pt_anchor_str"] = self.royale_pt_anchor_str_var.get()
             data["royale_pt_start"] = self.royale_pt_start_var.get()
             data["royale_pt_end"] = self.royale_pt_end_var.get()
+            data["royale_pt_interp"] = self.royale_pt_interp_var.get()
+            data["royale_pt_seq_seed"] = bool(self.royale_pt_seq_seed_var.get())
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9707,20 +9709,48 @@ class LoRATrainerGUI:
             value=self.last_used.get("royale_pt_h", self.last_used.get("royale_h", "512")))
         ttk.Combobox(_pof, textvariable=self.royale_pt_h_var, values=["384", "512", "768", "1024", "1280", "1536"],
                      state="readonly", width=5).pack(side=tk.LEFT)
+
+        _pin = tk.Frame(ptrav, bg=_sbg); _pin.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_pin, text="Interpolation", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_interp_var = tk.StringVar(
+            value=self.last_used.get("royale_pt_interp", "Linear"))
+        _ptin = ttk.Combobox(_pin, textvariable=self.royale_pt_interp_var,
+                             values=["Linear", "Norm-preserved", "Slerp"],
+                             state="readonly", width=15)
+        _ptin.pack(side=tk.LEFT)
+        ToolTip(_ptin,
+                "How the text embedding morphs between waypoints (test with Vary seed OFF to see it):\n"
+                "• Linear — original. Conditioning weakens mid-way between words → brightness/contrast can dip there.\n"
+                "• Norm-preserved — keeps the linear blend but holds conditioning strength constant → flatter,\n"
+                "  more even brightness with minimal change to the look. Low risk.\n"
+                "• Slerp — constant-speed spherical glide at full conditioning strength → smoothest morph,\n"
+                "  a bigger departure from Linear.")
+
         _poo = tk.Frame(ptrav, bg=_sbg); _poo.pack(anchor=tk.W, pady=(0, 8))
         self.royale_pt_loop_var = tk.BooleanVar(value=True)
         self.royale_pt_word_var = tk.BooleanVar(value=True)
         self.royale_pt_wm_var = tk.BooleanVar(value=True)
         self.royale_pt_vary_seed_var = tk.BooleanVar(
             value=bool(self.last_used.get("royale_pt_vary_seed", False)))
+        self.royale_pt_seq_seed_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_pt_seq_seed", False)))
         ttk.Checkbutton(_poo, text="Loop (ping-pong)", variable=self.royale_pt_loop_var).pack(side=tk.LEFT)
         ttk.Checkbutton(_poo, text="Word badge", variable=self.royale_pt_word_var).pack(side=tk.LEFT, padx=(14, 0))
         ttk.Checkbutton(_poo, text="Fizgig tag", variable=self.royale_pt_wm_var).pack(side=tk.LEFT, padx=(14, 0))
-        _vs = ttk.Checkbutton(_poo, text="Vary seed", variable=self.royale_pt_vary_seed_var)
+        _vs = ttk.Checkbutton(_poo, text="Vary seed", variable=self.royale_pt_vary_seed_var,
+                              command=self._royale_pt_sync_seq_seed)
         _vs.pack(side=tk.LEFT, padx=(14, 0))
-        ToolTip(_vs, "Give each frame a fresh random seed instead of one fixed seed.\n"
+        ToolTip(_vs, "Give each frame a fresh seed instead of one fixed seed.\n"
                      "With the reference anchored, this adds organic frame-to-frame variation "
                      "while the prompt morphs — a more alive, less static look.")
+        self._royale_pt_seq_seed_cb = ttk.Checkbutton(
+            _poo, text="Sequential seed", variable=self.royale_pt_seq_seed_var)
+        self._royale_pt_seq_seed_cb.pack(side=tk.LEFT, padx=(14, 0))
+        ToolTip(self._royale_pt_seq_seed_cb,
+                "Only applies when Vary seed is on.\n"
+                "On  — seeds walk deterministically (base, base+1, base+2 …), so the\n"
+                "       whole clip is reproducible: same base seed → same result every render.\n"
+                "Off — each frame gets a fresh random seed (different every render).")
         _pb = tk.Frame(ptrav, bg=_sbg); _pb.pack(anchor=tk.W)
         self._royale_pt_btn = tk.Button(_pb, text="Render & export prompt-travel…", font=(FONT_FAMILY, 10, "bold"),
                                         fg="#FFFFFF", bg="#B7791F", activeforeground="#FFFFFF",
@@ -9738,9 +9768,12 @@ class LoRATrainerGUI:
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_vary_seed_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self.royale_pt_seq_seed_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self.royale_pt_interp_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_range()
         self._royale_pt_refresh_words()
         self._royale_pt_toggle_ref_widgets()
+        self._royale_pt_sync_seq_seed()
 
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
@@ -9848,6 +9881,16 @@ class LoRATrainerGUI:
         self._royale_toggle_ref_widgets(self._royale_pt_ref_entry, self._royale_pt_ref_browse,
                                         self._royale_pt_ref_clear,
                                         bool(self.royale_pt_use_epoch_ref_var.get()))
+
+    def _royale_pt_sync_seq_seed(self):
+        """Enable the 'Sequential seed' tick only while 'Vary seed' is on — it has
+        no effect otherwise (a fixed seed can't walk)."""
+        st = "normal" if self.royale_pt_vary_seed_var.get() else "disabled"
+        if hasattr(self, "_royale_pt_seq_seed_cb"):
+            try:
+                self._royale_pt_seq_seed_cb.configure(state=st)
+            except Exception:
+                pass
 
     def _royale_travel_toggle_ref_widgets(self):
         self._royale_toggle_ref_widgets(self._royale_travel_ref_entry, self._royale_travel_ref_browse,
@@ -10617,6 +10660,8 @@ class LoRATrainerGUI:
             brand=bool(self.royale_pt_wm_var.get()),
             word_badge=bool(self.royale_pt_word_var.get()),
             vary_seed=bool(self.royale_pt_vary_seed_var.get()),
+            seq_seed=bool(self.royale_pt_seq_seed_var.get()),
+            interp=self.royale_pt_interp_var.get(),
         )
         self._royale_pt_running = True
         self._royale_pt_btn.configure(state="disabled")
@@ -10638,6 +10683,8 @@ class LoRATrainerGUI:
                     eng.reset(); eng.load_primary(p["path"])
             wp_prompts = pt.build_waypoint_prompts(p["base"], p["words"])
             ctx_list, neg = eng.encode_travel_prompts(wp_prompts)
+            interp_mode = {"Linear": "lerp", "Norm-preserved": "norm",
+                           "Slerp": "slerp"}.get(p.get("interp", "Linear"), "lerp")
             n = p["frames"]
             imgs, labels = [], []
             prev_path = None
@@ -10645,10 +10692,13 @@ class LoRATrainerGUI:
                 t = i / float(n - 1)
                 self.master.after(0, lambda i=i: self.royale_pt_status_var.set(
                     f"Rendering frame {i + 1}/{n}…"))
-                ctx = eng.interp_waypoints(ctx_list, t)
+                ctx = eng.interp_waypoints(ctx_list, t, mode=interp_mode)
                 st = SliderState.default_klein9b()
                 st.prompt = p["base"]
-                st.seed = random.randint(0, 2**31 - 1) if p.get("vary_seed") else p["seed"]
+                if p.get("vary_seed"):
+                    st.seed = (p["seed"] + i) if p.get("seq_seed") else random.randint(0, 2**31 - 1)
+                else:
+                    st.seed = p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
                 self._royale_apply_travel_ref(st, p, i, prev_path)
                 img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)

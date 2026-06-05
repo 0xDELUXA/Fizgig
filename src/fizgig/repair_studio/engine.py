@@ -385,22 +385,35 @@ class RepairEngine:
     # ------------------------------------------------------------------
 
     def _build_ref_tokens(self, state: SliderState):
-        """Encode the reference image into (ref_tokens, ref_ids) for edit-conditioning.
+        """Encode reference image(s) into (ref_tokens, ref_ids) for edit-conditioning.
 
-        Klein is an edit model: the ref latent goes in the POSITIVE conditioning
-        (caller concatenates these onto the cond pass only). Matches the user's
-        ReferenceLatentPlus node: cap to ref_megapixels (downscale only, ×16),
-        VAE-encode, scale the latent by ref_strength (1.0 stock), pack to tokens
-        with offset position ids (the "index"/Independent method). Returns
-        (None, None) when no ref is set."""
-        path = (getattr(state, "ref_image_path", "") or "").strip()
-        strength = float(getattr(state, "ref_strength", 1.0))
+        Klein is an edit model and supports MULTIPLE references: the primary
+        `ref_image_path`, plus an optional second `ref2_path`. Each is VAE-encoded,
+        scaled by its strength, and packed together — pack_control_latent gives
+        each its own position offset (the "index"/Independent method). The dual-ref
+        case is used by sequential travel: ref = original (clean identity anchor),
+        ref2 = previous frame (temporal continuity) — the original re-injects clean
+        detail every frame so VAE feedback drift can't accumulate.
+
+        Caps each to ref_megapixels (downscale only, ×16). The ref latent goes in
+        the POSITIVE conditioning (caller concatenates onto the cond pass only).
+        Returns (None, None) when no ref is set."""
         mp = max(0.05, float(getattr(state, "ref_megapixels", 1.0) or 1.0))
-        if not path or not os.path.exists(path) or strength == 0.0:
+        # Collect references in order: primary, then optional second anchor.
+        refs = []
+        p1 = (getattr(state, "ref_image_path", "") or "").strip()
+        s1 = float(getattr(state, "ref_strength", 1.0))
+        if p1 and os.path.exists(p1) and s1 != 0.0:
+            refs.append((p1, s1))
+        p2 = (getattr(state, "ref2_path", "") or "").strip()
+        s2 = float(getattr(state, "ref2_strength", 1.0))
+        if p2 and os.path.exists(p2) and s2 != 0.0:
+            refs.append((p2, s2))
+        if not refs:
             return None, None
 
-        # Cache: the VAE encode is one-time per ref config — skip it on slider tweaks.
-        ref_key = (path, round(mp, 4), round(strength, 4))
+        # Cache the packed tokens for the exact ref set (skip re-encode on slider tweaks).
+        ref_key = (tuple((p, round(s, 4)) for p, s in refs), round(mp, 4))
         if self._ref_cache_key == ref_key and self._ref_cache is not None:
             return self._ref_cache
 
@@ -409,30 +422,36 @@ class RepairEngine:
         from PIL import Image as _PILImage
         from fizgig.klein.position import pack_control_latent
         pipeline = self.pipeline
-        img = _PILImage.open(path).convert("RGB")
-        w, h = img.size
-        cur_mp = (w * h) / 1_000_000.0
-        if cur_mp > mp:  # downscale only (matches ReferenceLatentPlus _cap_megapixels)
-            s = (mp / cur_mp) ** 0.5
-            w, h = int(w * s), int(h * s)
-        w = max(16, (w // 16) * 16)
-        h = max(16, (h // 16) * 16)
-        img = img.resize((w, h), _PILImage.BICUBIC)
-        arr = np.asarray(img, dtype=np.float32)  # H, W, 3 in [0, 255]
-        t = torch.from_numpy(arr).permute(2, 0, 1) / 127.5 - 1.0  # C, H, W in [-1, 1]
 
         # Encode on the pipeline device (VAE may be CPU-offloaded between previews);
-        # move it on for the encode, then restore so we don't disturb VRAM planning.
+        # move it on for the encodes, then restore so we don't disturb VRAM planning.
         vae_dev = next(pipeline.vae.parameters()).device
         pipeline.vae.to(pipeline.device).eval()
-        t = t.unsqueeze(0).to(pipeline.device, dtype=pipeline.vae.dtype)
-        with torch.no_grad():
-            ref_latent = pipeline.vae.encode(t)[0]  # [128, H/16, W/16] (packed)
-        if vae_dev.type != pipeline.device.type:
-            pipeline.vae.to(vae_dev)
-        if strength != 1.0:
-            ref_latent = ref_latent * strength
-        ref_tokens, ref_ids = pack_control_latent([ref_latent.to(pipeline.device)])
+        latents = []
+        try:
+            for path, strength in refs:
+                img = _PILImage.open(path).convert("RGB")
+                w, h = img.size
+                cur_mp = (w * h) / 1_000_000.0
+                if cur_mp > mp:  # downscale only (matches ReferenceLatentPlus _cap_megapixels)
+                    sc = (mp / cur_mp) ** 0.5
+                    w, h = int(w * sc), int(h * sc)
+                w = max(16, (w // 16) * 16)
+                h = max(16, (h // 16) * 16)
+                img = img.resize((w, h), _PILImage.BICUBIC)
+                arr = np.asarray(img, dtype=np.float32)  # H, W, 3 in [0, 255]
+                t = torch.from_numpy(arr).permute(2, 0, 1) / 127.5 - 1.0  # C, H, W in [-1, 1]
+                t = t.unsqueeze(0).to(pipeline.device, dtype=pipeline.vae.dtype)
+                with torch.no_grad():
+                    lat = pipeline.vae.encode(t)[0]  # [128, H/16, W/16] (packed)
+                if strength != 1.0:
+                    lat = lat * strength
+                latents.append(lat.to(pipeline.device))
+        finally:
+            if vae_dev.type != pipeline.device.type:
+                pipeline.vae.to(vae_dev)
+
+        ref_tokens, ref_ids = pack_control_latent(latents)
         ref_tokens = ref_tokens.to(device=pipeline.device, dtype=torch.bfloat16)
         ref_ids = ref_ids.to(pipeline.device)
 

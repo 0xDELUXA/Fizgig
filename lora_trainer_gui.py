@@ -1148,6 +1148,8 @@ class LoRATrainerGUI:
             data["royale_travel_ref_strength"] = self.royale_travel_ref_strength_var.get()
             data["royale_travel_ref_mp"] = self.royale_travel_ref_mp_var.get()
             data["royale_travel_seq_ref"] = bool(self.royale_travel_seq_ref_var.get())
+            data["royale_travel_anchor"] = bool(self.royale_travel_anchor_var.get())
+            data["royale_travel_anchor_str"] = self.royale_travel_anchor_str_var.get()
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -1161,6 +1163,8 @@ class LoRATrainerGUI:
             data["royale_pt_vary_seed"] = bool(self.royale_pt_vary_seed_var.get())
             data["royale_pt_ref_mp"] = self.royale_pt_ref_mp_var.get()
             data["royale_pt_seq_ref"] = bool(self.royale_pt_seq_ref_var.get())
+            data["royale_pt_anchor"] = bool(self.royale_pt_anchor_var.get())
+            data["royale_pt_anchor_str"] = self.royale_pt_anchor_str_var.get()
             data["royale_pt_start"] = self.royale_pt_start_var.get()
             data["royale_pt_end"] = self.royale_pt_end_var.get()
         # Remember whether the bottom status bar is shown
@@ -9485,13 +9489,28 @@ class LoRATrainerGUI:
             value=bool(self.last_used.get("royale_travel_seq_ref", False)))
         ttk.Checkbutton(_trsq, text="Sequential reference",
                         variable=self.royale_travel_seq_ref_var).pack(side=tk.LEFT)
+        self.royale_travel_anchor_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_travel_anchor", True)))
+        ttk.Checkbutton(_trsq, text="Anchor to original",
+                        variable=self.royale_travel_anchor_var).pack(side=tk.LEFT, padx=(14, 0))
+        tk.Label(_trsq, text="Anchor str", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_travel_anchor_str_var = tk.StringVar(
+            value=self.last_used.get("royale_travel_anchor_str", "1.0"))
+        _trast = ttk.Entry(_trsq, textvariable=self.royale_travel_anchor_str_var, width=5)
+        _trast.pack(side=tk.LEFT)
+        ToolTip(_trast, "With 'Anchor to original' on, every frame also references the ORIGINAL image at this "
+                        "strength alongside the previous frame — re-injects clean detail each frame so the "
+                        "feedback chain can't drift. 1.0 = full anchor.")
         tk.Label(trav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
-                            "(a feedback chain — smoother, evolving). Recommended: strength ~0.7, Max MP ~0.5.",
+                            "(a feedback chain — smoother, evolving). Anchor to original keeps the pristine "
+                            "reference in every frame to stop drift. Recommended: strength ~0.7, Max MP ~0.5, "
+                            "anchor 1.0.",
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
         for _v in (self.royale_travel_ref_var, self.royale_travel_use_epoch_ref_var,
                    self.royale_travel_ref_strength_var, self.royale_travel_ref_mp_var,
-                   self.royale_travel_seq_ref_var):
+                   self.royale_travel_seq_ref_var, self.royale_travel_anchor_var,
+                   self.royale_travel_anchor_str_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_travel_toggle_ref_widgets()
 
@@ -9599,13 +9618,27 @@ class LoRATrainerGUI:
             value=bool(self.last_used.get("royale_pt_seq_ref", False)))
         ttk.Checkbutton(_ptsq, text="Sequential reference",
                         variable=self.royale_pt_seq_ref_var).pack(side=tk.LEFT)
+        self.royale_pt_anchor_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_pt_anchor", True)))
+        ttk.Checkbutton(_ptsq, text="Anchor to original",
+                        variable=self.royale_pt_anchor_var).pack(side=tk.LEFT, padx=(14, 0))
+        tk.Label(_ptsq, text="Anchor str", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_pt_anchor_str_var = tk.StringVar(
+            value=self.last_used.get("royale_pt_anchor_str", "1.0"))
+        _ptast = ttk.Entry(_ptsq, textvariable=self.royale_pt_anchor_str_var, width=5)
+        _ptast.pack(side=tk.LEFT)
+        ToolTip(_ptast, "With 'Anchor to original' on, every frame also references the ORIGINAL image at this "
+                        "strength alongside the previous frame. The original re-injects clean identity/detail "
+                        "each frame, so the feedback chain can't drift (VAE degradation). 1.0 = full anchor.")
         tk.Label(ptrav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
-                             "(a feedback chain — the subject smoothly evolves through the prompt journey). "
-                             "Recommended: strength ~0.7, Max MP ~0.5.",
+                             "(a feedback chain — the subject smoothly evolves). Anchor to original keeps the "
+                             "pristine reference in every frame to stop drift. Recommended: strength ~0.7, "
+                             "Max MP ~0.5, anchor 1.0.",
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
-        self.royale_pt_ref_mp_var.trace_add("write", lambda *a: self._save_last_used_paths())
-        self.royale_pt_seq_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        for _v in (self.royale_pt_ref_mp_var, self.royale_pt_seq_ref_var,
+                   self.royale_pt_anchor_var, self.royale_pt_anchor_str_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
         tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
@@ -9881,6 +9914,33 @@ class LoRATrainerGUI:
         per run as well as per frame)."""
         self._royale_seq_counter = getattr(self, "_royale_seq_counter", 0) + 1
         return self._royale_seq_counter
+
+    def _royale_apply_travel_ref(self, st, p, i, prev_path):
+        """Set the reference(s) on a travel frame's SliderState.
+
+        Non-sequential: the selected reference on every frame.
+        Sequential: frame 0 uses the selected reference; later frames edit the
+        previous rendered frame. With 'Anchor to original', later frames ALSO
+        keep the original as a second reference (clean identity anchor) so the
+        feedback chain doesn't drift — original = ref, previous = ref2."""
+        import os
+        st.ref_megapixels = p.get("ref_mp", 0.2)
+        st.ref2_path = ""
+        orig = p.get("ref", "")
+        if p.get("sequential"):
+            if p.get("anchor") and i > 0 and prev_path:
+                # Dual reference: original (anchor) + previous frame (continuity).
+                st.ref_image_path = orig if (orig and os.path.exists(orig)) else ""
+                st.ref_strength = p.get("anchor_str", 1.0)
+                st.ref2_path = prev_path
+                st.ref2_strength = p.get("ref_strength", 1.0)
+            else:
+                frame_ref = prev_path if (i > 0 and prev_path) else orig
+                st.ref_image_path = frame_ref if (frame_ref and os.path.exists(frame_ref)) else ""
+                st.ref_strength = p.get("ref_strength", 1.0)
+        else:
+            st.ref_image_path = orig if (orig and os.path.exists(orig)) else ""
+            st.ref_strength = p.get("ref_strength", 1.0)
 
     def _royale_seq_tempfile(self, token, i, img):
         """Save a frame of a sequential-reference chain to a unique temp PNG and
@@ -10365,6 +10425,8 @@ class LoRATrainerGUI:
             ref_strength=self._royale_parse_ref_strength(self.royale_travel_ref_strength_var.get()),
             ref_mp=self._royale_parse_ref_mp(self.royale_travel_ref_mp_var.get()),
             sequential=bool(self.royale_travel_seq_ref_var.get()),
+            anchor=bool(self.royale_travel_anchor_var.get()),
+            anchor_str=self._royale_parse_ref_strength(self.royale_travel_anchor_str_var.get()),
             seq_token=self._royale_next_seq_token(),
             speed=self.royale_travel_speed_var.get(),
             pingpong=bool(self.royale_travel_loop_var.get()),
@@ -10400,13 +10462,7 @@ class LoRATrainerGUI:
                 st = SliderState.default_klein9b()
                 st.prompt = p["prompt"]; st.seed = p["seed_a"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
-                if p.get("sequential"):
-                    frame_ref = prev_path if (i > 0 and prev_path) else p["ref"]
-                else:
-                    frame_ref = p["ref"]
-                if frame_ref and os.path.exists(frame_ref):
-                    st.ref_image_path = frame_ref; st.ref_megapixels = p.get("ref_mp", 0.2)
-                    st.ref_strength = p.get("ref_strength", 1.0)
+                self._royale_apply_travel_ref(st, p, i, prev_path)
                 img = eng.generate_preview(st, seed_b=p["seed_b"], travel_t=t)
                 imgs.append(img.copy())
                 if p.get("sequential"):
@@ -10553,6 +10609,8 @@ class LoRATrainerGUI:
             ref_strength=self._royale_parse_ref_strength(self.royale_pt_ref_strength_var.get()),
             ref_mp=self._royale_parse_ref_mp(self.royale_pt_ref_mp_var.get()),
             sequential=bool(self.royale_pt_seq_ref_var.get()),
+            anchor=bool(self.royale_pt_anchor_var.get()),
+            anchor_str=self._royale_parse_ref_strength(self.royale_pt_anchor_str_var.get()),
             seq_token=self._royale_next_seq_token(),
             speed=self.royale_pt_speed_var.get(),
             pingpong=bool(self.royale_pt_loop_var.get()),
@@ -10592,14 +10650,7 @@ class LoRATrainerGUI:
                 st.prompt = p["base"]
                 st.seed = random.randint(0, 2**31 - 1) if p.get("vary_seed") else p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
-                if p.get("sequential"):
-                    frame_ref = prev_path if (i > 0 and prev_path) else p["ref"]
-                else:
-                    frame_ref = p["ref"]
-                if frame_ref and os.path.exists(frame_ref):
-                    st.ref_image_path = frame_ref
-                    st.ref_megapixels = p.get("ref_mp", 0.2)
-                    st.ref_strength = p.get("ref_strength", 1.0)
+                self._royale_apply_travel_ref(st, p, i, prev_path)
                 img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)
                 imgs.append(img.copy())
                 labels.append(pt.dominant_word(p["words"], t).upper())

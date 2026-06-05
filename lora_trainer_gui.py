@@ -350,10 +350,10 @@ BUILT_IN_PRESETS = {
 # anchor / journey / identity-lock), NOT a prompt system (seed travel uses the Setup
 # prompt). Reference is kept light (0.1–0.4) so the seeds can actually travel.
 SEED_TRAVEL_PRESETS = {
-    "Identity tour":     dict(ref_strength="0.25", ref_mp="0.2", sequential=False, waypoints="5"),
-    "Wild morph":        dict(ref_strength="0.1",  ref_mp="0.2", sequential=False, waypoints="6"),
-    "Subtle variations": dict(ref_strength="0.4",  ref_mp="0.2", sequential=False, waypoints="2"),
-    "Feedback dream":    dict(ref_strength="0.25", ref_mp="0.5", sequential=True,  waypoints="4"),
+    "Identity tour":     dict(ref_strength="0.25", ref_mp="1.0", sequential=False, waypoints="5"),
+    "Wild morph":        dict(ref_strength="0.1",  ref_mp="1.0", sequential=False, waypoints="6"),
+    "Subtle variations": dict(ref_strength="0.4",  ref_mp="1.0", sequential=False, waypoints="2"),
+    "Feedback dream":    dict(ref_strength="0.25", ref_mp="1.0", sequential=True,  waypoints="4"),
 }
 
 # Directory for dataset configurations

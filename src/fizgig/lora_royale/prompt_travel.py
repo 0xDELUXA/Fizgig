@@ -234,7 +234,7 @@ DIMENSION_NAMES = list(TEMPLATES.keys())
 # exact tested prompts; the rest mirror that pattern with a guessed anchor.
 
 _PT_COMMON = dict(interp="Slerp", drift="1.0", vary_seed=False,
-                  sequential=True, anchor=True, ref_strength="0.01", ref_mp="0.2")
+                  sequential=True, anchor=True, ref_strength="0.01", ref_mp="1.0")
 # Templates carry {subj} (subject noun phrase), {poss} (possessive pronoun) and
 # {hold} (the anchor word — "pose" for things that pose, "composition" for scenery),
 # all filled by the chosen Subject; {x} stays for the per-frame travel word.

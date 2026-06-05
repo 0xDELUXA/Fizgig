@@ -1146,6 +1146,8 @@ class LoRATrainerGUI:
             data["royale_travel_ref"] = self.royale_travel_ref_var.get()
             data["royale_travel_use_epoch_ref"] = bool(self.royale_travel_use_epoch_ref_var.get())
             data["royale_travel_ref_strength"] = self.royale_travel_ref_strength_var.get()
+            data["royale_travel_ref_mp"] = self.royale_travel_ref_mp_var.get()
+            data["royale_travel_seq_ref"] = bool(self.royale_travel_seq_ref_var.get())
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -1157,6 +1159,8 @@ class LoRATrainerGUI:
             data["royale_pt_use_epoch_ref"] = bool(self.royale_pt_use_epoch_ref_var.get())
             data["royale_pt_ref_strength"] = self.royale_pt_ref_strength_var.get()
             data["royale_pt_vary_seed"] = bool(self.royale_pt_vary_seed_var.get())
+            data["royale_pt_ref_mp"] = self.royale_pt_ref_mp_var.get()
+            data["royale_pt_seq_ref"] = bool(self.royale_pt_seq_ref_var.get())
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9468,9 +9472,25 @@ class LoRATrainerGUI:
         ToolTip(_trse, "How strongly the reference anchors the morph.\n"
                        "0.1–0.4 is the sweet range for seed travel — enough to hold the subject, loose "
                        "enough to let the seeds actually travel. 1.0 clamps too hard here, 0 = off.")
-        self.royale_travel_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
-        self.royale_travel_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
-        self.royale_travel_ref_strength_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        tk.Label(_tru, text="Max MP", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self.royale_travel_ref_mp_var = tk.StringVar(value=self.last_used.get("royale_travel_ref_mp", "0.2"))
+        _trmp = ttk.Entry(_tru, textvariable=self.royale_travel_ref_mp_var, width=5)
+        _trmp.pack(side=tk.LEFT)
+        ToolTip(_trmp, "Reference encode resolution cap (megapixels), 0.05–1.0.\n"
+                       "Higher carries more detail (useful for sequential reference) at a little more VRAM.")
+        _trsq = tk.Frame(trav, bg=_sbg); _trsq.pack(anchor=tk.W, pady=(0, 4))
+        self.royale_travel_seq_ref_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_travel_seq_ref", False)))
+        ttk.Checkbutton(_trsq, text="Sequential reference",
+                        variable=self.royale_travel_seq_ref_var).pack(side=tk.LEFT)
+        tk.Label(trav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
+                            "(a feedback chain — smoother, evolving). Recommended: strength ~0.7, Max MP ~0.5.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
+        for _v in (self.royale_travel_ref_var, self.royale_travel_use_epoch_ref_var,
+                   self.royale_travel_ref_strength_var, self.royale_travel_ref_mp_var,
+                   self.royale_travel_seq_ref_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_travel_toggle_ref_widgets()
 
         _trf = tk.Frame(trav, bg=_sbg); _trf.pack(anchor=tk.W, pady=(0, 6))
@@ -9566,6 +9586,24 @@ class LoRATrainerGUI:
                        "1.0 is the right default for prompt travel — this is the edit model working as "
                        "intended: the reference holds the subject at full strength while the prompt does "
                        "the editing. Lower only if you want the prompt to override the reference more. 0 = off.")
+        tk.Label(_ptu, text="Max MP", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self.royale_pt_ref_mp_var = tk.StringVar(value=self.last_used.get("royale_pt_ref_mp", "0.2"))
+        _ptmp = ttk.Entry(_ptu, textvariable=self.royale_pt_ref_mp_var, width=5)
+        _ptmp.pack(side=tk.LEFT)
+        ToolTip(_ptmp, "Reference encode resolution cap (megapixels), 0.05–1.0.\n"
+                       "Higher carries more detail (useful for sequential reference) at a little more VRAM.")
+        _ptsq = tk.Frame(ptrav, bg=_sbg); _ptsq.pack(anchor=tk.W, pady=(0, 4))
+        self.royale_pt_seq_ref_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_pt_seq_ref", False)))
+        ttk.Checkbutton(_ptsq, text="Sequential reference",
+                        variable=self.royale_pt_seq_ref_var).pack(side=tk.LEFT)
+        tk.Label(ptrav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
+                             "(a feedback chain — the subject smoothly evolves through the prompt journey). "
+                             "Recommended: strength ~0.7, Max MP ~0.5.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
+        self.royale_pt_ref_mp_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self.royale_pt_seq_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
 
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
         tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
@@ -9806,6 +9844,34 @@ class LoRATrainerGUI:
             return max(0.0, min(2.0, float(text)))
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _royale_parse_ref_mp(text, default=0.2):
+        """Parse a reference max-megapixels entry, clamped to [0.05, 1.0]."""
+        try:
+            return max(0.05, min(1.0, float(text)))
+        except (TypeError, ValueError):
+            return default
+
+    def _royale_next_seq_token(self):
+        """Monotonic token so each sequential-reference run gets its own temp
+        filenames (the engine ref cache is path-keyed, so paths must be unique
+        per run as well as per frame)."""
+        self._royale_seq_counter = getattr(self, "_royale_seq_counter", 0) + 1
+        return self._royale_seq_counter
+
+    def _royale_seq_tempfile(self, token, i, img):
+        """Save a frame of a sequential-reference chain to a unique temp PNG and
+        return its path (so the next frame can edit-condition on it). Unique per
+        (run token, frame index) so the engine's path-keyed ref cache re-encodes
+        each link instead of reusing a stale one."""
+        import tempfile
+        tmp = os.path.join(tempfile.gettempdir(), f"fizgig_royale_seq_{token}_{i}.png")
+        try:
+            img.save(tmp)
+            return tmp
+        except Exception:
+            return ""
 
     def _royale_scan(self):
         import sys
@@ -10275,6 +10341,9 @@ class LoRATrainerGUI:
             ref=self._royale_resolve_travel_ref(self.royale_travel_use_epoch_ref_var.get(),
                                                 self.royale_travel_ref_var.get()),
             ref_strength=self._royale_parse_ref_strength(self.royale_travel_ref_strength_var.get()),
+            ref_mp=self._royale_parse_ref_mp(self.royale_travel_ref_mp_var.get()),
+            sequential=bool(self.royale_travel_seq_ref_var.get()),
+            seq_token=self._royale_next_seq_token(),
             speed=self.royale_travel_speed_var.get(),
             pingpong=bool(self.royale_travel_loop_var.get()),
             brand=bool(self.royale_travel_wm_var.get()),
@@ -10301,6 +10370,7 @@ class LoRATrainerGUI:
                     eng.reset(); eng.load_primary(p["path"])
             n = p["frames"]
             imgs = []
+            prev_path = None
             for i in range(n):
                 t = i / float(n - 1)
                 self.master.after(0, lambda i=i: self.royale_travel_status_var.set(
@@ -10308,11 +10378,17 @@ class LoRATrainerGUI:
                 st = SliderState.default_klein9b()
                 st.prompt = p["prompt"]; st.seed = p["seed_a"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
-                if p["ref"] and os.path.exists(p["ref"]):
-                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2
+                if p.get("sequential"):
+                    frame_ref = prev_path if (i > 0 and prev_path) else p["ref"]
+                else:
+                    frame_ref = p["ref"]
+                if frame_ref and os.path.exists(frame_ref):
+                    st.ref_image_path = frame_ref; st.ref_megapixels = p.get("ref_mp", 0.2)
                     st.ref_strength = p.get("ref_strength", 1.0)
                 img = eng.generate_preview(st, seed_b=p["seed_b"], travel_t=t)
                 imgs.append(img.copy())
+                if p.get("sequential"):
+                    prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)
             self.master.after(0, lambda: self.royale_travel_status_var.set("Encoding clip…"))
             badge = f"EPOCH {p['label']}" if p["show_epoch"] else None
             max_size = None if p["fmt"] == "MP4" else 768
@@ -10424,6 +10500,9 @@ class LoRATrainerGUI:
             ref=self._royale_resolve_travel_ref(self.royale_pt_use_epoch_ref_var.get(),
                                                 self.royale_pt_ref_var.get()),
             ref_strength=self._royale_parse_ref_strength(self.royale_pt_ref_strength_var.get()),
+            ref_mp=self._royale_parse_ref_mp(self.royale_pt_ref_mp_var.get()),
+            sequential=bool(self.royale_pt_seq_ref_var.get()),
+            seq_token=self._royale_next_seq_token(),
             speed=self.royale_pt_speed_var.get(),
             pingpong=bool(self.royale_pt_loop_var.get()),
             brand=bool(self.royale_pt_wm_var.get()),
@@ -10452,6 +10531,7 @@ class LoRATrainerGUI:
             ctx_list, neg = eng.encode_travel_prompts(wp_prompts)
             n = p["frames"]
             imgs, labels = [], []
+            prev_path = None
             for i in range(n):
                 t = i / float(n - 1)
                 self.master.after(0, lambda i=i: self.royale_pt_status_var.set(
@@ -10461,12 +10541,19 @@ class LoRATrainerGUI:
                 st.prompt = p["base"]
                 st.seed = random.randint(0, 2**31 - 1) if p.get("vary_seed") else p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
-                if p["ref"] and os.path.exists(p["ref"]):
-                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2
+                if p.get("sequential"):
+                    frame_ref = prev_path if (i > 0 and prev_path) else p["ref"]
+                else:
+                    frame_ref = p["ref"]
+                if frame_ref and os.path.exists(frame_ref):
+                    st.ref_image_path = frame_ref
+                    st.ref_megapixels = p.get("ref_mp", 0.2)
                     st.ref_strength = p.get("ref_strength", 1.0)
                 img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)
                 imgs.append(img.copy())
                 labels.append(pt.dominant_word(p["words"], t).upper())
+                if p.get("sequential"):
+                    prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)
             self.master.after(0, lambda: self.royale_pt_status_var.set("Encoding clip…"))
             frame_labels = labels if p["word_badge"] else None
             max_size = None if p["fmt"] == "MP4" else 768

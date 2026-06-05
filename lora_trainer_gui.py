@@ -351,13 +351,13 @@ BUILT_IN_PRESETS = {
 # prompt). Reference is kept light (0.1–0.4) so the seeds can actually travel.
 SEED_TRAVEL_PRESETS = {
     "Identity tour":     dict(ref_strength="0.25", ref_mp="0.2", sequential=False,
-                              anchor=True,  anchor_str="1.0", waypoints="5", idlock=True),
+                              anchor=True,  anchor_str="1.0", waypoints="5"),
     "Wild morph":        dict(ref_strength="0.1",  ref_mp="0.2", sequential=False,
-                              anchor=False, anchor_str="1.0", waypoints="6", idlock=False),
+                              anchor=False, anchor_str="1.0", waypoints="6"),
     "Subtle variations": dict(ref_strength="0.4",  ref_mp="0.2", sequential=False,
-                              anchor=True,  anchor_str="1.0", waypoints="2", idlock=True),
+                              anchor=True,  anchor_str="1.0", waypoints="2"),
     "Feedback dream":    dict(ref_strength="0.25", ref_mp="0.5", sequential=True,
-                              anchor=True,  anchor_str="1.0", waypoints="4", idlock=True),
+                              anchor=True,  anchor_str="1.0", waypoints="4"),
 }
 
 # Directory for dataset configurations
@@ -1165,7 +1165,6 @@ class LoRATrainerGUI:
             data["royale_travel_anchor"] = bool(self.royale_travel_anchor_var.get())
             data["royale_travel_anchor_str"] = self.royale_travel_anchor_str_var.get()
             data["royale_travel_waypoints"] = self.royale_travel_waypoints_var.get()
-            data["royale_travel_idlock"] = bool(self.royale_travel_idlock_var.get())
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -9552,15 +9551,6 @@ class LoRATrainerGUI:
         ToolTip(_trast, "With 'Anchor to original' on, every frame also references the ORIGINAL image at this "
                         "strength alongside the previous frame — re-injects clean detail each frame so the "
                         "feedback chain can't drift. 1.0 = full anchor.")
-        self.royale_travel_idlock_var = tk.BooleanVar(
-            value=bool(self.last_used.get("royale_travel_idlock", False)))
-        _tidl = ttk.Checkbutton(_trsq, text="Lock identity (image 1)",
-                                variable=self.royale_travel_idlock_var)
-        _tidl.pack(side=tk.LEFT, padx=(16, 0))
-        ToolTip(_tidl,
-                "Appends 'keep the face and identity from image 1' to the prompt, pinning the subject "
-                "while the seeds morph everything else around them. image 1 is the original reference "
-                "(with Anchor on) or your reference image. Needs a reference set to bite.")
         tk.Label(trav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
                             "(a feedback chain — smoother, evolving). Anchor to original keeps the pristine "
                             "reference in every frame to stop drift. Recommended: strength ~0.7, Max MP ~0.5, "
@@ -9570,7 +9560,7 @@ class LoRATrainerGUI:
         for _v in (self.royale_travel_ref_var, self.royale_travel_use_epoch_ref_var,
                    self.royale_travel_ref_strength_var, self.royale_travel_ref_mp_var,
                    self.royale_travel_seq_ref_var, self.royale_travel_anchor_var,
-                   self.royale_travel_anchor_str_var, self.royale_travel_idlock_var):
+                   self.royale_travel_anchor_str_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_travel_toggle_ref_widgets()
 
@@ -10626,7 +10616,6 @@ class LoRATrainerGUI:
         self.royale_travel_anchor_var.set(bool(preset["anchor"]))
         self.royale_travel_anchor_str_var.set(preset["anchor_str"])
         self.royale_travel_waypoints_var.set(preset["waypoints"])
-        self.royale_travel_idlock_var.set(bool(preset["idlock"]))
 
     # ----- Seed travel: morph one epoch between two seeds (slerp) -----
     def _royale_seed_travel(self):
@@ -10640,8 +10629,6 @@ class LoRATrainerGUI:
         if not prompt:
             messagebox.showinfo("LoRA Royale", "Enter a prompt (include your trigger word).")
             return
-        if self.royale_travel_idlock_var.get():
-            prompt = prompt.rstrip().rstrip(".") + ". keep the face and identity from image 1."
         try:
             seed_a = int(self.royale_travel_seed_a_var.get())
             seed_b = int(self.royale_travel_seed_b_var.get())

@@ -350,14 +350,10 @@ BUILT_IN_PRESETS = {
 # anchor / journey / identity-lock), NOT a prompt system (seed travel uses the Setup
 # prompt). Reference is kept light (0.1–0.4) so the seeds can actually travel.
 SEED_TRAVEL_PRESETS = {
-    "Identity tour":     dict(ref_strength="0.25", ref_mp="0.2", sequential=False,
-                              anchor=True,  anchor_str="1.0", waypoints="5"),
-    "Wild morph":        dict(ref_strength="0.1",  ref_mp="0.2", sequential=False,
-                              anchor=False, anchor_str="1.0", waypoints="6"),
-    "Subtle variations": dict(ref_strength="0.4",  ref_mp="0.2", sequential=False,
-                              anchor=True,  anchor_str="1.0", waypoints="2"),
-    "Feedback dream":    dict(ref_strength="0.25", ref_mp="0.5", sequential=True,
-                              anchor=True,  anchor_str="1.0", waypoints="4"),
+    "Identity tour":     dict(ref_strength="0.25", ref_mp="0.2", sequential=False, waypoints="5"),
+    "Wild morph":        dict(ref_strength="0.1",  ref_mp="0.2", sequential=False, waypoints="6"),
+    "Subtle variations": dict(ref_strength="0.4",  ref_mp="0.2", sequential=False, waypoints="2"),
+    "Feedback dream":    dict(ref_strength="0.25", ref_mp="0.5", sequential=True,  waypoints="4"),
 }
 
 # Directory for dataset configurations
@@ -1162,8 +1158,6 @@ class LoRATrainerGUI:
             data["royale_travel_ref_strength"] = self.royale_travel_ref_strength_var.get()
             data["royale_travel_ref_mp"] = self.royale_travel_ref_mp_var.get()
             data["royale_travel_seq_ref"] = bool(self.royale_travel_seq_ref_var.get())
-            data["royale_travel_anchor"] = bool(self.royale_travel_anchor_var.get())
-            data["royale_travel_anchor_str"] = self.royale_travel_anchor_str_var.get()
             data["royale_travel_waypoints"] = self.royale_travel_waypoints_var.get()
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
@@ -9539,28 +9533,14 @@ class LoRATrainerGUI:
             value=bool(self.last_used.get("royale_travel_seq_ref", False)))
         ttk.Checkbutton(_trsq, text="Sequential reference",
                         variable=self.royale_travel_seq_ref_var).pack(side=tk.LEFT)
-        self.royale_travel_anchor_var = tk.BooleanVar(
-            value=bool(self.last_used.get("royale_travel_anchor", True)))
-        ttk.Checkbutton(_trsq, text="Anchor to original",
-                        variable=self.royale_travel_anchor_var).pack(side=tk.LEFT, padx=(14, 0))
-        tk.Label(_trsq, text="Anchor str", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
-        self.royale_travel_anchor_str_var = tk.StringVar(
-            value=self.last_used.get("royale_travel_anchor_str", "1.0"))
-        _trast = ttk.Entry(_trsq, textvariable=self.royale_travel_anchor_str_var, width=5)
-        _trast.pack(side=tk.LEFT)
-        ToolTip(_trast, "With 'Anchor to original' on, every frame also references the ORIGINAL image at this "
-                        "strength alongside the previous frame — re-injects clean detail each frame so the "
-                        "feedback chain can't drift. 1.0 = full anchor.")
         tk.Label(trav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
-                            "(a feedback chain — smoother, evolving). Anchor to original keeps the pristine "
-                            "reference in every frame to stop drift. Recommended: strength ~0.7, Max MP ~0.5, "
-                            "anchor 1.0.",
+                            "(a feedback chain — the morph compounds and evolves, but can drift over a long run). "
+                            "Off = every frame uses the same reference: the cleaner, more predictable seed morph.",
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
         for _v in (self.royale_travel_ref_var, self.royale_travel_use_epoch_ref_var,
                    self.royale_travel_ref_strength_var, self.royale_travel_ref_mp_var,
-                   self.royale_travel_seq_ref_var, self.royale_travel_anchor_var,
-                   self.royale_travel_anchor_str_var):
+                   self.royale_travel_seq_ref_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_travel_toggle_ref_widgets()
 
@@ -10613,8 +10593,6 @@ class LoRATrainerGUI:
         self.royale_travel_ref_strength_var.set(preset["ref_strength"])
         self.royale_travel_ref_mp_var.set(preset["ref_mp"])
         self.royale_travel_seq_ref_var.set(bool(preset["sequential"]))
-        self.royale_travel_anchor_var.set(bool(preset["anchor"]))
-        self.royale_travel_anchor_str_var.set(preset["anchor_str"])
         self.royale_travel_waypoints_var.set(preset["waypoints"])
 
     # ----- Seed travel: morph one epoch between two seeds (slerp) -----
@@ -10677,8 +10655,7 @@ class LoRATrainerGUI:
             ref_strength=self._royale_parse_ref_strength(self.royale_travel_ref_strength_var.get()),
             ref_mp=self._royale_parse_ref_mp(self.royale_travel_ref_mp_var.get()),
             sequential=bool(self.royale_travel_seq_ref_var.get()),
-            anchor=bool(self.royale_travel_anchor_var.get()),
-            anchor_str=self._royale_parse_ref_strength(self.royale_travel_anchor_str_var.get()),
+            anchor=False,
             seq_token=self._royale_next_seq_token(),
             speed=self.royale_travel_speed_var.get(),
             pingpong=bool(self.royale_travel_loop_var.get()),

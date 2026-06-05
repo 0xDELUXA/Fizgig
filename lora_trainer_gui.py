@@ -1161,6 +1161,8 @@ class LoRATrainerGUI:
             data["royale_pt_vary_seed"] = bool(self.royale_pt_vary_seed_var.get())
             data["royale_pt_ref_mp"] = self.royale_pt_ref_mp_var.get()
             data["royale_pt_seq_ref"] = bool(self.royale_pt_seq_ref_var.get())
+            data["royale_pt_start"] = self.royale_pt_start_var.get()
+            data["royale_pt_end"] = self.royale_pt_end_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9627,6 +9629,24 @@ class LoRATrainerGUI:
         tk.Label(_pcr, text="(comma-separated, used when Travel = Custom)", bg=_sbg,
                  fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
 
+        _prg = tk.Frame(ptrav, bg=_sbg); _prg.pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(_prg, text="Start at", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 4))
+        self.royale_pt_start_var = tk.StringVar(value=self.last_used.get("royale_pt_start", ""))
+        self._royale_pt_start_combo = ttk.Combobox(_prg, textvariable=self.royale_pt_start_var,
+                                                    state="readonly", width=30)
+        self._royale_pt_start_combo.pack(side=tk.LEFT)
+        tk.Label(_prg, text="End at", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 4))
+        self.royale_pt_end_var = tk.StringVar(value=self.last_used.get("royale_pt_end", ""))
+        self._royale_pt_end_combo = ttk.Combobox(_prg, textvariable=self.royale_pt_end_var,
+                                                  state="readonly", width=30)
+        self._royale_pt_end_combo.pack(side=tk.LEFT)
+        tk.Label(ptrav, text="Optional: pick which waypoint to start and end on — e.g. start Age at the subject's "
+                             "current age so it matches the reference, then travel onward (the loop ping-pongs back).",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
+        for _v in (self.royale_pt_start_var, self.royale_pt_end_var):
+            _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
+
         self.royale_pt_words_var = tk.StringVar(value="")
         tk.Label(ptrav, textvariable=self.royale_pt_words_var, font=(FONT_FAMILY, 9, "italic"),
                  fg=COLORS["accent"], bg=_sbg, wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
@@ -9678,12 +9698,14 @@ class LoRATrainerGUI:
         tk.Label(_pb, textvariable=self.royale_pt_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
         for _v in (self.royale_pt_dim_var, self.royale_pt_custom_var):
-            _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
+            _v.trace_add("write", lambda *a: (self._royale_pt_refresh_range(),
+                                              self._royale_pt_refresh_words(), self._save_last_used_paths()))
         for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var,
                    self.royale_pt_w_var, self.royale_pt_h_var, self.royale_pt_ref_strength_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_vary_seed_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self._royale_pt_refresh_range()
         self._royale_pt_refresh_words()
         self._royale_pt_toggle_ref_widgets()
 
@@ -10419,7 +10441,7 @@ class LoRATrainerGUI:
 
     # ----- Prompt travel: morph one epoch through a prompt dimension -----
     def _royale_pt_words(self):
-        """Resolve the ordered waypoint words for the current dimension/custom."""
+        """Resolve the full ordered waypoint list for the current dimension/custom."""
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.lora_royale import prompt_travel as pt
@@ -10427,6 +10449,33 @@ class LoRATrainerGUI:
         if dim == "Custom":
             return pt.parse_custom(self.royale_pt_custom_var.get())
         return list(pt.TEMPLATES.get(dim, []))
+
+    def _royale_pt_refresh_range(self):
+        """Populate the Start/End waypoint dropdowns for the current dimension,
+        resetting the selection to the full range when it no longer applies."""
+        words = self._royale_pt_words()
+        if hasattr(self, "_royale_pt_start_combo"):
+            self._royale_pt_start_combo["values"] = words
+            self._royale_pt_end_combo["values"] = words
+        if not words:
+            return
+        if self.royale_pt_start_var.get() not in words:
+            self.royale_pt_start_var.set(words[0])
+        if self.royale_pt_end_var.get() not in words:
+            self.royale_pt_end_var.set(words[-1])
+
+    def _royale_pt_ranged_words(self):
+        """The waypoint sub-sequence the travel will actually cover, honoring the
+        Start/End selection (reversed if Start sits after End, e.g. de-aging)."""
+        words = self._royale_pt_words()
+        if len(words) < 2:
+            return words
+        s, e = self.royale_pt_start_var.get(), self.royale_pt_end_var.get()
+        si = words.index(s) if s in words else 0
+        ei = words.index(e) if e in words else len(words) - 1
+        if si <= ei:
+            return words[si:ei + 1]
+        return list(reversed(words[ei:si + 1]))
 
     def _royale_pt_insert_slot(self):
         """Insert the {x} travel slot at the cursor in the prompt entry (append
@@ -10441,9 +10490,11 @@ class LoRATrainerGUI:
         entry.focus_set()
 
     def _royale_pt_refresh_words(self):
-        words = self._royale_pt_words()
-        if words:
+        words = self._royale_pt_ranged_words()
+        if words and len(words) >= 2:
             self.royale_pt_words_var.set("Waypoints:  " + "  →  ".join(words))
+        elif words:
+            self.royale_pt_words_var.set("Pick a Start/End that span at least two waypoints.")
         else:
             self.royale_pt_words_var.set("Add at least two comma-separated custom words to travel between.")
 
@@ -10454,7 +10505,7 @@ class LoRATrainerGUI:
         if path is None or not os.path.exists(path):
             messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to prompt-travel.")
             return
-        words = self._royale_pt_words()
+        words = self._royale_pt_ranged_words()
         if len(words) < 2:
             messagebox.showinfo("LoRA Royale", "Prompt travel needs at least two waypoints "
                                                "(pick a Travel dimension, or enter 2+ Custom words).")

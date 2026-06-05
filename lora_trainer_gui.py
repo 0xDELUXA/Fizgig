@@ -1146,6 +1146,9 @@ class LoRATrainerGUI:
         # Remember the last LoRA Royale checkpoint folder + render inputs
         if hasattr(self, 'royale_folder_var'):
             data["royale_folder"] = self.royale_folder_var.get()
+        if hasattr(self, 'royale_mode_var'):
+            data["royale_mode"] = self.royale_mode_var.get()
+            data["royale_single"] = self.royale_single_var.get()
         if hasattr(self, 'royale_prompt_var'):
             data["royale_prompt"] = self.royale_prompt_var.get()
             data["royale_seed"] = self.royale_seed_var.get()
@@ -9342,17 +9345,41 @@ class LoRATrainerGUI:
         setup.columnconfigure(1, weight=1)
         _sbg = COLORS["bg_surface"]
         r = 0
-        ttk.Label(setup, text="Checkpoint folder:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        # Source: a training folder (compare epochs) or a single LoRA file.
+        ttk.Label(setup, text="Source:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.royale_mode_var = tk.StringVar(value=self.last_used.get("royale_mode", "folder"))
+        _mr = tk.Frame(setup, bg=_sbg); _mr.grid(row=r, column=1, columnspan=2, sticky=tk.W, pady=4)
+        ttk.Radiobutton(_mr, text="Training folder (compare epochs)", value="folder",
+                        variable=self.royale_mode_var, command=self._royale_apply_mode).pack(side=tk.LEFT)
+        ttk.Radiobutton(_mr, text="Single LoRA", value="single",
+                        variable=self.royale_mode_var, command=self._royale_apply_mode).pack(side=tk.LEFT, padx=(14, 0))
+        r += 1
+
+        self._royale_folder_lbl = ttk.Label(setup, text="Checkpoint folder:")
+        self._royale_folder_lbl.grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.royale_folder_var = tk.StringVar(
             value=self.last_used.get("royale_folder", "") or self.settings.get("LORA_OUTPUT_DIR", ""))
-        _ff = tk.Frame(setup, bg=_sbg); _ff.grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
-        ttk.Entry(_ff, textvariable=self.royale_folder_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(_ff, text="Browse…", command=self._royale_browse_folder).pack(side=tk.LEFT, padx=(6, 0))
+        self._royale_folder_row = tk.Frame(setup, bg=_sbg)
+        self._royale_folder_row.grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        ttk.Entry(self._royale_folder_row, textvariable=self.royale_folder_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(self._royale_folder_row, text="Browse…", command=self._royale_browse_folder).pack(side=tk.LEFT, padx=(6, 0))
         r += 1
+
+        self._royale_single_lbl = ttk.Label(setup, text="LoRA file:")
+        self._royale_single_lbl.grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.royale_single_var = tk.StringVar(value=self.last_used.get("royale_single", ""))
+        self._royale_single_row = tk.Frame(setup, bg=_sbg)
+        self._royale_single_row.grid(row=r, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        ttk.Entry(self._royale_single_row, textvariable=self.royale_single_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(self._royale_single_row, text="Browse…", command=self._royale_browse_single).pack(side=tk.LEFT, padx=(6, 0))
+        r += 1
+
         self.royale_scan_var = tk.StringVar(value="")
-        tk.Label(setup, textvariable=self.royale_scan_var, font=(FONT_FAMILY, 9, "italic"),
-                 fg=COLORS["accent"], bg=_sbg).grid(row=r, column=1, columnspan=2, sticky=tk.W)
+        self._royale_scan_lbl = tk.Label(setup, textvariable=self.royale_scan_var, font=(FONT_FAMILY, 9, "italic"),
+                                         fg=COLORS["accent"], bg=_sbg)
+        self._royale_scan_lbl.grid(row=r, column=1, columnspan=2, sticky=tk.W)
         self.royale_folder_var.trace_add("write", lambda *a: (self._royale_scan(), self._save_last_used_paths()))
+        self.royale_single_var.trace_add("write", lambda *a: self._save_last_used_paths())
         r += 1
 
         ttk.Label(setup, text="Prompt:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
@@ -9399,6 +9426,7 @@ class LoRATrainerGUI:
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
         _br = tk.Frame(setup, bg=_sbg); _br.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        self._royale_render_row = _br
         self._royale_render_btn = tk.Button(_br, text="Render epochs", font=(FONT_FAMILY, 11, "bold"),
                                             fg="#FFFFFF", bg="#2E8B57", activeforeground="#FFFFFF",
                                             activebackground="#256F46", relief="flat", bd=0, padx=24, pady=6,
@@ -10006,11 +10034,12 @@ class LoRATrainerGUI:
         tk.Label(_pbr, textvariable=self.royale_promote_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
-        # Card order: Export morph -> All epochs -> Likeness -> Seed travel -> Prompt travel ->
-        # LoRA strength travel -> Promote. (Travel cards built earlier; repack into place.)
-        trav.master.master.pack(before=promote.master.master)
-        ptrav.master.master.pack(before=promote.master.master)
-        ltrav.master.master.pack(before=promote.master.master)
+        # Final display order. _royale_apply_mode packs these (skipping the folder-only
+        # cards in Single-LoRA mode), so this list IS the canonical order.
+        self._royale_cards_in_order = [setup, cf, exp, grid_card, like, trav, ptrav, ltrav, promote]
+        # Cards that only make sense with a folder of epochs (hidden in Single-LoRA mode).
+        self._royale_folder_only_cards = {cf, exp, grid_card, like, promote}
+        self._royale_apply_mode()
 
         # Scan the pre-filled output folder so the count shows on first open.
         try:
@@ -10024,6 +10053,39 @@ class LoRATrainerGUI:
                                     initialdir=self.royale_folder_var.get() or self.settings.get("LORA_OUTPUT_DIR", ""))
         if d:
             self.royale_folder_var.set(d)
+
+    def _royale_browse_single(self):
+        from tkinter import filedialog
+        cur = self.royale_single_var.get()
+        init = os.path.dirname(cur) if cur else self.settings.get("LORA_OUTPUT_DIR", "")
+        p = filedialog.askopenfilename(title="Select a LoRA .safetensors", initialdir=init,
+                                       filetypes=[("Safetensors", "*.safetensors"), ("All files", "*.*")])
+        if p:
+            self.royale_single_var.set(p)
+
+    def _royale_apply_mode(self, *_):
+        """Show the folder picker + epoch-comparison cards (Crossfade, Export, All
+        epochs, Likeness, Promote) in folder mode; in Single-LoRA mode swap to the
+        single-file picker and hide all of those, leaving just the travel/export tools."""
+        single = (self.royale_mode_var.get() == "single")
+        if single:
+            for w in (self._royale_folder_lbl, self._royale_folder_row,
+                      self._royale_scan_lbl, self._royale_render_row):
+                w.grid_remove()
+            self._royale_single_lbl.grid(); self._royale_single_row.grid()
+        else:
+            self._royale_single_lbl.grid_remove(); self._royale_single_row.grid_remove()
+            for w in (self._royale_folder_lbl, self._royale_folder_row,
+                      self._royale_scan_lbl, self._royale_render_row):
+                w.grid()
+        # Re-pack the cards in canonical order, skipping folder-only ones when single.
+        for content in self._royale_cards_in_order:
+            content.master.master.pack_forget()
+        for content in self._royale_cards_in_order:
+            if single and content in self._royale_folder_only_cards:
+                continue
+            content.master.master.pack(fill=tk.X, padx=36, pady=(0, 16))
+        self._save_last_used_paths()
 
     def _royale_browse_ref(self):
         from tkinter import filedialog
@@ -10558,8 +10620,13 @@ class LoRATrainerGUI:
                 break
 
     def _royale_current_epoch(self):
-        """(label, path) for the epoch the crossfade is currently parked on
-        (rounded to the nearest rendered epoch), or (None, None)."""
+        """(label, path) for the LoRA the travel tools should use. In Single-LoRA mode
+        that's the chosen file; otherwise the epoch the crossfade is parked on."""
+        if getattr(self, "royale_mode_var", None) is not None and self.royale_mode_var.get() == "single":
+            p = self.royale_single_var.get().strip()
+            if p and os.path.exists(p):
+                return os.path.splitext(os.path.basename(p))[0], p
+            return None, None
         if not self._royale_images:
             return None, None
         idx = int(round(float(self.royale_scrub_var.get())))
@@ -10706,7 +10773,8 @@ class LoRATrainerGUI:
             return
         label, path = self._royale_current_epoch()
         if path is None or not os.path.exists(path):
-            messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to seed-travel.")
+            messagebox.showinfo("LoRA Royale", "Pick a LoRA file (Single-LoRA mode), or render epochs and slide "
+                                               "to the one you want (Folder mode), then seed-travel.")
             return
         prompt = self.royale_prompt_var.get().strip()
         if not prompt:
@@ -10817,7 +10885,8 @@ class LoRATrainerGUI:
             return
         label, path = self._royale_current_epoch()
         if path is None or not os.path.exists(path):
-            messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to strength-travel.")
+            messagebox.showinfo("LoRA Royale", "Pick a LoRA file (Single-LoRA mode), or render epochs and slide "
+                                               "to the one you want (Folder mode), then strength-travel.")
             return
         prompt = self.royale_prompt_var.get().strip()
         if not prompt:
@@ -11107,7 +11176,8 @@ class LoRATrainerGUI:
             return
         label, path = self._royale_current_epoch()
         if path is None or not os.path.exists(path):
-            messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to prompt-travel.")
+            messagebox.showinfo("LoRA Royale", "Pick a LoRA file (Single-LoRA mode), or render epochs and slide "
+                                               "to the one you want (Folder mode), then prompt-travel.")
             return
         words = self._royale_pt_ranged_words()
         if len(words) < 2:

@@ -964,6 +964,22 @@ class LoRATrainerGUI:
             except Exception:
                 pass
 
+    def _royale_is_busy(self):
+        """True while any LoRA Royale work is in flight (epoch render / seed / prompt /
+        strength travel / morph export / likeness scoring)."""
+        return any(getattr(self, f, False) for f in (
+            '_royale_rendering', '_royale_traveling', '_royale_pt_running',
+            '_royale_lora_running', '_royale_exporting', '_royale_scoring'))
+
+    def _is_render_busy(self):
+        """In-process GPU render on a tab that unloads its engine on switch (Repair
+        Studio / Explorer / Royale). Switching tabs here would reset a busy engine and
+        hang the app — used to lock tab switching. Excludes the training subprocess
+        (separate process; switching during a run is fine)."""
+        return (getattr(self, '_repair_preview_in_flight', False)
+                or getattr(self, '_explorer_generating', False)
+                or self._royale_is_busy())
+
     def _is_any_busy(self):
         """Return True if any background work is in progress."""
         if self.current_process is not None:
@@ -980,11 +996,7 @@ class LoRATrainerGUI:
             return True
         if getattr(self, '_explorer_generating', False):
             return True
-        # LoRA Royale: epoch render / seed travel / prompt travel / strength travel /
-        # morph export / likeness scoring.
-        if any(getattr(self, f, False) for f in (
-                '_royale_rendering', '_royale_traveling', '_royale_pt_running',
-                '_royale_lora_running', '_royale_exporting', '_royale_scoring')):
+        if self._royale_is_busy():
             return True
         # Profiler running (button disabled while active)
         if hasattr(self, 'profiler_run_btn'):
@@ -1006,6 +1018,17 @@ class LoRATrainerGUI:
         """Poll busy state and redraw the IDLE/BUSY 'studio light': a lit circle
         with a soft glow + all-caps word + a matching-colour frame, all in the
         status colour (green idle / red busy)."""
+        # Lock tab switching during an in-process render — switching can unload a busy
+        # engine and hang the app. (Training is a subprocess, so it doesn't lock.)
+        try:
+            render_busy = self._is_render_busy()
+            if render_busy != getattr(self, "_tabs_locked", None):
+                self._tabs_locked = render_busy
+                cur = self.notebook.select()
+                for tid in self.notebook.tabs():
+                    self.notebook.tab(tid, state=("disabled" if (render_busy and tid != cur) else "normal"))
+        except Exception:
+            pass
         try:
             busy = self._is_any_busy()
             color = COLORS["error"] if busy else COLORS["success"]
@@ -1094,12 +1117,16 @@ class LoRATrainerGUI:
                 self.refresh_caption_images()
                 self.caption_images_loaded = True
 
-        # When leaving Repair Studio / Explorer / Royale, unload pipeline to free VRAM
-        if tab_text != "Repair Studio":
+        # When leaving Repair Studio / Explorer / Royale, unload pipeline to free VRAM —
+        # but NEVER unload an engine that's mid-render on a worker thread (resetting it
+        # under the worker hard-hangs the app). Leave it loaded; it frees on a later
+        # idle switch. Tab switching is also locked while rendering (see status poll),
+        # so this is a belt-and-suspenders guard.
+        if tab_text != "Repair Studio" and not getattr(self, '_repair_preview_in_flight', False):
             self._unload_repair_studio_models()
-        if tab_text != "LoRA the Explorer":
+        if tab_text != "LoRA the Explorer" and not getattr(self, '_explorer_generating', False):
             self._unload_explorer_models()
-        if tab_text != "LoRA Royale":
+        if tab_text != "LoRA Royale" and not self._royale_is_busy():
             self._royale_unload()
 
     def remove_focus(self, event):

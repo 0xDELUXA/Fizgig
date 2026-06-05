@@ -10126,8 +10126,10 @@ class LoRATrainerGUI:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.lora_royale import export as rexport
         try:
+            # MP4 exports at the actual generated resolution; GIF stays capped at 768 (file size).
+            max_size = None if p["fmt"] == "MP4" else 768
             frames = rexport.build_frames(p["images"], speed=p["speed"], pingpong=p["pingpong"],
-                                          brand=p["brand"], show_epoch=p["show_epoch"])
+                                          brand=p["brand"], show_epoch=p["show_epoch"], max_size=max_size)
             if not frames:
                 raise RuntimeError("No frames were produced.")
             if p["fmt"] == "MP4":
@@ -10252,8 +10254,9 @@ class LoRATrainerGUI:
                 imgs.append(img.copy())
             self.master.after(0, lambda: self.royale_travel_status_var.set("Encoding clip…"))
             badge = f"EPOCH {p['label']}" if p["show_epoch"] else None
+            max_size = None if p["fmt"] == "MP4" else 768
             frames = rexport.frames_from_sequence(imgs, pingpong=p["pingpong"],
-                                                  brand=p["brand"], label=badge)
+                                                  brand=p["brand"], label=badge, max_size=max_size)
             if p["fmt"] == "MP4":
                 rexport.write_mp4(frames, p["out"], speed=p["speed"])
             else:
@@ -10391,8 +10394,9 @@ class LoRATrainerGUI:
                 labels.append(pt.dominant_word(p["words"], t).upper())
             self.master.after(0, lambda: self.royale_pt_status_var.set("Encoding clip…"))
             frame_labels = labels if p["word_badge"] else None
+            max_size = None if p["fmt"] == "MP4" else 768
             frames = rexport.frames_from_sequence(imgs, pingpong=p["pingpong"],
-                                                  brand=p["brand"], labels=frame_labels)
+                                                  brand=p["brand"], labels=frame_labels, max_size=max_size)
             if p["fmt"] == "MP4":
                 rexport.write_mp4(frames, p["out"], speed=p["speed"])
             else:

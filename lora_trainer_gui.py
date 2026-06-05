@@ -1169,6 +1169,7 @@ class LoRATrainerGUI:
             data["royale_pt_end"] = self.royale_pt_end_var.get()
             data["royale_pt_interp"] = self.royale_pt_interp_var.get()
             data["royale_pt_drift"] = self.royale_pt_drift_var.get()
+            data["royale_pt_subject"] = self.royale_pt_subject_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9580,16 +9581,26 @@ class LoRATrainerGUI:
         tk.Label(_pps, text="Preset", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_preset_var = tk.StringVar(value="")
         _ppcb = ttk.Combobox(_pps, textvariable=self.royale_pt_preset_var,
-                             values=list(_ptlib.PRESET_NAMES), state="readonly", width=22)
+                             values=list(_ptlib.PRESET_NAMES), state="readonly", width=18)
         _ppcb.pack(side=tk.LEFT)
         _ppcb.bind("<<ComboboxSelected>>", lambda e: self._royale_pt_apply_preset())
         ToolTip(_ppcb,
                 "One-click starting points tuned from real runs. Each fills the whole card —\n"
-                "dimension, references, seed/drift, interpolation — and drops a prompt into the\n"
-                "box for you to edit (change 'a woman' to your subject). image 1 = your original\n"
-                "reference, image 2 = the previous frame; the prompt steers them by index.\n"
-                "Age morphs the face (low anchor); Era and the world/lighting presets hold the\n"
-                "person (full anchor) while the scene changes.")
+                "dimension, references, seed/drift, interpolation — and builds a prompt you can\n"
+                "edit. image 1 = your original reference, image 2 = the previous frame; the\n"
+                "prompt steers them by index. Age morphs the face (low anchor); Era and the\n"
+                "world/lighting presets hold the person (full anchor) while the scene changes.")
+        tk.Label(_pps, text="Subject", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_pt_subject_var = tk.StringVar(
+            value=self.last_used.get("royale_pt_subject", "Woman"))
+        _pscb = ttk.Combobox(_pps, textvariable=self.royale_pt_subject_var,
+                             values=list(_ptlib.SUBJECT_LABELS), state="readonly", width=12)
+        _pscb.pack(side=tk.LEFT)
+        _pscb.bind("<<ComboboxSelected>>", lambda e: self._royale_pt_apply_subject())
+        ToolTip(_pscb,
+                "Who/what the preset is about — fills the subject in the prompt (and the matching\n"
+                "pronoun, so 'change her/his/its age' stays correct). Picking a preset jumps this\n"
+                "to a sensible default (Age → Female); change it any time, then fine-tune the box.")
 
         _pp = tk.Frame(ptrav, bg=_sbg); _pp.pack(fill=tk.X, pady=(0, 4))
         tk.Label(_pp, text="Prompt", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
@@ -9923,18 +9934,22 @@ class LoRATrainerGUI:
                                         self._royale_pt_ref_clear,
                                         bool(self.royale_pt_use_epoch_ref_var.get()))
 
-    def _royale_pt_apply_preset(self):
-        """Fill the Prompt-travel card from a built-in preset. The prompt lands in the
-        editable box (user swaps the subject); all the reference/seed/interp knobs are
-        set to the preset's tuned values."""
+    def _royale_pt_current_preset(self):
         import sys, os
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.lora_royale import prompt_travel as pt
-        name = self.royale_pt_preset_var.get()
-        preset = pt.PRESETS_BY_NAME.get(name)
+        return pt, pt.PRESETS_BY_NAME.get(self.royale_pt_preset_var.get())
+
+    def _royale_pt_apply_preset(self):
+        """Fill the Prompt-travel card from a built-in preset. Jumps Subject to the
+        preset's sensible default (e.g. Age → Female), composes the prompt into the
+        editable box, and sets all the reference/seed/interp knobs to tuned values."""
+        pt, preset = self._royale_pt_current_preset()
         if not preset:
             return
-        self.royale_pt_prompt_var.set(preset["prompt"])
+        self.royale_pt_subject_var.set(preset.get("subject", "Woman"))
+        self.royale_pt_prompt_var.set(
+            pt.fill_subject(preset["prompt"], self.royale_pt_subject_var.get()))
         self.royale_pt_dim_var.set(preset["dim"])
         self.royale_pt_interp_var.set(preset["interp"])
         self.royale_pt_drift_var.set(preset["drift"])
@@ -9948,6 +9963,16 @@ class LoRATrainerGUI:
         self._royale_pt_refresh_range()
         self._royale_pt_refresh_words()
         self._royale_pt_sync_seed_widgets()
+
+    def _royale_pt_apply_subject(self):
+        """Subject changed — re-compose only the prompt text from the selected preset's
+        template (knobs untouched). No-op if no preset is selected yet."""
+        pt, preset = self._royale_pt_current_preset()
+        self._save_last_used_paths()
+        if not preset:
+            return
+        self.royale_pt_prompt_var.set(
+            pt.fill_subject(preset["prompt"], self.royale_pt_subject_var.get()))
 
     def _royale_pt_sync_seed_widgets(self):
         """'Seed drift' only applies while 'Vary seed' is OFF — it's the smooth

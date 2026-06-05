@@ -235,30 +235,83 @@ DIMENSION_NAMES = list(TEMPLATES.keys())
 
 _PT_COMMON = dict(interp="Slerp", drift="1.0", vary_seed=False,
                   sequential=True, anchor=True, ref_strength="0.01", ref_mp="0.2")
-_PT_PREFIX = "keep the pose from image 1. keep the style from image 2. photo of a woman. "
-# Age uses "female" not "woman" — "woman" implies an adult and fights the young end
-# of the morph (baby/toddler/child). Empirically cleaner across the full age range.
-_PT_PREFIX_AGE = "keep the pose from image 1. keep the style from image 2. photo of a female. "
+# Templates carry {subj} (subject noun phrase), {poss} (possessive pronoun) and
+# {hold} (the anchor word — "pose" for things that pose, "composition" for scenery),
+# all filled by the chosen Subject; {x} stays for the per-frame travel word.
+_PT_PREFIX = "keep the {hold} from image 1. keep the style from image 2. photo of {subj}. "
 
 
-def _pt_preset(name, dim, lead, anchor_str, prefix=_PT_PREFIX, **over):
+def _pt_preset(name, dim, lead, anchor_str, subject="Woman", prefix=_PT_PREFIX, **over):
     """`lead` is the change clause up to (not including) the {x} slot, e.g.
-    'change her age to' → '<prefix>change her age to {x}'."""
+    'change {poss} age to' → '<prefix>change her age to {x}' once {poss} is filled.
+    `subject` is the default Subject label the dropdown jumps to for this preset."""
     d = dict(_PT_COMMON)
-    d.update(name=name, dim=dim, anchor_str=anchor_str,
+    d.update(name=name, dim=dim, anchor_str=anchor_str, subject=subject,
              prompt=f"{prefix}{lead} {SLOT}")
     d.update(over)
     return d
 
 
+# Subject label -> (noun phrase, possessive pronoun, hold word). The pronoun keeps
+# "change {poss} age" grammatical; the hold word is "pose" for things that pose
+# (people, animals, vehicles) and "composition" for buildings/scenery.
+SUBJECTS = [
+    ("Woman", "a woman", "her", "pose"),
+    ("Man", "a man", "his", "pose"),
+    ("Person", "a person", "their", "pose"),
+    ("Female", "a female", "her", "pose"),
+    ("Male", "a male", "his", "pose"),
+    ("Girl", "a girl", "her", "pose"),
+    ("Boy", "a boy", "his", "pose"),
+    ("Child", "a child", "their", "pose"),
+    ("Couple", "a couple", "their", "pose"),
+    ("Dog", "a dog", "its", "pose"),
+    ("Cat", "a cat", "its", "pose"),
+    ("Horse", "a horse", "its", "pose"),
+    ("Animal", "an animal", "its", "pose"),
+    ("Creature", "a creature", "its", "pose"),
+    ("Robot", "a robot", "its", "pose"),
+    ("Car", "a car", "its", "pose"),
+    ("Motorcycle", "a motorcycle", "its", "pose"),
+    ("Building", "a building", "its", "composition"),
+    # — Landscapes / scenery (all "its" / "composition") —
+    ("Landscape", "a landscape", "its", "composition"),
+    ("Vista", "a sweeping vista", "its", "composition"),
+    ("Mountains", "a mountain range", "its", "composition"),
+    ("Cliffs", "a coastal cliff", "its", "composition"),
+    ("Coastline", "a coastline", "its", "composition"),
+    ("Beach", "a beach", "its", "composition"),
+    ("Valley", "a valley", "its", "composition"),
+    ("Forest", "a forest", "its", "composition"),
+    ("Lake", "a lake", "its", "composition"),
+    ("Waterfall", "a waterfall", "its", "composition"),
+    ("Desert", "a desert", "its", "composition"),
+    ("Canyon", "a canyon", "its", "composition"),
+    ("Glacier", "a glacier", "its", "composition"),
+    ("Field", "a field", "its", "composition"),
+    ("City skyline", "a city skyline", "its", "composition"),
+]
+SUBJECT_LABELS = [s[0] for s in SUBJECTS]
+SUBJECTS_BY_LABEL = {label: (subj, poss, hold) for (label, subj, poss, hold) in SUBJECTS}
+
+
+def fill_subject(template: str, subject_label: str) -> str:
+    """Substitute {subj}/{poss}/{hold} in a preset template from a Subject label.
+    Leaves {x} (the travel slot) intact. Unknown label → 'a woman'/'her'/'pose'."""
+    subj, poss, hold = SUBJECTS_BY_LABEL.get(subject_label, ("a woman", "her", "pose"))
+    return ((template or "").replace("{subj}", subj)
+            .replace("{poss}", poss).replace("{hold}", hold))
+
+
 # Order: the two proven winners first, then derived per-dimension presets.
+# Age defaults to subject "Female" — "woman" implies an adult and fights the young
+# end of the morph (baby/toddler); empirically cleaner across the full age range.
 PRESETS = [
-    # ✓ Proven configs (Kadu tests). Age uses "female" (see _PT_PREFIX_AGE).
-    _pt_preset("Age", "Age", "change her age to", "0.01", prefix=_PT_PREFIX_AGE),
+    _pt_preset("Age", "Age", "change {poss} age to", "0.01", subject="Female"),
     _pt_preset("Era", "Era", "change the era to", "1.0"),
     # — Identity-morph —
-    _pt_preset("Age — detailed", "Age detailed", "change her age to", "0.01",
-               prefix=_PT_PREFIX_AGE),
+    _pt_preset("Age — detailed", "Age detailed", "change {poss} age to", "0.01",
+               subject="Female"),
     # — Hold the person, change the world/lighting —
     _pt_preset("Time of day", "Time of day", "change the time of day to", "1.0"),
     _pt_preset("Outdoor lighting", "Outdoor lighting", "change the lighting to", "1.0"),
@@ -268,12 +321,11 @@ PRESETS = [
     _pt_preset("Color grade", "Color grade", "change the colour grade to", "1.0"),
     _pt_preset("Shot size", "Shot size", "change the shot size to", "1.0"),
     # — Keep identity, let the face move —
-    _pt_preset("Expression", "Expression", "change her expression to", "0.3"),
+    _pt_preset("Expression", "Expression", "change {poss} expression to", "0.3"),
     _pt_preset("Mood", "Mood", "change the mood to", "0.5"),
     # — Restyle (don't keep image 2's style; hold identity from image 1) —
-    _pt_preset("Art style", "Art style", "render in the style of",
-               "0.5",
-               prefix="keep the pose and identity from image 1. photo of a woman. "),
+    _pt_preset("Art style", "Art style", "render in the style of", "0.5",
+               prefix="keep the {hold} and identity from image 1. photo of {subj}. "),
 ]
 
 PRESET_NAMES = [p["name"] for p in PRESETS]

@@ -1168,7 +1168,6 @@ class LoRATrainerGUI:
             data["royale_pt_start"] = self.royale_pt_start_var.get()
             data["royale_pt_end"] = self.royale_pt_end_var.get()
             data["royale_pt_interp"] = self.royale_pt_interp_var.get()
-            data["royale_pt_seq_seed"] = bool(self.royale_pt_seq_seed_var.get())
             data["royale_pt_drift"] = self.royale_pt_drift_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
@@ -9577,6 +9576,21 @@ class LoRATrainerGUI:
                                          "Morph the parked epoch through a series of prompt variations on a fixed "
                                          "seed — it interpolates the text embedding, so the same subject flows "
                                          "(e.g. dawn → night). Saved as a clip.")
+        _pps = tk.Frame(ptrav, bg=_sbg); _pps.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(_pps, text="Preset", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_preset_var = tk.StringVar(value="")
+        _ppcb = ttk.Combobox(_pps, textvariable=self.royale_pt_preset_var,
+                             values=list(_ptlib.PRESET_NAMES), state="readonly", width=22)
+        _ppcb.pack(side=tk.LEFT)
+        _ppcb.bind("<<ComboboxSelected>>", lambda e: self._royale_pt_apply_preset())
+        ToolTip(_ppcb,
+                "One-click starting points tuned from real runs. Each fills the whole card —\n"
+                "dimension, references, seed/drift, interpolation — and drops a prompt into the\n"
+                "box for you to edit (change 'a woman' to your subject). image 1 = your original\n"
+                "reference, image 2 = the previous frame; the prompt steers them by index.\n"
+                "Age morphs the face (low anchor); Era and the world/lighting presets hold the\n"
+                "person (full anchor) while the scene changes.")
+
         _pp = tk.Frame(ptrav, bg=_sbg); _pp.pack(fill=tk.X, pady=(0, 4))
         tk.Label(_pp, text="Prompt", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_prompt_var = tk.StringVar(value=self.last_used.get("royale_pt_prompt", ""))
@@ -9754,8 +9768,6 @@ class LoRATrainerGUI:
         self.royale_pt_wm_var = tk.BooleanVar(value=True)
         self.royale_pt_vary_seed_var = tk.BooleanVar(
             value=bool(self.last_used.get("royale_pt_vary_seed", False)))
-        self.royale_pt_seq_seed_var = tk.BooleanVar(
-            value=bool(self.last_used.get("royale_pt_seq_seed", False)))
         ttk.Checkbutton(_poo, text="Loop (ping-pong)", variable=self.royale_pt_loop_var).pack(side=tk.LEFT)
         ttk.Checkbutton(_poo, text="Word badge", variable=self.royale_pt_word_var).pack(side=tk.LEFT, padx=(14, 0))
         ttk.Checkbutton(_poo, text="Fizgig tag", variable=self.royale_pt_wm_var).pack(side=tk.LEFT, padx=(14, 0))
@@ -9775,17 +9787,11 @@ class LoRATrainerGUI:
         _vs = ttk.Checkbutton(_poo, text="Vary seed", variable=self.royale_pt_vary_seed_var,
                               command=self._royale_pt_sync_seed_widgets)
         _vs.pack(side=tk.LEFT, padx=(14, 0))
-        ToolTip(_vs, "Give each frame a fresh seed instead of one fixed seed.\n"
-                     "With the reference anchored, this adds organic frame-to-frame variation "
-                     "while the prompt morphs — a more alive, less static look.")
-        self._royale_pt_seq_seed_cb = ttk.Checkbutton(
-            _poo, text="Sequential seed", variable=self.royale_pt_seq_seed_var)
-        self._royale_pt_seq_seed_cb.pack(side=tk.LEFT, padx=(14, 0))
-        ToolTip(self._royale_pt_seq_seed_cb,
-                "Only applies when Vary seed is on.\n"
-                "On  — seeds walk deterministically (base, base+1, base+2 …), so the\n"
-                "       whole clip is reproducible: same base seed → same result every render.\n"
-                "Off — each frame gets a fresh random seed (different every render).")
+        ToolTip(_vs, "Give each frame its own seed instead of one fixed seed, so the image\n"
+                     "re-rolls per frame and the prompt (e.g. age) expresses more strongly.\n"
+                     "Seeds advance deterministically (base, base+1, base+2 …), so the whole\n"
+                     "clip is reproducible: same base seed → same result every render.\n"
+                     "Disables Seed drift (that's the smooth alternative for a fixed seed).")
         _pb = tk.Frame(ptrav, bg=_sbg); _pb.pack(anchor=tk.W)
         self._royale_pt_btn = tk.Button(_pb, text="Render & export prompt-travel…", font=(FONT_FAMILY, 10, "bold"),
                                         fg="#FFFFFF", bg="#B7791F", activeforeground="#FFFFFF",
@@ -9804,7 +9810,6 @@ class LoRATrainerGUI:
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_vary_seed_var.trace_add("write", lambda *a: self._save_last_used_paths())
-        self.royale_pt_seq_seed_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_interp_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_range()
         self._royale_pt_refresh_words()
@@ -9918,17 +9923,36 @@ class LoRATrainerGUI:
                                         self._royale_pt_ref_clear,
                                         bool(self.royale_pt_use_epoch_ref_var.get()))
 
+    def _royale_pt_apply_preset(self):
+        """Fill the Prompt-travel card from a built-in preset. The prompt lands in the
+        editable box (user swaps the subject); all the reference/seed/interp knobs are
+        set to the preset's tuned values."""
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import prompt_travel as pt
+        name = self.royale_pt_preset_var.get()
+        preset = pt.PRESETS_BY_NAME.get(name)
+        if not preset:
+            return
+        self.royale_pt_prompt_var.set(preset["prompt"])
+        self.royale_pt_dim_var.set(preset["dim"])
+        self.royale_pt_interp_var.set(preset["interp"])
+        self.royale_pt_drift_var.set(preset["drift"])
+        self.royale_pt_vary_seed_var.set(bool(preset["vary_seed"]))
+        self.royale_pt_seq_ref_var.set(bool(preset["sequential"]))
+        self.royale_pt_anchor_var.set(bool(preset["anchor"]))
+        self.royale_pt_anchor_str_var.set(preset["anchor_str"])
+        self.royale_pt_ref_strength_var.set(preset["ref_strength"])
+        self.royale_pt_ref_mp_var.set(preset["ref_mp"])
+        # Reflect dependent UI state (dimension waypoints, drift enable).
+        self._royale_pt_refresh_range()
+        self._royale_pt_refresh_words()
+        self._royale_pt_sync_seed_widgets()
+
     def _royale_pt_sync_seed_widgets(self):
-        """Gate the seed-variation widgets on 'Vary seed':
-        - 'Sequential seed' only matters while Vary seed is ON (a fixed seed can't walk).
-        - 'Seed drift' only applies while Vary seed is OFF (it's the smooth alternative
-          to random per-frame seeds), so disable it when Vary seed is on."""
+        """'Seed drift' only applies while 'Vary seed' is OFF — it's the smooth
+        alternative to a per-frame seed walk, so disable it when Vary seed is on."""
         on = bool(self.royale_pt_vary_seed_var.get())
-        if hasattr(self, "_royale_pt_seq_seed_cb"):
-            try:
-                self._royale_pt_seq_seed_cb.configure(state=("normal" if on else "disabled"))
-            except Exception:
-                pass
         if hasattr(self, "_royale_pt_drift_entry"):
             try:
                 self._royale_pt_drift_entry.configure(state=("disabled" if on else "normal"))
@@ -10125,6 +10149,23 @@ class LoRATrainerGUI:
         import threading
         threading.Thread(target=self._royale_render_worker, args=(sel, prompt), daemon=True).start()
 
+    def _royale_release_vram(self):
+        """Return the CUDA allocator's reserved-but-unused VRAM to the driver after a
+        render. The Klein pipeline stays resident (model params aren't freed), but the
+        transient working set (encode/decode spikes, intermediate tensors) is released
+        so the Windows desktop compositor and hardware video decoders can get surfaces
+        again. Without this, after several renders unrelated videos play as a black
+        frame until the app frees VRAM (e.g. on tab switch) — the allocator was holding
+        the spike memory the OS needed for decode surfaces."""
+        try:
+            eng = getattr(self, "royale_engine", None)
+            if eng is None or eng.pipeline is None:
+                return
+            from fizgig.utils.device import clean_memory_on_device
+            clean_memory_on_device(eng.pipeline.device)
+        except Exception:
+            pass
+
     def _royale_render_worker(self, sel, prompt):
         from fizgig.repair_studio.state import SliderState
         try:
@@ -10167,6 +10208,7 @@ class LoRATrainerGUI:
             except Exception:
                 import traceback
                 print(f"[royale] render failed for {path}:\n{traceback.format_exc()}")
+        self._royale_release_vram()
         self.master.after(0, lambda: self._royale_finish(results, paths))
 
     def _royale_finish(self, results, paths=None):
@@ -10581,6 +10623,8 @@ class LoRATrainerGUI:
             import traceback
             traceback.print_exc()
             self.master.after(0, lambda e=e: self._royale_travel_finish(p["out"], 0, e))
+        finally:
+            self._royale_release_vram()
 
     def _royale_travel_finish(self, out, n_frames, err):
         self._royale_traveling = False
@@ -10717,7 +10761,6 @@ class LoRATrainerGUI:
             brand=bool(self.royale_pt_wm_var.get()),
             word_badge=bool(self.royale_pt_word_var.get()),
             vary_seed=bool(self.royale_pt_vary_seed_var.get()),
-            seq_seed=bool(self.royale_pt_seq_seed_var.get()),
             drift=self._royale_parse_drift(self.royale_pt_drift_var.get()),
             interp=self.royale_pt_interp_var.get(),
             deflicker=self.royale_pt_deflicker_var.get(),
@@ -10757,10 +10800,9 @@ class LoRATrainerGUI:
                 ctx = eng.interp_waypoints(ctx_list, t, mode=interp_mode)
                 st = SliderState.default_klein9b()
                 st.prompt = p["base"]
-                if p.get("vary_seed"):
-                    st.seed = (p["seed"] + i) if p.get("seq_seed") else random.randint(0, 2**31 - 1)
-                else:
-                    st.seed = p["seed"]
+                # Vary seed: deterministic sequential walk (base, base+1, …) so the
+                # image re-rolls per frame yet the whole clip stays reproducible.
+                st.seed = (p["seed"] + i) if p.get("vary_seed") else p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
                 self._royale_apply_travel_ref(st, p, i, prev_path)
                 if drift > 0 and not p.get("vary_seed"):
@@ -10793,6 +10835,8 @@ class LoRATrainerGUI:
             import traceback
             traceback.print_exc()
             self.master.after(0, lambda e=e: self._royale_pt_finish(p["out"], 0, e))
+        finally:
+            self._royale_release_vram()
 
     def _royale_pt_finish(self, out, n_frames, err):
         self._royale_pt_running = False

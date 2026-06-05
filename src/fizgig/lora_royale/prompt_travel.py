@@ -216,6 +216,70 @@ TEMPLATES = {
 DIMENSION_NAMES = list(TEMPLATES.keys())
 
 
+# ── Prompt-travel presets ────────────────────────────────────────────────────
+# Derived from empirically-tuned winning runs (Kadu tests, 2026-06). Selecting a
+# preset fills the whole Prompt-travel card; the `prompt` drops into the editable
+# prompt box (the user tweaks the subject), and {x} is replaced per frame by the
+# chosen dimension's waypoint words.
+#
+# Reference model: image 1 = the original/anchor reference, image 2 = the previous
+# (sequential) frame. Two archetypes emerged:
+#   • Identity-morph (Age): anchor ≈ 0.01 so the face is free to change.
+#   • Hold-the-person (Era / world / lighting / style): anchor 1.0 locks identity
+#     while the world changes around them.
+#   • Face-but-keep-identity (Expression / Mood): a middling anchor lets the face
+#     move without losing the person.
+# Common winners across all: sequential ref ON, prev (image 2) 0.01, static seed +
+# Seed drift 1.0, Slerp interpolation. The two PROVEN configs (Age, Era) keep their
+# exact tested prompts; the rest mirror that pattern with a guessed anchor.
+
+_PT_COMMON = dict(interp="Slerp", drift="1.0", vary_seed=False,
+                  sequential=True, anchor=True, ref_strength="0.01", ref_mp="0.2")
+_PT_PREFIX = "keep the pose from image 1. keep the style from image 2. photo of a woman. "
+# Age uses "female" not "woman" — "woman" implies an adult and fights the young end
+# of the morph (baby/toddler/child). Empirically cleaner across the full age range.
+_PT_PREFIX_AGE = "keep the pose from image 1. keep the style from image 2. photo of a female. "
+
+
+def _pt_preset(name, dim, lead, anchor_str, prefix=_PT_PREFIX, **over):
+    """`lead` is the change clause up to (not including) the {x} slot, e.g.
+    'change her age to' → '<prefix>change her age to {x}'."""
+    d = dict(_PT_COMMON)
+    d.update(name=name, dim=dim, anchor_str=anchor_str,
+             prompt=f"{prefix}{lead} {SLOT}")
+    d.update(over)
+    return d
+
+
+# Order: the two proven winners first, then derived per-dimension presets.
+PRESETS = [
+    # ✓ Proven configs (Kadu tests). Age uses "female" (see _PT_PREFIX_AGE).
+    _pt_preset("Age", "Age", "change her age to", "0.01", prefix=_PT_PREFIX_AGE),
+    _pt_preset("Era", "Era", "change the era to", "1.0"),
+    # — Identity-morph —
+    _pt_preset("Age — detailed", "Age detailed", "change her age to", "0.01",
+               prefix=_PT_PREFIX_AGE),
+    # — Hold the person, change the world/lighting —
+    _pt_preset("Time of day", "Time of day", "change the time of day to", "1.0"),
+    _pt_preset("Outdoor lighting", "Outdoor lighting", "change the lighting to", "1.0"),
+    _pt_preset("Season", "Season", "change the season to", "1.0"),
+    _pt_preset("Weather", "Weather", "change the weather to", "1.0"),
+    _pt_preset("Environment", "Environment", "change the environment to", "1.0"),
+    _pt_preset("Color grade", "Color grade", "change the colour grade to", "1.0"),
+    _pt_preset("Shot size", "Shot size", "change the shot size to", "1.0"),
+    # — Keep identity, let the face move —
+    _pt_preset("Expression", "Expression", "change her expression to", "0.3"),
+    _pt_preset("Mood", "Mood", "change the mood to", "0.5"),
+    # — Restyle (don't keep image 2's style; hold identity from image 1) —
+    _pt_preset("Art style", "Art style", "render in the style of",
+               "0.5",
+               prefix="keep the pose and identity from image 1. photo of a woman. "),
+]
+
+PRESET_NAMES = [p["name"] for p in PRESETS]
+PRESETS_BY_NAME = {p["name"]: p for p in PRESETS}
+
+
 def waypoint_prompt(base: str, word: str) -> str:
     """Fill the base prompt's `{x}` slot with `word`, or append it if no slot."""
     base = base or ""

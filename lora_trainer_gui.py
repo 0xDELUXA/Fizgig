@@ -9326,11 +9326,11 @@ class LoRATrainerGUI:
         ttk.Entry(_pr, textvariable=self.royale_seed_var, width=10).pack(side=tk.LEFT)
         tk.Label(_pr, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
         self.royale_w_var = tk.StringVar(value=self.last_used.get("royale_w", "512"))
-        ttk.Combobox(_pr, textvariable=self.royale_w_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_pr, textvariable=self.royale_w_var, values=["384", "512", "768", "1024", "1280", "1536"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         tk.Label(_pr, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
         self.royale_h_var = tk.StringVar(value=self.last_used.get("royale_h", "512"))
-        ttk.Combobox(_pr, textvariable=self.royale_h_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_pr, textvariable=self.royale_h_var, values=["384", "512", "768", "1024", "1280", "1536"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         tk.Label(_pr, text="Max renders", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
         self.royale_max_var = tk.StringVar(value=self.last_used.get("royale_max", "12"))
@@ -9478,12 +9478,12 @@ class LoRATrainerGUI:
         tk.Label(_trf, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 3))
         self.royale_travel_w_var = tk.StringVar(
             value=self.last_used.get("royale_travel_w", self.last_used.get("royale_w", "512")))
-        ttk.Combobox(_trf, textvariable=self.royale_travel_w_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_trf, textvariable=self.royale_travel_w_var, values=["384", "512", "768", "1024", "1280", "1536"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         tk.Label(_trf, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
         self.royale_travel_h_var = tk.StringVar(
             value=self.last_used.get("royale_travel_h", self.last_used.get("royale_h", "512")))
-        ttk.Combobox(_trf, textvariable=self.royale_travel_h_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_trf, textvariable=self.royale_travel_h_var, values=["384", "512", "768", "1024", "1280", "1536"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         for _v in (self.royale_travel_w_var, self.royale_travel_h_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
@@ -9589,12 +9589,12 @@ class LoRATrainerGUI:
         tk.Label(_pof, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 3))
         self.royale_pt_w_var = tk.StringVar(
             value=self.last_used.get("royale_pt_w", self.last_used.get("royale_w", "512")))
-        ttk.Combobox(_pof, textvariable=self.royale_pt_w_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_pof, textvariable=self.royale_pt_w_var, values=["384", "512", "768", "1024", "1280", "1536"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         tk.Label(_pof, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
         self.royale_pt_h_var = tk.StringVar(
             value=self.last_used.get("royale_pt_h", self.last_used.get("royale_h", "512")))
-        ttk.Combobox(_pof, textvariable=self.royale_pt_h_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_pof, textvariable=self.royale_pt_h_var, values=["384", "512", "768", "1024", "1280", "1536"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         _poo = tk.Frame(ptrav, bg=_sbg); _poo.pack(anchor=tk.W, pady=(0, 8))
         self.royale_pt_loop_var = tk.BooleanVar(value=True)

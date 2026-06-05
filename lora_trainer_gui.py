@@ -9936,27 +9936,28 @@ class LoRATrainerGUI:
                    self.royale_lora_w_var, self.royale_lora_h_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
-        # Preview scrubber (filled after a render) + save-time export.
+        # Preview scrubber (filled after a render) + save-time export — centered,
+        # same 512 box as the main crossfade preview.
         self._royale_lt_frames = []
         self._royale_lt_labels = []
-        _ltp = tk.Frame(ltrav, bg=_sbg); _ltp.pack(anchor=tk.W, fill=tk.X, pady=(8, 0))
-        self._royale_lt_holder = tk.Frame(_ltp, bg=COLORS["bg_deep"], width=320, height=320)
+        _ltp = tk.Frame(ltrav, bg=_sbg); _ltp.pack(fill=tk.X, pady=(8, 0))
+        self._royale_lt_holder = tk.Frame(_ltp, bg="#1c1c1c", width=512, height=512, highlightthickness=0)
         self._royale_lt_holder.pack_propagate(False)
-        self._royale_lt_holder.pack(anchor=tk.W)
-        self._royale_lt_preview_label = tk.Label(self._royale_lt_holder, bg=COLORS["bg_deep"],
-                                                 fg=COLORS["text_muted"],
-                                                 text="Render to preview the frames here, then save.")
-        self._royale_lt_preview_label.pack(expand=True)
+        self._royale_lt_holder.pack(pady=(0, 8))
+        self._royale_lt_preview_label = ttk.Label(self._royale_lt_holder, anchor=tk.CENTER,
+                                                  background="#1c1c1c",
+                                                  text="Render to preview the frames here, then save.")
+        self._royale_lt_preview_label.pack(fill=tk.BOTH, expand=True)
+        self._royale_lt_frame_label_var = tk.StringVar(value="")
+        tk.Label(_ltp, textvariable=self._royale_lt_frame_label_var, font=(FONT_FAMILY, 11, "bold"),
+                 fg=COLORS["text_primary"], bg=_sbg).pack()
         self._royale_lt_scrub_var = tk.DoubleVar(value=0.0)
         self._royale_lt_scale = ttk.Scale(_ltp, from_=0, to=1, orient=tk.HORIZONTAL,
                                           variable=self._royale_lt_scrub_var,
                                           command=lambda e: self._royale_lt_scrub())
-        self._royale_lt_scale.pack(fill=tk.X, pady=(6, 2))
+        self._royale_lt_scale.pack(fill=tk.X, padx=20, pady=(4, 8))
         self._royale_lt_scale.configure(state="disabled")
-        self._royale_lt_frame_label_var = tk.StringVar(value="")
-        tk.Label(_ltp, textvariable=self._royale_lt_frame_label_var, font=(FONT_FAMILY, 9, "italic"),
-                 fg=COLORS["accent"], bg=_sbg).pack(anchor=tk.W)
-        _lsv = tk.Frame(ltrav, bg=_sbg); _lsv.pack(anchor=tk.W, pady=(6, 0))
+        _lsv = tk.Frame(ltrav, bg=_sbg); _lsv.pack(pady=(0, 0))
         self._royale_lt_save_mp4 = ttk.Button(_lsv, text="Save MP4", state="disabled",
                                               command=lambda: self._royale_lt_save("MP4"))
         self._royale_lt_save_mp4.pack(side=tk.LEFT)
@@ -10955,8 +10956,9 @@ class LoRATrainerGUI:
         self.royale_lora_status_var.set(f"Rendered {len(frames)} frames — scrub to review, then save.")
 
     def _royale_lt_fit_holder(self):
-        """Size the scrubber holder to the rendered frame's aspect (max 320 long side)."""
-        m = 320
+        """Size the scrubber holder to the rendered frame's aspect (max 512 long side,
+        matching the main crossfade preview)."""
+        m = 512
         frames = getattr(self, "_royale_lt_frames", None)
         if not frames:
             box = (m, m)
@@ -10975,7 +10977,7 @@ class LoRATrainerGUI:
         if not frames:
             return
         i = max(0, min(int(round(float(self._royale_lt_scrub_var.get()))), len(frames) - 1))
-        hw, hh = getattr(self, "_royale_lt_holder_box", (320, 320))
+        hw, hh = getattr(self, "_royale_lt_holder_box", (512, 512))
         disp = frames[i].copy()
         disp.thumbnail((max(64, hw), max(64, hh)), Image.LANCZOS)
         self._royale_lt_preview_imgtk = ImageTk.PhotoImage(disp)

@@ -9581,7 +9581,8 @@ class LoRATrainerGUI:
         tk.Label(_pps, text="Preset", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_preset_var = tk.StringVar(value="")
         _ppcb = ttk.Combobox(_pps, textvariable=self.royale_pt_preset_var,
-                             values=list(_ptlib.PRESET_NAMES), state="readonly", width=18)
+                             values=list(_ptlib.PRESET_NAMES), state="readonly",
+                             width=min(30, max(len(n) for n in _ptlib.PRESET_NAMES) + 2))
         _ppcb.pack(side=tk.LEFT)
         _ppcb.bind("<<ComboboxSelected>>", lambda e: self._royale_pt_apply_preset())
         ToolTip(_ppcb,
@@ -9679,12 +9680,10 @@ class LoRATrainerGUI:
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
-        tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
-        self.royale_pt_dim_var = tk.StringVar(value=self.last_used.get("royale_pt_dim", "Time of day"))
-        _dim_vals = _ptlib.DIMENSION_NAMES + ["Custom"]
-        ttk.Combobox(_pd, textvariable=self.royale_pt_dim_var, values=_dim_vals, state="readonly",
-                     width=max(len(v) for v in _dim_vals) + 2).pack(side=tk.LEFT)
-        tk.Label(_pd, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        # The travel dimension is set by the Preset dropdown above — no separate
+        # selector. This var is hidden state the preset writes (incl. "Custom").
+        self.royale_pt_dim_var = tk.StringVar(value=self.last_used.get("royale_pt_dim", "Age"))
+        tk.Label(_pd, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_frames_var = tk.StringVar(value=self.last_used.get("royale_pt_frames", "32"))
         _pfcb = ttk.Combobox(_pd, textvariable=self.royale_pt_frames_var,
                              values=["24", "32", "48", "64", "96", "128", "192", "256"],
@@ -9697,7 +9696,7 @@ class LoRATrainerGUI:
         tk.Label(_pcr, text="Custom words", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_custom_var = tk.StringVar(value=self.last_used.get("royale_pt_custom", ""))
         ttk.Entry(_pcr, textvariable=self.royale_pt_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Label(_pcr, text="(comma-separated, used when Travel = Custom)", bg=_sbg,
+        tk.Label(_pcr, text="(comma-separated, used when Preset = Custom words)", bg=_sbg,
                  fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
 
         _prg = tk.Frame(ptrav, bg=_sbg); _prg.pack(anchor=tk.W, pady=(0, 4))
@@ -9965,14 +9964,17 @@ class LoRATrainerGUI:
         self._royale_pt_sync_seed_widgets()
 
     def _royale_pt_apply_subject(self):
-        """Subject changed — re-compose only the prompt text from the selected preset's
-        template (knobs untouched). No-op if no preset is selected yet."""
+        """Subject changed — re-compose the prompt text from the selected preset's
+        template (knobs untouched) and refresh the waypoints, since some dimensions
+        (Age) have subject-specific waypoints (a car has no 'baby' stage)."""
         pt, preset = self._royale_pt_current_preset()
         self._save_last_used_paths()
-        if not preset:
-            return
-        self.royale_pt_prompt_var.set(
-            pt.fill_subject(preset["prompt"], self.royale_pt_subject_var.get()))
+        if preset:
+            self.royale_pt_prompt_var.set(
+                pt.fill_subject(preset["prompt"], self.royale_pt_subject_var.get()))
+        # Waypoints can depend on the subject — refresh regardless of preset.
+        self._royale_pt_refresh_range()
+        self._royale_pt_refresh_words()
 
     def _royale_pt_sync_seed_widgets(self):
         """'Seed drift' only applies while 'Vary seed' is OFF — it's the smooth
@@ -10673,7 +10675,7 @@ class LoRATrainerGUI:
         dim = self.royale_pt_dim_var.get()
         if dim == "Custom":
             return pt.parse_custom(self.royale_pt_custom_var.get())
-        return list(pt.TEMPLATES.get(dim, []))
+        return pt.waypoints_for(dim, self.royale_pt_subject_var.get())
 
     def _royale_pt_refresh_range(self):
         """Populate the Start/End waypoint dropdowns for the current dimension,

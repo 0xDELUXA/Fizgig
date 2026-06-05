@@ -303,31 +303,94 @@ def fill_subject(template: str, subject_label: str) -> str:
             .replace("{poss}", poss).replace("{hold}", hold))
 
 
-# Order: the two proven winners first, then derived per-dimension presets.
-# Age defaults to subject "Female" — "woman" implies an adult and fights the young
-# end of the morph (baby/toddler); empirically cleaner across the full age range.
-PRESETS = [
-    _pt_preset("Age", "Age", "change {poss} age to", "0.01", subject="Female"),
-    _pt_preset("Era", "Era", "change the era to", "1.0"),
-    # — Identity-morph —
-    _pt_preset("Age — detailed", "Age detailed", "change {poss} age to", "0.01",
-               subject="Female"),
-    # — Hold the person, change the world/lighting —
-    _pt_preset("Time of day", "Time of day", "change the time of day to", "1.0"),
-    _pt_preset("Outdoor lighting", "Outdoor lighting", "change the lighting to", "1.0"),
-    _pt_preset("Season", "Season", "change the season to", "1.0"),
-    _pt_preset("Weather", "Weather", "change the weather to", "1.0"),
-    _pt_preset("Environment", "Environment", "change the environment to", "1.0"),
-    _pt_preset("Color grade", "Color grade", "change the colour grade to", "1.0"),
-    _pt_preset("Shot size", "Shot size", "change the shot size to", "1.0"),
-    # — Keep identity, let the face move —
-    _pt_preset("Expression", "Expression", "change {poss} expression to", "0.3"),
-    _pt_preset("Mood", "Mood", "change the mood to", "0.5"),
-    # — Restyle (don't keep image 2's style; hold identity from image 1) —
-    _pt_preset("Art style", "Art style", "render in the style of", "0.5",
-               prefix="keep the {hold} and identity from image 1. photo of {subj}. "),
+# Subject category — only matters for dimensions whose waypoints are subject-specific
+# (Age: a car doesn't have a "baby" stage). Anything not listed is a person.
+_SUBJECT_CATEGORY = {
+    "Dog": "animal", "Cat": "animal", "Horse": "animal", "Animal": "animal",
+    "Creature": "animal",
+    "Robot": "machine", "Car": "machine", "Motorcycle": "machine",
+    "Building": "structure", "City skyline": "structure",
+    "Landscape": "scene", "Vista": "scene", "Mountains": "scene", "Cliffs": "scene",
+    "Coastline": "scene", "Beach": "scene", "Valley": "scene", "Forest": "scene",
+    "Lake": "scene", "Waterfall": "scene", "Desert": "scene", "Canyon": "scene",
+    "Glacier": "scene", "Field": "scene",
+}
+
+
+def subject_category(subject_label: str) -> str:
+    return _SUBJECT_CATEGORY.get(subject_label, "person")
+
+
+# Age waypoints when the subject isn't a person. Person uses the TEMPLATES["Age"]
+# (and "Age detailed") lists directly; these replace "as a baby … elderly" with a
+# wear/era progression that suits the subject. Used for both base and detailed.
+AGE_WAYPOINTS = {
+    "animal": ["as a newborn", "as a baby", "as a juvenile", "as a young adult",
+               "in its prime", "fully grown", "old", "very old and grey"],
+    "machine": ["brand new", "nearly new", "a few years old", "well-used",
+                "ageing and worn", "old", "vintage", "a rusted-out wreck"],
+    "structure": ["newly built", "modern and pristine", "a few decades old",
+                  "ageing", "old and weathered", "historic", "crumbling", "a ruin"],
+    "scene": ["pristine and untouched", "lightly weathered", "weathered",
+              "eroded", "heavily eroded", "ancient and worn down"],
+}
+
+
+def waypoints_for(dim: str, subject_label: str = "Woman") -> List[str]:
+    """Ordered waypoint list for a dimension, adapted to the subject where it matters.
+    For Age on a non-person subject, returns a wear/era progression instead of the
+    human life-stages (so Age + Car shows 'brand new … rusted wreck', not 'baby')."""
+    base = dim[:-len(" detailed")] if dim.endswith(" detailed") else dim
+    if base == "Age":
+        cat = subject_category(subject_label)
+        if cat != "person":
+            return list(AGE_WAYPOINTS.get(cat, AGE_WAYPOINTS["machine"]))
+    return list(TEMPLATES.get(dim, []))
+
+
+_PT_PREFIX_ARTSTYLE = "keep the {hold} and identity from image 1. photo of {subj}. "
+
+# One spec per travel dimension; each generates a base + a "— detailed" preset
+# (the detailed twin just points at the "<dim> detailed" waypoint list). This is the
+# single source for what to travel through — there's no separate dimension dropdown.
+#   (base_dim, lead clause, anchor strength, default subject, prefix override)
+# anchor: Age 0.01 (face free to morph) · Expression/Mood/Art style mid · the
+# world/lighting/era presets 1.0 (hold the person while the scene changes).
+# Age defaults to subject "Female" ("woman" implies an adult and fights baby/toddler).
+_DIM_SPECS = [
+    ("Age",              "change {poss} age to",        "0.01", "Female", None),
+    ("Expression",       "change {poss} expression to", "0.3",  "Woman",  None),
+    ("Mood",             "change the mood to",          "0.5",  "Woman",  None),
+    ("Era",              "change the era to",           "1.0",  "Woman",  None),
+    ("Time of day",      "change the time of day to",   "1.0",  "Woman",  None),
+    ("Lighting",         "change the lighting to",      "1.0",  "Woman",  None),
+    ("Outdoor lighting", "change the lighting to",      "1.0",  "Woman",  None),
+    ("Season",           "change the season to",        "1.0",  "Woman",  None),
+    ("Weather",          "change the weather to",       "1.0",  "Woman",  None),
+    ("Environment",      "change the environment to",   "1.0",  "Woman",  None),
+    ("Color grade",      "change the colour grade to",  "1.0",  "Woman",  None),
+    ("Shot size",        "change the shot size to",     "1.0",  "Woman",  None),
+    ("Art style",        "render in the style of",      "0.5",  "Woman",  _PT_PREFIX_ARTSTYLE),
 ]
 
+
+def _gen_presets():
+    out = []
+    for base_dim, lead, anc, subj, pfx in _DIM_SPECS:
+        kw = {} if pfx is None else {"prefix": pfx}
+        out.append(_pt_preset(base_dim, base_dim, lead, anc, subject=subj, **kw))
+        out.append(_pt_preset(f"{base_dim} — detailed", f"{base_dim} detailed",
+                              lead, anc, subject=subj, **kw))
+    # Custom: a neutral scaffold; the user supplies waypoints in the Custom words box
+    # and edits the prompt freely.
+    custom = dict(_PT_COMMON)
+    custom.update(name="Custom words", dim="Custom", subject="Woman", anchor_str="1.0",
+                  prompt=_PT_PREFIX + SLOT)
+    out.append(custom)
+    return out
+
+
+PRESETS = _gen_presets()
 PRESET_NAMES = [p["name"] for p in PRESETS]
 PRESETS_BY_NAME = {p["name"]: p for p in PRESETS}
 

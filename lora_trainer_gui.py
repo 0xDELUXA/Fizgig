@@ -9519,6 +9519,8 @@ class LoRATrainerGUI:
                 "more stable. Optional. Auto-resized to ~0.2 MP. Falls back to the Setup reference if left empty.")
         self.royale_travel_use_epoch_ref_var = tk.BooleanVar(
             value=bool(self.last_used.get("royale_travel_use_epoch_ref", False)))
+        self.royale_travel_seq_ref_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_travel_seq_ref", False)))
         _tru = tk.Frame(trav, bg=_sbg); _tru.pack(anchor=tk.W, pady=(0, 4))
         ttk.Checkbutton(_tru, text="Use the rendered epoch as the reference",
                         variable=self.royale_travel_use_epoch_ref_var,
@@ -9531,20 +9533,21 @@ class LoRATrainerGUI:
         ToolTip(_trse, "How strongly the reference anchors the morph.\n"
                        "0.1–0.4 is the sweet range for seed travel — enough to hold the subject, loose "
                        "enough to let the seeds actually travel. 1.0 clamps too hard here, 0 = off.")
+        _tseq = ttk.Checkbutton(_tru, text="Sequential reference", variable=self.royale_travel_seq_ref_var)
+        _tseq.pack(side=tk.LEFT, padx=(16, 0))
+        ToolTip(_tseq, "Feedback chain: frame 1 uses your reference, each later frame edits the previous one "
+                       "(the morph compounds and evolves).\n"
+                       "⚠ With this ON, keep Strength low — high strength compounds every frame and causes "
+                       "distortion / low-quality results. Recommended max ≈ 0.4 in this mode.")
         tk.Label(_tru, text="Max MP", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
         self.royale_travel_ref_mp_var = tk.StringVar(value=self.last_used.get("royale_travel_ref_mp", "0.2"))
         _trmp = ttk.Entry(_tru, textvariable=self.royale_travel_ref_mp_var, width=5)
         _trmp.pack(side=tk.LEFT)
         ToolTip(_trmp, "Reference encode resolution cap (megapixels), 0.05–1.0.\n"
                        "Higher carries more detail (useful for sequential reference) at a little more VRAM.")
-        _trsq = tk.Frame(trav, bg=_sbg); _trsq.pack(anchor=tk.W, pady=(0, 4))
-        self.royale_travel_seq_ref_var = tk.BooleanVar(
-            value=bool(self.last_used.get("royale_travel_seq_ref", False)))
-        ttk.Checkbutton(_trsq, text="Sequential reference",
-                        variable=self.royale_travel_seq_ref_var).pack(side=tk.LEFT)
         tk.Label(trav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
-                            "(a feedback chain — the morph compounds and evolves, but can drift over a long run). "
-                            "Off = every frame uses the same reference: the cleaner, more predictable seed morph.",
+                            "(a feedback chain — compounds and evolves, but can drift over a long run, especially "
+                            "at high Strength). Off = every frame uses the same reference: cleaner and more predictable.",
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
         for _v in (self.royale_travel_ref_var, self.royale_travel_use_epoch_ref_var,
@@ -9716,6 +9719,8 @@ class LoRATrainerGUI:
                 "Auto-resized to ~0.2 MP. Falls back to the Setup reference if left empty.")
         self.royale_pt_use_epoch_ref_var = tk.BooleanVar(
             value=bool(self.last_used.get("royale_pt_use_epoch_ref", False)))
+        self.royale_pt_seq_ref_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_pt_seq_ref", False)))
         _ptu = tk.Frame(ptrav, bg=_sbg); _ptu.pack(anchor=tk.W, pady=(0, 4))
         ttk.Checkbutton(_ptu, text="Use the rendered epoch as the reference",
                         variable=self.royale_pt_use_epoch_ref_var,
@@ -9729,6 +9734,12 @@ class LoRATrainerGUI:
                        "1.0 is the right default for prompt travel — this is the edit model working as "
                        "intended: the reference holds the subject at full strength while the prompt does "
                        "the editing. Lower only if you want the prompt to override the reference more. 0 = off.")
+        _pseq = ttk.Checkbutton(_ptu, text="Sequential reference", variable=self.royale_pt_seq_ref_var)
+        _pseq.pack(side=tk.LEFT, padx=(16, 0))
+        ToolTip(_pseq, "Feedback chain: frame 1 uses your reference, each later frame edits the previous one.\n"
+                       "⚠ With this ON, high Strength compounds every frame and can cause distortion / low quality "
+                       "over a long run. Keep Strength modest (≈0.4) — or turn on 'Anchor to original' below, which "
+                       "re-injects the clean reference each frame and lets you run higher Strength safely.")
         tk.Label(_ptu, text="Max MP", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
         self.royale_pt_ref_mp_var = tk.StringVar(value=self.last_used.get("royale_pt_ref_mp", "0.2"))
         _ptmp = ttk.Entry(_ptu, textvariable=self.royale_pt_ref_mp_var, width=5)
@@ -9736,10 +9747,6 @@ class LoRATrainerGUI:
         ToolTip(_ptmp, "Reference encode resolution cap (megapixels), 0.05–1.0.\n"
                        "Higher carries more detail (useful for sequential reference) at a little more VRAM.")
         _ptsq = tk.Frame(ptrav, bg=_sbg); _ptsq.pack(anchor=tk.W, pady=(0, 4))
-        self.royale_pt_seq_ref_var = tk.BooleanVar(
-            value=bool(self.last_used.get("royale_pt_seq_ref", False)))
-        ttk.Checkbutton(_ptsq, text="Sequential reference",
-                        variable=self.royale_pt_seq_ref_var).pack(side=tk.LEFT)
         self.royale_pt_anchor_var = tk.BooleanVar(
             value=bool(self.last_used.get("royale_pt_anchor", True)))
         ttk.Checkbutton(_ptsq, text="Anchor to original",

@@ -980,6 +980,12 @@ class LoRATrainerGUI:
             return True
         if getattr(self, '_explorer_generating', False):
             return True
+        # LoRA Royale: epoch render / seed travel / prompt travel / strength travel /
+        # morph export / likeness scoring.
+        if any(getattr(self, f, False) for f in (
+                '_royale_rendering', '_royale_traveling', '_royale_pt_running',
+                '_royale_lora_running', '_royale_exporting', '_royale_scoring')):
+            return True
         # Profiler running (button disabled while active)
         if hasattr(self, 'profiler_run_btn'):
             try:

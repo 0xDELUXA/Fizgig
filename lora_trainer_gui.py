@@ -1142,6 +1142,7 @@ class LoRATrainerGUI:
             data["royale_travel_res"] = self.royale_travel_res_var.get()
             data["royale_travel_ref"] = self.royale_travel_ref_var.get()
             data["royale_travel_use_epoch_ref"] = bool(self.royale_travel_use_epoch_ref_var.get())
+            data["royale_travel_ref_strength"] = self.royale_travel_ref_strength_var.get()
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -9440,10 +9441,16 @@ class LoRATrainerGUI:
         ttk.Checkbutton(_tru, text="Use the rendered epoch as the reference",
                         variable=self.royale_travel_use_epoch_ref_var,
                         command=self._royale_travel_toggle_ref_widgets).pack(side=tk.LEFT)
-        tk.Label(_tru, text="(anchors the morph to this epoch's own render)", bg=_sbg,
-                 fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(_tru, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self.royale_travel_ref_strength_var = tk.StringVar(
+            value=self.last_used.get("royale_travel_ref_strength", "1.0"))
+        _trse = ttk.Entry(_tru, textvariable=self.royale_travel_ref_strength_var, width=5)
+        _trse.pack(side=tk.LEFT)
+        ToolTip(_trse, "How strongly the reference anchors the morph.\n"
+                       "1.0 = stock, ~0.85 = Klein sweet spot, lower lets the seeds vary more, 0 = off.")
         self.royale_travel_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_travel_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self.royale_travel_ref_strength_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_travel_toggle_ref_widgets()
 
         _trf = tk.Frame(trav, bg=_sbg); _trf.pack(anchor=tk.W, pady=(0, 6))
@@ -9728,6 +9735,14 @@ class LoRATrainerGUI:
         if use_epoch:
             return self._royale_epoch_ref_tempfile()
         return (file_ref or "").strip() or self.royale_ref_var.get().strip()
+
+    @staticmethod
+    def _royale_parse_ref_strength(text, default=1.0):
+        """Parse a reference-strength entry, clamped to [0, 2]."""
+        try:
+            return max(0.0, min(2.0, float(text)))
+        except (TypeError, ValueError):
+            return default
 
     def _royale_scan(self):
         import sys
@@ -10170,6 +10185,7 @@ class LoRATrainerGUI:
             frames=max(2, frames), res=res, fmt=fmt, out=out,
             ref=self._royale_resolve_travel_ref(self.royale_travel_use_epoch_ref_var.get(),
                                                 self.royale_travel_ref_var.get()),
+            ref_strength=self._royale_parse_ref_strength(self.royale_travel_ref_strength_var.get()),
             speed=self.royale_travel_speed_var.get(),
             pingpong=bool(self.royale_travel_loop_var.get()),
             brand=bool(self.royale_travel_wm_var.get()),
@@ -10204,7 +10220,8 @@ class LoRATrainerGUI:
                 st.prompt = p["prompt"]; st.seed = p["seed_a"]
                 st.preview_width = p["res"]; st.preview_height = p["res"]
                 if p["ref"] and os.path.exists(p["ref"]):
-                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2; st.ref_strength = 1.0
+                    st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2
+                    st.ref_strength = p.get("ref_strength", 1.0)
                 img = eng.generate_preview(st, seed_b=p["seed_b"], travel_t=t)
                 imgs.append(img.copy())
             self.master.after(0, lambda: self.royale_travel_status_var.set("Encoding clip…"))

@@ -1156,6 +1156,7 @@ class LoRATrainerGUI:
             data["royale_pt_h"] = self.royale_pt_h_var.get()
             data["royale_pt_use_epoch_ref"] = bool(self.royale_pt_use_epoch_ref_var.get())
             data["royale_pt_ref_strength"] = self.royale_pt_ref_strength_var.get()
+            data["royale_pt_vary_seed"] = bool(self.royale_pt_vary_seed_var.get())
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9619,9 +9620,16 @@ class LoRATrainerGUI:
         self.royale_pt_loop_var = tk.BooleanVar(value=True)
         self.royale_pt_word_var = tk.BooleanVar(value=True)
         self.royale_pt_wm_var = tk.BooleanVar(value=True)
+        self.royale_pt_vary_seed_var = tk.BooleanVar(
+            value=bool(self.last_used.get("royale_pt_vary_seed", False)))
         ttk.Checkbutton(_poo, text="Loop (ping-pong)", variable=self.royale_pt_loop_var).pack(side=tk.LEFT)
         ttk.Checkbutton(_poo, text="Word badge", variable=self.royale_pt_word_var).pack(side=tk.LEFT, padx=(14, 0))
         ttk.Checkbutton(_poo, text="Fizgig tag", variable=self.royale_pt_wm_var).pack(side=tk.LEFT, padx=(14, 0))
+        _vs = ttk.Checkbutton(_poo, text="Vary seed", variable=self.royale_pt_vary_seed_var)
+        _vs.pack(side=tk.LEFT, padx=(14, 0))
+        ToolTip(_vs, "Give each frame a fresh random seed instead of one fixed seed.\n"
+                     "With the reference anchored, this adds organic frame-to-frame variation "
+                     "while the prompt morphs — a more alive, less static look.")
         _pb = tk.Frame(ptrav, bg=_sbg); _pb.pack(anchor=tk.W)
         self._royale_pt_btn = tk.Button(_pb, text="Render & export prompt-travel…", font=(FONT_FAMILY, 10, "bold"),
                                         fg="#FFFFFF", bg="#B7791F", activeforeground="#FFFFFF",
@@ -9637,6 +9645,7 @@ class LoRATrainerGUI:
                    self.royale_pt_w_var, self.royale_pt_h_var, self.royale_pt_ref_strength_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self.royale_pt_vary_seed_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._royale_pt_refresh_words()
         self._royale_pt_toggle_ref_widgets()
 
@@ -10419,6 +10428,7 @@ class LoRATrainerGUI:
             pingpong=bool(self.royale_pt_loop_var.get()),
             brand=bool(self.royale_pt_wm_var.get()),
             word_badge=bool(self.royale_pt_word_var.get()),
+            vary_seed=bool(self.royale_pt_vary_seed_var.get()),
         )
         self._royale_pt_running = True
         self._royale_pt_btn.configure(state="disabled")
@@ -10427,7 +10437,7 @@ class LoRATrainerGUI:
         threading.Thread(target=self._royale_pt_worker, args=(params,), daemon=True).start()
 
     def _royale_pt_worker(self, p):
-        import sys, os
+        import sys, os, random
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.repair_studio.state import SliderState
         from fizgig.lora_royale import export as rexport, prompt_travel as pt
@@ -10448,7 +10458,8 @@ class LoRATrainerGUI:
                     f"Rendering frame {i + 1}/{n}…"))
                 ctx = eng.interp_waypoints(ctx_list, t)
                 st = SliderState.default_klein9b()
-                st.prompt = p["base"]; st.seed = p["seed"]
+                st.prompt = p["base"]
+                st.seed = random.randint(0, 2**31 - 1) if p.get("vary_seed") else p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
                 if p["ref"] and os.path.exists(p["ref"]):
                     st.ref_image_path = p["ref"]; st.ref_megapixels = 0.2

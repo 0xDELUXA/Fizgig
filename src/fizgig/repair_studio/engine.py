@@ -211,7 +211,14 @@ class RepairEngine:
         except Exception:
             logger.exception("swap_primary_weights: failed to load %s", path)
             return False
-        info = self.primary_network.load_state_dict(sd, strict=False)
+        try:
+            info = self.primary_network.load_state_dict(sd, strict=False)
+        except Exception as e:
+            # strict=False tolerates missing/extra keys but NOT shape mismatches —
+            # a different-rank checkpoint raises "size mismatch ...". Bail so the
+            # caller does a full reset()+load_primary() that rebuilds for the new rank.
+            logger.info("swap_primary_weights: structure/shape mismatch, needs full reload (%s)", e)
+            return False
         # If most of the checkpoint's keys didn't map onto the patched network,
         # the structure differs — bail so the caller can do a full reload.
         if sd and len(info.unexpected_keys) > 0.5 * len(sd):

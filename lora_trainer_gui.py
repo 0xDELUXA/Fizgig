@@ -9444,11 +9444,12 @@ class LoRATrainerGUI:
                         command=self._royale_travel_toggle_ref_widgets).pack(side=tk.LEFT)
         tk.Label(_tru, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
         self.royale_travel_ref_strength_var = tk.StringVar(
-            value=self.last_used.get("royale_travel_ref_strength", "1.0"))
+            value=self.last_used.get("royale_travel_ref_strength", "0.25"))
         _trse = ttk.Entry(_tru, textvariable=self.royale_travel_ref_strength_var, width=5)
         _trse.pack(side=tk.LEFT)
         ToolTip(_trse, "How strongly the reference anchors the morph.\n"
-                       "1.0 = stock, ~0.85 = Klein sweet spot, lower lets the seeds vary more, 0 = off.")
+                       "0.1–0.4 is the sweet range for travel — enough to hold the subject, loose enough "
+                       "to let the seeds travel. 1.0 clamps hard, 0 = off.")
         self.royale_travel_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_travel_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_travel_ref_strength_var.trace_add("write", lambda *a: self._save_last_used_paths())
@@ -9528,12 +9529,12 @@ class LoRATrainerGUI:
                         command=self._royale_pt_toggle_ref_widgets).pack(side=tk.LEFT)
         tk.Label(_ptu, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
         self.royale_pt_ref_strength_var = tk.StringVar(
-            value=self.last_used.get("royale_pt_ref_strength", "1.0"))
+            value=self.last_used.get("royale_pt_ref_strength", "0.25"))
         _ptse = ttk.Entry(_ptu, textvariable=self.royale_pt_ref_strength_var, width=5)
         _ptse.pack(side=tk.LEFT)
         ToolTip(_ptse, "How strongly the reference anchors the morph.\n"
-                       "1.0 = stock, ~0.85 = Klein sweet spot, a softer anchor lets the prompt words pull "
-                       "harder, 0 = off.")
+                       "0.1–0.4 is the sweet range for travel — holds the subject while the words still "
+                       "pull. 1.0 clamps hard, 0 = off.")
 
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
         tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))

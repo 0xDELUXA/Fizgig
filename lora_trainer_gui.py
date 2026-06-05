@@ -1161,6 +1161,12 @@ class LoRATrainerGUI:
             data["royale_travel_ref_mp"] = self.royale_travel_ref_mp_var.get()
             data["royale_travel_seq_ref"] = bool(self.royale_travel_seq_ref_var.get())
             data["royale_travel_waypoints"] = self.royale_travel_waypoints_var.get()
+        if hasattr(self, 'royale_lora_start_var'):
+            data["royale_lora_start"] = self.royale_lora_start_var.get()
+            data["royale_lora_end"] = self.royale_lora_end_var.get()
+            data["royale_lora_frames"] = self.royale_lora_frames_var.get()
+            data["royale_lora_w"] = self.royale_lora_w_var.get()
+            data["royale_lora_h"] = self.royale_lora_h_var.get()
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -9317,6 +9323,7 @@ class LoRATrainerGUI:
         self._royale_exporting = False
         self._royale_traveling = False
         self._royale_pt_running = False
+        self._royale_lora_running = False
 
         frame, _canvas = self.create_scrollable_frame(self.lora_royale_tab)
         outer = tk.Frame(frame, bg=COLORS["bg_deep"])
@@ -9860,6 +9867,82 @@ class LoRATrainerGUI:
         self._royale_pt_toggle_ref_widgets()
         self._royale_pt_sync_seed_widgets()
 
+        # ----- LoRA strength travel -----
+        ltrav = self._start_section_card(outer, "LoRA strength travel",
+                                         "Hold the prompt and seed fixed and ramp the LoRA's strength from one value "
+                                         "to another — watch the effect fade in (0 = base model) through to full "
+                                         "strength and beyond. Saved as a clip.")
+        _ls1 = tk.Frame(ltrav, bg=_sbg); _ls1.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_ls1, text="Strength", bg=_sbg, fg=COLORS["text_muted"], width=10,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_lora_start_var = tk.StringVar(value=self.last_used.get("royale_lora_start", "0.0"))
+        ttk.Entry(_ls1, textvariable=self.royale_lora_start_var, width=6).pack(side=tk.LEFT)
+        tk.Label(_ls1, text="→", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 8))
+        self.royale_lora_end_var = tk.StringVar(value=self.last_used.get("royale_lora_end", "1.0"))
+        ttk.Entry(_ls1, textvariable=self.royale_lora_end_var, width=6).pack(side=tk.LEFT)
+        tk.Label(_ls1, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 4))
+        self.royale_lora_frames_var = tk.StringVar(value=self.last_used.get("royale_lora_frames", "24"))
+        _lfcb = ttk.Combobox(_ls1, textvariable=self.royale_lora_frames_var,
+                             values=["16", "24", "36", "48", "64", "96", "128", "192", "256"],
+                             state="readonly", width=5)
+        _lfcb.pack(side=tk.LEFT)
+        ToolTip(_lfcb, "Each frame is a fresh 4-step render — more frames = smoother ramp but slower.")
+        tk.Label(ltrav, text="0 = base model (no LoRA); 1.0 = trained strength; >1 over-drives it. Uses the Setup "
+                             "prompt and seed, fixed — only the LoRA strength changes.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
+
+        _lsf = tk.Frame(ltrav, bg=_sbg); _lsf.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_lsf, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_lora_format_var = tk.StringVar(value="MP4")
+        _lfmt = ttk.Combobox(_lsf, textvariable=self.royale_lora_format_var, values=["MP4", "GIF"],
+                             state="readonly", width=6)
+        _lfmt.pack(side=tk.LEFT)
+        ToolTip(_lfmt, "MP4 is full colour, smaller, faster to write, and autoplays on X / Reddit / Instagram.\n"
+                       "GIF embeds anywhere but is limited to 256 colours and is larger / slower to write.")
+        tk.Label(_lsf, text="Speed", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_lora_speed_var = tk.StringVar(value="Normal")
+        ttk.Combobox(_lsf, textvariable=self.royale_lora_speed_var, values=["Slow", "Normal", "Fast"],
+                     state="readonly", width=8).pack(side=tk.LEFT)
+        tk.Label(_lsf, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 3))
+        self.royale_lora_w_var = tk.StringVar(
+            value=self.last_used.get("royale_lora_w", self.last_used.get("royale_w", "512")))
+        ttk.Combobox(_lsf, textvariable=self.royale_lora_w_var, values=["384", "512", "768", "1024", "1280", "1536"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        tk.Label(_lsf, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_lora_h_var = tk.StringVar(
+            value=self.last_used.get("royale_lora_h", self.last_used.get("royale_h", "512")))
+        ttk.Combobox(_lsf, textvariable=self.royale_lora_h_var, values=["384", "512", "768", "1024", "1280", "1536"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+
+        _lso = tk.Frame(ltrav, bg=_sbg); _lso.pack(anchor=tk.W, pady=(0, 8))
+        self.royale_lora_loop_var = tk.BooleanVar(value=True)
+        self.royale_lora_badge_var = tk.BooleanVar(value=True)
+        self.royale_lora_wm_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(_lso, text="Loop (ping-pong)", variable=self.royale_lora_loop_var).pack(side=tk.LEFT)
+        _lbg = ttk.Checkbutton(_lso, text="Strength badge", variable=self.royale_lora_badge_var)
+        _lbg.pack(side=tk.LEFT, padx=(14, 0))
+        ToolTip(_lbg, "Burn the current strength (e.g. 0.80×) into each frame, ticking as it ramps — "
+                      "makes the clip self-explanatory.")
+        ttk.Checkbutton(_lso, text="Fizgig tag", variable=self.royale_lora_wm_var).pack(side=tk.LEFT, padx=(14, 0))
+        tk.Label(_lso, text="Deflicker", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_lora_deflicker_var = tk.StringVar(value="None")
+        ttk.Combobox(_lso, textvariable=self.royale_lora_deflicker_var,
+                     values=["None", "Normal", "Strong"], state="readonly", width=10).pack(side=tk.LEFT)
+
+        _lsb = tk.Frame(ltrav, bg=_sbg); _lsb.pack(anchor=tk.W)
+        self._royale_lora_btn = tk.Button(_lsb, text="Render & export strength-travel…", font=(FONT_FAMILY, 10, "bold"),
+                                          fg="#FFFFFF", bg="#B7791F", activeforeground="#FFFFFF",
+                                          activebackground="#9A6518", relief="flat", bd=0, padx=18, pady=5,
+                                          cursor="hand2", command=self._royale_lora_travel)
+        self._royale_lora_btn.pack(side=tk.LEFT)
+        self.royale_lora_status_var = tk.StringVar(value="")
+        tk.Label(_lsb, textvariable=self.royale_lora_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
+        for _v in (self.royale_lora_start_var, self.royale_lora_end_var, self.royale_lora_frames_var,
+                   self.royale_lora_w_var, self.royale_lora_h_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
+
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
         self._royale_grid = tk.Frame(grid_card, bg=_sbg)
@@ -9904,10 +9987,11 @@ class LoRATrainerGUI:
         tk.Label(_pbr, textvariable=self.royale_promote_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
 
-        # Card order: Export morph -> All epochs -> Likeness -> Seed travel -> Prompt travel -> Promote.
-        # (Travel cards are built earlier so they can reuse helpers; repack into place.)
+        # Card order: Export morph -> All epochs -> Likeness -> Seed travel -> Prompt travel ->
+        # LoRA strength travel -> Promote. (Travel cards built earlier; repack into place.)
         trav.master.master.pack(before=promote.master.master)
         ptrav.master.master.pack(before=promote.master.master)
+        ltrav.master.master.pack(before=promote.master.master)
 
         # Scan the pre-filled output folder so the count shows on first open.
         try:
@@ -10737,6 +10821,135 @@ class LoRATrainerGUI:
             messagebox.showerror("Seed-travel failed", msg)
             return
         self.royale_travel_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
+        self._royale_reveal(out)
+
+    # ----- LoRA strength travel: ramp the LoRA multiplier on a fixed prompt+seed -----
+    def _royale_lora_travel(self):
+        if getattr(self, "_royale_lora_running", False) or getattr(self, "_royale_traveling", False) \
+                or getattr(self, "_royale_exporting", False):
+            return
+        label, path = self._royale_current_epoch()
+        if path is None or not os.path.exists(path):
+            messagebox.showinfo("LoRA Royale", "Render epochs first, then slide to the one you want to strength-travel.")
+            return
+        prompt = self.royale_prompt_var.get().strip()
+        if not prompt:
+            messagebox.showinfo("LoRA Royale", "Enter a prompt (include your trigger word).")
+            return
+        try:
+            seed = int(self.royale_seed_var.get() or "42")
+        except ValueError:
+            seed = 42
+        try:
+            s_start = float(self.royale_lora_start_var.get())
+            s_end = float(self.royale_lora_end_var.get())
+        except ValueError:
+            messagebox.showinfo("LoRA Royale", "Start and end strength must be numbers.")
+            return
+        if s_start == s_end:
+            messagebox.showinfo("LoRA Royale", "Start and end strength are the same — pick two different values.")
+            return
+        try:
+            frames = int(self.royale_lora_frames_var.get())
+        except ValueError:
+            frames = 24
+        if not self._royale_ensure_engine():
+            return
+        try:
+            width = int(self.royale_lora_w_var.get()); height = int(self.royale_lora_h_var.get())
+        except ValueError:
+            width = height = 512
+        fmt = self.royale_lora_format_var.get().upper()
+        ext = ".mp4" if fmt == "MP4" else ".gif"
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import run_name_for_folder
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        from tkinter import filedialog
+        out = filedialog.asksaveasfilename(
+            title="Export strength-travel clip",
+            defaultextension=ext,
+            initialfile=f"{run}-epoch{label}-strengthtravel{ext}",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
+            filetypes=[("MP4 video", "*.mp4")] if fmt == "MP4" else [("Animated GIF", "*.gif")])
+        if not out:
+            return
+        params = dict(
+            label=label, path=path, prompt=prompt, seed=seed,
+            s_start=s_start, s_end=s_end, frames=max(2, frames),
+            width=width, height=height, fmt=fmt, out=out,
+            speed=self.royale_lora_speed_var.get(),
+            pingpong=bool(self.royale_lora_loop_var.get()),
+            brand=bool(self.royale_lora_wm_var.get()),
+            badge=bool(self.royale_lora_badge_var.get()),
+            deflicker=self.royale_lora_deflicker_var.get(),
+        )
+        self._royale_lora_running = True
+        self._royale_lora_btn.configure(state="disabled")
+        self.royale_lora_status_var.set("Loading epoch…")
+        import threading
+        threading.Thread(target=self._royale_lora_travel_worker, args=(params,), daemon=True).start()
+
+    def _royale_lora_travel_worker(self, p):
+        import sys, os
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.state import SliderState
+        from fizgig.lora_royale import export as rexport
+        eng = self.royale_engine
+        try:
+            if eng.primary_network is None:
+                eng.load_primary(p["path"])
+            elif eng.primary_path != p["path"]:
+                if not eng.swap_primary_weights(p["path"]):
+                    eng.reset(); eng.load_primary(p["path"])
+            n = p["frames"]
+            imgs, labels = [], []
+            for i in range(n):
+                t = i / float(n - 1)
+                strength = p["s_start"] + (p["s_end"] - p["s_start"]) * t
+                self.master.after(0, lambda i=i: self.royale_lora_status_var.set(
+                    f"Rendering frame {i + 1}/{n}…"))
+                st = SliderState.default_klein9b()
+                st.prompt = p["prompt"]; st.seed = p["seed"]
+                st.preview_width = p["width"]; st.preview_height = p["height"]
+                for bs in st.blocks.values():       # uniform LoRA strength across all blocks
+                    bs.primary_strength = strength
+                img = eng.generate_preview(st)
+                imgs.append(img.copy())
+                labels.append(f"{strength:.2f}×")
+            _dfm = p.get("deflicker", "None")
+            if _dfm and _dfm != "None":
+                self.master.after(0, lambda: self.royale_lora_status_var.set("Deflickering…"))
+                _sig = (len(imgs) / 3.0) if _dfm == "Strong" else None
+                imgs = rexport.deflicker_frames(imgs, sigma=_sig)
+            self.master.after(0, lambda: self.royale_lora_status_var.set("Encoding clip…"))
+            frame_labels = labels if p["badge"] else None
+            max_size = None if p["fmt"] == "MP4" else 768
+            frames = rexport.frames_from_sequence(imgs, pingpong=p["pingpong"],
+                                                  brand=p["brand"], labels=frame_labels, max_size=max_size)
+            if p["fmt"] == "MP4":
+                rexport.write_mp4(frames, p["out"], speed=p["speed"])
+            else:
+                rexport.write_gif(frames, p["out"], speed=p["speed"])
+            self.master.after(0, lambda: self._royale_lora_travel_finish(p["out"], len(frames), None))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.master.after(0, lambda e=e: self._royale_lora_travel_finish(p["out"], 0, e))
+        finally:
+            self._royale_release_vram()
+
+    def _royale_lora_travel_finish(self, out, n_frames, err):
+        self._royale_lora_running = False
+        self._royale_lora_btn.configure(state="normal")
+        if err is not None:
+            self.royale_lora_status_var.set("Strength-travel failed — see console.")
+            msg = str(err)
+            if "codec" in msg.lower() or "writer" in msg.lower():
+                msg += "\n\nTry the GIF format instead."
+            messagebox.showerror("Strength-travel failed", msg)
+            return
+        self.royale_lora_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
         self._royale_reveal(out)
 
     # ----- Prompt travel: morph one epoch through a prompt dimension -----

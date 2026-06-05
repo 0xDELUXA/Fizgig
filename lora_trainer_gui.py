@@ -1133,6 +1133,7 @@ class LoRATrainerGUI:
             data["royale_seed"] = self.royale_seed_var.get()
             data["royale_max"] = self.royale_max_var.get()
             data["royale_ref"] = self.royale_ref_var.get()
+            data["royale_ref_strength"] = self.royale_ref_strength_var.get()
             data["royale_w"] = self.royale_w_var.get()
             data["royale_h"] = self.royale_h_var.get()
         if hasattr(self, 'royale_like_ref_var'):
@@ -9345,11 +9346,18 @@ class LoRATrainerGUI:
         ttk.Entry(_rr, textvariable=self.royale_ref_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(_rr, text="Browse…", command=self._royale_browse_ref).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(_rr, text="Clear", command=lambda: self.royale_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        tk.Label(_rr, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_ref_strength_var = tk.StringVar(value=self.last_used.get("royale_ref_strength", "1.0"))
+        _rse = ttk.Entry(_rr, textvariable=self.royale_ref_strength_var, width=5)
+        _rse.pack(side=tk.LEFT)
+        ToolTip(_rse, "How strongly the reference anchors each epoch render.\n"
+                      "1.0 = full edit-model anchor (the reference holds the composition while each epoch's "
+                      "LoRA renders the prompt), lower lets the prompt vary more, 0 = off.")
         r += 1
 
         # Remember the render inputs across sessions.
         for _v in (self.royale_prompt_var, self.royale_seed_var, self.royale_w_var, self.royale_h_var,
-                   self.royale_max_var, self.royale_ref_var):
+                   self.royale_max_var, self.royale_ref_var, self.royale_ref_strength_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
         _br = tk.Frame(setup, bg=_sbg); _br.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
@@ -9877,6 +9885,7 @@ class LoRATrainerGUI:
         except ValueError:
             width = height = 512
         ref = self.royale_ref_var.get().strip()
+        ref_strength = self._royale_parse_ref_strength(self.royale_ref_strength_var.get())
         results = []
         paths = {}
         eng = self.royale_engine
@@ -9900,7 +9909,7 @@ class LoRATrainerGUI:
                 if ref and os.path.exists(ref):
                     st.ref_image_path = ref
                     st.ref_megapixels = 0.2
-                    st.ref_strength = 1.0
+                    st.ref_strength = ref_strength
                 img = eng.generate_preview(st)
                 results.append((label, img.copy()))
                 paths[label] = path

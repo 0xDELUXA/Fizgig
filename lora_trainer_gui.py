@@ -9517,9 +9517,15 @@ class LoRATrainerGUI:
         self.royale_pt_prompt_var = tk.StringVar(value=self.last_used.get("royale_pt_prompt", ""))
         _ppe = ttk.Entry(_pp, textvariable=self.royale_pt_prompt_var)
         _ppe.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self._royale_pt_prompt_entry = _ppe
         ToolTip(_ppe, "Put {x} where the travel word should go, e.g.\n"
                       "  a portrait of sks man, {x}\n"
                       "If you omit {x}, the word is appended to the end.")
+        ttk.Button(_pp, text="Insert {x}", command=self._royale_pt_insert_slot).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(ptrav, text="Type {x} where the travel word goes — e.g.  a portrait of sks man, {x} light. "
+                             "No {x}? the word is appended to the end.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
 
         _ptr = tk.Frame(ptrav, bg=_sbg); _ptr.pack(fill=tk.X, pady=(0, 4))
         tk.Label(_ptr, text="Reference", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
@@ -10290,6 +10296,18 @@ class LoRATrainerGUI:
         if dim == "Custom":
             return pt.parse_custom(self.royale_pt_custom_var.get())
         return list(pt.TEMPLATES.get(dim, []))
+
+    def _royale_pt_insert_slot(self):
+        """Insert the {x} travel slot at the cursor in the prompt entry (append
+        if it isn't focused)."""
+        entry = getattr(self, "_royale_pt_prompt_entry", None)
+        if entry is None:
+            return
+        try:
+            entry.insert(entry.index(tk.INSERT), "{x}")
+        except Exception:
+            self.royale_pt_prompt_var.set((self.royale_pt_prompt_var.get() + " {x}").strip())
+        entry.focus_set()
 
     def _royale_pt_refresh_words(self):
         words = self._royale_pt_words()

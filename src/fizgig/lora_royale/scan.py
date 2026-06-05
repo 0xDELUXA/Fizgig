@@ -8,20 +8,18 @@ from typing import List, Tuple
 _EPOCH_RE = re.compile(r"^(?P<name>.+)-(?P<epoch>\d{6})\.safetensors$")
 
 
-def scan_checkpoints(folder: str) -> List[Tuple[int, str]]:
+def scan_checkpoints(folder: str):
     """Find LoRA checkpoints in `folder`, sorted ascending.
 
-    Returns a list of (label, path) where `label` is the epoch number for
-    trainer checkpoints, or a 0-based index for arbitrary LoRAs.
+    Returns a list of (label, path):
+      - **Clean training run** (exactly one `<name>-NNNNNN.safetensors` run and no
+        other .safetensors) → `label` is the integer epoch number.
+      - **Anything else** (a bag of arbitrary LoRAs, multiple runs, or a run mixed
+        with stray files) → EVERY .safetensors in the folder, labelled by its
+        filename stem (string), sorted by name. This is the 'compare a group of
+        random LoRAs' case — not just training sets.
 
-    Behaviour / edge cases:
-      - Prefers the trainer's epoch files (`<name>-NNNNNN.safetensors`). Adapts
-        to however many exist — an early-stopped run just has fewer.
-      - If several runs share the folder, picks the run with the MOST
-        checkpoints (the main run) so a stray one-off LoRA doesn't derail it.
-      - No epoch files at all → falls back to every `.safetensors` (sorted by
-        name) treated as a plain sequence (the 'arbitrary LoRAs' case).
-      - State directories (`<name>-NNNNNN-state/`) and non-safetensors are ignored.
+    State directories (`<name>-NNNNNN-state/`) and non-safetensors are ignored.
     """
     if not folder or not os.path.isdir(folder):
         return []
@@ -44,11 +42,15 @@ def scan_checkpoints(folder: str) -> List[Tuple[int, str]]:
         else:
             others.append(full)
 
-    if by_run:
-        best = max(by_run.values(), key=len)
-        return sorted(best, key=lambda t: t[0])
+    # Clean single training run → epoch labels (the classic LoRA Royale flow).
+    if len(by_run) == 1 and not others:
+        run = next(iter(by_run.values()))
+        return sorted(run, key=lambda t: t[0])
 
-    return [(i, p) for i, p in enumerate(sorted(others))]
+    # Otherwise: compare every .safetensors, labelled by filename stem.
+    all_paths = [p for run in by_run.values() for _, p in run] + others
+    all_paths = sorted(set(all_paths), key=lambda p: os.path.basename(p).lower())
+    return [(os.path.splitext(os.path.basename(p))[0], p) for p in all_paths]
 
 
 def run_name_for_folder(folder: str) -> str:

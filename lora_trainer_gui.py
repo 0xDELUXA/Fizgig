@@ -10299,6 +10299,13 @@ class LoRATrainerGUI:
         except Exception:
             return ""
 
+    @staticmethod
+    def _royale_label_disp(label):
+        """Display text for a checkpoint label: 'Epoch N' for trainer epochs, or the
+        LoRA's filename for arbitrary (non-epoch) LoRAs."""
+        s = str(label)
+        return f"Epoch {s}" if s.isdigit() else s
+
     def _royale_scan(self):
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
@@ -10307,7 +10314,10 @@ class LoRATrainerGUI:
         self._royale_checkpoints = cps
         if cps:
             labels = [e for e, _ in cps]
-            self.royale_scan_var.set(f"{len(cps)} checkpoints found (epochs {labels[0]}–{labels[-1]}).")
+            if all(str(x).isdigit() for x in labels):
+                self.royale_scan_var.set(f"{len(cps)} checkpoints found (epochs {labels[0]}–{labels[-1]}).")
+            else:
+                self.royale_scan_var.set(f"{len(cps)} LoRAs found — compared by filename.")
         else:
             self.royale_scan_var.set("No .safetensors checkpoints found in this folder.")
 
@@ -10410,7 +10420,7 @@ class LoRATrainerGUI:
         total = len(sel)
         for i, (label, path) in enumerate(sel):
             self.master.after(0, lambda l=label, i=i: self.royale_status_var.set(
-                f"Rendering epoch {l} ({i + 1}/{total})…"))
+                f"Rendering {self._royale_label_disp(l)} ({i + 1}/{total})…"))
             try:
                 # First-ever load patches the DiT; everything after (including a
                 # re-kicked render that reuses the loaded engine) swaps weights.
@@ -10471,12 +10481,13 @@ class LoRATrainerGUI:
         b_label, b_img = imgs[hi]
         if alpha <= 0.01 or lo == hi:
             blended = a_img
-            self.royale_scrub_label_var.set(f"Epoch {a_label}")
+            self.royale_scrub_label_var.set(self._royale_label_disp(a_label))
         else:
             if a_img.size != b_img.size:
                 b_img = b_img.resize(a_img.size)
             blended = Image.blend(a_img, b_img, alpha)
-            self.royale_scrub_label_var.set(f"Epoch {a_label}  →  {b_label}    ({alpha:.0%})")
+            self.royale_scrub_label_var.set(
+                f"{self._royale_label_disp(a_label)}  →  {self._royale_label_disp(b_label)}    ({alpha:.0%})")
         hw, hh = getattr(self, "_royale_holder_box", (512, 512))
         disp = blended.copy()
         disp.thumbnail((max(64, hw), max(64, hh)), Image.LANCZOS)
@@ -10526,11 +10537,12 @@ class LoRATrainerGUI:
             lbl = tk.Label(holder, image=tk_img, cursor="hand2", bg=COLORS["bg_surface"])
             lbl.pack()
             lbl.bind("<Button-1>", lambda e, idx=i: (self.royale_scrub_var.set(float(idx)), self._royale_scrub()))
-            # Caption: epoch + likeness score (if scored).
-            cap = f"e{label}"
+            # Caption: epoch number (or filename for arbitrary LoRAs) + likeness score.
+            base = f"e{label}" if str(label).isdigit() else str(label)[:16]
+            cap = base
             sc = scores.get(label)
             if sc is not None:
-                cap = f"e{label}  {sc:.2f}" if sc == sc else f"e{label}  —"  # NaN check
+                cap = f"{base}  {sc:.2f}" if sc == sc else f"{base}  —"  # NaN check
             tk.Label(self._royale_grid, text=cap, font=(FONT_FAMILY, 8, "bold" if is_best else "normal"),
                      fg=("#FFD24A" if is_best else COLORS["text_muted"]),
                      bg=COLORS["bg_surface"]).grid(row=row + 1, column=col, pady=(0, 4))
@@ -10643,7 +10655,8 @@ class LoRATrainerGUI:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.lora_royale import run_name_for_folder
         run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
-        default_name = f"{run}-epoch{label}-pick.safetensors"
+        default_name = (f"{run}-epoch{label}-pick.safetensors" if str(label).isdigit()
+                        else f"{label}-pick.safetensors")
         from tkinter import filedialog
         out = filedialog.asksaveasfilename(
             title="Promote epoch — save as",
@@ -10659,7 +10672,7 @@ class LoRATrainerGUI:
         except Exception as e:
             messagebox.showerror("Promote failed", f"Could not copy checkpoint:\n{e}")
             return
-        self.royale_promote_status_var.set(f"Saved epoch {label} → {os.path.basename(out)}")
+        self.royale_promote_status_var.set(f"Saved {self._royale_label_disp(label)} → {os.path.basename(out)}")
 
     # ----- Export the morph as a shareable clip -----
     def _royale_export(self):
@@ -10852,7 +10865,7 @@ class LoRATrainerGUI:
                 self._royale_apply_travel_ref(st, p, i, prev_path)
                 img = eng.generate_preview(st, seed_b=seeds[si + 1], travel_t=pos - si)
                 imgs.append(img.copy())
-                labels.append(f"EPOCH {p['label']}")
+                labels.append(self._royale_label_disp(p["label"]).upper())
                 if p.get("sequential"):
                     prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)
             self.master.after(0, lambda: self._royale_travel_finish(imgs, labels, None))

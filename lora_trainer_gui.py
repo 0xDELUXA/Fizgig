@@ -350,10 +350,12 @@ BUILT_IN_PRESETS = {
 # anchor / journey / identity-lock), NOT a prompt system (seed travel uses the Setup
 # prompt). Reference is kept light (0.1–0.4) so the seeds can actually travel.
 SEED_TRAVEL_PRESETS = {
-    # Three presets, each varying a clearly different knob:
+    # Each varies a clearly different knob:
     "Hold subject":   dict(ref_strength="0.4",  ref_mp="1.0", sequential=False, waypoints="2"),
     "Journey":        dict(ref_strength="0.2",  ref_mp="1.0", sequential=False, waypoints="6"),
     "Feedback dream": dict(ref_strength="0.25", ref_mp="1.0", sequential=True,  waypoints="4"),
+    # No reference at all — pure noise wandering through many seeds.
+    "Free ride":      dict(ref_strength="0.0",  ref_mp="1.0", sequential=False, waypoints="8"),
 }
 
 # Directory for dataset configurations

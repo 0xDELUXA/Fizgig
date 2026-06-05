@@ -9559,8 +9559,9 @@ class LoRATrainerGUI:
         _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
         tk.Label(_pd, text="Travel", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_dim_var = tk.StringVar(value=self.last_used.get("royale_pt_dim", "Time of day"))
-        ttk.Combobox(_pd, textvariable=self.royale_pt_dim_var,
-                     values=_ptlib.DIMENSION_NAMES + ["Custom"], state="readonly", width=16).pack(side=tk.LEFT)
+        _dim_vals = _ptlib.DIMENSION_NAMES + ["Custom"]
+        ttk.Combobox(_pd, textvariable=self.royale_pt_dim_var, values=_dim_vals, state="readonly",
+                     width=max(len(v) for v in _dim_vals) + 2).pack(side=tk.LEFT)
         tk.Label(_pd, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
         self.royale_pt_frames_var = tk.StringVar(value=self.last_used.get("royale_pt_frames", "32"))
         _pfcb = ttk.Combobox(_pd, textvariable=self.royale_pt_frames_var,
@@ -9912,6 +9913,7 @@ class LoRATrainerGUI:
         self.royale_status_var.set(f"Rendered {len(results)} epochs. Drag the crossfade slider, or click a thumbnail.")
         self._royale_scale.configure(to=float(len(results) - 1))
         self.royale_scrub_var.set(0.0)
+        self._royale_fit_holder()
         self._royale_build_grid()
         self._royale_scrub()
 
@@ -9934,12 +9936,31 @@ class LoRATrainerGUI:
                 b_img = b_img.resize(a_img.size)
             blended = Image.blend(a_img, b_img, alpha)
             self.royale_scrub_label_var.set(f"Epoch {a_label}  →  {b_label}    ({alpha:.0%})")
-        hw = self._royale_holder.winfo_width() or 512
-        hh = self._royale_holder.winfo_height() or 512
+        hw, hh = getattr(self, "_royale_holder_box", (512, 512))
         disp = blended.copy()
         disp.thumbnail((max(64, hw), max(64, hh)), Image.LANCZOS)
         self._royale_preview_imgtk = ImageTk.PhotoImage(disp)
         self._royale_preview_label.configure(image=self._royale_preview_imgtk, text="")
+
+    def _royale_fit_holder(self):
+        """Size the crossfade preview holder to the rendered image's aspect
+        (max 512 on the long side), so portrait/landscape renders aren't
+        letterboxed in a square box."""
+        imgs = getattr(self, "_royale_images", None)
+        m = 512
+        if not imgs:
+            box = (m, m)
+        else:
+            iw, ih = imgs[0][1].size
+            if iw >= ih:
+                box = (m, max(64, round(m * ih / iw)))
+            else:
+                box = (max(64, round(m * iw / ih)), m)
+        self._royale_holder_box = box
+        try:
+            self._royale_holder.configure(width=box[0], height=box[1])
+        except Exception:
+            pass
 
     def _royale_build_grid(self):
         from PIL import Image, ImageTk

@@ -9578,7 +9578,8 @@ class LoRATrainerGUI:
                                          "seed — it interpolates the text embedding, so the same subject flows "
                                          "(e.g. dawn → night). Saved as a clip.")
         _pps = tk.Frame(ptrav, bg=_sbg); _pps.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(_pps, text="Preset", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(_pps, text="Preset", bg=_sbg, fg=COLORS["text_muted"], width=12,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_preset_var = tk.StringVar(value="")
         _ppcb = ttk.Combobox(_pps, textvariable=self.royale_pt_preset_var,
                              values=list(_ptlib.PRESET_NAMES), state="readonly",
@@ -9604,7 +9605,8 @@ class LoRATrainerGUI:
                 "to a sensible default (Age → Female); change it any time, then fine-tune the box.")
 
         _pp = tk.Frame(ptrav, bg=_sbg); _pp.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(_pp, text="Prompt", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(_pp, text="Prompt", bg=_sbg, fg=COLORS["text_muted"], width=12,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_prompt_var = tk.StringVar(value=self.last_used.get("royale_pt_prompt", ""))
         _ppe = ttk.Entry(_pp, textvariable=self.royale_pt_prompt_var)
         _ppe.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -9616,10 +9618,55 @@ class LoRATrainerGUI:
         tk.Label(ptrav, text="Type {x} where the travel word goes — e.g.  a portrait of sks man, {x} light. "
                              "No {x}? the word is appended to the end.",
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
-                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 8))
+
+        # — Travel definition: what the clip morphs through (sits right under the prompt) —
+        # Hidden dimension state — set by the Preset dropdown above (incl. "Custom").
+        self.royale_pt_dim_var = tk.StringVar(value=self.last_used.get("royale_pt_dim", "Age"))
+        _pcr = tk.Frame(ptrav, bg=_sbg); _pcr.pack(fill=tk.X, pady=(0, 0))
+        tk.Label(_pcr, text="Custom words", bg=_sbg, fg=COLORS["text_muted"], width=12,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_custom_var = tk.StringVar(value=self.last_used.get("royale_pt_custom", ""))
+        ttk.Entry(_pcr, textvariable=self.royale_pt_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(ptrav, text="Comma-separated — only used when Preset = Custom words.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 6))
+
+        _prg = tk.Frame(ptrav, bg=_sbg); _prg.pack(fill=tk.X, pady=(0, 0))
+        tk.Label(_prg, text="Travel", bg=_sbg, fg=COLORS["text_muted"], width=12,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_pt_start_var = tk.StringVar(value=self.last_used.get("royale_pt_start", ""))
+        self._royale_pt_start_combo = ttk.Combobox(_prg, textvariable=self.royale_pt_start_var,
+                                                    state="readonly", width=24)
+        self._royale_pt_start_combo.pack(side=tk.LEFT)
+        tk.Label(_prg, text="→", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 8))
+        self.royale_pt_end_var = tk.StringVar(value=self.last_used.get("royale_pt_end", ""))
+        self._royale_pt_end_combo = ttk.Combobox(_prg, textvariable=self.royale_pt_end_var,
+                                                  state="readonly", width=24)
+        self._royale_pt_end_combo.pack(side=tk.LEFT)
+        tk.Label(_prg, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(18, 4))
+        self.royale_pt_frames_var = tk.StringVar(value=self.last_used.get("royale_pt_frames", "32"))
+        _pfcb = ttk.Combobox(_prg, textvariable=self.royale_pt_frames_var,
+                             values=["24", "32", "48", "64", "96", "128", "192", "256"],
+                             state="readonly", width=5)
+        _pfcb.pack(side=tk.LEFT)
+        ToolTip(_pfcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
+                       "Frames are spread across the Start→End waypoint span.")
+        tk.Label(ptrav, text="Start/End pick which waypoints to span — e.g. start Age at the subject's current age so "
+                             "it matches the reference, then travel onward (the loop ping-pongs back). Frames spread "
+                             "across that span.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 4))
+        for _v in (self.royale_pt_start_var, self.royale_pt_end_var):
+            _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
+
+        self.royale_pt_words_var = tk.StringVar(value="")
+        tk.Label(ptrav, textvariable=self.royale_pt_words_var, font=(FONT_FAMILY, 9, "italic"),
+                 fg=COLORS["accent"], bg=_sbg, wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 8))
 
         _ptr = tk.Frame(ptrav, bg=_sbg); _ptr.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(_ptr, text="Reference", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(_ptr, text="Reference", bg=_sbg, fg=COLORS["text_muted"], width=12,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
         self.royale_pt_ref_var = tk.StringVar(value=self.last_used.get("royale_pt_ref", ""))
         self._royale_pt_ref_entry = ttk.Entry(_ptr, textvariable=self.royale_pt_ref_var, state="readonly")
         self._royale_pt_ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -9678,48 +9725,6 @@ class LoRATrainerGUI:
         for _v in (self.royale_pt_ref_mp_var, self.royale_pt_seq_ref_var,
                    self.royale_pt_anchor_var, self.royale_pt_anchor_str_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
-
-        _pd = tk.Frame(ptrav, bg=_sbg); _pd.pack(anchor=tk.W, pady=(0, 4))
-        # The travel dimension is set by the Preset dropdown above — no separate
-        # selector. This var is hidden state the preset writes (incl. "Custom").
-        self.royale_pt_dim_var = tk.StringVar(value=self.last_used.get("royale_pt_dim", "Age"))
-        tk.Label(_pd, text="Frames", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
-        self.royale_pt_frames_var = tk.StringVar(value=self.last_used.get("royale_pt_frames", "32"))
-        _pfcb = ttk.Combobox(_pd, textvariable=self.royale_pt_frames_var,
-                             values=["24", "32", "48", "64", "96", "128", "192", "256"],
-                             state="readonly", width=5)
-        _pfcb.pack(side=tk.LEFT)
-        ToolTip(_pfcb, "Each frame is a fresh 4-step render — more frames = smoother but slower.\n"
-                       "Spread across all the waypoints, so multi-step dimensions want more.")
-
-        _pcr = tk.Frame(ptrav, bg=_sbg); _pcr.pack(fill=tk.X, pady=(0, 4))
-        tk.Label(_pcr, text="Custom words", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
-        self.royale_pt_custom_var = tk.StringVar(value=self.last_used.get("royale_pt_custom", ""))
-        ttk.Entry(_pcr, textvariable=self.royale_pt_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Label(_pcr, text="(comma-separated, used when Preset = Custom words)", bg=_sbg,
-                 fg=COLORS["text_muted"], font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(6, 0))
-
-        _prg = tk.Frame(ptrav, bg=_sbg); _prg.pack(anchor=tk.W, pady=(0, 4))
-        tk.Label(_prg, text="Start at", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 4))
-        self.royale_pt_start_var = tk.StringVar(value=self.last_used.get("royale_pt_start", ""))
-        self._royale_pt_start_combo = ttk.Combobox(_prg, textvariable=self.royale_pt_start_var,
-                                                    state="readonly", width=30)
-        self._royale_pt_start_combo.pack(side=tk.LEFT)
-        tk.Label(_prg, text="End at", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 4))
-        self.royale_pt_end_var = tk.StringVar(value=self.last_used.get("royale_pt_end", ""))
-        self._royale_pt_end_combo = ttk.Combobox(_prg, textvariable=self.royale_pt_end_var,
-                                                  state="readonly", width=30)
-        self._royale_pt_end_combo.pack(side=tk.LEFT)
-        tk.Label(ptrav, text="Optional: pick which waypoint to start and end on — e.g. start Age at the subject's "
-                             "current age so it matches the reference, then travel onward (the loop ping-pongs back).",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
-                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
-        for _v in (self.royale_pt_start_var, self.royale_pt_end_var):
-            _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
-
-        self.royale_pt_words_var = tk.StringVar(value="")
-        tk.Label(ptrav, textvariable=self.royale_pt_words_var, font=(FONT_FAMILY, 9, "italic"),
-                 fg=COLORS["accent"], bg=_sbg, wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
 
         _pof = tk.Frame(ptrav, bg=_sbg); _pof.pack(anchor=tk.W, pady=(0, 6))
         tk.Label(_pof, text="Format", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))

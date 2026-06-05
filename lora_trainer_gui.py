@@ -1169,6 +1169,7 @@ class LoRATrainerGUI:
             data["royale_pt_end"] = self.royale_pt_end_var.get()
             data["royale_pt_interp"] = self.royale_pt_interp_var.get()
             data["royale_pt_seq_seed"] = bool(self.royale_pt_seq_seed_var.get())
+            data["royale_pt_drift"] = self.royale_pt_drift_var.get()
         # Remember whether the bottom status bar is shown
         data["status_bar_visible"] = bool(getattr(self, "_status_bar_visible", True))
         save_last_used(data)
@@ -9548,6 +9549,16 @@ class LoRATrainerGUI:
         ttk.Checkbutton(_tro, text="Loop (ping-pong)", variable=self.royale_travel_loop_var).pack(side=tk.LEFT)
         ttk.Checkbutton(_tro, text="Epoch badge", variable=self.royale_travel_epoch_var).pack(side=tk.LEFT, padx=(14, 0))
         ttk.Checkbutton(_tro, text="Fizgig tag", variable=self.royale_travel_wm_var).pack(side=tk.LEFT, padx=(14, 0))
+        tk.Label(_tro, text="Deflicker", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_travel_deflicker_var = tk.StringVar(value="None")
+        _tdf = ttk.Combobox(_tro, textvariable=self.royale_travel_deflicker_var,
+                            values=["None", "Normal", "Strong"], state="readonly", width=10)
+        _tdf.pack(side=tk.LEFT)
+        ToolTip(_tdf,
+                "Timelapse-style luminance deflicker (post-process, like DaVinci Resolve).\n"
+                "• None — off.\n"
+                "• Normal — removes frame-to-frame jitter, keeps the intended slow brightness arc.\n"
+                "• Strong — wider window, flattens harder (also smooths slower changes).")
 
         _tr2 = tk.Frame(trav, bg=_sbg); _tr2.pack(anchor=tk.W)
         self._royale_travel_btn = tk.Button(_tr2, text="Render & export seed-travel…", font=(FONT_FAMILY, 10, "bold"),
@@ -9725,6 +9736,17 @@ class LoRATrainerGUI:
                 "  more even brightness with minimal change to the look. Low risk.\n"
                 "• Slerp — constant-speed spherical glide at full conditioning strength → smoothest morph,\n"
                 "  a bigger departure from Linear.")
+        tk.Label(_pin, text="Seed drift", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 6))
+        self.royale_pt_drift_var = tk.StringVar(value=self.last_used.get("royale_pt_drift", "0.0"))
+        self._royale_pt_drift_entry = ttk.Entry(_pin, textvariable=self.royale_pt_drift_var, width=5)
+        self._royale_pt_drift_entry.pack(side=tk.LEFT)
+        ToolTip(self._royale_pt_drift_entry,
+                "Fixes the static-seed fixed point. On a fixed seed the image can settle so hard that the\n"
+                "prompt (e.g. age) never fully expresses. Seed drift slerps the noise smoothly from the base\n"
+                "seed toward a second seed across the sweep, injecting fresh structure so the prompt takes\n"
+                "hold — with none of the jumpiness of Vary seed (which re-rolls randomly every frame).\n"
+                "0 = off (pure static seed).  0.1–0.3 = gentle.  0.5–1.0 = strong (the last frame ends up\n"
+                "half / fully a different seed).  Only applies when Vary seed is OFF.")
 
         _poo = tk.Frame(ptrav, bg=_sbg); _poo.pack(anchor=tk.W, pady=(0, 8))
         self.royale_pt_loop_var = tk.BooleanVar(value=True)
@@ -9737,8 +9759,21 @@ class LoRATrainerGUI:
         ttk.Checkbutton(_poo, text="Loop (ping-pong)", variable=self.royale_pt_loop_var).pack(side=tk.LEFT)
         ttk.Checkbutton(_poo, text="Word badge", variable=self.royale_pt_word_var).pack(side=tk.LEFT, padx=(14, 0))
         ttk.Checkbutton(_poo, text="Fizgig tag", variable=self.royale_pt_wm_var).pack(side=tk.LEFT, padx=(14, 0))
+        tk.Label(_poo, text="Deflicker", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.royale_pt_deflicker_var = tk.StringVar(value="None")
+        _pdf = ttk.Combobox(_poo, textvariable=self.royale_pt_deflicker_var,
+                            values=["None", "Normal", "Strong"], state="readonly", width=10)
+        _pdf.pack(side=tk.LEFT)
+        ToolTip(_pdf,
+                "Timelapse-style luminance deflicker (post-process, like DaVinci Resolve).\n"
+                "Smooths each frame's brightness toward a low-frequency baseline.\n"
+                "• None — off.\n"
+                "• Normal — removes frame-to-frame jitter, keeps the intended slow brightness arc\n"
+                "  (safe for Time-of-day / Lighting — the deliberate change is preserved).\n"
+                "• Strong — wider window, flattens harder; also smooths slower brightness changes.\n"
+                "  Use when even the gentle arc wobbles, at the cost of some intended drift.")
         _vs = ttk.Checkbutton(_poo, text="Vary seed", variable=self.royale_pt_vary_seed_var,
-                              command=self._royale_pt_sync_seq_seed)
+                              command=self._royale_pt_sync_seed_widgets)
         _vs.pack(side=tk.LEFT, padx=(14, 0))
         ToolTip(_vs, "Give each frame a fresh seed instead of one fixed seed.\n"
                      "With the reference anchored, this adds organic frame-to-frame variation "
@@ -9764,7 +9799,8 @@ class LoRATrainerGUI:
             _v.trace_add("write", lambda *a: (self._royale_pt_refresh_range(),
                                               self._royale_pt_refresh_words(), self._save_last_used_paths()))
         for _v in (self.royale_pt_prompt_var, self.royale_pt_frames_var, self.royale_pt_ref_var,
-                   self.royale_pt_w_var, self.royale_pt_h_var, self.royale_pt_ref_strength_var):
+                   self.royale_pt_w_var, self.royale_pt_h_var, self.royale_pt_ref_strength_var,
+                   self.royale_pt_drift_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_use_epoch_ref_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self.royale_pt_vary_seed_var.trace_add("write", lambda *a: self._save_last_used_paths())
@@ -9773,7 +9809,7 @@ class LoRATrainerGUI:
         self._royale_pt_refresh_range()
         self._royale_pt_refresh_words()
         self._royale_pt_toggle_ref_widgets()
-        self._royale_pt_sync_seq_seed()
+        self._royale_pt_sync_seed_widgets()
 
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
@@ -9882,13 +9918,20 @@ class LoRATrainerGUI:
                                         self._royale_pt_ref_clear,
                                         bool(self.royale_pt_use_epoch_ref_var.get()))
 
-    def _royale_pt_sync_seq_seed(self):
-        """Enable the 'Sequential seed' tick only while 'Vary seed' is on — it has
-        no effect otherwise (a fixed seed can't walk)."""
-        st = "normal" if self.royale_pt_vary_seed_var.get() else "disabled"
+    def _royale_pt_sync_seed_widgets(self):
+        """Gate the seed-variation widgets on 'Vary seed':
+        - 'Sequential seed' only matters while Vary seed is ON (a fixed seed can't walk).
+        - 'Seed drift' only applies while Vary seed is OFF (it's the smooth alternative
+          to random per-frame seeds), so disable it when Vary seed is on."""
+        on = bool(self.royale_pt_vary_seed_var.get())
         if hasattr(self, "_royale_pt_seq_seed_cb"):
             try:
-                self._royale_pt_seq_seed_cb.configure(state=st)
+                self._royale_pt_seq_seed_cb.configure(state=("normal" if on else "disabled"))
+            except Exception:
+                pass
+        if hasattr(self, "_royale_pt_drift_entry"):
+            try:
+                self._royale_pt_drift_entry.configure(state=("disabled" if on else "normal"))
             except Exception:
                 pass
 
@@ -9940,6 +9983,14 @@ class LoRATrainerGUI:
         """Parse a reference-strength entry, clamped to [0, 2]."""
         try:
             return max(0.0, min(2.0, float(text)))
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _royale_parse_drift(text, default=0.0):
+        """Parse a seed-drift amount, clamped to [0, 1] (0 = static seed)."""
+        try:
+            return max(0.0, min(1.0, float(text)))
         except (TypeError, ValueError):
             return default
 
@@ -10475,6 +10526,7 @@ class LoRATrainerGUI:
             pingpong=bool(self.royale_travel_loop_var.get()),
             brand=bool(self.royale_travel_wm_var.get()),
             show_epoch=bool(self.royale_travel_epoch_var.get()),
+            deflicker=self.royale_travel_deflicker_var.get(),
         )
         self._royale_traveling = True
         self._royale_travel_btn.configure(state="disabled")
@@ -10510,6 +10562,11 @@ class LoRATrainerGUI:
                 imgs.append(img.copy())
                 if p.get("sequential"):
                     prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)
+            _dfm = p.get("deflicker", "None")
+            if _dfm and _dfm != "None":
+                self.master.after(0, lambda: self.royale_travel_status_var.set("Deflickering…"))
+                _sig = (len(imgs) / 3.0) if _dfm == "Strong" else None
+                imgs = rexport.deflicker_frames(imgs, sigma=_sig)
             self.master.after(0, lambda: self.royale_travel_status_var.set("Encoding clip…"))
             badge = f"EPOCH {p['label']}" if p["show_epoch"] else None
             max_size = None if p["fmt"] == "MP4" else 768
@@ -10661,7 +10718,9 @@ class LoRATrainerGUI:
             word_badge=bool(self.royale_pt_word_var.get()),
             vary_seed=bool(self.royale_pt_vary_seed_var.get()),
             seq_seed=bool(self.royale_pt_seq_seed_var.get()),
+            drift=self._royale_parse_drift(self.royale_pt_drift_var.get()),
             interp=self.royale_pt_interp_var.get(),
+            deflicker=self.royale_pt_deflicker_var.get(),
         )
         self._royale_pt_running = True
         self._royale_pt_btn.configure(state="disabled")
@@ -10685,6 +10744,9 @@ class LoRATrainerGUI:
             ctx_list, neg = eng.encode_travel_prompts(wp_prompts)
             interp_mode = {"Linear": "lerp", "Norm-preserved": "norm",
                            "Slerp": "slerp"}.get(p.get("interp", "Linear"), "lerp")
+            drift = float(p.get("drift", 0.0) or 0.0)
+            # Deterministic second seed for smooth noise drift (uncorrelated with base).
+            drift_seed = (int(p["seed"]) + 1013904223) % (2**31) if drift > 0 else None
             n = p["frames"]
             imgs, labels = [], []
             prev_path = None
@@ -10701,11 +10763,22 @@ class LoRATrainerGUI:
                     st.seed = p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
                 self._royale_apply_travel_ref(st, p, i, prev_path)
-                img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)
+                if drift > 0 and not p.get("vary_seed"):
+                    # Smooth noise drift: slerp base seed -> drift_seed across the sweep,
+                    # breaking the static-seed fixed point so the prompt expresses.
+                    img = eng.generate_preview(st, seed_b=drift_seed, travel_t=drift * t,
+                                               override_ctx=ctx, override_neg_ctx=neg)
+                else:
+                    img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)
                 imgs.append(img.copy())
                 labels.append(pt.dominant_word(p["words"], t).upper())
                 if p.get("sequential"):
                     prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)
+            _dfm = p.get("deflicker", "None")
+            if _dfm and _dfm != "None":
+                self.master.after(0, lambda: self.royale_pt_status_var.set("Deflickering…"))
+                _sig = (len(imgs) / 3.0) if _dfm == "Strong" else None
+                imgs = rexport.deflicker_frames(imgs, sigma=_sig)
             self.master.after(0, lambda: self.royale_pt_status_var.set("Encoding clip…"))
             frame_labels = labels if p["word_badge"] else None
             max_size = None if p["fmt"] == "MP4" else 768

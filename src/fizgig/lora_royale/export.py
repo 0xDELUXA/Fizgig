@@ -131,6 +131,56 @@ def _even(n: int) -> int:
     return n if n % 2 == 0 else n - 1
 
 
+def deflicker_frames(images: List[Image.Image], strength: float = 1.0,
+                     sigma: Optional[float] = None) -> List[Image.Image]:
+    """Timelapse-style luminance deflicker for a rendered frame sequence.
+
+    The same idea as DaVinci Resolve's Timelapse Deflicker: measure each frame's
+    brightness, fit a smooth low-frequency baseline across the sweep, and pull each
+    frame's exposure toward that baseline. High-frequency frame-to-frame wobble
+    (flicker) is removed; the intended slow brightness arc (a sunset darkening, a
+    Time-of-day morph) lives in the baseline and is preserved — so it's safe to run
+    even on lighting dimensions.
+
+    Multiplicative gain, because exposure flicker is multiplicative. The gain is a
+    single per-frame scalar applied uniformly to R/G/B, so colour balance is kept.
+
+    `strength` 0..1 blends the correction (1 = full pull to baseline). `sigma` is the
+    Gaussian width in frames; auto from frame count when None (smaller window = treats
+    slower drift as flicker; the auto value keeps the global arc and removes jitter).
+    """
+    if not images or len(images) < 3:
+        return images
+    import numpy as np
+    arrs, means = [], []
+    for im in images:
+        a = np.asarray(im.convert("RGB"), dtype=np.float32)
+        arrs.append(a)
+        luma = 0.299 * a[..., 0] + 0.587 * a[..., 1] + 0.114 * a[..., 2]
+        means.append(float(luma.mean()))
+    means = np.asarray(means, dtype=np.float32)
+    n = len(means)
+    if sigma is None:
+        sigma = max(1.0, n / 10.0)
+    radius = max(1, int(round(sigma * 3)))
+    ker = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma) ** 2)
+    ker /= ker.sum()
+    baseline = np.convolve(np.pad(means, radius, mode="reflect"), ker, mode="valid")
+
+    strength = max(0.0, min(1.0, float(strength)))
+    out: List[Image.Image] = []
+    for i, a in enumerate(arrs):
+        m = means[i]
+        if m <= 1e-3:
+            out.append(images[i])
+            continue
+        g = baseline[i] / m
+        g = 1.0 + strength * (g - 1.0)
+        g = max(0.5, min(2.0, g))             # guard near-black/blown frames
+        out.append(Image.fromarray(np.clip(a * g, 0, 255).astype(np.uint8)))
+    return out
+
+
 def build_frames(images: List[Tuple], speed: str = "Normal", pingpong: bool = True,
                  brand: bool = True, show_epoch: bool = True,
                  max_size: Optional[int] = 768) -> List[Image.Image]:

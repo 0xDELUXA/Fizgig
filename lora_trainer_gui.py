@@ -9583,9 +9583,12 @@ class LoRATrainerGUI:
         self.royale_travel_seq_ref_var = tk.BooleanVar(
             value=bool(self.last_used.get("royale_travel_seq_ref", False)))
         _tru = tk.Frame(trav, bg=_sbg); _tru.pack(anchor=tk.W, pady=(0, 4))
-        ttk.Checkbutton(_tru, text="Use the rendered epoch as the reference",
-                        variable=self.royale_travel_use_epoch_ref_var,
-                        command=self._royale_travel_toggle_ref_widgets).pack(side=tk.LEFT)
+        self._royale_travel_ref_row = _tru
+        self._royale_travel_useepoch_cb = ttk.Checkbutton(
+            _tru, text="Use the rendered epoch as the reference",
+            variable=self.royale_travel_use_epoch_ref_var,
+            command=self._royale_travel_toggle_ref_widgets)
+        self._royale_travel_useepoch_cb.pack(side=tk.LEFT)
         tk.Label(_tru, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
         self.royale_travel_ref_strength_var = tk.StringVar(
             value=self.last_used.get("royale_travel_ref_strength", "0.25"))
@@ -9783,9 +9786,12 @@ class LoRATrainerGUI:
         self.royale_pt_seq_ref_var = tk.BooleanVar(
             value=bool(self.last_used.get("royale_pt_seq_ref", False)))
         _ptu = tk.Frame(ptrav, bg=_sbg); _ptu.pack(anchor=tk.W, pady=(0, 4))
-        ttk.Checkbutton(_ptu, text="Use the rendered epoch as the reference",
-                        variable=self.royale_pt_use_epoch_ref_var,
-                        command=self._royale_pt_toggle_ref_widgets).pack(side=tk.LEFT)
+        self._royale_pt_ref_row = _ptu
+        self._royale_pt_useepoch_cb = ttk.Checkbutton(
+            _ptu, text="Use the rendered epoch as the reference",
+            variable=self.royale_pt_use_epoch_ref_var,
+            command=self._royale_pt_toggle_ref_widgets)
+        self._royale_pt_useepoch_cb.pack(side=tk.LEFT)
         tk.Label(_ptu, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
         self.royale_pt_ref_strength_var = tk.StringVar(
             value=self.last_used.get("royale_pt_ref_strength", "1.0"))
@@ -10105,6 +10111,30 @@ class LoRATrainerGUI:
             for w in (self._royale_folder_lbl, self._royale_folder_row,
                       self._royale_scan_lbl, self._royale_render_row):
                 w.grid()
+        # The 'use rendered epoch as reference' toggle is meaningless in Single-LoRA
+        # mode (nothing renders epochs) — hide it and force it OFF so the travel cards
+        # use the file/Setup reference (Browse) instead.
+        for cb, row, var, toggle in (
+            (getattr(self, "_royale_travel_useepoch_cb", None), getattr(self, "_royale_travel_ref_row", None),
+             getattr(self, "royale_travel_use_epoch_ref_var", None), getattr(self, "_royale_travel_toggle_ref_widgets", None)),
+            (getattr(self, "_royale_pt_useepoch_cb", None), getattr(self, "_royale_pt_ref_row", None),
+             getattr(self, "royale_pt_use_epoch_ref_var", None), getattr(self, "_royale_pt_toggle_ref_widgets", None)),
+        ):
+            if cb is None:
+                continue
+            cb.pack_forget()
+            if single:
+                if var is not None and var.get():
+                    var.set(False)
+            else:
+                slaves = row.pack_slaves() if row is not None else []
+                if slaves:
+                    cb.pack(side=tk.LEFT, before=slaves[0])
+                else:
+                    cb.pack(side=tk.LEFT)
+            if toggle is not None:
+                toggle()          # re-grey the file-ref row to match use-epoch state
+
         # Re-pack the cards in canonical order, skipping folder-only ones when single.
         for content in self._royale_cards_in_order:
             content.master.master.pack_forget()

@@ -9536,8 +9536,11 @@ class LoRATrainerGUI:
         tk.Label(_tr1, text="→", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 8))
         self.royale_travel_seed_b_var = tk.StringVar(value=self.last_used.get("royale_travel_seed_b", "4242"))
         ttk.Entry(_tr1, textvariable=self.royale_travel_seed_b_var, width=9).pack(side=tk.LEFT)
-        ttk.Button(_tr1, text="🎲", width=3,
-                   command=self._royale_travel_randomize_seeds).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Button(_tr1, text="🎲", font=(FONT_FAMILY, 12), relief="flat", bd=0,
+                  fg=COLORS["text_primary"], bg=COLORS["bg_deep"],
+                  activebackground=COLORS["border"], activeforeground=COLORS["text_primary"],
+                  cursor="hand2", padx=5, pady=0,
+                  command=self._royale_travel_randomize_seeds).pack(side=tk.LEFT, padx=(6, 0))
         for _sv in (self.royale_travel_seed_a_var, self.royale_travel_seed_b_var):
             _sv.trace_add("write", lambda *a: self._save_last_used_paths())
         # (royale_travel_w/h var traces added after they're created below.)

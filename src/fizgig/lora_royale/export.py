@@ -5,8 +5,10 @@ with an epoch ticker and a 'Fizgig · LoRA Royale' tag burned in. Every clip is
 an advert for the tool, and the tool makes the clip for you.
 
 Frames are built from the same Image.blend the crossfade slider uses, so the
-exported sweep is exactly what you saw. No new dependencies — PIL writes the
-GIF, OpenCV (already a Fizgig dep) writes the MP4.
+exported sweep is exactly what you saw. PIL writes the GIF; the MP4 is H.264 +
+yuv420p + faststart via ffmpeg (bundled imageio-ffmpeg or a system ffmpeg) so it
+plays on Reddit / X / Instagram / Discord — falling back to OpenCV mp4v only if no
+ffmpeg is present.
 """
 
 from typing import List, Optional, Tuple
@@ -273,22 +275,71 @@ def write_gif(frames: List[Image.Image], path: str, speed: str = "Normal", loop:
                    duration=dur, loop=loop, optimize=True, disposal=2)
 
 
+def _find_ffmpeg():
+    """Locate an ffmpeg binary: prefer imageio-ffmpeg's bundled, cross-platform one
+    (pip-installed, no system setup), then a system ffmpeg on PATH. Returns a path or
+    None."""
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    import shutil
+    return shutil.which("ffmpeg")
+
+
 def write_mp4(frames: List[Image.Image], path: str, speed: str = "Normal"):
-    """Write an MP4 via OpenCV (mp4v). Raises a clear error if the codec/writer
-    can't be opened so the caller can suggest GIF instead."""
+    """Write a web-/social-compatible MP4 — H.264 (libx264) + yuv420p + faststart —
+    by piping raw frames to ffmpeg. This is what Reddit / X / Instagram / Discord
+    require; the old OpenCV `mp4v` output is MPEG-4 Part 2 (plays in desktop players
+    but is rejected or fails to transcode on most web platforms).
+
+    Falls back to OpenCV `mp4v` only if no ffmpeg is found, so export still works —
+    just not web-standard (a warning is printed)."""
     if not frames:
         raise ValueError("No frames to export.")
     import numpy as np
-    import cv2
     _, _, fps = SPEED_PRESETS.get(speed, SPEED_PRESETS["Normal"])
+    # H.264 + yuv420p require even dimensions.
     w, h = frames[0].size
+    w, h = max(2, _even(w)), max(2, _even(h))
+
+    def _prep(fr):
+        im = fr.convert("RGB")
+        return im if im.size == (w, h) else im.resize((w, h), Image.LANCZOS)
+
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg:
+        import subprocess
+        cmd = [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+            "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-crf", "18", "-preset", "medium", "-movflags", "+faststart", path,
+        ]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        try:
+            for fr in frames:
+                proc.stdin.write(np.asarray(_prep(fr), dtype=np.uint8).tobytes())
+        finally:
+            proc.stdin.close()
+            rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(f"ffmpeg failed (exit {rc}) writing {path}. Try GIF instead.")
+        return
+
+    # No ffmpeg — fall back to OpenCV mp4v (not web-standard).
+    import cv2
+    print("[export] WARNING: ffmpeg not found — writing mp4v (MPEG-4 Part 2). This plays "
+          "locally but may be rejected by Reddit / web. Install ffmpeg or "
+          "`pip install imageio-ffmpeg` for H.264 output.")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(path, fourcc, float(fps), (w, h))
     if not writer.isOpened():
         raise RuntimeError("OpenCV could not open an MP4 writer (codec unavailable). Try GIF instead.")
     try:
         for fr in frames:
-            arr = np.array(fr.convert("RGB"))[:, :, ::-1]    # RGB -> BGR
+            arr = np.array(_prep(fr))[:, :, ::-1]    # RGB -> BGR
             writer.write(np.ascontiguousarray(arr))
     finally:
         writer.release()

@@ -1802,11 +1802,7 @@ class LoRATrainerGUI:
         except Exception:
             url = fallback
         btn_frame = tk.Frame(parent, bg=COLORS["bg_deep"])
-        btn_frame.pack(fill=tk.X, padx=36, pady=(0 if prominent else 8, 8))
-        if prominent:
-            tk.Label(btn_frame, text="Need help? Every tab has a YouTube guide at the bottom.",
-                     font=(FONT_FAMILY, 11), fg=COLORS["text_secondary"],
-                     bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 8))
+        btn_frame.pack(fill=tk.X, padx=36, pady=(16, 16) if prominent else (8, 8))
         row = tk.Frame(btn_frame, bg=COLORS["bg_deep"])
         row.pack(anchor=tk.W)
         btn = tk.Button(
@@ -1814,7 +1810,7 @@ class LoRATrainerGUI:
             font=(FONT_FAMILY, 12 if prominent else 10, "bold"),
             fg="#FFFFFF", bg="#CC0000", activeforeground="#FFFFFF", activebackground="#990000",
             relief="flat", bd=0, padx=20 if prominent else 16,
-            pady=10 if prominent else 6, cursor="hand2",
+            pady=6, cursor="hand2",
             command=lambda: __import__("webbrowser").open(url),
         )
         btn.pack(side=tk.LEFT)
@@ -1823,7 +1819,7 @@ class LoRATrainerGUI:
                 row, text="\u2615  Buy me a coffee",
                 font=(FONT_FAMILY, 12, "bold"),
                 fg="#000000", bg="#FFDD00", activeforeground="#000000", activebackground="#E5C700",
-                relief="flat", bd=0, padx=20, pady=10, cursor="hand2",
+                relief="flat", bd=0, padx=20, pady=6, cursor="hand2",
                 command=lambda: __import__("webbrowser").open(
                     "https://buymeacoffee.com/lorasandlenses"),
             )
@@ -1833,7 +1829,7 @@ class LoRATrainerGUI:
                 font=(FONT_FAMILY, 12, "bold"),
                 fg="#FFFFFF", bg=COLORS["accent"],
                 activeforeground="#FFFFFF", activebackground=COLORS["accent_hover"],
-                relief="flat", bd=0, padx=20, pady=10, cursor="hand2",
+                relief="flat", bd=0, padx=20, pady=6, cursor="hand2",
                 command=self._open_about_dialog,
             )
             about.pack(side=tk.LEFT, padx=(12, 0))
@@ -2100,7 +2096,7 @@ class LoRATrainerGUI:
 
         tk.Label(picker_card, text="Training image folder",
                  font=(FONT_FAMILY, 12, "bold"),
-                 fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(anchor=tk.W, padx=20, pady=(16, 2))
+                 fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(anchor=tk.W, padx=20, pady=(8, 2))
         tk.Label(picker_card,
                  text="This is the single place you set your dataset folder. Image Prep, Captions, "
                       "and Training all read from it automatically.",
@@ -2109,7 +2105,7 @@ class LoRATrainerGUI:
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 12))
 
         row = tk.Frame(picker_card, bg=COLORS["bg_surface"])
-        row.pack(fill=tk.X, padx=20, pady=(0, 16))
+        row.pack(fill=tk.X, padx=20, pady=(0, 8))
         ttk.Entry(row, textvariable=self.image_folder_var, width=70, font=(FONT_FAMILY, 10)).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), ipady=4
         )
@@ -2175,6 +2171,9 @@ class LoRATrainerGUI:
             ("LoRA the Explorer",
              "Evolutionary discovery — the computer proposes random mutations, you pick favourites, "
              "and the LoRA evolves. Seamlessly connected to Repair Studio."),
+            ("LoRA Royale",
+             "Compare epochs (or any LoRAs) on one seed, then export share-ready clips — seed, "
+             "prompt, and LoRA-strength travels, deflickered and ready for social."),
             ("Extract",
              "Distill a LoRA to a lower rank with optional block- and timestep-targeted presets. "
              "Supports LyCORIS (LoKR / LoHa) sources."),

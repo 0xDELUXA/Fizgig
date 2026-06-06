@@ -10348,10 +10348,12 @@ class LoRATrainerGUI:
         else:
             self.royale_scan_var.set("No .safetensors checkpoints found in this folder.")
 
-    def _royale_ensure_engine(self):
-        if (self.royale_engine is not None and self.royale_engine.pipeline is not None
-                and self.royale_engine.pipeline.is_loaded):
-            return True
+    def _royale_validate_models(self):
+        """Fast main-thread pre-flight before a render: verify the model paths exist,
+        make sure the engine object exists, and stash the pipeline kwargs for the worker
+        to load with. Does NOT load anything (no blocking) — the worker thread does the
+        heavy load via _royale_ensure_pipeline_loaded(). Shows a messagebox + returns
+        False on a missing path."""
         dit_path = self.prefs_vars["distilled_dit"].get() if "distilled_dit" in self.prefs_vars else ""
         vae_path = self._get_path("VAE_MODEL")
         te_path = self._get_path("TEXT_ENCODER")
@@ -10363,25 +10365,26 @@ class LoRATrainerGUI:
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.repair_studio.engine import RepairEngine
         if self.royale_engine is None:
-            self.royale_engine = RepairEngine()
+            self.royale_engine = RepairEngine()      # cheap constructor — no model load
         is_fp8 = "fp8" in os.path.basename(dit_path).lower()
-        # Stash the kwargs so a worker thread can rebuild the pipeline after reset()
-        # (needed when switching to a different-rank LoRA) without touching Tk.
+        # Stash kwargs so the worker thread can load (and rebuild after reset() on a
+        # different-rank swap) without touching Tk.
         self._royale_pipeline_kwargs = dict(
             dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
             model_version="klein-9b", device="cuda",
             fp8_scaled=False if is_fp8 else True,
             blocks_to_swap=self._get_inference_blocks_to_swap())
-        try:
-            self.royale_status_var.set("Loading Distilled model…")
-            self.master.update_idletasks()
-            self.royale_engine.ensure_pipeline(**self._royale_pipeline_kwargs)
-            return True
-        except Exception:
-            import traceback
-            messagebox.showerror("Error", f"Failed to load models:\n{traceback.format_exc()}")
-            self.royale_status_var.set("Error loading models.")
-            return False
+        return True
+
+    def _royale_ensure_pipeline_loaded(self):
+        """Worker-thread: load the Distilled pipeline if it isn't already. No Tk calls;
+        raises on failure (callers route it to their finish handler). The same load
+        already runs on a worker thread in _royale_load_or_swap_primary, so it's
+        proven-safe off the main thread."""
+        eng = self.royale_engine
+        if eng is not None and eng.pipeline is not None and eng.pipeline.is_loaded:
+            return
+        eng.ensure_pipeline(**self._royale_pipeline_kwargs)
 
     def _royale_load_or_swap_primary(self, eng, path):
         """Point `eng` at `path`. Fast in-place weight swap when the structure matches
@@ -10406,7 +10409,7 @@ class LoRATrainerGUI:
                 pass
 
     def _royale_render(self):
-        if self._royale_rendering:
+        if self._royale_is_busy():
             return
         cps = self._royale_checkpoints
         if not cps:
@@ -10424,10 +10427,11 @@ class LoRATrainerGUI:
             if len(cps) > n:
                 idx = sorted({round(i * (len(cps) - 1) / (n - 1)) for i in range(n)})
                 sel = [cps[i] for i in idx]
-        if not self._royale_ensure_engine():
+        if not self._royale_validate_models():
             return
         self._royale_rendering = True
         self._royale_render_btn.configure(state="disabled")
+        self.royale_status_var.set("Loading model…")
         import threading
         threading.Thread(target=self._royale_render_worker, args=(sel, prompt), daemon=True).start()
 
@@ -10450,6 +10454,13 @@ class LoRATrainerGUI:
 
     def _royale_render_worker(self, sel, prompt):
         from fizgig.repair_studio.state import SliderState
+        try:
+            self._royale_ensure_pipeline_loaded()      # heavy load, off the main thread
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.master.after(0, lambda e=e: self._royale_render_load_failed(e))
+            return
         try:
             seed = int(self.royale_seed_var.get() or "42")
         except ValueError:
@@ -10488,6 +10499,14 @@ class LoRATrainerGUI:
                 print(f"[royale] render failed for {path}:\n{traceback.format_exc()}")
         self._royale_release_vram()
         self.master.after(0, lambda: self._royale_finish(results, paths))
+
+    def _royale_render_load_failed(self, err):
+        """Pipeline load failed on the render worker thread — re-enable the button and
+        report (main thread)."""
+        self._royale_rendering = False
+        self._royale_render_btn.configure(state="normal")
+        self.royale_status_var.set("Failed to load models — see console.")
+        messagebox.showerror("Error", f"Failed to load models:\n{err}")
 
     def _royale_finish(self, results, paths=None):
         self._royale_rendering = False
@@ -10824,7 +10843,7 @@ class LoRATrainerGUI:
 
     # ----- Seed travel: morph one epoch between two seeds (slerp) -----
     def _royale_seed_travel(self):
-        if getattr(self, "_royale_traveling", False) or getattr(self, "_royale_exporting", False):
+        if self._royale_is_busy():
             return
         label, path = self._royale_current_epoch()
         if path is None or not os.path.exists(path):
@@ -10853,12 +10872,7 @@ class LoRATrainerGUI:
             frames = int(self.royale_travel_frames_var.get())
         except ValueError:
             frames = 24
-        # Paint feedback before ensure_engine — the first single-LoRA render loads the
-        # whole pipeline on this thread, which would otherwise sit silent.
-        self.royale_travel_status_var.set("Loading model…")
-        self.master.update_idletasks()
-        if not self._royale_ensure_engine():
-            self.royale_travel_status_var.set("")
+        if not self._royale_validate_models():
             return
         try:
             width = int(self.royale_travel_w_var.get()); height = int(self.royale_travel_h_var.get())
@@ -10878,7 +10892,7 @@ class LoRATrainerGUI:
         )
         self._royale_traveling = True
         self._royale_travel_btn.configure(state="disabled")
-        self.royale_travel_status_var.set("Loading epoch…")
+        self.royale_travel_status_var.set("Loading model…")
         import threading
         threading.Thread(target=self._royale_travel_worker, args=(params,), daemon=True).start()
 
@@ -10888,6 +10902,7 @@ class LoRATrainerGUI:
         from fizgig.repair_studio.state import SliderState
         eng = self.royale_engine
         try:
+            self._royale_ensure_pipeline_loaded()      # heavy load, off the main thread
             # Make sure the engine holds the parked epoch's weights.
             self._royale_load_or_swap_primary(eng, p["path"])
             n = p["frames"]
@@ -10936,8 +10951,7 @@ class LoRATrainerGUI:
     # Render produces the raw frames into a scrubber; save (MP4/GIF/frame) is deferred
     # and applies the cosmetic/encode options at save time (no re-render).
     def _royale_lora_travel(self):
-        if getattr(self, "_royale_lora_running", False) or getattr(self, "_royale_traveling", False) \
-                or getattr(self, "_royale_exporting", False):
+        if self._royale_is_busy():
             return
         label, path = self._royale_current_epoch()
         if path is None or not os.path.exists(path):
@@ -10965,10 +10979,7 @@ class LoRATrainerGUI:
             frames = int(self.royale_lora_frames_var.get())
         except ValueError:
             frames = 24
-        self.royale_lora_status_var.set("Loading model…")
-        self.master.update_idletasks()
-        if not self._royale_ensure_engine():
-            self.royale_lora_status_var.set("")
+        if not self._royale_validate_models():
             return
         try:
             width = int(self.royale_lora_w_var.get()); height = int(self.royale_lora_h_var.get())
@@ -10981,7 +10992,7 @@ class LoRATrainerGUI:
         )
         self._royale_lora_running = True
         self._royale_lora_btn.configure(state="disabled")
-        self.royale_lora_status_var.set("Loading epoch…")
+        self.royale_lora_status_var.set("Loading model…")
         import threading
         threading.Thread(target=self._royale_lora_travel_worker, args=(params,), daemon=True).start()
 
@@ -10991,6 +11002,7 @@ class LoRATrainerGUI:
         from fizgig.repair_studio.state import SliderState
         eng = self.royale_engine
         try:
+            self._royale_ensure_pipeline_loaded()      # heavy load, off the main thread
             self._royale_load_or_swap_primary(eng, p["path"])
             n = p["frames"]
             imgs, labels = [], []
@@ -11227,7 +11239,7 @@ class LoRATrainerGUI:
             self.royale_pt_words_var.set("Add at least two comma-separated custom words to travel between.")
 
     def _royale_prompt_travel(self):
-        if getattr(self, "_royale_pt_running", False) or getattr(self, "_royale_traveling", False):
+        if self._royale_is_busy():
             return
         label, path = self._royale_current_epoch()
         if path is None or not os.path.exists(path):
@@ -11256,10 +11268,7 @@ class LoRATrainerGUI:
             width = int(self.royale_pt_w_var.get()); height = int(self.royale_pt_h_var.get())
         except ValueError:
             width = height = 512
-        self.royale_pt_status_var.set("Loading model…")
-        self.master.update_idletasks()
-        if not self._royale_ensure_engine():
-            self.royale_pt_status_var.set("")
+        if not self._royale_validate_models():
             return
         params = dict(
             label=label, path=path, base=base, words=words,
@@ -11278,7 +11287,7 @@ class LoRATrainerGUI:
         )
         self._royale_pt_running = True
         self._royale_pt_btn.configure(state="disabled")
-        self.royale_pt_status_var.set("Encoding prompts…")
+        self.royale_pt_status_var.set("Loading model…")
         import threading
         threading.Thread(target=self._royale_pt_worker, args=(params,), daemon=True).start()
 
@@ -11289,7 +11298,9 @@ class LoRATrainerGUI:
         from fizgig.lora_royale import prompt_travel as pt
         eng = self.royale_engine
         try:
+            self._royale_ensure_pipeline_loaded()      # heavy load, off the main thread
             self._royale_load_or_swap_primary(eng, p["path"])
+            self.master.after(0, lambda: self.royale_pt_status_var.set("Encoding prompts…"))
             wp_prompts = pt.build_waypoint_prompts(p["base"], p["words"])
             ctx_list, neg = eng.encode_travel_prompts(wp_prompts)
             interp_mode = {"Linear": "lerp", "Norm-preserved": "norm",

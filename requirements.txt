@@ -9,7 +9,7 @@ torchvision==0.25.0
 # Training framework
 accelerate==1.6.0
 diffusers==0.32.1
-safetensors==0.4.5
+safetensors==0.5.3  # 0.4.5 had no cp313 wheel (forced a Rust source build on Python 3.13 / cold machines); 0.5.3 ships wheels for 3.12 + 3.13
 einops==0.7.0
 
 # Text encoder (Qwen3)

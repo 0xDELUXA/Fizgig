@@ -10311,52 +10311,36 @@ class LoRATrainerGUI:
         except (TypeError, ValueError):
             return default
 
-    def _royale_next_seq_token(self):
-        """Monotonic token so each sequential-reference run gets its own temp
-        filenames (the engine ref cache is path-keyed, so paths must be unique
-        per run as well as per frame)."""
-        self._royale_seq_counter = getattr(self, "_royale_seq_counter", 0) + 1
-        return self._royale_seq_counter
+    def _royale_apply_travel_ref(self, st, p, i):
+        """Set the reference(s) on a travel frame's SliderState and return the strength
+        to apply to the PREVIOUS frame's latent (0.0 when this frame uses no prev latent).
 
-    def _royale_apply_travel_ref(self, st, p, i, prev_path):
-        """Set the reference(s) on a travel frame's SliderState.
-
-        Non-sequential: the selected reference on every frame.
-        Sequential: frame 0 uses the selected reference; later frames edit the
-        previous rendered frame. With 'Anchor to original', later frames ALSO
-        keep the original as a second reference (clean identity anchor) so the
-        feedback chain doesn't drift — original = ref, previous = ref2."""
+        Non-sequential: the selected reference on every frame; no prev latent.
+        Sequential: frame 0 uses the selected reference. Later frames edit the PREVIOUS
+        frame via its cached clean latent (no VAE decode→PNG→encode round trip — the
+        worker passes RepairEngine._last_frame_latent as prev_latent), which is what
+        keeps the chain sharp at high strength. With 'Anchor to original', later frames
+        ALSO keep the original as a clean image reference (identity anchor):
+        original = image ref, previous = latent ref."""
         import os
         st.ref_megapixels = p.get("ref_mp", 0.2)
         st.ref2_path = ""
         orig = p.get("ref", "")
-        if p.get("sequential"):
-            if p.get("anchor") and i > 0 and prev_path:
-                # Dual reference: original (anchor) + previous frame (continuity).
-                st.ref_image_path = orig if (orig and os.path.exists(orig)) else ""
+        orig_ok = orig if (orig and os.path.exists(orig)) else ""
+        if p.get("sequential") and i > 0:
+            if p.get("anchor"):
+                # Dual reference: original (clean image anchor) + previous frame (latent).
+                st.ref_image_path = orig_ok
                 st.ref_strength = p.get("anchor_str", 1.0)
-                st.ref2_path = prev_path
-                st.ref2_strength = p.get("ref_strength", 1.0)
             else:
-                frame_ref = prev_path if (i > 0 and prev_path) else orig
-                st.ref_image_path = frame_ref if (frame_ref and os.path.exists(frame_ref)) else ""
-                st.ref_strength = p.get("ref_strength", 1.0)
-        else:
-            st.ref_image_path = orig if (orig and os.path.exists(orig)) else ""
-            st.ref_strength = p.get("ref_strength", 1.0)
-
-    def _royale_seq_tempfile(self, token, i, img):
-        """Save a frame of a sequential-reference chain to a unique temp PNG and
-        return its path (so the next frame can edit-condition on it). Unique per
-        (run token, frame index) so the engine's path-keyed ref cache re-encodes
-        each link instead of reusing a stale one."""
-        import tempfile
-        tmp = os.path.join(tempfile.gettempdir(), f"fizgig_royale_seq_{token}_{i}.png")
-        try:
-            img.save(tmp)
-            return tmp
-        except Exception:
-            return ""
+                # Previous frame only — supplied as the latent ref by the worker.
+                st.ref_image_path = ""
+                st.ref_strength = 0.0
+            return float(p.get("ref_strength", 1.0))
+        # Frame 0 or non-sequential: the selected image reference, no prev latent.
+        st.ref_image_path = orig_ok
+        st.ref_strength = p.get("ref_strength", 1.0)
+        return 0.0
 
     @staticmethod
     def _royale_label_disp(label):
@@ -10920,7 +10904,6 @@ class LoRATrainerGUI:
             ref_mp=self._royale_parse_ref_mp(self.royale_travel_ref_mp_var.get()),
             sequential=bool(self.royale_travel_seq_ref_var.get()),
             anchor=False,
-            seq_token=self._royale_next_seq_token(),
         )
         self._royale_traveling = True
         self._royale_travel_btn.configure(state="disabled")
@@ -10941,7 +10924,7 @@ class LoRATrainerGUI:
             seeds = self._royale_journey_seeds(p["seed_a"], p["seed_b"], p.get("waypoints", 2))
             nseg = len(seeds) - 1
             imgs, labels = [], []
-            prev_path = None
+            prev_latent = None
             for i in range(n):
                 t = i / float(n - 1)
                 self.master.after(0, lambda i=i: self.royale_travel_status_var.set(
@@ -10952,12 +10935,14 @@ class LoRATrainerGUI:
                 st = SliderState.default_klein9b()
                 st.prompt = p["prompt"]; st.seed = seeds[si]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
-                self._royale_apply_travel_ref(st, p, i, prev_path)
-                img = eng.generate_preview(st, seed_b=seeds[si + 1], travel_t=pos - si)
+                pls = self._royale_apply_travel_ref(st, p, i)
+                img = eng.generate_preview(
+                    st, seed_b=seeds[si + 1], travel_t=pos - si,
+                    prev_latent=prev_latent, prev_latent_strength=pls)
                 imgs.append(img.copy())
                 labels.append(self._royale_label_disp(p["label"]).upper())
                 if p.get("sequential"):
-                    prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)
+                    prev_latent = eng._last_frame_latent
             self.master.after(0, lambda: self._royale_travel_finish(imgs, labels, None))
         except Exception as e:
             import traceback
@@ -11312,7 +11297,6 @@ class LoRATrainerGUI:
             sequential=bool(self.royale_pt_seq_ref_var.get()),
             anchor=bool(self.royale_pt_anchor_var.get()),
             anchor_str=self._royale_parse_ref_strength(self.royale_pt_anchor_str_var.get()),
-            seq_token=self._royale_next_seq_token(),
             vary_seed=bool(self.royale_pt_vary_seed_var.get()),
             drift=self._royale_parse_drift(self.royale_pt_drift_var.get()),
             interp=self.royale_pt_interp_var.get(),
@@ -11342,7 +11326,7 @@ class LoRATrainerGUI:
             drift_seed = (int(p["seed"]) + 1013904223) % (2**31) if drift > 0 else None
             n = p["frames"]
             imgs, labels = [], []
-            prev_path = None
+            prev_latent = None
             for i in range(n):
                 t = i / float(n - 1)
                 self.master.after(0, lambda i=i: self.royale_pt_status_var.set(
@@ -11354,18 +11338,20 @@ class LoRATrainerGUI:
                 # image re-rolls per frame yet the whole clip stays reproducible.
                 st.seed = (p["seed"] + i) if p.get("vary_seed") else p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
-                self._royale_apply_travel_ref(st, p, i, prev_path)
+                pls = self._royale_apply_travel_ref(st, p, i)
                 if drift > 0 and not p.get("vary_seed"):
                     # Smooth noise drift: slerp base seed -> drift_seed across the sweep,
                     # breaking the static-seed fixed point so the prompt expresses.
                     img = eng.generate_preview(st, seed_b=drift_seed, travel_t=drift * t,
-                                               override_ctx=ctx, override_neg_ctx=neg)
+                                               override_ctx=ctx, override_neg_ctx=neg,
+                                               prev_latent=prev_latent, prev_latent_strength=pls)
                 else:
-                    img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg)
+                    img = eng.generate_preview(st, override_ctx=ctx, override_neg_ctx=neg,
+                                               prev_latent=prev_latent, prev_latent_strength=pls)
                 imgs.append(img.copy())
                 labels.append(pt.dominant_word(p["words"], t).upper())
                 if p.get("sequential"):
-                    prev_path = self._royale_seq_tempfile(p["seq_token"], i, img)
+                    prev_latent = eng._last_frame_latent
             self.master.after(0, lambda: self._royale_pt_finish(imgs, labels, None))
         except Exception as e:
             import traceback

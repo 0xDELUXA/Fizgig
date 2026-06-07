@@ -118,6 +118,10 @@ class RepairEngine:
         self._ref_cache_key: Optional[tuple] = None   # (path, megapixels, strength)
         self._ref_cache: Optional[tuple] = None       # (ref_tokens, ref_ids)
 
+        # Clean latent of the most recent generate_preview ([128, H/16, W/16]).
+        # Sequential travel feeds this back as the next frame's reference latent.
+        self._last_frame_latent = None
+
         # Cache the last-generated baseline keyed on (primary_path, seed,
         # prompt, w, h) — only regenerate baseline when these change.
         self._baseline_cache_key = None
@@ -391,7 +395,8 @@ class RepairEngine:
     # Generation — the single preview entry point (v2 replaces body only)
     # ------------------------------------------------------------------
 
-    def _build_ref_tokens(self, state: SliderState):
+    def _build_ref_tokens(self, state: SliderState, prev_latent=None,
+                          prev_latent_strength=1.0):
         """Encode reference image(s) into (ref_tokens, ref_ids) for edit-conditioning.
 
         Klein is an edit model and supports MULTIPLE references: the primary
@@ -402,11 +407,18 @@ class RepairEngine:
         ref2 = previous frame (temporal continuity) — the original re-injects clean
         detail every frame so VAE feedback drift can't accumulate.
 
-        Caps each to ref_megapixels (downscale only, ×16). The ref latent goes in
-        the POSITIVE conditioning (caller concatenates onto the cond pass only).
+        `prev_latent` (optional): the previous frame's CLEAN latent ([128, H/16,
+        W/16], as cached by generate_preview). When supplied it is packed directly
+        as the previous-frame reference — skipping the lossy decode→PNG→encode round
+        trip the image path incurs. This is what keeps sequential travel sharp at
+        high strength. It is appended LAST (image 1 = original anchor, image 2 =
+        previous-frame latent), and the token cache is bypassed (it changes per frame).
+
+        Caps each image to ref_megapixels (downscale only, ×16). The ref latent goes
+        in the POSITIVE conditioning (caller concatenates onto the cond pass only).
         Returns (None, None) when no ref is set."""
         mp = max(0.05, float(getattr(state, "ref_megapixels", 1.0) or 1.0))
-        # Collect references in order: primary, then optional second anchor.
+        # Collect image references in order: primary, then optional second anchor.
         refs = []
         p1 = (getattr(state, "ref_image_path", "") or "").strip()
         s1 = float(getattr(state, "ref_strength", 1.0))
@@ -416,12 +428,16 @@ class RepairEngine:
         s2 = float(getattr(state, "ref2_strength", 1.0))
         if p2 and os.path.exists(p2) and s2 != 0.0:
             refs.append((p2, s2))
-        if not refs:
+        use_prev_latent = (prev_latent is not None
+                           and float(prev_latent_strength) != 0.0)
+        if not refs and not use_prev_latent:
             return None, None
 
-        # Cache the packed tokens for the exact ref set (skip re-encode on slider tweaks).
+        # Cache the packed tokens for the exact image ref set (skip re-encode on
+        # slider tweaks). A latent ref changes every frame, so bypass the cache then.
         ref_key = (tuple((p, round(s, 4)) for p, s in refs), round(mp, 4))
-        if self._ref_cache_key == ref_key and self._ref_cache is not None:
+        if (not use_prev_latent and self._ref_cache_key == ref_key
+                and self._ref_cache is not None):
             return self._ref_cache
 
         import numpy as np
@@ -458,12 +474,21 @@ class RepairEngine:
             if vae_dev.type != pipeline.device.type:
                 pipeline.vae.to(vae_dev)
 
+        # Previous-frame latent goes in directly (no VAE round trip), last in order
+        # so it reads as "image 2" after any clean original anchor.
+        if use_prev_latent:
+            lat = prev_latent.to(pipeline.device, dtype=pipeline.vae.dtype)
+            if float(prev_latent_strength) != 1.0:
+                lat = lat * float(prev_latent_strength)
+            latents.append(lat)
+
         ref_tokens, ref_ids = pack_control_latent(latents)
         ref_tokens = ref_tokens.to(device=pipeline.device, dtype=torch.bfloat16)
         ref_ids = ref_ids.to(pipeline.device)
 
-        self._ref_cache_key = ref_key
-        self._ref_cache = (ref_tokens, ref_ids)
+        if not use_prev_latent:
+            self._ref_cache_key = ref_key
+            self._ref_cache = (ref_tokens, ref_ids)
         return ref_tokens, ref_ids
 
     def encode_travel_prompts(self, prompts):
@@ -561,7 +586,8 @@ class RepairEngine:
         return torch.lerp(a, b, local).to(vecs[i].dtype)
 
     def generate_preview(self, state: SliderState, seed_b=None, travel_t=None,
-                         override_ctx=None, override_neg_ctx=None) -> Image.Image:
+                         override_ctx=None, override_neg_ctx=None,
+                         prev_latent=None, prev_latent_strength=1.0) -> Image.Image:
         """Apply state, run a 4-step Distilled generation, return PIL image.
 
         Seed travel: when `seed_b` is given, the initial noise is a spherical
@@ -699,7 +725,8 @@ class RepairEngine:
         # Reference image (Klein edit conditioning) — encode once, inject into the
         # positive/cond forward only. Disables Turbo (the activation cache is keyed
         # without the ref sequence) and shifts no other behavior when absent.
-        ref_tokens, ref_ids = self._build_ref_tokens(state)
+        ref_tokens, ref_ids = self._build_ref_tokens(
+            state, prev_latent=prev_latent, prev_latent_strength=prev_latent_strength)
         has_ref = ref_tokens is not None
         if has_ref:
             dlog(f"ref active: tokens={list(ref_tokens.shape)} "
@@ -838,6 +865,12 @@ class RepairEngine:
         dlog(f"unpacked latent: {_stats(x)}")
         latent = x.to(pipeline.vae.dtype)
         del x
+
+        # Cache the clean latent ([128, H/16, W/16] — same space as vae.encode) so
+        # sequential travel can reuse it as the NEXT frame's reference latent directly,
+        # skipping the lossy decode→PNG→encode round trip that otherwise compounds each
+        # frame (the cause of quality loss at high sequential-reference strength).
+        self._last_frame_latent = latent[0].detach().clone()
 
         # Phase boundary 3: release DiT activation scratch before VAE claims GPU.
         clean_memory_on_device(device)

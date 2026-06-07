@@ -10764,12 +10764,17 @@ class LoRATrainerGUI:
         """Save every rendered epoch still (the all-epochs view) to a chosen folder as
         full-res PNGs. Epoch labels are zero-padded so the files sort in render order;
         arbitrary-LoRA labels use the LoRA filename. The render results otherwise live
-        only in memory (`self._royale_images`) and are lost on app close."""
+        only in memory (`self._royale_images`) and are lost on app close.
+
+        Runs on a worker thread (mirrors Export clip) so the blue status label animates
+        and the UI stays responsive while a large batch of full-res PNGs is written."""
+        if getattr(self, "_royale_exporting", False):
+            return
         if not self._royale_images:
             messagebox.showinfo("LoRA Royale", "Render epochs first, then save the stills.")
             return
         from tkinter import filedialog
-        import sys, re
+        import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.lora_royale import run_name_for_folder
         run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
@@ -10778,8 +10783,18 @@ class LoRATrainerGUI:
             initialdir=self.settings.get("LORA_OUTPUT_DIR", ""))
         if not folder:
             return
+        self._royale_exporting = True
+        self._royale_save_stills_btn.configure(state="disabled")
+        self._royale_export_btn.configure(state="disabled")
+        self.royale_export_status_var.set("Saving stills…")
+        images = list(self._royale_images)
+        threading.Thread(target=self._royale_save_stills_worker,
+                         args=(images, run, folder), daemon=True).start()
+
+    def _royale_save_stills_worker(self, images, run, folder):
+        import re, traceback
         saved = 0
-        for label, img in list(self._royale_images):
+        for i, (label, img) in enumerate(images):
             if str(label).isdigit():
                 name = f"{run}-epoch{int(label):04d}.png"
             else:
@@ -10789,10 +10804,17 @@ class LoRATrainerGUI:
                 img.save(os.path.join(folder, name))
                 saved += 1
             except Exception:
-                import traceback
                 traceback.print_exc()
+            self.master.after(0, lambda i=i: self.royale_export_status_var.set(
+                f"Saving stills… {i + 1}/{len(images)}"))
+        self.master.after(0, lambda: self._royale_save_stills_finish(saved, len(images), folder))
+
+    def _royale_save_stills_finish(self, saved, total, folder):
+        self._royale_exporting = False
+        self._royale_save_stills_btn.configure(state="normal")
+        self._royale_export_btn.configure(state="normal")
         self.royale_export_status_var.set(
-            f"Saved {saved}/{len(self._royale_images)} stills → {os.path.basename(folder)}")
+            f"Saved {saved}/{total} stills → {os.path.basename(folder)}")
 
     # ----- Export the morph as a shareable clip -----
     def _royale_export(self):

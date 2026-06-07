@@ -49,12 +49,37 @@ def _ensure_app():
     return _app
 
 
+def _detect_faces(bgr):
+    """Detect faces, retrying with a padded border if none are found.
+
+    RetinaFace (buffalo_l) fails on faces that FILL the frame — a close-up
+    headshot is too large for its anchor scales, so it returns nothing. Padding
+    a border around the image shrinks the face's fraction of the frame, bringing
+    it back into the detector's working range. The padding shifts coordinates but
+    not the face content, so the alignment/embedding is unchanged — it only helps
+    detection. We only pad when the unpadded pass fails (no regression for normal
+    framing, and small faces aren't shrunk needlessly)."""
+    import cv2
+    app = _ensure_app()
+    faces = app.get(bgr)
+    if faces:
+        return faces
+    for pad in (0.25, 0.5):
+        h, w = bgr.shape[:2]
+        py, px = int(h * pad), int(w * pad)
+        padded = cv2.copyMakeBorder(bgr, py, py, px, px, cv2.BORDER_REPLICATE)
+        faces = app.get(padded)
+        if faces:
+            return faces
+    return []
+
+
 def _largest_embedding(pil_image) -> Optional[np.ndarray]:
     """ArcFace embedding (L2-normalized, 512-d) of the largest face, or None."""
     import cv2
     arr = np.array(pil_image.convert("RGB"))
     bgr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
-    faces = _ensure_app().get(bgr)
+    faces = _detect_faces(bgr)
     if not faces:
         return None
     face = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))

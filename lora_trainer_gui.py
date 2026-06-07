@@ -9507,6 +9507,15 @@ class LoRATrainerGUI:
                                             activebackground="#763A91", relief="flat", bd=0, padx=18, pady=5,
                                             cursor="hand2", command=self._royale_export)
         self._royale_export_btn.pack(side=tk.LEFT)
+        self._royale_save_stills_btn = tk.Button(_er3, text="Save all stills…", font=(FONT_FAMILY, 10, "bold"),
+                                                 fg="#FFFFFF", bg="#34495E", activeforeground="#FFFFFF",
+                                                 activebackground="#2C3E50", relief="flat", bd=0, padx=18, pady=5,
+                                                 cursor="hand2", command=self._royale_save_all_stills)
+        self._royale_save_stills_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ToolTip(self._royale_save_stills_btn,
+                "Save every rendered epoch still to a folder you pick, as full-res PNGs\n"
+                "(named by epoch so they sort in order). The render results otherwise live\n"
+                "only in memory and are lost when you close the app.")
         self.royale_export_status_var = tk.StringVar(value="")
         tk.Label(_er3, textvariable=self.royale_export_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
@@ -10750,6 +10759,40 @@ class LoRATrainerGUI:
             messagebox.showerror("Promote failed", f"Could not copy checkpoint:\n{e}")
             return
         self.royale_promote_status_var.set(f"Saved {self._royale_label_disp(label)} → {os.path.basename(out)}")
+
+    def _royale_save_all_stills(self):
+        """Save every rendered epoch still (the all-epochs view) to a chosen folder as
+        full-res PNGs. Epoch labels are zero-padded so the files sort in render order;
+        arbitrary-LoRA labels use the LoRA filename. The render results otherwise live
+        only in memory (`self._royale_images`) and are lost on app close."""
+        if not self._royale_images:
+            messagebox.showinfo("LoRA Royale", "Render epochs first, then save the stills.")
+            return
+        from tkinter import filedialog
+        import sys, re
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import run_name_for_folder
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        folder = filedialog.askdirectory(
+            title="Save all epoch stills to folder",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""))
+        if not folder:
+            return
+        saved = 0
+        for label, img in list(self._royale_images):
+            if str(label).isdigit():
+                name = f"{run}-epoch{int(label):04d}.png"
+            else:
+                safe = re.sub(r"[^A-Za-z0-9_-]", "_", str(label))
+                name = f"{run}-{safe}.png"
+            try:
+                img.save(os.path.join(folder, name))
+                saved += 1
+            except Exception:
+                import traceback
+                traceback.print_exc()
+        self.royale_export_status_var.set(
+            f"Saved {saved}/{len(self._royale_images)} stills → {os.path.basename(folder)}")
 
     # ----- Export the morph as a shareable clip -----
     def _royale_export(self):

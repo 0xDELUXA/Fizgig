@@ -105,12 +105,21 @@ def install_dependencies():
     print("Upgrading pip...")
     subprocess.run([str(python_path), "-m", "pip", "install", "--upgrade", "pip"], check=True)
 
-    print(f"Installing dependencies from: {REQUIREMENTS_FILE}")
+    print("Installing uv...")
+    # shell=False (list form) with internal Path constants — not injectable
+    subprocess.run([str(python_path), "-m", "pip", "install", "--upgrade", "uv"], check=True)
+
+    print(f"Installing dependencies from: {REQUIREMENTS_FILE} (using uv)")
     print("(This may take a few minutes for PyTorch download...)")
 
     try:
+        # shell=False (list form) with internal Path constants — not injectable.
+        # --link-mode=copy: the uv cache and the venv are often on different drives
+        # (e.g. cache on C:, install on S:), where hardlinking isn't possible — copy
+        # mode avoids the noisy "Failed to hardlink" warning.
         subprocess.run(
-            [str(python_path), "-m", "pip", "install", "-r", str(REQUIREMENTS_FILE)],
+            [str(python_path), "-m", "uv", "pip", "install", "--link-mode", "copy",
+             "--index-strategy", "unsafe-best-match", "-r", str(REQUIREMENTS_FILE)],
             check=True
         )
         print("Dependencies installed successfully.")

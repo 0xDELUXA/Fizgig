@@ -22,8 +22,8 @@ Every trainer makes LoRAs. Fizgig is built around what you do with them **afterw
 
 - **Fix** a baked LoRA block-by-block, no retraining — overbaked identity, crushed style, drag a slider, save a new `.safetensors`.
 - **Explore** new variations like a game — the app proposes mutations, you pick favourites, the LoRA evolves through selection.
-- **Find** the best LoRA by eye — render every epoch of a run (or any folder of LoRAs) on one seed and crossfade to the one that *feels* right.
-- **Share** what you made — export the epoch morph, or travel a single LoRA through seeds, prompts, or strength, as a looping MP4/GIF made to share.
+- **Find** the best LoRA by eye — **LoRA Royale** renders every epoch of a run (or any folder of LoRAs) on one seed; crossfade to the one that *feels* right.
+- **Share** what you made — LoRA Royale exports the epoch morph, or travels a single LoRA through seeds, prompts, or strength, as a looping MP4/GIF made to share.
 - **Profile** exactly which blocks carry identity, style, and detail — so you know what to touch before you touch it.
 
 Under that workbench sits a fast, light trainer tuned for a single model. Because everything is built for Klein 9B instead of bolted on to a dozen models, the whole thing can do things the generalists can't: a full 9B LoRA trains comfortably on a **16 GB card**, fp8 steps run **~1.5× faster** on RTX 40/50-series, and the post-training tools all read each other's output.

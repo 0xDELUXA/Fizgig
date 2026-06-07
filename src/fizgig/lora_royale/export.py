@@ -266,6 +266,110 @@ def frames_from_sequence(images: List[Image.Image], pingpong: bool = True,
     return out
 
 
+def _fit_height(im: Image.Image, h: int) -> Image.Image:
+    """Resize to height `h` preserving aspect (even width for MP4). No crop, no
+    distortion — the reference photo keeps its shape whatever its aspect, and just
+    sits in a wider/narrower panel beside the epoch render."""
+    im = im.convert("RGB")
+    w0, h0 = im.size
+    w = max(2, _even(round(w0 * h / max(1, h0))))
+    return im.resize((w, h), Image.LANCZOS)
+
+
+def _score_badge(score) -> Tuple[str, tuple]:
+    """(text, pill_rgba) for a cosine likeness score, colour-coded: green (strong,
+    >=0.5), amber (0.35-0.5), red (weak), grey (no face / NaN)."""
+    import math
+    if score is None or (isinstance(score, float) and math.isnan(score)):
+        return "NO FACE", (110, 110, 116, 235)
+    s = float(score)
+    if s >= 0.5:
+        col = (60, 180, 110, 245)
+    elif s >= 0.35:
+        col = (235, 185, 70, 245)
+    else:
+        col = (210, 90, 80, 245)
+    return f"LIKENESS {s:.2f}", col
+
+
+def build_likeness_frames(ref_image: Image.Image, images: List[Tuple], scores: dict,
+                          speed: str = "Normal", pingpong: bool = True, brand: bool = True,
+                          max_size: Optional[int] = 768) -> List[Image.Image]:
+    """Side-by-side likeness clip: [ reference | epoch ] with the ArcFace likeness
+    score burned in, morphing epoch-by-epoch like the crossfade — the reference panel
+    stays fixed while the epoch panel blends and the score ticks. `scores` maps the
+    epoch label to its cosine (NaN / missing → 'NO FACE'). Mirrors build_frames'
+    hold + blend + ping-pong timing."""
+    if ref_image is None or not images:
+        return []
+    fpt, hold, _fps = SPEED_PRESETS.get(speed, SPEED_PRESETS["Normal"])
+
+    # Match both panels to a common HEIGHT, preserving each image's aspect (no crop,
+    # no distortion) — the source can be any shape. The composite is wide (side by side):
+    # W = ref_w + gap + epoch_w. Height capped by max_size for shareability.
+    H = images[0][1].size[1]
+    if max_size:
+        H = min(H, max_size // 2)
+    H = max(2, _even(H))
+
+    ref_p = _fit_height(ref_image, H)
+    epochs = [(label, _fit_height(im, H)) for label, im in images]
+    ref_w = ref_p.size[0]
+    ep_w = epochs[0][1].size[0]
+    gap = max(2, _even(H // 64))
+    W = max(2, _even(ref_w + gap + ep_w))
+    margin = max(8, H // 40)
+    fs = max(13, H // 26)
+    pad = (max(6, fs // 2), max(4, fs // 3))
+    sfs = max(16, H // 15)
+    spad = (max(9, sfs // 2), max(6, sfs // 3))
+
+    def compose(epoch_img: Image.Image, label) -> Image.Image:
+        canvas = Image.new("RGB", (W, H), (16, 16, 18))
+        canvas.paste(ref_p, (0, 0))
+        canvas.paste(epoch_img, (ref_w + gap, 0))
+        base = canvas.convert("RGBA")
+        overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        f = _load_font(fs)
+        # Panel labels (bottom-left of each panel).
+        _pill_lines(d, ["SOURCE"], f, margin, H - margin, (255, 255, 255, 235), (0, 0, 0, 150), pad)
+        ep_lbl = f"EPOCH {label}" if str(label).isdigit() else str(label)
+        _pill_lines(d, [ep_lbl], f, ref_w + gap + margin, H - margin, (255, 210, 74, 245), (0, 0, 0, 150), pad)
+        # Likeness score headline, centered at the top.
+        stext, scol = _score_badge(scores.get(label) if scores else None)
+        sf = _load_font(sfs)
+        asc, desc = sf.getmetrics()
+        s_h = (asc + desc) + 2 * spad[1]
+        sw = int(draw_len(d, stext, sf) + spad[0] * 2)
+        _pill_lines(d, [stext], sf, (W - sw) // 2, margin + s_h, (20, 20, 22, 255), scol, spad)
+        # Brand pill (bottom-right of the whole composite).
+        if brand:
+            bf = _load_font(fs)
+            bt = "Fizgig · LoRA Royale"
+            bw = int(draw_len(d, bt, bf) + pad[0] * 2)
+            _pill_lines(d, [bt], bf, W - margin - bw, H - margin, (255, 255, 255, 235), (0, 0, 0, 140), pad)
+        return Image.alpha_composite(base, overlay).convert("RGB")
+
+    frames: List[Image.Image] = []
+    if len(epochs) == 1:
+        l, im = epochs[0]
+        frames.extend([compose(im, l)] * max(hold, fpt))
+        return frames
+    for i in range(len(epochs) - 1):
+        (la, a), (lb, b) = epochs[i], epochs[i + 1]
+        frames.extend([compose(a, la)] * hold)               # hold on epoch i
+        for k in range(1, fpt + 1):
+            alpha = k / float(fpt + 1)
+            label = la if alpha < 0.5 else lb                # dominant epoch -> its score
+            frames.append(compose(Image.blend(a, b, alpha), label))
+    lz, z = epochs[-1]
+    frames.extend([compose(z, lz)] * hold)                   # hold on the final epoch
+    if pingpong and len(frames) > 2:
+        frames = frames + frames[-2:0:-1]
+    return frames
+
+
 def write_gif(frames: List[Image.Image], path: str, speed: str = "Normal", loop: int = 0):
     if not frames:
         raise ValueError("No frames to export.")

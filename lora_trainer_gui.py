@@ -10061,6 +10061,15 @@ class LoRATrainerGUI:
         self._royale_jump_best_btn = ttk.Button(_lbr, text="Jump to best", command=self._royale_jump_best,
                                                 state="disabled")
         self._royale_jump_best_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._royale_like_export_btn = tk.Button(_lbr, text="Export likeness clip…", font=(FONT_FAMILY, 10, "bold"),
+                                                 fg="#FFFFFF", bg="#8E44AD", activeforeground="#FFFFFF",
+                                                 activebackground="#763A91", relief="flat", bd=0, padx=18, pady=5,
+                                                 cursor="hand2", command=self._royale_export_likeness)
+        self._royale_like_export_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ToolTip(self._royale_like_export_btn,
+                "Score likeness first, then export a side-by-side clip: your subject image next to\n"
+                "each epoch with its likeness score, morphing epoch by epoch. Uses the Format /\n"
+                "Speed / Loop / Fizgig-tag settings from the 'Export the morph' card above.")
         self.royale_like_status_var = tk.StringVar(value="")
         tk.Label(_lbr, textvariable=self.royale_like_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
@@ -10884,6 +10893,86 @@ class LoRATrainerGUI:
             messagebox.showerror("Export failed", msg)
             return
         self.royale_export_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
+        self._royale_reveal(out)
+
+    # ----- Export the likeness comparison (subject vs each epoch, side by side) -----
+    def _royale_export_likeness(self):
+        if getattr(self, "_royale_exporting", False):
+            return
+        if not self._royale_images:
+            messagebox.showinfo("LoRA Royale", "Render epochs first.")
+            return
+        scores = getattr(self, "_royale_scores", None)
+        if not scores:
+            messagebox.showinfo("LoRA Royale",
+                                "Score likeness first — the clip shows each epoch's score beside your subject image.")
+            return
+        ref = self.royale_like_ref_var.get().strip()
+        if not ref or not os.path.exists(ref):
+            messagebox.showinfo("LoRA Royale", "Pick a subject image to show alongside the epochs.")
+            return
+        fmt = self.royale_export_format_var.get().upper()
+        ext = ".mp4" if fmt == "MP4" else ".gif"
+        from tkinter import filedialog
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import run_name_for_folder
+        run = run_name_for_folder(self.royale_folder_var.get().strip()) or "lora"
+        out = filedialog.asksaveasfilename(
+            title="Export likeness clip",
+            defaultextension=ext,
+            initialfile=f"{run}-likeness{ext}",
+            initialdir=self.settings.get("LORA_OUTPUT_DIR", ""),
+            filetypes=[("MP4 video", "*.mp4")] if fmt == "MP4" else [("Animated GIF", "*.gif")])
+        if not out:
+            return
+        params = dict(
+            ref=ref, images=list(self._royale_images), scores=dict(scores),
+            fmt=fmt, out=out,
+            speed=self.royale_export_speed_var.get(),
+            pingpong=bool(self.royale_export_loop_var.get()),
+            brand=bool(self.royale_export_wm_var.get()))
+        self._royale_exporting = True
+        self._royale_like_export_btn.configure(state="disabled")
+        self.royale_like_status_var.set("Building likeness clip…")
+        threading.Thread(target=self._royale_export_likeness_worker, args=(params,), daemon=True).start()
+
+    def _royale_export_likeness_worker(self, p):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.lora_royale import export as rexport
+        from PIL import Image
+        try:
+            # MP4 at full panel res; GIF capped at 768 (file size) — mirrors the morph export.
+            max_size = None if p["fmt"] == "MP4" else 768
+            with Image.open(p["ref"]) as ri:
+                ref_img = ri.convert("RGB")
+            frames = rexport.build_likeness_frames(
+                ref_img, p["images"], p["scores"], speed=p["speed"],
+                pingpong=p["pingpong"], brand=p["brand"], max_size=max_size)
+            if not frames:
+                raise RuntimeError("No frames were produced.")
+            if p["fmt"] == "MP4":
+                rexport.write_mp4(frames, p["out"], speed=p["speed"])
+            else:
+                rexport.write_gif(frames, p["out"], speed=p["speed"])
+            self.master.after(0, lambda: self._royale_export_likeness_finish(p["out"], len(frames), None))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.master.after(0, lambda e=e: self._royale_export_likeness_finish(p["out"], 0, e))
+
+    def _royale_export_likeness_finish(self, out, n_frames, err):
+        self._royale_exporting = False
+        self._royale_like_export_btn.configure(state="normal")
+        if err is not None:
+            self.royale_like_status_var.set("Likeness export failed — see console.")
+            msg = str(err)
+            if "codec" in msg.lower() or "writer" in msg.lower():
+                msg += "\n\nTry the GIF format instead."
+            messagebox.showerror("Export failed", msg)
+            return
+        self.royale_like_status_var.set(f"Saved {n_frames} frames → {os.path.basename(out)}")
         self._royale_reveal(out)
 
     def _royale_reveal(self, path):

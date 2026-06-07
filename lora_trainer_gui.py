@@ -10614,7 +10614,7 @@ class LoRATrainerGUI:
         for w in self._royale_grid.winfo_children():
             w.destroy()
         self._royale_thumbs = []
-        cols = 11
+        cols = 10
         scores = getattr(self, "_royale_scores", {})
         best = getattr(self, "_royale_best_label", None)
         for i, (label, img) in enumerate(self._royale_images):

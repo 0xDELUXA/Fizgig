@@ -3416,16 +3416,16 @@ class LoRATrainerGUI:
         return int(m.group()) if m else 0
 
     def _auto_krea2_blocks_swap(self) -> int:
-        """Pick Krea 2 training block swap from GPU VRAM. Krea 2's RAW DiT is ~14 GB in fp8
-        (vs Klein's ~9.6 GB), so even a 32 GB card keeps a small swap for training headroom.
-        Previews park the training DiT on CPU separately, so this governs only the training
-        step. Max swap is 26 (28 main blocks − 2)."""
+        """Pick Krea 2 training block swap from GPU VRAM. Krea 2's RAW DiT is ~14 GB in fp8,
+        so the training step fits a 32 GB card with no swap (fastest — no PCIe transfers); the
+        in-training preview parks the training DiT on CPU separately, so swap only governs the
+        training step. Smaller cards swap progressively. Max swap is 26 (28 main blocks − 2)."""
         try:
             import torch
             if torch.cuda.is_available():
                 vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
                 if vram_gb >= 30:
-                    return 4    # 32 GB — small swap for headroom
+                    return 0    # 32 GB — no swap; fp8 base (~14 GB) trains resident
                 if vram_gb >= 22:
                     return 12   # 24 GB
                 if vram_gb >= 15:
@@ -3433,7 +3433,7 @@ class LoRATrainerGUI:
                 return 26       # <16 GB — maximum
         except Exception:
             pass
-        return 4  # safe default
+        return 12  # safe default for an unknown smaller card
 
     def _auto_training_blocks_swap(self) -> int:
         """Pick training block swap based on GPU VRAM."""

@@ -147,6 +147,11 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
     turbo = load_krea2_dit(turbo_path, device=device, dtype=torch.bfloat16)  # prequant fp8 auto-detected
     net = create_network_from_weights(None, 1.0, lora_sd, None, turbo, for_inference=True)
     net.apply_to(text_encoders=None, unet=turbo, apply_text_encoder=False, apply_unet=True)
+    # create_network_from_weights only builds the module STRUCTURE (sizes from dims/alphas);
+    # the trained values must be loaded in, or the LoRA stays at its zero init (lora_up=0) and
+    # contributes nothing — which made every epoch's preview identical. Mirrors the Klein path
+    # (inference.py: apply_to -> load_state_dict(strict=False)).
+    net.load_state_dict(lora_sd, strict=False)
     net.to(device=device, dtype=torch.bfloat16).eval()
     turbo.eval()
     os.makedirs(out_dir, exist_ok=True)

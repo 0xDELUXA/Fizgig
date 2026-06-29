@@ -112,6 +112,51 @@ def _save_lora(network, path, network_dim, network_alpha, dtype):
     network.save_weights(path, dtype, metadata)
 
 
+# --- in-training previews (sample the fp8 Turbo with the live LoRA) -----------
+def encode_sample_prompts(te_path, prompts, *, device="cuda"):
+    """Pre-encode the sample prompts once (Qwen3-VL), freeing the encoder afterwards.
+    Returns a list of (txt, txtmask) on CPU, fed straight to sampling.sample at preview time."""
+    from fizgig.krea2.utils import load_krea2_text_encoder
+    from fizgig.krea2 import sampling
+
+    enc = load_krea2_text_encoder(te_path, dtype=torch.bfloat16, device=device)
+    out = []
+    for p in prompts:
+        txt, txtmask, _, _ = sampling.encode_prompts(enc, [p], cfg=False)
+        out.append((txt.cpu(), txtmask.cpu()))
+    del enc
+    torch.cuda.empty_cache()
+    return out
+
+
+def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
+                    steps=8, cfg_scale=1.0, width=512, height=512, seed=42, device="cuda"):
+    """Load the (clean) pre-quant fp8 Turbo, apply the current LoRA LIVE (no merge -> no grid),
+    and render each pre-encoded prompt. Turbo is freed afterwards."""
+    from fizgig.krea2.utils import load_krea2_dit
+    from fizgig.networks.lora import create_network_from_weights
+    from fizgig.krea2 import sampling
+
+    turbo = load_krea2_dit(turbo_path, device=device, dtype=torch.bfloat16)  # prequant fp8 auto-detected
+    net = create_network_from_weights(None, 1.0, lora_sd, None, turbo, for_inference=True)
+    net.apply_to(text_encoders=None, unet=turbo, apply_text_encoder=False, apply_unet=True)
+    net.to(device=device, dtype=torch.bfloat16).eval()
+    turbo.eval()
+    os.makedirs(out_dir, exist_ok=True)
+    paths = []
+    for i, (txt, txtmask) in enumerate(encoded_prompts):
+        with torch.no_grad():
+            imgs = sampling.sample(turbo, ae, txt, txtmask, untxt=None, untxtmask=None,
+                                   device=device, dtype=torch.bfloat16, width=width, height=height,
+                                   steps=steps, cfg_scale=cfg_scale, mu=1.15, seed=seed + i)
+        p = os.path.join(out_dir, f"epoch{epoch:04d}_{i:02d}.png")
+        imgs[0].save(p)
+        paths.append(p)
+    del turbo, net
+    torch.cuda.empty_cache()
+    return paths
+
+
 def train_krea2(
     raw_path: str,
     dataset_config: str,
@@ -127,6 +172,16 @@ def train_krea2(
     blocks_to_swap: int = 0,
     shift: float = 2.5,
     seed: int = 42,
+    # in-training previews (sample the fp8 Turbo with the live LoRA)
+    sample_prompts: list = None,
+    turbo_path: str = None,
+    vae_path: str = None,
+    te_path: str = None,
+    sample_every_n_epochs: int = 0,
+    sample_width: int = 512,
+    sample_height: int = 512,
+    sample_steps: int = 8,
+    sample_seed: int = 42,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ):
@@ -144,6 +199,17 @@ def train_krea2(
     if group.num_train_items == 0:
         raise RuntimeError("No training items — run the krea2 cache scripts first.")
     logger.info(f"Krea 2 training: {group.num_train_items} items, {max_train_epochs} epochs")
+
+    # Preview setup: pre-encode prompts (frees the 8GB encoder) + load the VAE BEFORE the RAW DiT,
+    # so the encoder never coexists with the resident base.
+    do_previews = bool(sample_every_n_epochs and sample_prompts and turbo_path and vae_path and te_path)
+    encoded_prompts = sample_ae = sample_dir = None
+    if do_previews:
+        from fizgig.krea2.vae_loader import load_vae
+        logger.info(f"pre-encoding {len(sample_prompts)} sample prompt(s)...")
+        encoded_prompts = encode_sample_prompts(te_path, sample_prompts, device=device)
+        sample_ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
+        sample_dir = os.path.join(output_dir, "sample")
 
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
@@ -188,6 +254,17 @@ def train_krea2(
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),
                        network_dim, network_alpha, dtype)
+
+        if do_previews and (epoch + 1) % sample_every_n_epochs == 0:
+            from safetensors.torch import load_file
+            tmp = os.path.join(output_dir, "_sample_lora.safetensors")
+            _save_lora(network, tmp, network_dim, network_alpha, dtype)
+            logger.info(f"rendering previews (epoch {epoch + 1}) on the fp8 Turbo...")
+            sample_previews(turbo_path, sample_ae, encoded_prompts, load_file(tmp), sample_dir, epoch + 1,
+                            steps=sample_steps, width=sample_width, height=sample_height,
+                            seed=sample_seed, device=device)
+            dit.train()
+            network.train()
 
     out = os.path.join(output_dir, f"{output_name}.safetensors")
     _save_lora(network, out, network_dim, network_alpha, dtype)

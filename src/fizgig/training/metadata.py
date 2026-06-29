@@ -18,10 +18,13 @@ logger = logging.getLogger(__name__)
 # Fizgig-native architecture identifiers
 ARCHITECTURE_KLEIN_9B = "klein9b"
 ARCHITECTURE_KLEIN_9B_FULL = "klein_9b"
+ARCHITECTURE_KREA2 = "krea2"  # Krea 2 single-stream MMDiT (Qwen-Image VAE + Qwen3-VL-4B)
 
 # SAI model spec architecture strings
 ARCH_KLEIN_9B = "Flux.2-klein-9b"
 IMPL_KLEIN = "https://github.com/black-forest-labs/flux2"
+ARCH_KREA2 = "Krea-2"
+IMPL_KREA2 = "https://github.com/krea-ai/krea-2"
 
 ADAPTER_LORA = "lora"
 MODELSPEC_TITLE = "modelspec.title"
@@ -86,6 +89,9 @@ def build_metadata(
     if architecture in (ARCHITECTURE_KLEIN_9B, ARCHITECTURE_KLEIN_9B_FULL):
         arch = ARCH_KLEIN_9B
         impl = IMPL_KLEIN
+    elif architecture == ARCHITECTURE_KREA2:
+        arch = ARCH_KREA2
+        impl = IMPL_KREA2
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

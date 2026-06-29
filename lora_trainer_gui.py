@@ -5112,6 +5112,11 @@ class LoRATrainerGUI:
             self.update_ui_for_architecture()
         except Exception:
             pass
+        # Pause/Resume availability is architecture-dependent (Krea 2: Start/Stop only).
+        try:
+            self._refresh_training_buttons()
+        except Exception:
+            pass
         # Swap the preset dropdown to this architecture's built-ins + user presets.
         try:
             self.refresh_preset_combobox()
@@ -13904,15 +13909,19 @@ class LoRATrainerGUI:
         """Show/hide Pause and Resume buttons based on self.training_state."""
         if not hasattr(self, "training_state"):
             self.training_state = "idle"
-        # Pause: visible while running
-        if self.training_state == "running":
+        # Krea 2's native trainer doesn't save_state (no optimizer/scheduler/RNG/dataloader
+        # snapshot), so graceful Pause/Resume can't work yet — only Start/Stop apply. Deferred,
+        # not removed: when krea2_train gains state saving + --resume, drop this guard.
+        krea2 = self._is_krea2_arch()
+        # Pause: visible while running (Klein only)
+        if self.training_state == "running" and not krea2:
             try: self._pause_training_btn.pack(side=tk.LEFT, padx=(0, 12), after=self._start_training_btn)
             except Exception: pass
         else:
             try: self._pause_training_btn.pack_forget()
             except Exception: pass
-        # Resume: visible while paused
-        if self.training_state == "paused":
+        # Resume: visible while paused (Klein only — Krea 2 can't reach a paused state anyway)
+        if self.training_state == "paused" and not krea2:
             try: self._resume_training_btn.pack(side=tk.LEFT, padx=(0, 12), after=self._start_training_btn)
             except Exception: pass
         else:

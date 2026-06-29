@@ -25,7 +25,7 @@ from transformers import (
     Qwen3VLForConditionalGeneration,
 )
 
-from musubi_tuner.utils.safetensors_utils import load_split_weights
+from fizgig.krea2.safetensors_utils import load_split_weights
 
 logger = logging.getLogger(__name__)
 

@@ -1,20 +1,17 @@
 """Shared loaders / helpers for the Krea 2 (K2) integration."""
 
+from __future__ import annotations
+
 import logging
 from typing import Optional, Union
 
 import torch
 
-from musubi_tuner.krea2.krea2_encoder import (
-    QWEN3_VL_4B_INSTRUCT_REPO_ID,
-    Qwen3VLConditioner,
-    TextEncoderConfig,
-    load_qwen3_vl_conditioner,
-)
-from musubi_tuner.krea2.krea2_mmdit import SingleMMDiTConfig, SingleStreamDiT
-from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
-from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
-from musubi_tuner.utils.safetensors_utils import load_safetensors
+from fizgig.krea2.model import SingleMMDiTConfig, SingleStreamDiT
+from fizgig.krea2.safetensors_utils import load_safetensors
+
+# Text-encoder imports are lazy (see _encoder_api) so the DiT loader + config can be used
+# without pulling in transformers' Qwen3-VL classes (and the heavy encoder module).
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +88,10 @@ def load_krea2_dit(
         # Single load path that merges LoRA (if any) into the base weights and optionally
         # quantizes the per-block Linears to scaled fp8. fp8 targets/excludes only apply when
         # quantizing; without fp8 the weights are merged and cast to ``dtype`` as-is.
+        # Lazy: fp8/LoRA support modules (ported later) are only needed on this path.
+        from fizgig.krea2.fp8_optimization_utils import apply_fp8_monkey_patch
+        from fizgig.krea2.lora_utils import load_safetensors_with_lora_and_fp8
+
         sd = load_safetensors_with_lora_and_fp8(
             model_files=dit_path,
             lora_weights_list=lora_weights,
@@ -147,6 +148,8 @@ def load_krea2_dit_state_dict(
     move_to_device = calc_dev == rd
 
     if fp8_scaled:
+        from fizgig.krea2.lora_utils import load_safetensors_with_lora_and_fp8
+
         sd = load_safetensors_with_lora_and_fp8(
             model_files=dit_path,
             lora_weights_list=None,
@@ -171,12 +174,25 @@ def load_krea2_text_encoder(
     path: str,
     dtype: torch.dtype = torch.bfloat16,
     device: Union[str, torch.device] = "cpu",
-    max_length: int = TextEncoderConfig.max_length,
-    select_layers: tuple = TextEncoderConfig.select_layers,
-    tokenizer_repo: str = QWEN3_VL_4B_INSTRUCT_REPO_ID,
-) -> Qwen3VLConditioner:
+    max_length: Optional[int] = None,
+    select_layers: Optional[tuple] = None,
+    tokenizer_repo: Optional[str] = None,
+) -> "Qwen3VLConditioner":
     """Load the Qwen3-VL-4B conditioner used by K2: weights from ``path`` (local safetensors,
     ComfyUI or official key layout), tokenizer from ``tokenizer_repo`` (Hub id or local dir)."""
+    # Lazy: pulls in transformers' Qwen3-VL classes only when an encoder is actually loaded.
+    from fizgig.krea2.embedder import (
+        QWEN3_VL_4B_INSTRUCT_REPO_ID,
+        TextEncoderConfig,
+        load_qwen3_vl_conditioner,
+    )
+
+    if max_length is None:
+        max_length = TextEncoderConfig.max_length
+    if select_layers is None:
+        select_layers = TextEncoderConfig.select_layers
+    if tokenizer_repo is None:
+        tokenizer_repo = QWEN3_VL_4B_INSTRUCT_REPO_ID
     return load_qwen3_vl_conditioner(
         path,
         dtype=dtype,

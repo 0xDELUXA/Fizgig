@@ -85,7 +85,7 @@ def encode_and_save_latents(vae, batch: List[ItemInfo]) -> None:
     with torch.no_grad():
         latents = vae.encode_pixels_to_latents(contents.to(vae.device, dtype=vae.dtype))  # (B, C, 1, H, W)
     for b, item in enumerate(batch):
-        latent = latents[b].squeeze(0) if latents[b].dim() == 4 else latents[b]  # (C, 1, H, W) -> (C, H, W)
+        latent = latents[b].squeeze(1) if latents[b].dim() == 4 else latents[b]  # (C, 1, H, W) -> (C, H, W)
         logger.info(f"latent cache: {item.item_key} -> {tuple(latent.shape)}")
         save_latent_cache_krea2(item, latent)
 

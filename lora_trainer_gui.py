@@ -381,6 +381,20 @@ BUILT_IN_PRESETS = {
     },
 }
 
+# Built-in presets for Krea 2. The Klein block-targeting / adaptive-LR / timestep presets
+# above don't apply (Krea 2 trains all linears, no block map yet, no adaptive LR), so Krea 2
+# ships a single sensible-defaults entry. Users can still save their own via Save Preset —
+# those land in the per-architecture preset folder and appear alongside this one.
+KREA2_BUILT_IN_PRESETS = {
+    "✨ Krea 2 Defaults (rank 32, full model)": {
+        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "LEARNING_RATE": 1e-4,
+        "MAX_TRAIN_EPOCHS": 10, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
+        "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
+        "OPTIMIZER_TYPE": "adamw8bit",
+    },
+}
+
 # LoRA Royale seed-travel presets — recipes of the *mechanics* knobs (reference /
 # anchor / journey / identity-lock), NOT a prompt system (seed travel uses the Setup
 # prompt). Reference is kept light (0.1–0.4) so the seeds can actually travel.
@@ -955,8 +969,9 @@ class LoRATrainerGUI:
         # Last Train still works — it just overrides whenever the user clicks it.
         self.load_default_preset(show_message=False)
         try:
-            first_preset = next(iter(BUILT_IN_PRESETS))
-            self._apply_preset_values(BUILT_IN_PRESETS[first_preset])
+            _builtins = self._builtins_for_arch(self.architecture_var.get())
+            first_preset = next(iter(_builtins))
+            self._apply_preset_values(_builtins[first_preset])
             self.custom_preset_var.set(first_preset)
         except Exception:
             pass
@@ -2943,13 +2958,21 @@ class LoRATrainerGUI:
                 presets.append(f[:-5])  # Remove .json extension
         return sorted(presets)
 
+    def _builtins_for_arch(self, arch):
+        """Return the built-in preset dict for an architecture. Krea 2 gets its single
+        defaults entry (Klein's block/timestep/adaptive presets don't apply); everything
+        else gets the full Klein built-in set."""
+        cfg = ARCHITECTURES.get(arch, {})
+        return KREA2_BUILT_IN_PRESETS if cfg.get("is_krea2") else BUILT_IN_PRESETS
+
     def refresh_preset_combobox(self):
         """Refresh the preset combobox: built-in presets first, then user-saved presets."""
         arch = self.architecture_var.get()
         user_presets = self.get_saved_presets(arch)
-        builtins = list(BUILT_IN_PRESETS.keys())
+        builtins_map = self._builtins_for_arch(arch)
+        builtins = list(builtins_map.keys())
         # Built-ins first; if a user saves a preset with same name as a built-in, it appears once (under user)
-        combined = builtins + [p for p in user_presets if p not in BUILT_IN_PRESETS]
+        combined = builtins + [p for p in user_presets if p not in builtins_map]
         self.custom_preset_combo['values'] = combined
         # Dynamic width: fit longest entry so names like "✨ Multi-Character (rank 16, noisy dataset)" don't truncate
         max_len = max((len(v) for v in combined), default=20)
@@ -3198,9 +3221,10 @@ class LoRATrainerGUI:
         if not preset_name:
             return
 
-        # Check built-in presets first
-        if preset_name in BUILT_IN_PRESETS:
-            self._apply_preset_values(BUILT_IN_PRESETS[preset_name])
+        # Check built-in presets first (architecture-specific)
+        builtins = self._builtins_for_arch(self.architecture_var.get())
+        if preset_name in builtins:
+            self._apply_preset_values(builtins[preset_name])
             messagebox.showinfo("Preset Loaded", f"Loaded built-in preset '{preset_name}'")
             return
 
@@ -4977,9 +5001,17 @@ class LoRATrainerGUI:
         self.sample_cfg_label.configure(foreground=grey)
 
     def _on_architecture_selected(self, event=None):
-        """Model-family selector changed — refresh sample defaults + persist the choice."""
+        """Model-family selector changed — refresh sample defaults + presets + persist."""
         try:
             self.update_samples_ui_for_architecture()
+        except Exception:
+            pass
+        # Swap the preset dropdown to this architecture's built-ins + user presets.
+        try:
+            self.refresh_preset_combobox()
+            builtins = self._builtins_for_arch(self.architecture_var.get())
+            if builtins:
+                self.custom_preset_var.set(next(iter(builtins)))
         except Exception:
             pass
         try:

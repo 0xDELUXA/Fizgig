@@ -12,6 +12,8 @@ import logging
 import os
 from multiprocessing import Value
 
+from tqdm import tqdm
+
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -255,29 +257,24 @@ def train_krea2(
         steps_per_epoch = len(loader)
     except TypeError:
         steps_per_epoch = group.num_train_items
-    # Same smoothed readout as Klein: the raw per-step loss is very noisy (batch size 1 +
-    # a random flow-matching timestep each step), so we also surface a moving average.
+    # Progress + loss display exactly as Klein: one continuous tqdm bar over all steps with
+    # a smoothed avr_loss in the postfix (the raw per-step loss is very noisy — batch size 1
+    # plus a random flow-matching timestep each step — so the moving average is the signal).
     loss_recorder = LossRecorder()
+    progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, desc="steps", smoothing=0)
     for epoch in range(max_train_epochs):
         shared_epoch.value = epoch + 1
-        epoch_loss, nb = 0.0, 0
         for i, batch in enumerate(loader):
             loss = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
                                 shift=shift, dtype=dtype)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-            step_loss = loss.item()
-            epoch_loss += step_loss
-            nb += 1
             global_step += 1
-            loss_recorder.add(epoch=epoch, step=i, loss=step_loss)
-            # Plain per-step console line (no progress bar) so each optimizer step is visible.
-            # avr_loss is the meaningful trend; raw loss is the noisy single-sample value.
-            logger.info(f"  epoch {epoch + 1}/{max_train_epochs}  step {i + 1}/{steps_per_epoch}  "
-                        f"(global {global_step})  loss={step_loss:.4f}  avr_loss={loss_recorder.moving_average:.4f}")
-        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  "
-                    f"(epoch mean={epoch_loss / max(1, nb):.4f})  step={global_step}")
+            loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
+            progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}")
+            progress_bar.update(1)
+        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  step={global_step}")
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),
@@ -311,6 +308,7 @@ def train_krea2(
             dit.train()
             network.train()
 
+    progress_bar.close()
     out = os.path.join(output_dir, f"{output_name}.safetensors")
     _save_lora(network, out, network_dim, network_alpha, dtype)
     logger.info(f"saved final LoRA -> {out}")

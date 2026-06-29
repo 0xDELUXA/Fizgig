@@ -25,6 +25,45 @@ logger = logging.getLogger(__name__)
 KREA2_FP8_OPTIMIZATION_TARGET_KEYS = ["blocks."]
 KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS = ["mod.", "norm", "txtfusion"]
 
+# --- Pre-quantized (ComfyUI) fp8 support -------------------------------------
+# A ComfyUI fp8_scaled checkpoint (e.g. krea2_turbo_fp8_scaled) stores raw fp8 weights +
+# per-Linear `.weight_scale` scalars (+ optional `.comfy_quant` markers). Musubi's monkey
+# patch expects `.scale_weight` broadcastable against [out, in], so a load-time split hook
+# renames + reshapes, and load is done with allow_prequantized_fp8=True (no re-quantization).
+_FP8_SCALE_SUFFIX = ".weight_scale"
+_COMFY_FP8_MARKER_SUFFIX = ".comfy_quant"
+
+
+def _reshape_prequant_fp8_scale(scale: "torch.Tensor") -> "torch.Tensor":
+    """Per-channel [out] -> [out, 1]; per-tensor scalar [] -> [1]; else unchanged."""
+    if scale.ndim == 1:
+        return scale.unsqueeze(1)
+    if scale.ndim == 0:
+        return scale.reshape(1)
+    return scale
+
+
+def _make_krea2_comfy_fp8_split_hook(compute_dtype: "torch.dtype"):
+    """Split hook: `.weight_scale` -> `.scale_weight` (reshaped, cast to compute dtype);
+    drop `.comfy_quant` markers; pass everything else through."""
+    def split_hook(key, value):
+        if key.endswith(_COMFY_FP8_MARKER_SUFFIX):
+            return [], None
+        if key.endswith(_FP8_SCALE_SUFFIX):
+            new_key = key[: -len(_FP8_SCALE_SUFFIX)] + ".scale_weight"
+            if value is None:
+                return [new_key], None
+            return [new_key], [_reshape_prequant_fp8_scale(value).to(compute_dtype)]
+        return None, None
+    return split_hook
+
+
+def is_prequantized_fp8(path: str) -> bool:
+    """True if `path` is a ComfyUI-style pre-quantized fp8 checkpoint (has `.weight_scale` keys)."""
+    from fizgig.krea2.safetensors_utils import MemoryEfficientSafeOpen
+    with MemoryEfficientSafeOpen(path) as f:
+        return any(k.endswith(_FP8_SCALE_SUFFIX) for k in f.keys())
+
 
 # The single config shipped with the OSS checkpoints (single_mmdit_large_wide).
 single_mmdit_large_wide = SingleMMDiTConfig(
@@ -83,6 +122,36 @@ def load_krea2_dit(
     )
     with torch.device("meta"):
         dit = SingleStreamDiT(config, attn_mode=attn_mode, split_attn=split_attn)
+
+    if (not has_lora) and is_prequantized_fp8(dit_path):
+        # Pre-quantized ComfyUI fp8 (e.g. krea2_turbo_fp8_scaled): keep the weights fp8, normalize
+        # the Comfy scale layout via the split hook, and monkey-patch each Linear to dequantize on
+        # the fly. No re-quantization, so it loads fast — ideal for the per-epoch sample swap.
+        from fizgig.krea2.fp8_optimization_utils import apply_fp8_monkey_patch
+        from fizgig.krea2.lora_utils import load_safetensors_with_lora_and_fp8
+        from fizgig.krea2.safetensors_utils import WeightTransformHooks
+
+        logger.info(f"Loading Krea 2 DiT from pre-quantized fp8 {dit_path}")
+        hooks = WeightTransformHooks(split_hook=_make_krea2_comfy_fp8_split_hook(dtype))
+        sd = load_safetensors_with_lora_and_fp8(
+            model_files=dit_path,
+            lora_weights_list=None,
+            lora_multipliers=None,
+            fp8_optimization=True,
+            calc_device=device,
+            move_to_device=(loading_device == device),
+            dit_weight_dtype=None,
+            target_keys=KREA2_FP8_OPTIMIZATION_TARGET_KEYS,
+            exclude_keys=KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS,
+            weight_transform_hooks=hooks,
+            allow_prequantized_fp8=True,
+        )
+        apply_fp8_monkey_patch(dit, sd, use_scaled_mm=False)
+        if loading_device.type != "cpu":
+            for key in sd.keys():
+                sd[key] = sd[key].to(loading_device)
+        dit.load_state_dict(sd, strict=True, assign=True)
+        return dit
 
     if fp8_scaled or has_lora:
         # Single load path that merges LoRA (if any) into the base weights and optionally

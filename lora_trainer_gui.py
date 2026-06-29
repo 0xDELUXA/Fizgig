@@ -278,6 +278,41 @@ ARCHITECTURES = {
         "sample_width_default": 768,
         "sample_height_default": 768,
     },
+    "Krea 2 (experimental)": {
+        # Krea 2 trains natively via fizgig.scripts.krea2_* (no accelerate launch — a
+        # single-process script). The command builders branch on "is_krea2" and ignore
+        # the Klein-shaped keys below; they're kept so start_training / the Samples tab /
+        # validate_inputs can read the same config shape without KeyErrors.
+        "train_script": "src/fizgig/scripts/krea2_train.py",
+        "cache_latents_script": "src/fizgig/scripts/krea2_cache_latents.py",
+        "cache_text_script": "src/fizgig/scripts/krea2_cache_text.py",
+        "is_krea2": True,
+        "network_module": "fizgig.networks.lora_klein",  # unused — krea2 trainer builds its own net
+        "use_fizgig_venv": True,
+        "timestep_sampling": "shift",
+        "discrete_flow_shift": 2.5,
+        "weighting_scheme": "none",
+        "blocks_swap_max": 28,  # Krea 2 SingleStreamDiT has 28 blocks
+        "fp8_text_encoder_flag": None,
+        "uses_clip": False,
+        "uses_t5": False,
+        "uses_text_encoder": True,
+        "uses_model_type": False,
+        "uses_model_version": False,
+        "model_version": "krea-2",
+        "vae_label": "Qwen-Image VAE",
+        "text_encoder_label": "Qwen3-VL-4B",
+        "is_distilled": False,
+        "supports_weighting_scheme": False,
+        "supports_discrete_flow_shift": False,
+        # Sample generation: previews render on the fp8 Turbo (8-step, CFG-free).
+        "supports_samples": True,
+        "sample_cfg_default": None,
+        "sample_flow_shift_default": None,
+        "sample_steps_default": 8,
+        "sample_width_default": 1024,
+        "sample_height_default": 1024,
+    },
 }
 
 ARCHITECTURE_LIST = list(ARCHITECTURES.keys())
@@ -2227,8 +2262,37 @@ class LoRATrainerGUI:
             "click any header to toggle. Dataset-config knobs live in Other Options.",
         )
 
-        # Klein Base 9B is the only supported architecture; var kept for downstream code lookups.
-        self.architecture_var = tk.StringVar(value="Flux 2 Klein Base 9B")
+        # Model family selector. Restore the last choice; fall back to Klein if the
+        # saved value isn't a known architecture (e.g. a removed/renamed entry).
+        _saved_arch = "Flux 2 Klein Base 9B"
+        try:
+            _candidate = self.last_used.get("architecture", _saved_arch)
+            if _candidate in ARCHITECTURE_LIST:
+                _saved_arch = _candidate
+        except Exception:
+            pass
+        self.architecture_var = tk.StringVar(value=_saved_arch)
+
+        # === Base Model card (only shown when more than one architecture is available) ===
+        if len(ARCHITECTURE_LIST) > 1:
+            model_card = self._start_section_card(
+                outer, "Base Model",
+                "Pick the model family to train. Krea 2 is experimental — set its four "
+                "model paths on the Preferences tab before training.",
+            )
+            model_row = tk.Frame(model_card, bg=COLORS["bg_surface"])
+            model_row.pack(anchor=tk.W)
+            tk.Label(
+                model_row, text="Model:",
+                font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            arch_combo = ttk.Combobox(
+                model_row, textvariable=self.architecture_var, state="readonly",
+                width=28, values=ARCHITECTURE_LIST,
+            )
+            arch_combo.pack(side=tk.LEFT)
+            arch_combo.bind("<<ComboboxSelected>>", self._on_architecture_selected)
+            ToolTip(arch_combo, "Model family to train (Klein 9B or Krea 2)")
 
         # === Presets card ===
         preset_card = self._start_section_card(
@@ -4892,6 +4956,17 @@ class LoRATrainerGUI:
         # CFG Scale (not used by Distilled)
         self.sample_cfg_scale_entry.configure(state=state)
         self.sample_cfg_label.configure(foreground=grey)
+
+    def _on_architecture_selected(self, event=None):
+        """Model-family selector changed — refresh sample defaults + persist the choice."""
+        try:
+            self.update_samples_ui_for_architecture()
+        except Exception:
+            pass
+        try:
+            self._save_last_used_paths()
+        except Exception:
+            pass
 
     def update_samples_ui_for_architecture(self):
         """Update samples tab UI based on selected architecture"""
@@ -12749,39 +12824,56 @@ class LoRATrainerGUI:
         elif not os.path.exists(dataset_config):
             errors.append(f"Dataset config file does not exist: {dataset_config}")
 
-        vae_model = self._get_path("VAE_MODEL")
-        if not vae_model:
-            errors.append("VAE model file path is empty (set on the Preferences tab)")
-        elif not os.path.exists(vae_model):
-            errors.append(f"VAE model file does not exist: {vae_model}")
+        if config.get("is_krea2"):
+            # Krea 2 reads its own four model paths from Preferences (krea2_*). The
+            # Turbo DiT is only required when in-training previews are enabled.
+            krea2_required = [
+                ("krea2_raw_dit", "Krea 2 RAW DiT"),
+                ("krea2_vae", "Qwen-Image VAE"),
+                ("krea2_text_encoder", "Qwen3-VL-4B text encoder"),
+            ]
+            if self.sample_enabled_var.get():
+                krea2_required.append(("krea2_turbo_dit", "Krea 2 Turbo DiT (fp8) — needed for previews"))
+            for pref_key, label in krea2_required:
+                path = self._krea2_pref(pref_key)
+                if not path:
+                    errors.append(f"{label} path is empty (set it on the Preferences tab)")
+                elif not os.path.exists(path):
+                    errors.append(f"{label} file does not exist: {path}")
+        else:
+            vae_model = self._get_path("VAE_MODEL")
+            if not vae_model:
+                errors.append("VAE model file path is empty (set on the Preferences tab)")
+            elif not os.path.exists(vae_model):
+                errors.append(f"VAE model file does not exist: {vae_model}")
 
-        dit_model = self._get_path("DIT_MODEL")
-        if not dit_model:
-            errors.append("DiT model file path is empty (set on the Preferences tab)")
-        elif not os.path.exists(dit_model):
-            errors.append(f"DiT model file does not exist: {dit_model}")
+            dit_model = self._get_path("DIT_MODEL")
+            if not dit_model:
+                errors.append("DiT model file path is empty (set on the Preferences tab)")
+            elif not os.path.exists(dit_model):
+                errors.append(f"DiT model file does not exist: {dit_model}")
 
-        # Architecture-specific validation (T5/CLIP are dead for Klein but kept for future flexibility)
-        if config["uses_t5"]:
-            t5_model = self._get_path("T5_MODEL")
-            if not t5_model:
-                errors.append("T5 model file path is empty")
-            elif not os.path.exists(t5_model):
-                errors.append(f"T5 model file does not exist: {t5_model}")
+            # Architecture-specific validation (T5/CLIP are dead for Klein but kept for future flexibility)
+            if config["uses_t5"]:
+                t5_model = self._get_path("T5_MODEL")
+                if not t5_model:
+                    errors.append("T5 model file path is empty")
+                elif not os.path.exists(t5_model):
+                    errors.append(f"T5 model file does not exist: {t5_model}")
 
-        if config["uses_text_encoder"]:
-            text_encoder = self._get_path("TEXT_ENCODER")
-            if not text_encoder:
-                errors.append("Text encoder file path is empty (set on the Preferences tab)")
-            elif not os.path.exists(text_encoder):
-                errors.append(f"Text encoder file does not exist: {text_encoder}")
+            if config["uses_text_encoder"]:
+                text_encoder = self._get_path("TEXT_ENCODER")
+                if not text_encoder:
+                    errors.append("Text encoder file path is empty (set on the Preferences tab)")
+                elif not os.path.exists(text_encoder):
+                    errors.append(f"Text encoder file does not exist: {text_encoder}")
 
-        if config["uses_clip"]:
-            clip_model = self._get_path("CLIP_MODEL")
-            if not clip_model:
-                errors.append("CLIP model file path is empty")
-            elif not os.path.exists(clip_model):
-                errors.append(f"CLIP model file does not exist: {clip_model}")
+            if config["uses_clip"]:
+                clip_model = self._get_path("CLIP_MODEL")
+                if not clip_model:
+                    errors.append("CLIP model file path is empty")
+                elif not os.path.exists(clip_model):
+                    errors.append(f"CLIP model file does not exist: {clip_model}")
 
         # Validate numeric fields
         try:
@@ -12968,9 +13060,11 @@ class LoRATrainerGUI:
         except Exception:
             pass
 
-        # Auto-uncheck FP8 Base if the Base DiT file is already fp8-quantised
+        # Auto-uncheck FP8 Base if the Base DiT file is already fp8-quantised (Klein only —
+        # Krea 2 reads its own RAW DiT and dynamic-quantizes it, so this must not fire there).
+        _is_krea2_run = ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)
         base_dit_path = self.prefs_vars.get("base_dit", tk.StringVar()).get()
-        if "fp8" in os.path.basename(base_dit_path).lower() and self.fp8_var.get():
+        if not _is_krea2_run and "fp8" in os.path.basename(base_dit_path).lower() and self.fp8_var.get():
             self.fp8_var.set(False)
             self.scaled_var.set(False)
             self.toggle_scaled()
@@ -13126,6 +13220,8 @@ class LoRATrainerGUI:
 
     def build_training_command(self, config):
         """Build the training command based on architecture configuration"""
+        if config.get("is_krea2"):
+            return self._build_krea2_train_command()
         arch = self.settings["ARCHITECTURE"]
         if os.name == 'nt':
             accelerate_path = os.path.join(FIZGIG_DIR, "venv", "Scripts", "accelerate.exe")
@@ -13416,6 +13512,9 @@ class LoRATrainerGUI:
 
     def build_cache_latents_command(self, config):
         """Build the cache latents command based on architecture"""
+        if config.get("is_krea2"):
+            return self._build_krea2_cache_command("krea2_cache_latents.py",
+                                                   "--vae", self._krea2_pref("krea2_vae"))
         arch = self.settings["ARCHITECTURE"]
         if os.name == 'nt':
             python_path = os.path.join(FIZGIG_DIR, "venv", "Scripts", "python.exe")
@@ -13442,6 +13541,9 @@ class LoRATrainerGUI:
 
     def build_cache_text_command(self, config):
         """Build the cache text encoder command based on architecture"""
+        if config.get("is_krea2"):
+            return self._build_krea2_cache_command("krea2_cache_text.py",
+                                                   "--text_encoder", self._krea2_pref("krea2_text_encoder"))
         arch = self.settings["ARCHITECTURE"]
         if os.name == 'nt':
             python_path = os.path.join(FIZGIG_DIR, "venv", "Scripts", "python.exe")
@@ -13472,6 +13574,102 @@ class LoRATrainerGUI:
             command.extend(["--model_version", config["model_version"]])
 
         return command
+
+    # === Krea 2 native command builders ===
+
+    def _venv_python(self) -> str:
+        """Absolute path to the bundled venv python."""
+        if os.name == 'nt':
+            return os.path.join(FIZGIG_DIR, "venv", "Scripts", "python.exe")
+        return os.path.join(FIZGIG_DIR, "venv", "bin", "python")
+
+    def _krea2_pref(self, key: str) -> str:
+        """Read a Krea 2 model path from Preferences (krea2_raw_dit / krea2_turbo_dit / krea2_vae / krea2_text_encoder)."""
+        var = self.prefs_vars.get(key)
+        return var.get().strip() if var is not None else ""
+
+    def _krea2_script(self, name: str) -> str:
+        return os.path.join(FIZGIG_DIR, "src", "fizgig", "scripts", name)
+
+    def _build_krea2_cache_command(self, script_name: str, model_flag: str, model_path: str):
+        """Krea 2 caching: a plain venv-python call to krea2_cache_latents.py / krea2_cache_text.py."""
+        return [
+            self._venv_python(),
+            self._krea2_script(script_name),
+            "--dataset_config", self.settings["DATASET_CONFIG"],
+            model_flag, model_path,
+        ]
+
+    def _write_krea2_sample_prompts(self):
+        """Write the Samples-tab prompts as clean lines (one prompt per line) for krea2_train.
+
+        Klein's prompt file carries inline flags (`--w`/`--h`/`--s`/...); krea2_train takes
+        resolution as CLI args and reads each line as a literal prompt, so we strip any
+        trailing ` --flag ...` group. Returns the file path, or None if no prompts."""
+        samples_dir = self.get_samples_dir()
+        os.makedirs(samples_dir, exist_ok=True)
+        lines = []
+        for raw in self.sample_prompt_text.get("1.0", tk.END).splitlines():
+            ln = raw.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            ln = ln.split(" --")[0].strip()  # drop Klein-style inline flags
+            if ln:
+                lines.append(ln)
+        if not lines:
+            return None
+        path = os.path.join(samples_dir, "krea2_prompts.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        return path
+
+    def _build_krea2_train_command(self):
+        """Build the native Krea 2 training command (RAW base, fp8 Turbo previews).
+
+        Model paths come from Preferences (krea2_*); rank/alpha/lr/epochs/save/seed and the
+        auto-resolved Blocks Swap come from the shared Training-tab knobs; sample resolution +
+        frequency come from the Samples tab (same source Klein uses)."""
+        cmd = [
+            self._venv_python(),
+            self._krea2_script("krea2_train.py"),
+            "--dit", self._krea2_pref("krea2_raw_dit"),
+            "--dataset_config", self.settings["DATASET_CONFIG"],
+            "--output_dir", self.settings["LORA_OUTPUT_DIR"],
+            "--output_name", self.settings["LORA_NAME"],
+            "--network_dim", str(self.settings["NETWORK_DIM"]),
+            "--network_alpha", str(self.settings["NETWORK_ALPHA"]),
+            "--learning_rate", str(self.settings["LEARNING_RATE"]),
+            "--max_train_epochs", str(self.settings["MAX_TRAIN_EPOCHS"]),
+            "--save_every_n_epochs", str(self.settings["SAVE_EVERY_N_EPOCHS"]),
+            "--blocks_to_swap", str(self.settings["BLOCKS_SWAP"]),
+            "--seed", str(self.settings["SEED"]),
+            "--discrete_flow_shift", "2.5",
+        ]
+        # FP8 base (dynamic-quantize the RAW model) is the default — fits lower-VRAM cards.
+        # Unchecking "FP8 Base" trains the base in bf16 (26 GB, big-card / heavy-swap only).
+        if not self.settings.get("FP8", True):
+            cmd.append("--no_fp8")
+
+        # In-training previews: render the fp8 Turbo with the live LoRA. Resolution +
+        # frequency come from the Samples tab; previews land in <output_dir>/sample, which
+        # is exactly where the GUI samples watcher looks.
+        if self.sample_enabled_var.get():
+            prompt_file = self._write_krea2_sample_prompts()
+            every = self.sample_every_n_epochs_var.get().strip()
+            every_n = int(every) if every.isdigit() else 0
+            if prompt_file and every_n > 0:
+                width = (self.sample_width_var.get().strip() or "1024")
+                height = (self.sample_height_var.get().strip() or "1024")
+                cmd += [
+                    "--sample_prompts", prompt_file,
+                    "--sample_every_n_epochs", str(every_n),
+                    "--sample_width", width,
+                    "--sample_height", height,
+                    "--turbo_dit", self._krea2_pref("krea2_turbo_dit"),
+                    "--vae", self._krea2_pref("krea2_vae"),
+                    "--text_encoder", self._krea2_pref("krea2_text_encoder"),
+                ]
+        return cmd
 
     # === Pause / Resume support ===
 

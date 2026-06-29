@@ -130,9 +130,15 @@ def encode_sample_prompts(te_path, prompts, *, device="cuda"):
 
 
 def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
-                    steps=8, cfg_scale=1.0, width=512, height=512, seed=42, device="cuda"):
+                    output_name="krea2", steps=8, cfg_scale=1.0, width=512, height=512,
+                    seed=42, device="cuda"):
     """Load the (clean) pre-quant fp8 Turbo, apply the current LoRA LIVE (no merge -> no grid),
-    and render each pre-encoded prompt. Turbo is freed afterwards."""
+    and render each pre-encoded prompt. Turbo is freed afterwards.
+
+    Filenames follow the Fizgig samples-gallery pattern
+    `{name}_e{epoch:06d}_{idx:02d}_{timestamp:14d}_{seed}.png` so the live preview gallery
+    (which parses that exact format) picks them up — same as the Klein training path."""
+    import datetime
     from fizgig.krea2.utils import load_krea2_dit
     from fizgig.networks.lora import create_network_from_weights
     from fizgig.krea2 import sampling
@@ -143,13 +149,14 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
     net.to(device=device, dtype=torch.bfloat16).eval()
     turbo.eval()
     os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")  # 14-digit timestamp
     paths = []
     for i, (txt, txtmask) in enumerate(encoded_prompts):
         with torch.no_grad():
             imgs = sampling.sample(turbo, ae, txt, txtmask, untxt=None, untxtmask=None,
                                    device=device, dtype=torch.bfloat16, width=width, height=height,
                                    steps=steps, cfg_scale=cfg_scale, mu=1.15, seed=seed + i)
-        p = os.path.join(out_dir, f"epoch{epoch:04d}_{i:02d}.png")
+        p = os.path.join(out_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{seed + i}.png")
         imgs[0].save(p)
         paths.append(p)
     del turbo, net
@@ -261,8 +268,8 @@ def train_krea2(
             _save_lora(network, tmp, network_dim, network_alpha, dtype)
             logger.info(f"rendering previews (epoch {epoch + 1}) on the fp8 Turbo...")
             sample_previews(turbo_path, sample_ae, encoded_prompts, load_file(tmp), sample_dir, epoch + 1,
-                            steps=sample_steps, width=sample_width, height=sample_height,
-                            seed=sample_seed, device=device)
+                            output_name=output_name, steps=sample_steps, width=sample_width,
+                            height=sample_height, seed=sample_seed, device=device)
             dit.train()
             network.train()
 

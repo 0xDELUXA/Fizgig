@@ -26,6 +26,7 @@ from fizgig.krea2.utils import load_krea2_dit
 from fizgig.krea2.sampling import gather_valid_text, prepare
 from fizgig.networks.lora import create_network
 from fizgig.training.metadata import ARCHITECTURE_KREA2
+from fizgig.training.train_utils import LossRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,9 @@ def train_krea2(
         steps_per_epoch = len(loader)
     except TypeError:
         steps_per_epoch = group.num_train_items
+    # Same smoothed readout as Klein: the raw per-step loss is very noisy (batch size 1 +
+    # a random flow-matching timestep each step), so we also surface a moving average.
+    loss_recorder = LossRecorder()
     for epoch in range(max_train_epochs):
         shared_epoch.value = epoch + 1
         epoch_loss, nb = 0.0, 0
@@ -267,10 +271,13 @@ def train_krea2(
             epoch_loss += step_loss
             nb += 1
             global_step += 1
+            loss_recorder.add(epoch=epoch, step=i, loss=step_loss)
             # Plain per-step console line (no progress bar) so each optimizer step is visible.
+            # avr_loss is the meaningful trend; raw loss is the noisy single-sample value.
             logger.info(f"  epoch {epoch + 1}/{max_train_epochs}  step {i + 1}/{steps_per_epoch}  "
-                        f"(global {global_step})  loss={step_loss:.4f}")
-        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  loss={epoch_loss / max(1, nb):.4f}  step={global_step}")
+                        f"(global {global_step})  loss={step_loss:.4f}  avr_loss={loss_recorder.moving_average:.4f}")
+        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  "
+                    f"(epoch mean={epoch_loss / max(1, nb):.4f})  step={global_step}")
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),

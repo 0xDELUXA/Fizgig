@@ -292,7 +292,7 @@ ARCHITECTURES = {
         "timestep_sampling": "shift",
         "discrete_flow_shift": 2.5,
         "weighting_scheme": "none",
-        "blocks_swap_max": 28,  # Krea 2 SingleStreamDiT has 28 blocks
+        "blocks_swap_max": 26,  # Krea 2 SingleStreamDiT has 28 blocks; offloader caps at 28-2
         "fp8_text_encoder_flag": None,
         "uses_clip": False,
         "uses_t5": False,
@@ -3408,9 +3408,32 @@ class LoRATrainerGUI:
         import re as _re
         raw = self.entries["BLOCKS_SWAP"].get().strip()
         if raw.lower().startswith("auto"):
+            cfg = ARCHITECTURES.get(self.architecture_var.get(), {})
+            if cfg.get("is_krea2"):
+                return self._auto_krea2_blocks_swap()
             return self._auto_training_blocks_swap()
         m = _re.match(r'\d+', raw)
         return int(m.group()) if m else 0
+
+    def _auto_krea2_blocks_swap(self) -> int:
+        """Pick Krea 2 training block swap from GPU VRAM. Krea 2's RAW DiT is ~14 GB in fp8
+        (vs Klein's ~9.6 GB), so even a 32 GB card keeps a small swap for training headroom.
+        Previews park the training DiT on CPU separately, so this governs only the training
+        step. Max swap is 26 (28 main blocks − 2)."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                if vram_gb >= 30:
+                    return 4    # 32 GB — small swap for headroom
+                if vram_gb >= 22:
+                    return 12   # 24 GB
+                if vram_gb >= 15:
+                    return 20   # 16 GB
+                return 26       # <16 GB — maximum
+        except Exception:
+            pass
+        return 4  # safe default
 
     def _auto_training_blocks_swap(self) -> int:
         """Pick training block swap based on GPU VRAM."""

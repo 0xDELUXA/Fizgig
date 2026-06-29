@@ -7,6 +7,7 @@ dataloader (same framework as Klein) over the krea2 latent/TE caches.
 """
 
 import argparse
+import gc
 import logging
 import os
 from multiprocessing import Value
@@ -267,9 +268,26 @@ def train_krea2(
             tmp = os.path.join(output_dir, "_sample_lora.safetensors")
             _save_lora(network, tmp, network_dim, network_alpha, dtype)
             logger.info(f"rendering previews (epoch {epoch + 1}) on the fp8 Turbo...")
-            sample_previews(turbo_path, sample_ae, encoded_prompts, load_file(tmp), sample_dir, epoch + 1,
-                            output_name=output_name, steps=sample_steps, width=sample_width,
-                            height=sample_height, seed=sample_seed, device=device)
+            # The preview loads the fp8 Turbo (~13 GB) on top of the resident training DiT
+            # (~14 GB fp8) + the VAE — two full models won't fit (OOMs ~30 GB on a 32 GB card).
+            # Park the training DiT on CPU for the preview, then restore it (and its block-swap
+            # placement) before the next epoch. Costs one CPU<->GPU round-trip per preview.
+            dit.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+            try:
+                sample_previews(turbo_path, sample_ae, encoded_prompts, load_file(tmp), sample_dir, epoch + 1,
+                                output_name=output_name, steps=sample_steps, width=sample_width,
+                                height=sample_height, seed=sample_seed, device=device)
+            finally:
+                gc.collect()
+                torch.cuda.empty_cache()
+                if blocks_to_swap > 0:
+                    # Re-establish the training placement (non-swap blocks -> GPU, swap blocks -> CPU).
+                    dit.move_to_device_except_swap_blocks(torch.device(device))
+                    dit.switch_block_swap_for_training()
+                else:
+                    dit.to(device)
             dit.train()
             network.train()
 

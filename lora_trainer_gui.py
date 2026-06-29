@@ -4758,8 +4758,9 @@ class LoRATrainerGUI:
         _steps_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_steps_entry = ttk.Entry(_steps_frame, textvariable=self.sample_steps_var, width=10)
         self.sample_steps_entry.pack(side=tk.LEFT)
-        tk.Label(_steps_frame, text="Base samples only — Distilled is locked at 4 steps",
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(10, 0))
+        self.sample_steps_note = tk.Label(_steps_frame, text="Base samples only — Distilled is locked at 4 steps",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+        self.sample_steps_note.pack(side=tk.LEFT, padx=(10, 0))
 
         ttk.Label(prompt_card, text="Seed:").grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_seed_var = tk.StringVar(value=str(self.settings["SAMPLE_SEED"]))
@@ -4772,21 +4773,25 @@ class LoRATrainerGUI:
 
         # Reference image (Klein edit conditioning) — the persistent default for
         # samples; the status-bar override can swap it live mid-run.
-        ttk.Label(prompt_card, text="Reference:").grid(row=5, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_ref_label = ttk.Label(prompt_card, text="Reference:")
+        self.sample_ref_label.grid(row=5, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_ref_image_var = tk.StringVar(value=self.last_used.get("sample_ref_image", ""))
         _ref_row = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
         _ref_row.grid(row=5, column=1, columnspan=2, sticky=tk.EW, pady=4)
-        ttk.Entry(_ref_row, textvariable=self.sample_ref_image_var, state="readonly").pack(
-            side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(_ref_row, text="Browse…", command=self._browse_sample_ref).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(_ref_row, text="Clear", command=lambda: self.sample_ref_image_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        self.sample_ref_entry = ttk.Entry(_ref_row, textvariable=self.sample_ref_image_var, state="readonly")
+        self.sample_ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.sample_ref_browse_btn = ttk.Button(_ref_row, text="Browse…", command=self._browse_sample_ref)
+        self.sample_ref_browse_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self.sample_ref_clear_btn = ttk.Button(_ref_row, text="Clear", command=lambda: self.sample_ref_image_var.set(""))
+        self.sample_ref_clear_btn.pack(side=tk.LEFT, padx=(4, 0))
         self.sample_ref_image_var.trace_add("write", lambda *a: self._save_last_used_paths())
-        tk.Label(prompt_card,
+        self.sample_ref_note = tk.Label(prompt_card,
                  text="Optional — Klein is an edit model, so samples can be conditioned on a real image (they edit "
                       "it rather than generate from scratch). Auto-resized to ~0.20 MP so any size is safe. Leave "
                       "empty for normal samples.",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
-                 wraplength=560, justify=tk.LEFT).grid(row=6, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
+                 wraplength=560, justify=tk.LEFT)
+        self.sample_ref_note.grid(row=6, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
 
         # Card 2: Generation Frequency
         freq_card = self._start_section_card(
@@ -4815,26 +4820,29 @@ class LoRATrainerGUI:
         ).grid(row=2, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
 
         self.use_distilled_samples_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(
+        self.use_distilled_check = ttk.Checkbutton(
             freq_card, text="Use Distilled model for samples (4-step, matches ComfyUI)",
             variable=self.use_distilled_samples_var,
             command=self._on_distilled_samples_toggled,
-        ).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
+        )
+        self.use_distilled_check.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
 
         # Cache the Distilled sample model in CPU RAM between epochs (skip disk reload).
-        ttk.Label(freq_card, text="Cache sample model in RAM:").grid(
+        self.cache_sample_model_label = ttk.Label(freq_card, text="Cache sample model in RAM:")
+        self.cache_sample_model_label.grid(
             row=4, column=0, sticky=tk.W, padx=(0, 10), pady=(8, 0))
         self.cache_sample_model_var = tk.StringVar(value=self.settings.get("CACHE_SAMPLE_MODEL", "auto"))
-        ttk.Combobox(freq_card, textvariable=self.cache_sample_model_var,
-                     values=["auto", "on", "off"], state="readonly", width=8).grid(
-            row=4, column=1, sticky=tk.W, pady=(8, 0))
-        tk.Label(freq_card,
+        self.cache_sample_model_combo = ttk.Combobox(freq_card, textvariable=self.cache_sample_model_var,
+                     values=["auto", "on", "off"], state="readonly", width=8)
+        self.cache_sample_model_combo.grid(row=4, column=1, sticky=tk.W, pady=(8, 0))
+        self.cache_sample_model_note = tk.Label(freq_card,
                  text="Keeps the ~10 GB Distilled model resident in system RAM between epochs so it isn't "
                       "re-read from disk every sample (~3–4 s/epoch saved). auto = only when free RAM is "
                       "comfortable; off = reload each time. Only applies when sampling isn't block-swapping the "
                       "Distilled — i.e. 24 GB+ cards, where the sample peaks around ~18 GB).",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
-                 wraplength=600, justify=tk.LEFT).grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
+                 wraplength=600, justify=tk.LEFT)
+        self.cache_sample_model_note.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
 
         # Card 3: Architecture-Specific (Flow Shift / Guidance / Negative / CFG)
         arch_card = self._start_section_card(
@@ -4938,6 +4946,17 @@ class LoRATrainerGUI:
 
         _walk(self.sample_settings_frame)
 
+        # The walk above re-enabled every child uniformly — re-assert the Klein-only
+        # greying so the Distilled / Cache-model / Reference controls stay disabled in
+        # Krea 2 mode (and the distilled-toggle-driven field states).
+        if self.sample_enabled_var.get():
+            try:
+                cfg = ARCHITECTURES.get(self.architecture_var.get(), {})
+                self._apply_samples_klein_only(cfg.get("is_krea2", False))
+                self._on_distilled_samples_toggled()
+            except Exception:
+                pass
+
     def _on_distilled_samples_toggled(self):
         """Grey out fields that Distilled overrides when the checkbox is ticked."""
         use_distilled = self.use_distilled_samples_var.get()
@@ -5025,8 +5044,66 @@ class LoRATrainerGUI:
             else:
                 self.sample_cfg_scale_entry.configure(state=tk.NORMAL)
 
+            # Grey out / relabel the Klein-only sample controls when Krea 2 is selected.
+            self._apply_samples_klein_only(config.get("is_krea2", False))
+
         # Update sample output path label
         self.update_sample_output_label()
+
+    def _apply_samples_klein_only(self, is_krea2):
+        """Mark the Klein-only sample controls when Krea 2 is selected.
+
+        Krea 2 always renders previews on its fp8 Turbo (8-step, CFG-free, no edit
+        reference, model reloaded per pass), so the 'Use Distilled model' toggle, the
+        'Cache sample model in RAM' dropdown, and the Klein edit-Reference image don't
+        apply. Disable them and relabel as 'Klein only' so it's clear, rather than
+        silently leaving live controls that do nothing in Krea 2 mode."""
+        muted = COLORS["text_muted"]
+        secondary = COLORS["text_secondary"]
+        label_fg = muted if is_krea2 else secondary
+
+        # "Use Distilled model for samples" checkbox
+        if hasattr(self, "use_distilled_check"):
+            self.use_distilled_check.configure(
+                state=(tk.DISABLED if is_krea2 else tk.NORMAL),
+                text=("Use Distilled model for samples — Klein only (Krea 2 always uses the fp8 Turbo)"
+                      if is_krea2 else
+                      "Use Distilled model for samples (4-step, matches ComfyUI)"))
+
+        # Steps note
+        if hasattr(self, "sample_steps_note"):
+            self.sample_steps_note.configure(
+                text=("Klein only — Krea 2 previews always use the 8-step fp8 Turbo"
+                      if is_krea2 else
+                      "Base samples only — Distilled is locked at 4 steps"))
+
+        # Reference image (Klein edit conditioning)
+        for attr in ("sample_ref_entry",):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.configure(state=(tk.DISABLED if is_krea2 else "readonly"))
+        for attr in ("sample_ref_browse_btn", "sample_ref_clear_btn"):
+            w = getattr(self, attr, None)
+            if w is not None:
+                w.configure(state=(tk.DISABLED if is_krea2 else tk.NORMAL))
+        if hasattr(self, "sample_ref_label"):
+            self.sample_ref_label.configure(foreground=label_fg)
+        if hasattr(self, "sample_ref_note"):
+            self.sample_ref_note.configure(
+                text=("Klein only — Krea 2 is not an edit model, so previews are generated from scratch "
+                      "(no reference image)."
+                      if is_krea2 else
+                      "Optional — Klein is an edit model, so samples can be conditioned on a real image (they edit "
+                      "it rather than generate from scratch). Auto-resized to ~0.20 MP so any size is safe. Leave "
+                      "empty for normal samples."))
+
+        # "Cache sample model in RAM" dropdown (not implemented for Krea 2)
+        if hasattr(self, "cache_sample_model_combo"):
+            self.cache_sample_model_combo.configure(state=(tk.DISABLED if is_krea2 else "readonly"))
+        if hasattr(self, "cache_sample_model_label"):
+            self.cache_sample_model_label.configure(
+                text=("Cache sample model in RAM (Klein only):" if is_krea2 else "Cache sample model in RAM:"),
+                foreground=label_fg)
 
     def update_sample_output_label(self):
         """Update the sample output path label to show actual path"""

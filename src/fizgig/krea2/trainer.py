@@ -1,19 +1,30 @@
-"""Krea 2 LoRA training core: full-model LoRA setup + flow-matching loss.
+"""Krea 2 LoRA training: full-model LoRA + flow-matching loss over a bucketed dataloader.
 
-Trains on the RAW model. The LoRA wraps all 264 Linears (no layer-targeting presets yet —
-Krea2's block semantics aren't mapped, so Identity/Style/Details presets come later). The base
-is frozen (optionally fp8-quantized, QLoRA-style); only the LoRA trains in bf16.
+Trains on the RAW model. The LoRA wraps all 264 Linears (no layer-targeting presets yet — Krea2's
+block semantics aren't mapped, so Identity/Style/Details presets come later). The base is frozen
+(optionally fp8, QLoRA-style); only the LoRA trains in bf16. Uses Fizgig's bucketed multi-resolution
+dataloader (same framework as Klein) over the krea2 latent/TE caches.
 """
 
+import argparse
 import logging
-import random
+import os
+from multiprocessing import Value
 
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader
 
+from fizgig.dataset.config import (
+    BlueprintGenerator,
+    ConfigSanitizer,
+    generate_dataset_group_by_blueprint,
+    load_user_config,
+)
 from fizgig.krea2.utils import load_krea2_dit
 from fizgig.krea2.sampling import gather_valid_text, prepare
 from fizgig.networks.lora import create_network
+from fizgig.training.metadata import ARCHITECTURE_KREA2
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +40,7 @@ def load_dit_for_training(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ):
-    """Load the RAW DiT (frozen base, optionally fp8) and apply a trainable full-model LoRA.
-
-    For block swap, pass blocks_to_swap>0; the base loads to CPU and resident blocks move to
-    `device`, with swap blocks streamed during forward (set up by the caller via the model's
-    enable_block_swap / move_to_device_except_swap_blocks like inference)."""
+    """Load the RAW DiT (frozen base, optionally fp8) and apply a trainable full-model LoRA."""
     loading_device = "cpu" if blocks_to_swap > 0 else device
     dit = load_krea2_dit(raw_path, device=device, dtype=dtype, fp8_scaled=fp8_scaled,
                          loading_device=loading_device)
@@ -54,18 +61,10 @@ def sample_shifted_timesteps(bsize: int, shift: float, device) -> torch.Tensor:
     return shift * u / (1.0 + (shift - 1.0) * u)
 
 
-def compute_loss(
-    dit,
-    latent: torch.Tensor,
-    hidden_states: torch.Tensor,
-    attention_mask: torch.Tensor,
-    *,
-    shift: float = 2.5,
-    dtype: torch.dtype = torch.bfloat16,
-) -> torch.Tensor:
+def compute_loss(dit, latent, hidden_states, attention_mask, *, shift=2.5, dtype=torch.bfloat16):
     """Flow-matching training loss for Krea 2.
 
-    latent:        (B, 16, h, w)        — cached Qwen-Image VAE latent
+    latent:        (B, 16, h, w)         — cached Qwen-Image VAE latent
     hidden_states: (B, seq, layers, dim) — cached Qwen3-VL multi-layer stack
     attention_mask:(B, seq) bool         — cached validity mask
     """
@@ -89,37 +88,33 @@ def compute_loss(
     return F.mse_loss(pred.float(), target_tokens.float())
 
 
-# --- minimal training loop (reads krea2 caches directly) ---------------------
-def find_cache_pairs(cache_dir):
-    """Pair (latent_cache, te_cache) by item key from a krea2 cache directory."""
-    import glob
-    import os
-    import re
+class _Krea2Collator:
+    """DataLoader batch_size is always 1 (the dataset batches internally by bucket)."""
 
-    latents, tes = {}, {}
-    for f in glob.glob(os.path.join(cache_dir, "*.safetensors")):
-        b = os.path.basename(f)
-        if b.endswith("_krea2_te.safetensors"):
-            tes[b[: -len("_krea2_te.safetensors")]] = f
-        elif b.endswith("_krea2.safetensors"):
-            m = re.match(r"^(.*)_\d+x\d+_krea2\.safetensors$", b)
-            if m:
-                latents[m.group(1)] = f
-    return [(latents[k], tes[k]) for k in sorted(latents) if k in tes]
+    def __init__(self, shared_epoch, dataset):
+        self.shared_epoch = shared_epoch
+        self.dataset = dataset
+
+    def __call__(self, examples):
+        wi = torch.utils.data.get_worker_info()
+        ds = wi.dataset if wi is not None else self.dataset
+        ds.set_current_epoch(self.shared_epoch.value)
+        return examples[0]
 
 
-def _load_cached_item(latent_path, te_path):
-    from safetensors.torch import load_file
-
-    lf = load_file(latent_path)
-    latent = next(v for k, v in lf.items() if k.startswith("latent_"))  # (16, h, w)
-    tf = load_file(te_path)
-    return latent, tf["hidden_states"], tf["attention_mask"].to(torch.bool)
+def _save_lora(network, path, network_dim, network_alpha, dtype):
+    metadata = {
+        "ss_network_module": "fizgig.krea2 (lora_unet, all-Linear)",
+        "ss_network_dim": str(network_dim),
+        "ss_network_alpha": str(network_alpha),
+        "ss_architecture": ARCHITECTURE_KREA2,
+    }
+    network.save_weights(path, dtype, metadata)
 
 
 def train_krea2(
     raw_path: str,
-    cache_dir: str,
+    dataset_config: str,
     output_dir: str,
     output_name: str,
     *,
@@ -127,7 +122,6 @@ def train_krea2(
     network_alpha: float = 32,
     learning_rate: float = 1e-4,
     max_train_epochs: int = 10,
-    num_repeats: int = 1,
     save_every_n_epochs: int = 0,
     fp8_scaled: bool = True,
     blocks_to_swap: int = 0,
@@ -136,23 +130,24 @@ def train_krea2(
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ):
-    """Minimal native Krea 2 LoRA training loop: cache pairs -> flow-matching loss -> AdamW -> save.
-
-    Reads the krea2 latent/TE caches directly (batch size 1). Bucketing / multi-resolution
-    batching and in-training Turbo previews are deliberately left for the GUI-driven trainer;
-    this is the verified core loop."""
-    import os
-
+    """Native Krea 2 LoRA training: bucketed multi-resolution dataloader over the krea2 caches ->
+    flow-matching loss -> AdamW -> save a ComfyUI-compatible LoRA. In-training Turbo previews +
+    GUI wiring are layered on elsewhere."""
     torch.manual_seed(seed)
-    pairs = find_cache_pairs(cache_dir)
-    if not pairs:
-        raise RuntimeError(f"No krea2 cache pairs found in {cache_dir} — run the cache scripts first.")
-    logger.info(f"Krea 2 training: {len(pairs)} cached items x {num_repeats} repeats, {max_train_epochs} epochs")
+
+    shared_epoch = Value("i", 0)
+    user_config = load_user_config(dataset_config)
+    blueprint = BlueprintGenerator(ConfigSanitizer()).generate(
+        user_config, argparse.Namespace(), architecture=ARCHITECTURE_KREA2)
+    group = generate_dataset_group_by_blueprint(
+        blueprint.dataset_group, training=True, num_timestep_buckets=None, shared_epoch=shared_epoch)
+    if group.num_train_items == 0:
+        raise RuntimeError("No training items — run the krea2 cache scripts first.")
+    logger.info(f"Krea 2 training: {group.num_train_items} items, {max_train_epochs} epochs")
 
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
-        fp8_scaled=fp8_scaled, blocks_to_swap=blocks_to_swap, device=device, dtype=dtype,
-    )
+        fp8_scaled=fp8_scaled, blocks_to_swap=blocks_to_swap, device=device, dtype=dtype)
     if blocks_to_swap > 0:
         from fizgig.krea2.offloading import BlockSwapConfig
         dit.enable_block_swap(blocks_to_swap, BlockSwapConfig(torch.device(device), supports_backward=True))
@@ -160,8 +155,8 @@ def train_krea2(
         dit.switch_block_swap_for_training()
     dit.train()
     network.train()
-
     network.requires_grad_(True)
+
     params = list(network.get_trainable_params())
     try:
         import bitsandbytes as bnb
@@ -171,23 +166,24 @@ def train_krea2(
         optimizer = torch.optim.AdamW(params, lr=learning_rate)
         logger.info("optimizer: AdamW (bitsandbytes unavailable)")
 
+    collator = _Krea2Collator(shared_epoch, group)
+    loader = DataLoader(group, batch_size=1, shuffle=True, collate_fn=collator, num_workers=0)
+
     os.makedirs(output_dir, exist_ok=True)
-    items = pairs * num_repeats
     global_step = 0
     for epoch in range(max_train_epochs):
-        random.shuffle(items)
-        epoch_loss = 0.0
-        for latent_path, te_path in items:
-            latent, hidden, mask = _load_cached_item(latent_path, te_path)
-            loss = compute_loss(dit, latent.unsqueeze(0), hidden.unsqueeze(0), mask.unsqueeze(0),
+        shared_epoch.value = epoch + 1
+        epoch_loss, nb = 0.0, 0
+        for batch in loader:
+            loss = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
                                 shift=shift, dtype=dtype)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             epoch_loss += loss.item()
+            nb += 1
             global_step += 1
-        epoch_loss /= len(items)
-        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  loss={epoch_loss:.4f}  step={global_step}")
+        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  loss={epoch_loss / max(1, nb):.4f}  step={global_step}")
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),
@@ -197,15 +193,3 @@ def train_krea2(
     _save_lora(network, out, network_dim, network_alpha, dtype)
     logger.info(f"saved final LoRA -> {out}")
     return out
-
-
-def _save_lora(network, path, network_dim, network_alpha, dtype):
-    from fizgig.training.metadata import ARCHITECTURE_KREA2
-
-    metadata = {
-        "ss_network_module": "fizgig.krea2 (lora_unet, all-Linear)",
-        "ss_network_dim": str(network_dim),
-        "ss_network_alpha": str(network_alpha),
-        "ss_architecture": ARCHITECTURE_KREA2,
-    }
-    network.save_weights(path, dtype, metadata)

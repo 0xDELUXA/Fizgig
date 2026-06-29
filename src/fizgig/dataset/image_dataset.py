@@ -411,6 +411,9 @@ class BucketBatchManager:
                     content_key = "latents"
                 elif key == "text_embed":
                     content_key = "ctx_vec"
+                elif key in ("hidden_states", "attention_mask"):
+                    # Krea 2 text cache: multi-layer Qwen3-VL stack + validity mask
+                    content_key = key
                 else:
                     # Fallback: strip dtype suffix for compatibility with any
                     # legacy keys that might exist in merged caches

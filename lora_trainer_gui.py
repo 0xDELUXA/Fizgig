@@ -2370,9 +2370,11 @@ class LoRATrainerGUI:
             variable=self.adaptive_lr_var, command=self._on_adaptive_lr_toggle,
         )
         adaptive_cb.grid(row=2, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(4, 0))
+        self._adaptive_cb = adaptive_cb
 
         adaptive_frame = ttk.Frame(training_content)
         adaptive_frame.grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 2))
+        self._adaptive_frame = adaptive_frame
         ttk.Label(adaptive_frame, text="Min LR:").pack(side=tk.LEFT, padx=(0, 4))
         self.entries["ADAPTIVE_LR_MIN"] = ttk.Combobox(adaptive_frame, width=28, values=["1e-5", "5e-5", "1e-4", "2e-4 - likely too high"], state="readonly")
         self.entries["ADAPTIVE_LR_MIN"].set("1e-5")
@@ -2383,12 +2385,12 @@ class LoRATrainerGUI:
         self.entries["ADAPTIVE_LR_MAX"].pack(side=tk.LEFT, padx=(0, 12))
         self._adaptive_reset_btn = ttk.Button(adaptive_frame, text="Reset Defaults", command=self._reset_adaptive_lr_defaults)
         self._adaptive_reset_btn.pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Label(training_content,
+        self._adaptive_desc_label = ttk.Label(training_content,
                   text="When on, starting LR = Learning Rate field. Probes UP on steady loss descent; reduces DOWN "
                        "on loss plateau, heavy gradient clipping, or runaway weight-norm growth (with a rollback to "
                        "the previous epoch's weights on stability events).",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720,
-                 ).grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 6))
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._adaptive_desc_label.grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 6))
         self._on_adaptive_lr_toggle()  # sync initial enabled/disabled state
 
         # LoRA LR Ratio — hidden, always 1 (LoRA+ default). Widget exists for preset/save compat.
@@ -2401,7 +2403,8 @@ class LoRATrainerGUI:
         self._add_field_to_section(training_content, "SEED", "Seed", "int", 9)
 
         # Model Area to Train dropdown (blocks + timestep auto-fill)
-        ttk.Label(training_content, text="Model Area to Train:").grid(row=10, column=0, sticky=tk.W, padx=5, pady=2)
+        self._modelarea_label = ttk.Label(training_content, text="Model Area to Train:")
+        self._modelarea_label.grid(row=10, column=0, sticky=tk.W, padx=5, pady=2)
         self.training_preset_var = tk.StringVar(value="Full Model")
         training_preset_combo = ttk.Combobox(
             training_content, textvariable=self.training_preset_var,
@@ -2410,9 +2413,11 @@ class LoRATrainerGUI:
         )
         training_preset_combo.grid(row=10, column=1, sticky=tk.W, padx=5, pady=2)
         training_preset_combo.bind("<<ComboboxSelected>>", self._on_training_preset_changed)
-        ttk.Label(training_content,
+        self._modelarea_combo = training_preset_combo
+        self._modelarea_desc_label = ttk.Label(training_content,
                   text="Identity = single 1-16  |  Style = style+comp blocks @ late ts (0-400)  |  Style+Composition = double 0-7 + single 0-1  |  Details = single 12-23",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(row=11, column=0, columnspan=2, sticky=tk.W, padx=5)
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"))
+        self._modelarea_desc_label.grid(row=11, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # Custom block picker panel (hidden unless preset == Custom)
         self._training_custom_frame = ttk.Frame(training_content)
@@ -2468,9 +2473,11 @@ class LoRATrainerGUI:
         self._training_custom_frame.grid_remove()  # hidden until preset == Custom
 
         # Context LoRA (optional) — train new LoRA with an existing one frozen + active on the base
-        ttk.Label(training_content, text="Context LoRA:").grid(row=13, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self._contextlora_label = ttk.Label(training_content, text="Context LoRA:")
+        self._contextlora_label.grid(row=13, column=0, sticky=tk.W, padx=5, pady=(8, 2))
         ctx_frame = ttk.Frame(training_content)
         ctx_frame.grid(row=13, column=1, sticky=tk.W, padx=5, pady=(8, 2))
+        self._contextlora_frame = ctx_frame
         self.entries["CONTEXT_LORA_PATH"] = ttk.Entry(ctx_frame, width=42)
         self.entries["CONTEXT_LORA_PATH"].pack(side=tk.LEFT)
         ttk.Button(ctx_frame, text="Browse",
@@ -2479,16 +2486,16 @@ class LoRATrainerGUI:
         self.entries["CONTEXT_LORA_STRENGTH"] = ttk.Entry(ctx_frame, width=6)
         self.entries["CONTEXT_LORA_STRENGTH"].insert(0, "1.0")
         self.entries["CONTEXT_LORA_STRENGTH"].pack(side=tk.LEFT)
-        ttk.Label(training_content,
+        self._contextlora_desc_label = ttk.Label(training_content,
                   text="Train this LoRA with an existing LoRA already active on the base model. "
                        "Pair with same context+strength at inference.",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=14, column=0, columnspan=2, sticky=tk.W, padx=5)
-        ttk.Label(training_content,
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"))
+        self._contextlora_desc_label.grid(row=14, column=0, columnspan=2, sticky=tk.W, padx=5)
+        self._contextlora_warn_label = ttk.Label(training_content,
                   text="⚠ Context LoRAs usually look better in ComfyUI than in training samples — "
                        "don't worry if previews look rough, test the output LoRA in ComfyUI.",
-                  foreground="#E67E22", font=(FONT_FAMILY, 8, "italic")).grid(
-            row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
+                  foreground="#E67E22", font=(FONT_FAMILY, 8, "italic"))
+        self._contextlora_warn_label.grid(row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # Target Megapixels (training resolution) — moved here from Other Options
         ttk.Label(training_content, text="Target Megapixels:").grid(row=16, column=0, sticky=tk.W, padx=5, pady=(8, 2))
@@ -3387,6 +3394,76 @@ class LoRATrainerGUI:
             self._on_timestep_sampling_changed()
             self._on_weighting_scheme_changed()
             self._update_noise_range_label()
+
+        # Krea 2 hides Training-tab features that aren't wired into its native trainer yet.
+        # These are DEFERRED, not removed — each is re-enabled simply by dropping it from the
+        # hide lists in _apply_training_arch_visibility once krea2_train supports it.
+        self._apply_training_arch_visibility(config.get("is_krea2", False))
+
+    def _is_krea2_arch(self) -> bool:
+        return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)
+
+    def _set_training_section_visible(self, key: str, before_key: str, visible: bool):
+        """Show/hide a whole collapsible section, preserving the canonical pack order.
+        When showing, pack it before `before_key` (which must be a currently-packed section)
+        so it lands back in the right place rather than at the bottom of the tab."""
+        sec = self.collapsible_sections.get(key)
+        if sec is None:
+            return
+        try:
+            if visible:
+                before = self.collapsible_sections.get(before_key)
+                if before is not None and before.winfo_manager() == "pack":
+                    sec.pack(fill=tk.X, padx=36, pady=(0, 16), before=before)
+                else:
+                    sec.pack(fill=tk.X, padx=36, pady=(0, 16))
+            else:
+                sec.pack_forget()
+        except Exception:
+            pass
+
+    def _apply_training_arch_visibility(self, is_krea2: bool):
+        """Hide Training-tab controls not yet wired into the Krea 2 native trainer; re-show for Klein.
+
+        Deferred-for-Krea-2 feature groups (re-enable by removing from these lists as they land):
+          • Adaptive LR (checkbox + Min/Max LR + description)   — no adaptive scheduler in krea2_train
+          • Model Area to Train (dropdown + desc + Custom panel) — no Krea 2 block map yet
+          • Context LoRA (path/Browse/Strength + 2 descriptions) — no --context_lora in krea2_train
+          • Optimizer section                                   — krea2 hardcodes AdamW8bit
+          • Timestep & Noise section                            — krea2 uses a fixed shift schedule
+        """
+        # Guard: this may run via update_ui_for_architecture before the Training tab is built.
+        if not hasattr(self, "_adaptive_cb"):
+            return
+        # Per-widget groups in the (always-visible) Training Parameters section.
+        widgets = [
+            self._adaptive_cb, self._adaptive_frame, self._adaptive_desc_label,
+            self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
+            self._contextlora_label, self._contextlora_frame,
+            self._contextlora_desc_label, self._contextlora_warn_label,
+        ]
+        for w in widgets:
+            if w is None:
+                continue
+            try:
+                w.grid_remove() if is_krea2 else w.grid()
+            except Exception:
+                pass
+
+        # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
+        # dropdown decide (only shown when the preset is "Custom").
+        try:
+            if is_krea2:
+                self._training_custom_frame.grid_remove()
+            else:
+                self._on_training_preset_changed()
+        except Exception:
+            pass
+
+        # Whole collapsible sections. Re-show in canonical order (Timestep before Optimizer,
+        # Optimizer before Other Options) — show Optimizer first so Timestep's anchor is packed.
+        self._set_training_section_visible("optimizer", "scheduler", not is_krea2)
+        self._set_training_section_visible("timestep", "optimizer", not is_krea2)
 
     # ── Timestep section helpers ────────────────────────────────────────
 
@@ -5027,6 +5104,12 @@ class LoRATrainerGUI:
         """Model-family selector changed — refresh sample defaults + presets + persist."""
         try:
             self.update_samples_ui_for_architecture()
+        except Exception:
+            pass
+        # Refresh Training-tab field/section visibility for the new architecture
+        # (hides Krea 2-unsupported controls; re-shows them for Klein).
+        try:
+            self.update_ui_for_architecture()
         except Exception:
             pass
         # Swap the preset dropdown to this architecture's built-ins + user presets.
@@ -13013,7 +13096,8 @@ class LoRATrainerGUI:
             if lr <= 0:
                 errors.append("Learning rate must be positive")
             # When adaptive LR is enabled, starting LR must not exceed max LR
-            if hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get():
+            # (Krea 2 has no adaptive LR — the control is hidden — so skip this check there.)
+            if hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get() and not self._is_krea2_arch():
                 try:
                     max_lr_str = self.entries["ADAPTIVE_LR_MAX"].get().split(" ")[0]
                     min_lr_str = self.entries["ADAPTIVE_LR_MIN"].get().split(" ")[0]
@@ -13028,9 +13112,10 @@ class LoRATrainerGUI:
         except ValueError:
             errors.append("Learning rate must be a valid number")
 
-        # Context LoRA validation
+        # Context LoRA validation (Krea 2 doesn't support Context LoRA yet — the field is
+        # hidden there, so don't validate any stale value left from a Klein session).
         ctx_path = self.entries.get("CONTEXT_LORA_PATH").get().strip() if "CONTEXT_LORA_PATH" in self.entries else ""
-        if ctx_path:
+        if ctx_path and not self._is_krea2_arch():
             if not os.path.exists(ctx_path):
                 errors.append(f"Context LoRA file does not exist: {ctx_path}")
             elif not ctx_path.lower().endswith(".safetensors"):

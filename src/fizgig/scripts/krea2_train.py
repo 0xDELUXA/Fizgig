@@ -1,0 +1,65 @@
+"""Krea 2 LoRA training CLI (wraps fizgig.krea2.trainer.train_krea2).
+
+The GUI drives the full run as three steps: krea2_cache_latents -> krea2_cache_text -> krea2_train.
+Trains on the RAW model; previews render on the fp8 Turbo (--turbo_dit) with the live LoRA.
+"""
+
+import argparse
+import logging
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+from fizgig.krea2.trainer import train_krea2
+
+logging.basicConfig(level=logging.INFO)
+
+
+def setup_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Krea 2 LoRA training (RAW base, fp8 Turbo previews)")
+    p.add_argument("--dit", required=True, help="Krea 2 RAW DiT (Krea-2-raw.safetensors)")
+    p.add_argument("--dataset_config", required=True, help="Dataset .toml")
+    p.add_argument("--output_dir", required=True)
+    p.add_argument("--output_name", required=True)
+    p.add_argument("--network_dim", type=int, default=32)
+    p.add_argument("--network_alpha", type=float, default=32)
+    p.add_argument("--learning_rate", type=float, default=1e-4)
+    p.add_argument("--max_train_epochs", type=int, default=10)
+    p.add_argument("--save_every_n_epochs", type=int, default=0)
+    p.add_argument("--no_fp8", action="store_true", help="Train the base in bf16 instead of dynamic fp8")
+    p.add_argument("--blocks_to_swap", type=int, default=0)
+    p.add_argument("--discrete_flow_shift", type=float, default=2.5)
+    p.add_argument("--seed", type=int, default=42)
+    # previews (sample the fp8 Turbo with the live LoRA)
+    p.add_argument("--turbo_dit", default=None, help="Pre-quant fp8 Turbo for previews")
+    p.add_argument("--vae", default=None, help="Qwen-Image VAE (for preview decode)")
+    p.add_argument("--text_encoder", default=None, help="bf16 Qwen3-VL-4B (for preview prompt encode)")
+    p.add_argument("--sample_prompts", default=None, help="Sample-prompts file (one prompt per line)")
+    p.add_argument("--sample_every_n_epochs", type=int, default=0)
+    p.add_argument("--sample_width", type=int, default=512)
+    p.add_argument("--sample_height", type=int, default=512)
+    return p
+
+
+def main():
+    args = setup_parser().parse_args()
+    prompts = None
+    if args.sample_prompts and os.path.exists(args.sample_prompts):
+        with open(args.sample_prompts, encoding="utf-8") as f:
+            prompts = [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+
+    train_krea2(
+        args.dit, args.dataset_config, args.output_dir, args.output_name,
+        network_dim=args.network_dim, network_alpha=args.network_alpha,
+        learning_rate=args.learning_rate, max_train_epochs=args.max_train_epochs,
+        save_every_n_epochs=args.save_every_n_epochs, fp8_scaled=not args.no_fp8,
+        blocks_to_swap=args.blocks_to_swap, shift=args.discrete_flow_shift, seed=args.seed,
+        sample_prompts=prompts, turbo_path=args.turbo_dit, vae_path=args.vae, te_path=args.text_encoder,
+        sample_every_n_epochs=args.sample_every_n_epochs,
+        sample_width=args.sample_width, sample_height=args.sample_height,
+    )
+
+
+if __name__ == "__main__":
+    main()

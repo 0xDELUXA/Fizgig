@@ -245,18 +245,26 @@ def train_krea2(
 
     os.makedirs(output_dir, exist_ok=True)
     global_step = 0
+    try:
+        steps_per_epoch = len(loader)
+    except TypeError:
+        steps_per_epoch = group.num_train_items
     for epoch in range(max_train_epochs):
         shared_epoch.value = epoch + 1
         epoch_loss, nb = 0.0, 0
-        for batch in loader:
+        for i, batch in enumerate(loader):
             loss = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
                                 shift=shift, dtype=dtype)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-            epoch_loss += loss.item()
+            step_loss = loss.item()
+            epoch_loss += step_loss
             nb += 1
             global_step += 1
+            # Plain per-step console line (no progress bar) so each optimizer step is visible.
+            logger.info(f"  epoch {epoch + 1}/{max_train_epochs}  step {i + 1}/{steps_per_epoch}  "
+                        f"(global {global_step})  loss={step_loss:.4f}")
         logger.info(f"epoch {epoch + 1}/{max_train_epochs}  loss={epoch_loss / max(1, nb):.4f}  step={global_step}")
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:

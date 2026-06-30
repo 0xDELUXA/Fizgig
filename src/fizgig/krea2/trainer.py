@@ -407,12 +407,16 @@ def _read_sample_override(output_dir):
     try:
         with open(path, encoding="utf-8") as f:
             d = json.load(f)
-        if str(d.get("prompt", "")).strip():
-            return {"prompt": str(d["prompt"]).strip(),
+        prompt = str(d.get("prompt", "")).strip()
+        ref = str(d.get("ref_image", "")).strip()
+        # Active on a prompt OR a reference — a reference with an empty prompt is a valid
+        # 'generate from this picture' override (the Qwen3-VL vision path handles the rest).
+        if prompt or ref:
+            return {"prompt": prompt,
                     "seed": int(d.get("seed", 1234)),
                     "width": int(d.get("width", 1024)),
                     "height": int(d.get("height", 1024)),
-                    "ref_image": str(d.get("ref_image", "")).strip()}
+                    "ref_image": ref}
     except Exception:
         pass
     return None

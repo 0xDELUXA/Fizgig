@@ -55,6 +55,10 @@ def main():
     if args.sample_prompts and os.path.exists(args.sample_prompts):
         with open(args.sample_prompts, encoding="utf-8") as f:
             prompts = [ln.strip() for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+    # Reference-only samples: a reference image with no prompt is a valid 'generate from this
+    # picture' run (Qwen3-VL vision path) — render one empty-prompt sample driven by the ref.
+    if not prompts and args.sample_ref_image:
+        prompts = [""]
 
     train_krea2(
         args.dit, args.dataset_config, args.output_dir, args.output_name,

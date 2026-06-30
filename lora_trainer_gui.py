@@ -1522,11 +1522,15 @@ class LoRATrainerGUI:
     def _on_sample_override_changed(self):
         """Write or remove the live sample-override sentinel the trainer reads.
 
-        While the toggle is on (and a prompt is set) the trainer uses this
-        prompt/seed/res for the next samples; off removes it → Samples tab."""
+        Active when the toggle is on AND there's a prompt OR a reference image. A reference with
+        no prompt is a valid Krea 2 'generate from this picture' override (routed through the
+        Qwen3-VL vision path); the Klein trainer still ignores prompt-less overrides (it requires
+        a prompt). Off removes the sentinel → samples fall back to the Samples tab."""
         path = self._sample_override_path()
         try:
-            active = self.sample_override_var.get() and self.sample_override_prompt_var.get().strip()
+            active = self.sample_override_var.get() and (
+                self.sample_override_prompt_var.get().strip()
+                or self.sample_override_ref_var.get().strip())
             if active:
                 try:
                     seed = int(self.sample_override_seed_var.get() or "1234")
@@ -14144,11 +14148,15 @@ class LoRATrainerGUI:
             prompt_file = self._write_krea2_sample_prompts()
             every = self.sample_every_n_epochs_var.get().strip()
             every_n = int(every) if every.isdigit() else 0
-            if prompt_file and every_n > 0:
+            ref_img = (getattr(self, "sample_ref_image_var", None).get().strip()
+                       if getattr(self, "sample_ref_image_var", None) else "")
+            ref_img = ref_img if (ref_img and os.path.exists(ref_img)) else ""
+            # Samples fire if there's a prompt OR a reference (ref-only = 'generate from this
+            # picture' via the Qwen3-VL vision path).
+            if (prompt_file or ref_img) and every_n > 0:
                 width = (self.sample_width_var.get().strip() or "1024")
                 height = (self.sample_height_var.get().strip() or "1024")
                 cmd += [
-                    "--sample_prompts", prompt_file,
                     "--sample_every_n_epochs", str(every_n),
                     "--sample_width", width,
                     "--sample_height", height,
@@ -14156,10 +14164,9 @@ class LoRATrainerGUI:
                     "--vae", self._krea2_pref("krea2_vae"),
                     "--text_encoder", self._krea2_pref("krea2_text_encoder"),
                 ]
-                # Reference image (Qwen3-VL vision path) — samples become visually aware of it.
-                ref_img = (getattr(self, "sample_ref_image_var", None).get().strip()
-                           if getattr(self, "sample_ref_image_var", None) else "")
-                if ref_img and os.path.exists(ref_img):
+                if prompt_file:
+                    cmd += ["--sample_prompts", prompt_file]
+                if ref_img:
                     cmd += ["--sample_ref_image", ref_img]
         return cmd
 

@@ -8625,9 +8625,25 @@ class LoRATrainerGUI:
         self._add_tab_banner(
             outer,
             "Profiler",
-            "Analyze a LoRA to see which blocks are active at each denoising stage. "
-            "Writes a full HTML report plus a `<name>_profile.json` sidecar that the Repair Studio reads inline.",
+            "Analyze a LoRA's per-block signature. Klein: full activation profile (5-bucket report). "
+            "Krea 2: weight-only profile (flat per-block — no block-role map yet). Both write a sidecar "
+            "the Repair Studio reads inline.",
         )
+
+        # Model family selector (Klein 9B / Krea 2). Krea 2 is a weight-only profile — no pipeline,
+        # prompt, resolution or stages — so those cards are hidden in Krea 2 mode.
+        _pfam = "krea2" if str(self.last_used.get("profiler_family", "klein")) == "krea2" else "klein"
+        self.profiler_family_var = tk.StringVar(value=_pfam)
+        fam_card = self._start_section_card(
+            outer, "Model Family",
+            "Klein 9B (activation profile) or Krea 2 (weight-only — the instrument to discover Krea 2's block roles).",
+        )
+        _pf = tk.Frame(fam_card, bg=COLORS["bg_surface"])
+        _pf.pack(anchor=tk.W)
+        ttk.Radiobutton(_pf, text="Klein 9B", variable=self.profiler_family_var, value="klein",
+                        command=self._on_profiler_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_pf, text="Krea 2 (experimental)", variable=self.profiler_family_var, value="krea2",
+                        command=self._on_profiler_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Model selection
         model_card = self._start_section_card(
@@ -8635,6 +8651,7 @@ class LoRATrainerGUI:
             "Paths are set on the Preferences tab. Distilled is a few seconds per probe and fine for most scans; "
             "Base produces the authoritative report but is slower.",
         )
+        self._profiler_model_container = model_card.master.master
         self.profiler_dit_choice_var = tk.StringVar(value="distilled")
         dit_choice_frame = tk.Frame(model_card, bg=COLORS["bg_surface"])
         dit_choice_frame.pack(anchor=tk.W)
@@ -8648,6 +8665,7 @@ class LoRATrainerGUI:
             outer, "LoRA File",
             "Select the LoRA you want to profile. PEFT and LyCORIS (LoKR / LoHa) are auto-converted on load.",
         )
+        self._profiler_lora_container = lora_card.master.master
         lora_card.grid_columnconfigure(1, weight=1)
         ttk.Label(lora_card, text="LoRA File:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.profiler_lora_var = tk.StringVar()
@@ -8660,6 +8678,7 @@ class LoRATrainerGUI:
             "Include the LoRA's trigger word so the profile captures its active pathways, e.g.: "
             "`zwxem, a portrait photo of a woman`.",
         )
+        self._profiler_prompt_container = prompt_card.master.master
         prompt_card.grid_columnconfigure(1, weight=1)
         ttk.Label(prompt_card, text="Prompt:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.profiler_prompt_var = tk.StringVar(value="")
@@ -8670,6 +8689,7 @@ class LoRATrainerGUI:
             outer, "Options",
             "Resolution controls the probe render size; Stages is the number of denoising buckets the profiler measures.",
         )
+        self._profiler_options_container = options_card.master.master
         options_row = tk.Frame(options_card, bg=COLORS["bg_surface"])
         options_row.pack(anchor=tk.W)
 
@@ -8685,6 +8705,7 @@ class LoRATrainerGUI:
 
         # Card 5: Run
         run_card = self._start_section_card(outer, "Run", None)
+        self._profiler_run_container = run_card.master.master
         run_row = tk.Frame(run_card, bg=COLORS["bg_surface"])
         run_row.pack(anchor=tk.W)
         self.profiler_run_btn = ttk.Button(run_row, text="Profile LoRA", command=self._run_profiler, style="Primary.TButton")
@@ -8714,6 +8735,45 @@ class LoRATrainerGUI:
         self._profiler_report_path = None
 
         self._add_youtube_help_button(outer, "profiler")
+        self._apply_profiler_family_ui()
+
+    def _apply_profiler_family_ui(self):
+        """Krea 2 profiling is weight-only — hide the activation-probe cards (Model/Prompt/Options).
+        Re-show (Klein) uses before= anchors so the cards land back in their canonical order."""
+        krea2 = (self.profiler_family_var.get() == "krea2")
+
+        def _show(cont, before):
+            try:
+                if cont is not None and cont.winfo_manager() == "":
+                    if before is not None and before.winfo_manager() == "pack":
+                        cont.pack(fill=tk.X, padx=36, pady=(0, 16), before=before)
+                    else:
+                        cont.pack(fill=tk.X, padx=36, pady=(0, 16))
+            except Exception:
+                pass
+
+        if krea2:
+            for cont in (getattr(self, "_profiler_model_container", None),
+                         getattr(self, "_profiler_prompt_container", None),
+                         getattr(self, "_profiler_options_container", None)):
+                try:
+                    if cont is not None:
+                        cont.pack_forget()
+                except Exception:
+                    pass
+        else:
+            # Order matters: options before run, prompt before options, model before lora.
+            _show(getattr(self, "_profiler_options_container", None), getattr(self, "_profiler_run_container", None))
+            _show(getattr(self, "_profiler_prompt_container", None), getattr(self, "_profiler_options_container", None))
+            _show(getattr(self, "_profiler_model_container", None), getattr(self, "_profiler_lora_container", None))
+
+    def _on_profiler_family_changed(self):
+        self._apply_profiler_family_ui()
+        try:
+            self.last_used["profiler_family"] = self.profiler_family_var.get()
+            self._save_last_used_paths()
+        except Exception:
+            pass
 
     def _browse_profiler_lora(self):
         filepath = filedialog.askopenfilename(
@@ -8747,6 +8807,9 @@ class LoRATrainerGUI:
         if not lora_path or not os.path.exists(lora_path):
             messagebox.showerror("Error", "Please select a valid LoRA file.")
             return
+
+        if self.profiler_family_var.get() == "krea2":
+            return self._run_profiler_krea2(lora_path)
 
         prompt = self.profiler_prompt_var.get().strip()
         if not prompt:
@@ -8793,6 +8856,55 @@ class LoRATrainerGUI:
             daemon=True,
         )
         thread.start()
+
+    def _run_profiler_krea2(self, lora_path):
+        """Krea 2 weight-only profile — no pipeline, fast. Runs in a thread (LoRA load + norms)."""
+        import threading
+        self.profiler_run_btn.configure(state="disabled")
+        self.profiler_open_btn.configure(state="disabled")
+        self.profiler_results.configure(state="normal")
+        self.profiler_results.delete(1.0, tk.END)
+        self.profiler_results.configure(state="disabled")
+        self.profiler_progress_var.set("Profiling (Krea 2, weight-only)…")
+
+        def worker():
+            try:
+                import sys
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+                from fizgig.profiler.krea2_profile import profile_krea2_weight_only
+                profiles_dir = (self.prefs_vars["profiles_dir"].get() if "profiles_dir" in self.prefs_vars
+                                else os.path.join(OUTPUT_LORAS_DIR, "profiles"))
+                os.makedirs(profiles_dir, exist_ok=True)
+                stem = os.path.splitext(os.path.basename(lora_path))[0]
+                out_html = os.path.join(profiles_dir, f"{stem}_krea2_profile.html")
+                html, sidecar = profile_krea2_weight_only(lora_path, out_html, profiles_dir=profiles_dir)
+                self._profiler_report_path = html
+                self.master.after(0, lambda: self._profiler_krea2_done(html, sidecar))
+            except Exception:
+                import traceback
+                err = traceback.format_exc()
+                def _fail():
+                    self._profiler_log(err + "\n")
+                    self.profiler_progress_var.set("Error — see results.")
+                    self.profiler_run_btn.configure(state="normal")
+                self.master.after(0, _fail)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _profiler_krea2_done(self, html, sidecar):
+        try:
+            import json as _json
+            d = _json.load(open(sidecar, encoding="utf-8"))
+            lines = ["Krea 2 weight-only profile complete.\n",
+                     f"Report: {html}\n\nTop blocks by weight:\n"]
+            for b in d.get("top_active_blocks", []):
+                lines.append(f"  {b['name']:<12} {b['pct']:.1f}%\n")
+            lines.append("\nNo semantic block map yet — this is the weight signature to discover it.\n")
+            self._profiler_log("".join(lines))
+        except Exception:
+            self._profiler_log(f"Profile complete: {html}\n")
+        self.profiler_progress_var.set("Done.")
+        self.profiler_run_btn.configure(state="normal")
+        self.profiler_open_btn.configure(state="normal")
 
     def _profiler_worker(self, lora_path, prompt, dit_path, vae_path, te_path, res, stages):
         """Background worker for profiling."""

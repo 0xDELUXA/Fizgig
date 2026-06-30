@@ -3457,7 +3457,6 @@ class LoRATrainerGUI:
         Deferred-for-Krea-2 feature groups (re-enable by removing from these lists as they land):
           • Adaptive LR (checkbox + Min/Max LR + description)   — no adaptive scheduler in krea2_train
           • Model Area to Train (dropdown + desc + Custom panel) — no Krea 2 block map yet
-          • Context LoRA (path/Browse/Strength + 2 descriptions) — no --context_lora in krea2_train
           • Optimizer section                                   — krea2 hardcodes AdamW8bit
           • Timestep & Noise section                            — krea2 uses a fixed shift schedule
           • 4-bit NF4 base (in Memory & FP8)                    — krea2_train has no --quant_4bit
@@ -3476,8 +3475,6 @@ class LoRATrainerGUI:
         widgets = [
             self._adaptive_cb, self._adaptive_frame, self._adaptive_desc_label,
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
-            self._contextlora_label, self._contextlora_frame,
-            self._contextlora_desc_label, self._contextlora_warn_label,
             self._quant_4bit_label, self.quant_4bit_check, self._quant_4bit_hint,
             self.scaled_check,                                   # FP8 Scaled
             self.fp8_text_encoder_label, self.fp8_text_encoder_check,
@@ -13153,10 +13150,9 @@ class LoRATrainerGUI:
         except ValueError:
             errors.append("Learning rate must be a valid number")
 
-        # Context LoRA validation (Krea 2 doesn't support Context LoRA yet — the field is
-        # hidden there, so don't validate any stale value left from a Klein session).
+        # Context LoRA validation (supported by both Klein and Krea 2).
         ctx_path = self.entries.get("CONTEXT_LORA_PATH").get().strip() if "CONTEXT_LORA_PATH" in self.entries else ""
-        if ctx_path and not self._is_krea2_arch():
+        if ctx_path:
             if not os.path.exists(ctx_path):
                 errors.append(f"Context LoRA file does not exist: {ctx_path}")
             elif not ctx_path.lower().endswith(".safetensors"):
@@ -13911,6 +13907,11 @@ class LoRATrainerGUI:
         resume_path = (self.settings.get("RESUME_TRAINING") or "").strip()
         if resume_path:
             cmd += ["--resume", resume_path]
+        # Context LoRA — train with an existing LoRA frozen + active on the base (model-agnostic).
+        ctx_path = (self.settings.get("CONTEXT_LORA_PATH") or "").strip()
+        if ctx_path:
+            ctx_strength = (self.settings.get("CONTEXT_LORA_STRENGTH") or "1.0").strip() or "1.0"
+            cmd += ["--context_lora_path", ctx_path, "--context_lora_strength", ctx_strength]
         # FP8 base (dynamic-quantize the RAW model) is the default — fits lower-VRAM cards.
         # Unchecking "FP8 Base" trains the base in bf16 (26 GB, big-card / heavy-swap only).
         if not self.settings.get("FP8", True):

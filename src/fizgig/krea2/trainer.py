@@ -35,6 +35,22 @@ from fizgig.training.train_utils import LossRecorder
 logger = logging.getLogger(__name__)
 
 
+def _apply_context_lora(target, path, strength, *, device, dtype):
+    """Load a context LoRA and apply it FROZEN + ACTIVE on `target` (the base DiT during
+    training, or the Turbo at preview time). The context and the trainable/preview LoRA each
+    wrap the forward and contribute additively; gradients never flow to the context. Returns
+    the network so the caller can keep a reference (and free it after previews)."""
+    from safetensors.torch import load_file
+    from fizgig.networks.lora import create_network_from_weights
+    sd = load_file(path)
+    net = create_network_from_weights(None, float(strength), sd, None, target, for_inference=True)
+    net.apply_to(text_encoders=None, unet=target, apply_text_encoder=False, apply_unet=True)
+    net.load_state_dict(sd, strict=False)
+    net.to(device=device, dtype=dtype).eval()
+    net.requires_grad_(False)
+    return net
+
+
 def load_dit_for_training(
     raw_path: str,
     *,
@@ -43,16 +59,26 @@ def load_dit_for_training(
     fp8_scaled: bool = True,
     blocks_to_swap: int = 0,
     gradient_checkpointing: bool = True,
+    context_lora_path: str = None,
+    context_lora_strength: float = 1.0,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ):
-    """Load the RAW DiT (frozen base, optionally fp8) and apply a trainable full-model LoRA."""
+    """Load the RAW DiT (frozen base, optionally fp8) and apply a trainable full-model LoRA.
+    An optional frozen Context LoRA is applied to the base first, so the new LoRA learns to
+    coexist with it (the context stays active during previews too)."""
     loading_device = "cpu" if blocks_to_swap > 0 else device
     dit = load_krea2_dit(raw_path, device=device, dtype=dtype, fp8_scaled=fp8_scaled,
                          loading_device=loading_device)
     dit.requires_grad_(False)  # frozen base (QLoRA-style)
     if gradient_checkpointing:
         dit.enable_gradient_checkpointing()
+
+    # Context LoRA: frozen + active on the base BEFORE the trainable LoRA, so the trainable
+    # one wraps the context-included forward (both additive; grads only flow to the trainable).
+    if context_lora_path:
+        logger.info(f"context LoRA: {os.path.basename(context_lora_path)} @ {context_lora_strength} (frozen, active)")
+        _apply_context_lora(dit, context_lora_path, context_lora_strength, device=device, dtype=dtype)
 
     network = create_network(None, "lora_unet", 1.0, network_dim, network_alpha, None, [], dit)
     network.apply_to(text_encoders=None, unet=dit, apply_text_encoder=False, apply_unet=True)
@@ -156,13 +182,15 @@ def _load_training_state(state_dir, network, optimizer, *, device):
     return int(meta.get("epoch", 0)), int(meta.get("global_step", 0)), meta
 
 
-def _save_lora(network, path, network_dim, network_alpha, dtype):
+def _save_lora(network, path, network_dim, network_alpha, dtype, extra_metadata=None):
     metadata = {
         "ss_network_module": "fizgig.krea2 (lora_unet, all-Linear)",
         "ss_network_dim": str(network_dim),
         "ss_network_alpha": str(network_alpha),
         "ss_architecture": ARCHITECTURE_KREA2,
     }
+    if extra_metadata:
+        metadata.update(extra_metadata)
     network.save_weights(path, dtype, metadata)
 
 
@@ -207,7 +235,7 @@ def _read_sample_override(output_dir):
 
 def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
                     output_name="krea2", steps=8, cfg_scale=1.0, width=512, height=512,
-                    seed=42, device="cuda"):
+                    seed=42, context_lora_path=None, context_lora_strength=1.0, device="cuda"):
     """Load the (clean) pre-quant fp8 Turbo, apply the current LoRA LIVE (no merge -> no grid),
     and render each pre-encoded prompt. Turbo is freed afterwards.
 
@@ -220,6 +248,12 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
     from fizgig.krea2 import sampling
 
     turbo = load_krea2_dit(turbo_path, device=device, dtype=torch.bfloat16)  # prequant fp8 auto-detected
+    # Context LoRA (frozen) goes on FIRST so previews match deployment: the trained LoRA runs
+    # on top of the same context at the same strength it was trained with.
+    ctx_net = None
+    if context_lora_path:
+        ctx_net = _apply_context_lora(turbo, context_lora_path, context_lora_strength,
+                                      device=device, dtype=torch.bfloat16)
     net = create_network_from_weights(None, 1.0, lora_sd, None, turbo, for_inference=True)
     net.apply_to(text_encoders=None, unet=turbo, apply_text_encoder=False, apply_unet=True)
     # create_network_from_weights only builds the module STRUCTURE (sizes from dims/alphas);
@@ -240,7 +274,7 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
         p = os.path.join(out_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{seed + i}.png")
         imgs[0].save(p)
         paths.append(p)
-    del turbo, net
+    del turbo, net, ctx_net
     torch.cuda.empty_cache()
     return paths
 
@@ -271,6 +305,8 @@ def train_krea2(
     sample_steps: int = 8,
     sample_seed: int = 42,
     resume_state_dir: str = None,
+    context_lora_path: str = None,
+    context_lora_strength: float = 1.0,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ):
@@ -302,7 +338,9 @@ def train_krea2(
 
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
-        fp8_scaled=fp8_scaled, blocks_to_swap=blocks_to_swap, device=device, dtype=dtype)
+        fp8_scaled=fp8_scaled, blocks_to_swap=blocks_to_swap,
+        context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
+        device=device, dtype=dtype)
     if blocks_to_swap > 0:
         from fizgig.krea2.offloading import BlockSwapConfig
         dit.enable_block_swap(blocks_to_swap, BlockSwapConfig(torch.device(device), supports_backward=True))
@@ -387,7 +425,9 @@ def train_krea2(
                     prev_enc, prev_w, prev_h, prev_seed = encoded_prompts, sample_width, sample_height, sample_seed
                 sample_previews(turbo_path, sample_ae, prev_enc, load_file(tmp), sample_dir, epoch + 1,
                                 output_name=output_name, steps=sample_steps, width=prev_w,
-                                height=prev_h, seed=prev_seed, device=device)
+                                height=prev_h, seed=prev_seed,
+                                context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
+                                device=device)
             finally:
                 gc.collect()
                 torch.cuda.empty_cache()
@@ -418,6 +458,12 @@ def train_krea2(
 
     progress_bar.close()
     out = os.path.join(output_dir, f"{output_name}.safetensors")
-    _save_lora(network, out, network_dim, network_alpha, dtype)
+    # Record the context LoRA in metadata so users know to pair it at the same strength at
+    # inference (the trained LoRA is context-dependent — same contract as Klein).
+    extra = None
+    if context_lora_path:
+        extra = {"ss_context_lora": os.path.basename(context_lora_path),
+                 "ss_context_lora_strength": str(context_lora_strength)}
+    _save_lora(network, out, network_dim, network_alpha, dtype, extra_metadata=extra)
     logger.info(f"saved final LoRA -> {out}")
     return out

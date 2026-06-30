@@ -7829,9 +7829,24 @@ class LoRATrainerGUI:
         self._add_tab_banner(
             outer,
             "Extract",
-            "Distill an existing LoRA down to a lower rank — optionally targeting specific blocks "
-            "or timestep ranges. SVD runs per-block and typically takes a few minutes.",
+            "Distill an existing LoRA down to a lower rank. Klein: block + timestep targeting, optional "
+            "activation-weighted SVD. Krea 2: pure weight SVD over all blocks (no block map yet).",
         )
+
+        # Model family selector. Krea 2 = pure weight SVD over all blocks (no pipeline / prompt /
+        # timesteps / block presets), so those cards are hidden in Krea 2 mode.
+        _efam = "krea2" if str(self.last_used.get("extract_family", "klein")) == "krea2" else "klein"
+        self.extract_family_var = tk.StringVar(value=_efam)
+        efam_card = self._start_section_card(
+            outer, "Model Family",
+            "Klein 9B (full extractor) or Krea 2 (weight-only SVD; block-targeting presets come once the block map exists).",
+        )
+        _ef = tk.Frame(efam_card, bg=COLORS["bg_surface"])
+        _ef.pack(anchor=tk.W)
+        ttk.Radiobutton(_ef, text="Klein 9B", variable=self.extract_family_var, value="klein",
+                        command=self._on_extract_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_ef, text="Krea 2 (experimental)", variable=self.extract_family_var, value="krea2",
+                        command=self._on_extract_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Source & Output
         io_card = self._start_section_card(
@@ -7861,6 +7876,7 @@ class LoRATrainerGUI:
             "Style = style+comp @ late timesteps.  |  Style+Composition = double 0-7 + single 0-1 + single 2 @ 0.5.  |  "
             "Details = single 12-23.",
         )
+        self._extract_preset_container = preset_card.master.master
         preset_row = tk.Frame(preset_card, bg=COLORS["bg_surface"])
         preset_row.pack(anchor=tk.W)
         ttk.Label(preset_row, text="Extract Preset:").pack(side=tk.LEFT, padx=(0, 10))
@@ -7965,7 +7981,8 @@ class LoRATrainerGUI:
         rank_combo.pack(side=tk.LEFT, padx=(0, 20))
         rank_combo.bind("<<ComboboxSelected>>", lambda e: self._update_extract_output_name())
 
-        ttk.Label(options_row, text="Timesteps:").pack(side=tk.LEFT, padx=(0, 6))
+        self._extract_timesteps_label = ttk.Label(options_row, text="Timesteps:")
+        self._extract_timesteps_label.pack(side=tk.LEFT, padx=(0, 6))
         self.extract_timesteps_var = tk.StringVar(value="all")
         self._extract_timesteps_combo = ttk.Combobox(
             options_row, textvariable=self.extract_timesteps_var,
@@ -7973,7 +7990,8 @@ class LoRATrainerGUI:
         )
         self._extract_timesteps_combo.pack(side=tk.LEFT, padx=(0, 20))
 
-        ttk.Label(options_row, text="Forward Passes:").pack(side=tk.LEFT, padx=(0, 6))
+        self._extract_samples_label = ttk.Label(options_row, text="Forward Passes:")
+        self._extract_samples_label.pack(side=tk.LEFT, padx=(0, 6))
         self.extract_samples_var = tk.StringVar(value="16")
         self._extract_samples_combo = ttk.Combobox(
             options_row, textvariable=self.extract_samples_var,
@@ -7987,6 +8005,7 @@ class LoRATrainerGUI:
             outer, "Prompt",
             "Used during the GPU probe forward passes. Include the source LoRA's trigger word for best results.",
         )
+        self._extract_prompt_container = prompt_card.master.master
         prompt_card.grid_columnconfigure(1, weight=1)
         ttk.Label(prompt_card, text="Prompt:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.extract_prompt_var = tk.StringVar(value="")
@@ -7997,6 +8016,7 @@ class LoRATrainerGUI:
             outer, "Run",
             "Extraction runs SVD on each block and can take several minutes depending on rank and block count.",
         )
+        self._extract_run_container = run_card.master.master
         run_row = tk.Frame(run_card, bg=COLORS["bg_surface"])
         run_row.pack(anchor=tk.W)
         self.extract_run_btn = ttk.Button(run_row, text="Extract LoRA", command=self._run_extract, style="Primary.TButton")
@@ -8021,6 +8041,9 @@ class LoRATrainerGUI:
         self.extract_log.pack(fill=tk.BOTH, expand=True)
 
         self._extract_output_path = None
+
+        # Apply the persisted family (krea2 hides the Klein-only block/prompt/probe controls).
+        self._apply_extract_family_ui(str(self.extract_family_var.get()) == "krea2")
 
         self._add_youtube_help_button(outer, "extract")
 
@@ -8217,6 +8240,10 @@ class LoRATrainerGUI:
 
     def _run_extract(self):
         """Start extraction in a background thread."""
+        if str(self.extract_family_var.get()) == "krea2":
+            self._run_extract_krea2()
+            return
+
         source = self.extract_source_var.get()
         if not source or not os.path.exists(source):
             messagebox.showerror("Error", "Please select a valid source LoRA.")
@@ -8376,6 +8403,139 @@ class LoRATrainerGUI:
             self.master.after(0, _update_ui)
 
         except Exception as e:
+            import traceback
+            error_msg = f"Extraction failed:\n{traceback.format_exc()}"
+            def _show_error():
+                self._extract_log(error_msg)
+                self.extract_progress_var.set("Error")
+                self.extract_run_btn.configure(state="normal")
+            self.master.after(0, _show_error)
+
+    # --- Krea 2 extract (weight-only SVD over all blocks; no pipeline / prompt / block map) ---
+
+    def _on_extract_family_changed(self):
+        fam = "krea2" if str(self.extract_family_var.get()) == "krea2" else "klein"
+        self.last_used["extract_family"] = fam
+        self._save_last_used()
+        self._apply_extract_family_ui(fam == "krea2")
+
+    def _apply_extract_family_ui(self, is_krea2):
+        """Krea 2 mode: pure weight SVD over all blocks. Hide the block-preset, custom-block,
+        prompt and activation-probe (timesteps + forward passes) controls — only Target Rank
+        plus Source/Output/Run remain. Klein mode restores everything."""
+        # (widget, original padx) — restored verbatim so the klein branch is idempotent.
+        probe_widgets = [
+            (getattr(self, "_extract_timesteps_label", None), (0, 6)),
+            (getattr(self, "_extract_timesteps_combo", None), (0, 20)),
+            (getattr(self, "_extract_samples_label", None), (0, 6)),
+            (getattr(self, "_extract_samples_combo", None), (0, 0)),
+        ]
+        if is_krea2:
+            for c in (getattr(self, "_extract_preset_container", None),
+                      getattr(self, "_extract_prompt_container", None)):
+                if c is not None:
+                    c.pack_forget()
+            if getattr(self, "_extract_custom_frame", None) is not None:
+                self._extract_custom_frame.pack_forget()
+            for w, _ in probe_widgets:
+                if w is not None:
+                    w.pack_forget()
+            # Force weight-only all-blocks regardless of stale Klein selections.
+            self.extract_samples_var.set("0")
+            self.extract_timesteps_var.set("all")
+        else:
+            anchor = getattr(self, "_extract_options_anchor", None)
+            if getattr(self, "_extract_preset_container", None) is not None and anchor is not None:
+                self._extract_preset_container.pack(fill=tk.X, padx=36, pady=(0, 16), before=anchor)
+            run_anchor = getattr(self, "_extract_run_container", None)
+            if getattr(self, "_extract_prompt_container", None) is not None and run_anchor is not None:
+                self._extract_prompt_container.pack(fill=tk.X, padx=36, pady=(0, 16), before=run_anchor)
+            # Re-pack probe widgets in their original order/padding after the rank combo.
+            for w, padx in probe_widgets:
+                if w is not None:
+                    w.pack(side=tk.LEFT, padx=padx)
+            # Custom-block frame visibility is owned by the preset combo; refresh it.
+            if hasattr(self, "_on_extract_preset_changed"):
+                self._on_extract_preset_changed()
+
+    def _run_extract_krea2(self):
+        """Krea 2: pure weight SVD over all blocks — no pipeline, prompt, or block targeting."""
+        source = self.extract_source_var.get()
+        if not source or not os.path.exists(source):
+            messagebox.showerror("Error", "Please select a valid source LoRA.")
+            return
+
+        output_name = self.extract_output_var.get().strip()
+        if not output_name:
+            messagebox.showerror("Error", "Please enter an output name.")
+            return
+        if not output_name.endswith(".safetensors"):
+            output_name += ".safetensors"
+
+        output_dir = self.prefs_vars["lora_output_dir"].get()
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, output_name)
+
+        self.extract_run_btn.configure(state="disabled")
+        self.extract_open_btn.configure(state="disabled")
+        self.extract_log.configure(state="normal")
+        self.extract_log.delete(1.0, tk.END)
+        self.extract_log.configure(state="disabled")
+        self.extract_progress_var.set("Extracting...")
+
+        import threading
+        thread = threading.Thread(
+            target=self._extract_worker_krea2,
+            args=(source, output_path),
+            daemon=True,
+        )
+        thread.start()
+
+    def _extract_worker_krea2(self, source, output_path):
+        """Background worker: weight-only SVD, model-agnostic (extract_weight_only with all blocks)."""
+        try:
+            import sys
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+            from fizgig.extraction.extractor import LoRAExtractor, ExtractionConfig
+
+            rank = int(self.extract_rank_var.get())
+            config = ExtractionConfig(
+                source_lora_path=source,
+                output_lora_path=output_path,
+                target_rank=rank,
+                timestep_range=(0.0, 1.0),
+                include_blocks=["all"],
+                custom_blocks=None,
+                num_samples=0,
+                prompt="",
+                width=1024,
+                height=1024,
+                seed=42,
+            )
+
+            def progress(stage, current, total):
+                self.master.after(0, lambda: self.extract_progress_var.set(f"{stage}: {current+1}/{total}"))
+
+            self.master.after(0, lambda: self._extract_log(
+                f"Krea 2 weight-only SVD (all blocks), rank={rank}\n"))
+            result = LoRAExtractor.extract_weight_only(config, progress_callback=progress)
+
+            summary = (f"\nExtraction complete!\n"
+                       f"  Output: {result.output_path}\n"
+                       f"  Layers extracted: {result.num_layers_extracted}\n"
+                       f"  Target rank: {result.target_rank}\n"
+                       f"  Total params: {result.total_params:,}\n"
+                       f"  Time: {result.elapsed_seconds:.1f}s\n")
+            self._extract_output_path = output_path
+
+            def _update_ui():
+                self._extract_log(summary)
+                self.extract_progress_var.set("Done!")
+                self.extract_run_btn.configure(state="normal")
+                self.extract_open_btn.configure(state="normal")
+            self.master.after(0, _update_ui)
+
+        except Exception:
             import traceback
             error_msg = f"Extraction failed:\n{traceback.format_exc()}"
             def _show_error():

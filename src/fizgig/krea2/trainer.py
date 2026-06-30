@@ -41,8 +41,11 @@ def _apply_context_lora(target, path, strength, *, device, dtype):
     wrap the forward and contribute additively; gradients never flow to the context. Returns
     the network so the caller can keep a reference (and free it after previews)."""
     from safetensors.torch import load_file
-    from fizgig.networks.lora import create_network_from_weights
-    sd = load_file(path)
+    from fizgig.networks.lora import create_network_from_weights, ensure_kohya_lora_state_dict
+    # Normalize foreign formats (PEFT / diffusers / ComfyUI `diffusion_model.*`, LyCORIS) to
+    # kohya keys so create_network_from_weights' lora_down scan finds the modules — without
+    # this a diffusers-format context LoRA yields 0 modules. Mirrors Klein's load_lora.
+    sd = ensure_kohya_lora_state_dict(load_file(path))
     net = create_network_from_weights(None, float(strength), sd, None, target, for_inference=True)
     net.apply_to(text_encoders=None, unet=target, apply_text_encoder=False, apply_unet=True)
     net.load_state_dict(sd, strict=False)

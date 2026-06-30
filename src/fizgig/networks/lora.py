@@ -900,7 +900,7 @@ class LoRANetwork(torch.nn.Module):
             if unet is not None:
                 for _n, _m in unet.named_modules():
                     unet_classes.add(_m.__class__.__name__)
-            target_list = getattr(self, "target_replace_modules", [])
+            target_list = getattr(self, "target_replace_modules", None) or []
             target_matches = [c for c in target_list if c in unet_classes]
             logger.error(
                 "No LoRA modules found.\n"

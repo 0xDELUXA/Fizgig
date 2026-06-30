@@ -73,12 +73,14 @@ class Krea2RepairEngine:
         self._baseline_cache_image: Optional[Image.Image] = None
 
         # Turbo Preview — per-step activation cache (forward_cached). Tweaking a late block
-        # skips the earlier blocks. Cache key: (primary, donor, seed, prompt, w, h).
+        # skips the earlier blocks. Cache key: (primary, donor, seed, prompt, w, h). The resume
+        # point is computed by DIFFING the render's state against `_act_cache_state` (the state
+        # the cache was built from) — not a mutable changed-set — so rapid edits during an
+        # in-flight render are never lost.
         self._turbo_enabled = True
         self._act_cache = None          # {step_idx: KreaActivationCacheEntry}
         self._act_cache_key = None
-        self._changed_blocks = set()    # block ids changed since the last render
-        self._changed_full = False      # a non-main (txtfusion) change -> must full-recompute
+        self._act_cache_state = None    # SliderState the current cache reflects
 
     # ----- pipeline + LoRA loading -------------------------------------------
     def ensure_pipeline(self, turbo_path: str, vae_path: str, text_encoder_path: str,
@@ -190,20 +192,18 @@ class Krea2RepairEngine:
         if getattr(self, "_turbo_enabled", True):
             key = (self.primary_path, self.donor_path, seed, prompt, width, height)
             if key != self._act_cache_key:
+                # Prompt/seed/res/LoRA changed — the cached activations are stale; full pass.
                 self._invalidate_activation_cache()
-                self._changed_blocks.clear()
-                self._changed_full = False
                 resume_from = None
             else:
-                resume_from = self._compute_resume_point()
+                resume_from = self._resume_from_diff(state)
             try:
                 with torch.no_grad():
                     img, new_cache = self._sample_cached(txt, txtmask, seed=seed, width=width,
                                                          height=height, steps=steps, resume_from=resume_from)
                 self._act_cache = new_cache
                 self._act_cache_key = key
-                self._changed_blocks.clear()
-                self._changed_full = False
+                self._act_cache_state = state.copy()  # the state the cache now reflects
                 return img
             except Exception:
                 logger.warning("krea2 Turbo-cache preview failed; full forward fallback", exc_info=True)
@@ -281,25 +281,29 @@ class Krea2RepairEngine:
     def _invalidate_activation_cache(self) -> None:
         self._act_cache = None
         self._act_cache_key = None
+        self._act_cache_state = None
 
     def mark_blocks_changed(self, blocks) -> None:
-        """Record which blocks changed since the last render (Turbo Preview resume hint)."""
-        for b in blocks:
-            self._changed_blocks.add(b)
-            if not str(b).startswith("block_"):
-                self._changed_full = True  # txtfusion / non-main -> pre-block setup changes
+        # The GUI calls this on every slider change, but the resume point is derived from a
+        # state diff at render time (race-free), so this is just a no-op compatibility shim.
+        pass
 
     @staticmethod
     def _block_index(block_id):
         return int(block_id.split("_")[1]) if str(block_id).startswith("block_") else None
 
-    def _compute_resume_point(self):
-        """Earliest changed main-block index, or None (full recompute) if a non-main block
-        changed or nothing is recorded."""
-        if self._changed_full or not self._changed_blocks:
+    def _resume_from_diff(self, state):
+        """Earliest main-block index whose primary/donor differs from the cached state, or None
+        (full recompute) if a non-main block (txtfusion) changed or there's no cached state.
+        Diffing the FULL state against what the cache holds guarantees no edit is ever missed,
+        even ones made while a previous render was in flight."""
+        if self._act_cache_state is None:
             return None
-        idxs = [self._block_index(b) for b in self._changed_blocks]
-        if any(i is None for i in idxs):
+        changed = state.diff_blocks(self._act_cache_state)
+        if not changed:
+            return None
+        idxs = [self._block_index(b) for b in changed]
+        if any(i is None for i in idxs):  # a txtfusion / non-main block changed -> full pass
             return None
         return min(idxs)
 
@@ -330,8 +334,7 @@ class Krea2RepairEngine:
         self._baseline_cache_image = None
         self._act_cache = None
         self._act_cache_key = None
-        self._changed_blocks = set()
-        self._changed_full = False
+        self._act_cache_state = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

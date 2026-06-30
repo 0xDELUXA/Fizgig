@@ -42,6 +42,9 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--resume", default=None, help="Path to a <name>-NNNNNN-state dir to resume from")
     p.add_argument("--context_lora_path", default=None, help="Frozen+active context LoRA on the base")
     p.add_argument("--context_lora_strength", type=float, default=1.0)
+    p.add_argument("--adaptive_lr", action="store_true", help="Bi-directional plateau LR tracker")
+    p.add_argument("--adaptive_lr_min", type=float, default=1e-5)
+    p.add_argument("--adaptive_lr_max", type=float, default=4e-4)
     return p
 
 
@@ -63,6 +66,8 @@ def main():
         sample_width=args.sample_width, sample_height=args.sample_height,
         resume_state_dir=args.resume,
         context_lora_path=args.context_lora_path, context_lora_strength=args.context_lora_strength,
+        adaptive_lr=args.adaptive_lr,
+        adaptive_lr_min=args.adaptive_lr_min, adaptive_lr_max=args.adaptive_lr_max,
     )
 
 

@@ -3455,7 +3455,6 @@ class LoRATrainerGUI:
         """Hide Training-tab controls not yet wired into the Krea 2 native trainer; re-show for Klein.
 
         Deferred-for-Krea-2 feature groups (re-enable by removing from these lists as they land):
-          • Adaptive LR (checkbox + Min/Max LR + description)   — no adaptive scheduler in krea2_train
           • Model Area to Train (dropdown + desc + Custom panel) — no Krea 2 block map yet
           • Optimizer section                                   — krea2 hardcodes AdamW8bit
           • Timestep & Noise section                            — krea2 uses a fixed shift schedule
@@ -3473,7 +3472,6 @@ class LoRATrainerGUI:
         # Per-widget groups across the Training Parameters + Memory & FP8 sections. FP8 Base
         # stays visible (wired -> --no_fp8); only the unwired Memory controls are hidden.
         widgets = [
-            self._adaptive_cb, self._adaptive_frame, self._adaptive_desc_label,
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
             self._quant_4bit_label, self.quant_4bit_check, self._quant_4bit_hint,
             self.scaled_check,                                   # FP8 Scaled
@@ -13133,9 +13131,8 @@ class LoRATrainerGUI:
             lr = float(self.entries["LEARNING_RATE"].get())
             if lr <= 0:
                 errors.append("Learning rate must be positive")
-            # When adaptive LR is enabled, starting LR must not exceed max LR
-            # (Krea 2 has no adaptive LR — the control is hidden — so skip this check there.)
-            if hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get() and not self._is_krea2_arch():
+            # When adaptive LR is enabled, starting LR must not exceed max LR (both archs).
+            if hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get():
                 try:
                     max_lr_str = self.entries["ADAPTIVE_LR_MAX"].get().split(" ")[0]
                     min_lr_str = self.entries["ADAPTIVE_LR_MIN"].get().split(" ")[0]
@@ -13912,6 +13909,12 @@ class LoRATrainerGUI:
         if ctx_path:
             ctx_strength = (self.settings.get("CONTEXT_LORA_STRENGTH") or "1.0").strip() or "1.0"
             cmd += ["--context_lora_path", ctx_path, "--context_lora_strength", ctx_strength]
+        # Adaptive LR — bi-directional plateau tracker (model-agnostic). Min/Max combo values
+        # can carry a trailing note (e.g. "2e-4 - likely too high"); take the leading token.
+        if self.settings.get("ADAPTIVE_LR"):
+            min_lr = str(self.settings.get("ADAPTIVE_LR_MIN", "1e-5")).split(" ")[0]
+            max_lr = str(self.settings.get("ADAPTIVE_LR_MAX", "4e-4")).split(" ")[0]
+            cmd += ["--adaptive_lr", "--adaptive_lr_min", min_lr, "--adaptive_lr_max", max_lr]
         # FP8 base (dynamic-quantize the RAW model) is the default — fits lower-VRAM cards.
         # Unchecking "FP8 Base" trains the base in bf16 (26 GB, big-card / heavy-swap only).
         if not self.settings.get("FP8", True):

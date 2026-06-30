@@ -1354,22 +1354,26 @@ class LoRATrainerGUI:
         ttk.Combobox(r1, textvariable=self.sample_override_h_var, values=_res_vals,
                      state="readonly", width=6).pack(side=tk.LEFT)
         # Reference image (Klein edit conditioning) — auto-capped to ~0.20 MP by
-        # the trainer so a big image can't OOM the sample.
-        tk.Label(r1, text="Ref", bg=_sbg, fg=COLORS["text_muted"],
-                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
+        # the trainer so a big image can't OOM the sample. Hidden in Krea 2 mode (Krea 2
+        # isn't an edit model, so samples generate from scratch — no reference image).
+        self._override_ref_caption = tk.Label(r1, text="Ref", bg=_sbg, fg=COLORS["text_muted"],
+                 font=(FONT_FAMILY, 8))
+        self._override_ref_caption.pack(side=tk.LEFT, padx=(14, 3))
         self.sample_override_ref_var = tk.StringVar(value="")
         # Compact button so it matches the seed/resolution input height (the
         # default ttk.Button padding is taller and pushes the prompt row down).
         ttk.Style().configure("OverrideRef.TButton", padding=(8, 0), font=(FONT_FAMILY, 8))
-        ttk.Button(r1, text="Browse…", width=9, style="OverrideRef.TButton",
-                   command=self._browse_override_ref).pack(side=tk.LEFT)
+        self._override_ref_browse_btn = ttk.Button(r1, text="Browse…", width=9, style="OverrideRef.TButton",
+                   command=self._browse_override_ref)
+        self._override_ref_browse_btn.pack(side=tk.LEFT)
         self._override_ref_label = tk.Label(r1, text="(none)", bg=_sbg,
                                             fg=COLORS["text_muted"], font=(FONT_FAMILY, 8))
         self._override_ref_label.pack(side=tk.LEFT, padx=(6, 2))
-        tk.Button(r1, text="✕", font=(FONT_FAMILY, 8), bg=_sbg, fg=COLORS["text_muted"],
+        self._override_ref_clear_btn = tk.Button(r1, text="✕", font=(FONT_FAMILY, 8), bg=_sbg, fg=COLORS["text_muted"],
                   activebackground=COLORS["border"], activeforeground=COLORS["text_primary"],
                   relief="flat", bd=0, cursor="hand2",
-                  command=self._clear_override_ref).pack(side=tk.LEFT)
+                  command=self._clear_override_ref)
+        self._override_ref_clear_btn.pack(side=tk.LEFT)
         r2 = tk.Frame(ov, bg=_sbg); r2.pack(fill=tk.X, padx=8, pady=(8, 4))
         tk.Label(r2, text="Prompt", bg=_sbg, fg=COLORS["text_muted"],
                  font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(0, 6))
@@ -3464,7 +3468,8 @@ class LoRATrainerGUI:
           • Gradient Checkpointing (in Memory & FP8)            — krea2_train hardcodes it ON
         Kept (model-agnostic / wired): FP8 Base (-> --no_fp8), and the live "Override next
         sample" status-bar panel (krea2 reads the override sentinel for previews — prompt/seed/
-        resolution; the edit-reference field is ignored since krea2 isn't an edit model).
+        resolution). Only the override's edit-Reference controls are hidden for Krea 2, since
+        krea2 isn't an edit model (previews generate from scratch).
         """
         # Guard: this may run via update_ui_for_architecture before the Training tab is built.
         if not hasattr(self, "_adaptive_cb"):
@@ -3477,6 +3482,9 @@ class LoRATrainerGUI:
             self.scaled_check,                                   # FP8 Scaled
             self.fp8_text_encoder_label, self.fp8_text_encoder_check,
             self._grad_checkpoint_label, self.grad_checkpoint_check, self._grad_checkpoint_hint,
+            # Sample-override edit-Reference controls (status bar) — Krea 2 isn't an edit model.
+            self._override_ref_caption, self._override_ref_browse_btn,
+            self._override_ref_label, self._override_ref_clear_btn,
         ]
         for w in widgets:
             self._set_widget_visible(w, not is_krea2)

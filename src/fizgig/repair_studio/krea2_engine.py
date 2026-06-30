@@ -72,6 +72,14 @@ class Krea2RepairEngine:
         self._baseline_cache_key = None
         self._baseline_cache_image: Optional[Image.Image] = None
 
+        # Turbo Preview — per-step activation cache (forward_cached). Tweaking a late block
+        # skips the earlier blocks. Cache key: (primary, donor, seed, prompt, w, h).
+        self._turbo_enabled = True
+        self._act_cache = None          # {step_idx: KreaActivationCacheEntry}
+        self._act_cache_key = None
+        self._changed_blocks = set()    # block ids changed since the last render
+        self._changed_full = False      # a non-main (txtfusion) change -> must full-recompute
+
     # ----- pipeline + LoRA loading -------------------------------------------
     def ensure_pipeline(self, turbo_path: str, vae_path: str, text_encoder_path: str,
                         device: str = "cuda", model_kind: str = "turbo", **_ignored) -> None:
@@ -166,9 +174,9 @@ class Krea2RepairEngine:
     def generate_preview(self, state, *, seed: Optional[int] = None,
                          prompt: Optional[str] = None, width: Optional[int] = None,
                          height: Optional[int] = None, steps: Optional[int] = None) -> Image.Image:
-        """Apply the slider state and render one preview with the live LoRA(s). Default step
-        count follows model_kind (8 Turbo / 20 RAW)."""
-        from fizgig.krea2 import sampling
+        """Apply the slider state and render one preview with the live LoRA(s). With Turbo
+        Preview on, reuses per-step activation cache so a late-block tweak skips earlier blocks.
+        Default step count follows model_kind (8 Turbo / 20 RAW)."""
         self.apply_state(state)
         prompt = prompt if prompt is not None else state.prompt
         seed = seed if seed is not None else state.seed
@@ -178,11 +186,75 @@ class Krea2RepairEngine:
         txt, txtmask = self._encode_prompt(prompt)
         txt = txt.to(self.device)
         txtmask = txtmask.to(self.device)
+
+        if getattr(self, "_turbo_enabled", True):
+            key = (self.primary_path, self.donor_path, seed, prompt, width, height)
+            if key != self._act_cache_key:
+                self._invalidate_activation_cache()
+                self._changed_blocks.clear()
+                self._changed_full = False
+                resume_from = None
+            else:
+                resume_from = self._compute_resume_point()
+            try:
+                with torch.no_grad():
+                    img, new_cache = self._sample_cached(txt, txtmask, seed=seed, width=width,
+                                                         height=height, steps=steps, resume_from=resume_from)
+                self._act_cache = new_cache
+                self._act_cache_key = key
+                self._changed_blocks.clear()
+                self._changed_full = False
+                return img
+            except Exception:
+                logger.warning("krea2 Turbo-cache preview failed; full forward fallback", exc_info=True)
+                self._invalidate_activation_cache()
+
+        from fizgig.krea2 import sampling
         with torch.no_grad():
             imgs = sampling.sample(self.turbo, self.ae, txt, txtmask, untxt=None, untxtmask=None,
                                    device=self.device, dtype=self.dtype, width=width, height=height,
                                    steps=steps, cfg_scale=1.0, mu=1.15, seed=seed)
         return imgs[0]
+
+    def _sample_cached(self, txt, txtmask, *, seed, width, height, steps, resume_from):
+        """Denoise loop mirroring sampling.sample but via forward_cached, threading a per-step
+        activation cache. Turbo preview is CFG-free (cfg_scale=1.0), so only the cond path runs."""
+        from einops import rearrange
+        from fizgig.krea2.sampling import prepare, timesteps, roundup
+        from fizgig.krea2.model import KreaActivationCacheEntry
+        model, ae, device, dtype = self.turbo, self.ae, self.device, self.dtype
+        patch = model.config.patch
+        compression = 2 ** len(ae.temperal_downsample)
+        channels = ae.z_dim
+        align = compression * patch
+        width, height = roundup(width, align, "width"), roundup(height, align, "height")
+        noise = torch.randn(1, channels, height // compression, width // compression,
+                            device=device, dtype=dtype,
+                            generator=torch.Generator(device=device).manual_seed(seed))
+        img, pos, mask = prepare(noise, txt.shape[1], patch, txtmask)
+        x1 = (256 // align) ** 2
+        x2 = (1280 // align) ** 2
+        ts = timesteps(img.shape[1], steps, x1, x2, y1=0.5, y2=1.15, mu=1.15)
+        new_cache = {}
+        prev = self._act_cache or {}
+        use_resume = resume_from is not None and bool(prev)
+        with torch.autocast(device_type=torch.device(device).type, dtype=dtype):
+            for si, (tcurr, tprev) in enumerate(zip(ts[:-1], ts[1:])):
+                t = torch.full((len(img),), tcurr, dtype=img.dtype, device=img.device)
+                entry = KreaActivationCacheEntry(block_inputs=[])
+                step_cached = prev.get(si) if use_resume else None
+                step_resume = resume_from if step_cached is not None else None
+                v = model.forward_cached(img=img, context=txt, t=t, pos=pos, mask=mask,
+                                         resume_from=step_resume, cached=step_cached, new_cache=entry)
+                new_cache[si] = entry
+                img = img + (tprev - tcurr) * v
+        img = rearrange(img, "b (h w) (c ph pw) -> b c 1 (h ph) (w pw)",
+                        ph=patch, pw=patch, h=height // align, w=width // align)
+        ae = ae.to(img.device)
+        pixels = ae.decode_to_pixels(img.to(torch.bfloat16))
+        self.ae = ae.to("cpu")
+        pixels = rearrange(pixels * 255.0, "b c h w -> b h w c").cpu().byte().numpy()
+        return Image.fromarray(pixels[0]), new_cache
 
     def generate_baseline(self, state) -> Image.Image:
         """Baseline = primary at default 1.0 / all enabled, donor off. Cached on
@@ -207,12 +279,29 @@ class Krea2RepairEngine:
         self._baseline_cache_image = None
 
     def _invalidate_activation_cache(self) -> None:
-        # Krea 2 has no forward_cached activation cache (8-step is already fast). No-op.
-        pass
+        self._act_cache = None
+        self._act_cache_key = None
 
     def mark_blocks_changed(self, blocks) -> None:
-        # Activation-cache hint for Klein's Turbo Preview; Krea 2 renders full each time. No-op.
-        pass
+        """Record which blocks changed since the last render (Turbo Preview resume hint)."""
+        for b in blocks:
+            self._changed_blocks.add(b)
+            if not str(b).startswith("block_"):
+                self._changed_full = True  # txtfusion / non-main -> pre-block setup changes
+
+    @staticmethod
+    def _block_index(block_id):
+        return int(block_id.split("_")[1]) if str(block_id).startswith("block_") else None
+
+    def _compute_resume_point(self):
+        """Earliest changed main-block index, or None (full recompute) if a non-main block
+        changed or nothing is recorded."""
+        if self._changed_full or not self._changed_blocks:
+            return None
+        idxs = [self._block_index(b) for b in self._changed_blocks]
+        if any(i is None for i in idxs):
+            return None
+        return min(idxs)
 
     # ----- teardown ----------------------------------------------------------
     def reset(self) -> None:
@@ -239,6 +328,10 @@ class Krea2RepairEngine:
         self._prompt_cache = None
         self._baseline_cache_key = None
         self._baseline_cache_image = None
+        self._act_cache = None
+        self._act_cache_key = None
+        self._changed_blocks = set()
+        self._changed_full = False
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

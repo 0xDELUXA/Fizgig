@@ -9069,8 +9069,9 @@ class LoRATrainerGUI:
             pass
         krea2 = (self.repair_family_var.get() == "krea2")
         self.repair_state = (SliderState.default_krea2() if krea2 else SliderState.default_klein9b())
-        # Default preview resolution per family (Krea 2 likes 1024; Klein 512).
-        self.repair_res_var.set("1024" if krea2 else "512")
+        # 512 default for both — keeps the Turbo Preview activation cache VRAM-feasible
+        # (krea2's per-block activations are large; 768+ can be tight alongside the 13 GB Turbo).
+        self.repair_res_var.set("512")
         self._build_repair_slider_panel(self._repair_sliders_parent)
         self._apply_repair_family_ui()
         try:

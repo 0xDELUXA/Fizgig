@@ -64,10 +64,10 @@ class SliderState:
     @classmethod
     def default_krea2(cls) -> "SliderState":
         """Krea 2 layout: 28 main blocks + 4 txtfusion (see repair_studio.krea2_blocks).
-        Same BlockState model; only the block-id set differs. Default preview res 1024."""
+        Same BlockState model; only the block-id set differs. Preview res 512 (keeps the
+        Turbo Preview activation cache VRAM-feasible alongside the resident Turbo)."""
         from fizgig.repair_studio.krea2_blocks import all_block_ids_krea2
-        return cls(blocks={bid: BlockState() for bid in all_block_ids_krea2()},
-                   preview_width=1024, preview_height=1024)
+        return cls(blocks={bid: BlockState() for bid in all_block_ids_krea2()})
 
     def to_json(self) -> Dict[str, Any]:
         return {

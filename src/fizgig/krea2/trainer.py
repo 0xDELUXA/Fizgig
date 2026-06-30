@@ -10,6 +10,7 @@ import argparse
 import gc
 import json
 import logging
+import math
 import os
 import sys
 from multiprocessing import Value
@@ -90,10 +91,36 @@ def load_dit_for_training(
     return dit, network
 
 
-def sample_shifted_timesteps(bsize: int, shift: float, device) -> torch.Tensor:
-    """Flow-matching 'shift' timestep sampling: u~U(0,1), t = shift*u / (1 + (shift-1)*u)."""
-    u = torch.rand(bsize, device=device)
-    return shift * u / (1.0 + (shift - 1.0) * u)
+def _get_lin_function(x1, y1, x2, y2):
+    """Linear map through (x1,y1)-(x2,y2): f(x) = m*x + b. Used to schedule the flow shift `mu`
+    from image-token count (musubi's get_lin_function)."""
+    m = (y2 - y1) / (x2 - x1)
+    b = y1 - m * x1
+    return lambda x: m * x + b
+
+
+# Krea 2 resolution->mu schedule (musubi `krea2_shift`): token count maps to mu, shift = exp(mu).
+# Endpoints match krea2 inference defaults (minres 256, maxres 1280 at align 16):
+#   x1 = (256//16)**2 = 256, x2 = (1280//16)**2 = 6400, y1 = 0.5, y2 = 1.15.
+_KREA2_MU = _get_lin_function(256, 0.5, 6400, 1.15)
+
+
+def sample_krea2_timesteps(bsize: int, num_img_tokens: int, device, sigmoid_scale: float = 1.0) -> torch.Tensor:
+    """Krea 2 'krea2_shift' timestep sampling — a faithful port of the musubi krea2_train recipe.
+
+    The base t is **logit-normal** (sigmoid of a standard normal), so timesteps concentrate near the
+    middle instead of being uniform. Uniform sampling (the old code) dumps far too much mass on the
+    high-noise end, where the flow-matching velocity is intrinsically hard to predict — that inflates
+    the loss AND skews the training signal away from the validated reference recipe. The shift is
+    resolution-dependent (shift = exp(mu), mu from the image-token count), not a fixed 2.5.
+
+        t_base = sigmoid(randn * sigmoid_scale)
+        t      = (t_base * shift) / (1 + (shift - 1) * t_base)
+    """
+    mu = _KREA2_MU(num_img_tokens)
+    shift = math.exp(mu)
+    t = (torch.randn(bsize, device=device) * sigmoid_scale).sigmoid()
+    return (t * shift) / (1.0 + (shift - 1.0) * t)
 
 
 def compute_loss(dit, latent, hidden_states, attention_mask, *, shift=2.5, dtype=torch.bfloat16):
@@ -102,19 +129,26 @@ def compute_loss(dit, latent, hidden_states, attention_mask, *, shift=2.5, dtype
     latent:        (B, 16, h, w)         — cached Qwen-Image VAE latent
     hidden_states: (B, seq, layers, dim) — cached Qwen3-VL multi-layer stack
     attention_mask:(B, seq) bool         — cached validity mask
+
+    `shift` is kept for signature compatibility but no longer used: krea2_shift derives the flow
+    shift from the image resolution (see sample_krea2_timesteps), matching the musubi reference.
     """
     device = next(p for p in dit.parameters()).device
     B = latent.shape[0]
     latent = latent.to(device=device, dtype=dtype)
+    patch = dit.config.patch
 
     noise = torch.randn_like(latent)
-    t = sample_shifted_timesteps(B, shift, device)
+    # krea2_shift: logit-normal base + resolution-dependent shift, over the image-token count
+    # (latent grid // patch). Replaces the old uniform-u sampler that over-weighted high-noise t
+    # and inflated the loss.
+    num_img_tokens = (latent.shape[-2] // patch) * (latent.shape[-1] // patch)
+    t = sample_krea2_timesteps(B, num_img_tokens, device)
     t_ = t.view(B, 1, 1, 1).to(dtype)
     noised = (1.0 - t_) * latent + t_ * noise
     target = noise - latent  # flow-matching velocity
 
     txt, txtmask = gather_valid_text(hidden_states.to(device=device, dtype=dtype), attention_mask.to(device))
-    patch = dit.config.patch
     img_tokens, pos, mask = prepare(noised, txt.shape[1], patch, txtmask)
     target_tokens, _, _ = prepare(target, txt.shape[1], patch, txtmask)
 

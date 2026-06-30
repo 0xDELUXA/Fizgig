@@ -39,6 +39,7 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample_every_n_epochs", type=int, default=0)
     p.add_argument("--sample_width", type=int, default=512)
     p.add_argument("--sample_height", type=int, default=512)
+    p.add_argument("--sample_ref_image", default=None, help="Reference image (Qwen3-VL vision path)")
     p.add_argument("--resume", default=None, help="Path to a <name>-NNNNNN-state dir to resume from")
     p.add_argument("--context_lora_path", default=None, help="Frozen+active context LoRA on the base")
     p.add_argument("--context_lora_strength", type=float, default=1.0)
@@ -64,6 +65,7 @@ def main():
         sample_prompts=prompts, turbo_path=args.turbo_dit, vae_path=args.vae, te_path=args.text_encoder,
         sample_every_n_epochs=args.sample_every_n_epochs,
         sample_width=args.sample_width, sample_height=args.sample_height,
+        sample_ref_image=args.sample_ref_image,
         resume_state_dir=args.resume,
         context_lora_path=args.context_lora_path, context_lora_strength=args.context_lora_strength,
         adaptive_lr=args.adaptive_lr,

@@ -370,16 +370,26 @@ def _save_lora(network, path, network_dim, network_alpha, dtype, extra_metadata=
 
 
 # --- in-training previews (sample the fp8 Turbo with the live LoRA) -----------
-def encode_sample_prompts(te_path, prompts, *, device="cuda"):
+def encode_sample_prompts(te_path, prompts, *, ref_image=None, vision_megapixels=1.0, device="cuda"):
     """Pre-encode the sample prompts once (Qwen3-VL), freeing the encoder afterwards.
-    Returns a list of (txt, txtmask) on CPU, fed straight to sampling.sample at preview time."""
+    Returns a list of (txt, txtmask) on CPU, fed straight to sampling.sample at preview time.
+
+    `ref_image` (a PIL image or path) routes a reference through Qwen3-VL's vision path so the
+    samples become visually aware of it ('prompt from a picture' — Krea 2's reference mechanism)."""
     from fizgig.krea2.utils import load_krea2_text_encoder
     from fizgig.krea2 import sampling
+
+    pil = None
+    if ref_image:
+        from PIL import Image
+        pil = ref_image if hasattr(ref_image, "convert") else Image.open(ref_image)
 
     enc = load_krea2_text_encoder(te_path, dtype=torch.bfloat16, device=device)
     out = []
     for p in prompts:
-        txt, txtmask, _, _ = sampling.encode_prompts(enc, [p], cfg=False)
+        images = [[pil]] if pil is not None else None
+        txt, txtmask, _, _ = sampling.encode_prompts(enc, [p], cfg=False,
+                                                     images=images, vision_megapixels=vision_megapixels)
         out.append((txt.cpu(), txtmask.cpu()))
     del enc
     torch.cuda.empty_cache()
@@ -389,9 +399,8 @@ def encode_sample_prompts(te_path, prompts, *, device="cuda"):
 def _read_sample_override(output_dir):
     """Live sample override written by the GUI to <output_dir>/.sample_override.json.
 
-    Returns {prompt, seed, width, height} while active, else None. Model-agnostic fields
-    only — the override's ref_image (Klein edit conditioning) is ignored, since Krea 2 isn't
-    an edit model and generates previews from scratch."""
+    Returns {prompt, seed, width, height, ref_image} while active, else None. ref_image (if set)
+    is routed through Qwen3-VL's vision path (Krea 2's reference mechanism)."""
     path = os.path.join(output_dir, ".sample_override.json")
     if not os.path.exists(path):
         return None
@@ -402,7 +411,8 @@ def _read_sample_override(output_dir):
             return {"prompt": str(d["prompt"]).strip(),
                     "seed": int(d.get("seed", 1234)),
                     "width": int(d.get("width", 1024)),
-                    "height": int(d.get("height", 1024))}
+                    "height": int(d.get("height", 1024)),
+                    "ref_image": str(d.get("ref_image", "")).strip()}
     except Exception:
         pass
     return None
@@ -479,6 +489,7 @@ def train_krea2(
     sample_height: int = 512,
     sample_steps: int = 8,
     sample_seed: int = 42,
+    sample_ref_image: str = None,
     resume_state_dir: str = None,
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
@@ -509,8 +520,9 @@ def train_krea2(
     encoded_prompts = sample_ae = sample_dir = None
     if do_previews:
         from fizgig.krea2.vae_loader import load_vae
-        logger.info(f"pre-encoding {len(sample_prompts)} sample prompt(s)...")
-        encoded_prompts = encode_sample_prompts(te_path, sample_prompts, device=device)
+        logger.info(f"pre-encoding {len(sample_prompts)} sample prompt(s)"
+                    f"{' with reference image' if sample_ref_image else ''}...")
+        encoded_prompts = encode_sample_prompts(te_path, sample_prompts, ref_image=sample_ref_image, device=device)
         sample_ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
         sample_dir = os.path.join(output_dir, "sample")
 
@@ -611,8 +623,10 @@ def train_krea2(
                 ov = _read_sample_override(output_dir)
                 if ov:
                     logger.info(f"[sample override] active — '{ov['prompt'][:60]}' "
-                                f"seed={ov['seed']} {ov['width']}x{ov['height']}")
-                    prev_enc = encode_sample_prompts(te_path, [ov["prompt"]], device=device)
+                                f"seed={ov['seed']} {ov['width']}x{ov['height']}"
+                                f"{' +ref' if ov.get('ref_image') else ''}")
+                    prev_enc = encode_sample_prompts(te_path, [ov["prompt"]],
+                                                     ref_image=ov.get("ref_image") or None, device=device)
                     prev_w, prev_h, prev_seed = ov["width"], ov["height"], ov["seed"]
                 else:
                     prev_enc, prev_w, prev_h, prev_seed = encoded_prompts, sample_width, sample_height, sample_seed

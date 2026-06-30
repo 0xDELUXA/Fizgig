@@ -3466,10 +3466,10 @@ class LoRATrainerGUI:
           • FP8 Scaled (in Memory & FP8)                        — krea2's fp8 path is always scaled
           • FP8 Text Encoder (in Memory & FP8)                  — krea2 caches the TE in bf16
           • Gradient Checkpointing (in Memory & FP8)            — krea2_train hardcodes it ON
-        Kept (model-agnostic / wired): FP8 Base (-> --no_fp8), and the live "Override next
-        sample" status-bar panel (krea2 reads the override sentinel for previews — prompt/seed/
-        resolution). Only the override's edit-Reference controls are hidden for Krea 2, since
-        krea2 isn't an edit model (previews generate from scratch).
+        Kept (model-agnostic / wired): FP8 Base (-> --no_fp8), and the full live "Override next
+        sample" status-bar panel including its Reference image — krea2 reads the override sentinel
+        for previews (prompt/seed/resolution) and routes the reference through the Qwen3-VL vision
+        path.
         """
         # Guard: this may run via update_ui_for_architecture before the Training tab is built.
         if not hasattr(self, "_adaptive_cb"):
@@ -3482,9 +3482,6 @@ class LoRATrainerGUI:
             self.scaled_check,                                   # FP8 Scaled
             self.fp8_text_encoder_label, self.fp8_text_encoder_check,
             self._grad_checkpoint_label, self.grad_checkpoint_check, self._grad_checkpoint_hint,
-            # Sample-override edit-Reference controls (status bar) — Krea 2 isn't an edit model.
-            self._override_ref_caption, self._override_ref_browse_btn,
-            self._override_ref_label, self._override_ref_clear_btn,
         ]
         for w in widgets:
             self._set_widget_visible(w, not is_krea2)
@@ -5259,21 +5256,22 @@ class LoRATrainerGUI:
                       if is_krea2 else
                       "Base samples only — Distilled is locked at 4 steps"))
 
-        # Reference image (Klein edit conditioning)
-        for attr in ("sample_ref_entry",):
-            w = getattr(self, attr, None)
-            if w is not None:
-                w.configure(state=(tk.DISABLED if is_krea2 else "readonly"))
+        # Reference image — supported by BOTH families now (Klein: edit conditioning; Krea 2:
+        # Qwen3-VL vision path). Always enabled; only the note differs. No strength dial on this
+        # row in either mode (Krea 2's vision-path reference has no strength; Klein auto-caps).
+        if hasattr(self, "sample_ref_entry"):
+            self.sample_ref_entry.configure(state="readonly")
         for attr in ("sample_ref_browse_btn", "sample_ref_clear_btn"):
             w = getattr(self, attr, None)
             if w is not None:
-                w.configure(state=(tk.DISABLED if is_krea2 else tk.NORMAL))
+                w.configure(state=tk.NORMAL)
         if hasattr(self, "sample_ref_label"):
-            self.sample_ref_label.configure(foreground=label_fg)
+            self.sample_ref_label.configure(foreground=secondary)
         if hasattr(self, "sample_ref_note"):
             self.sample_ref_note.configure(
-                text=("Klein only — Krea 2 is not an edit model, so previews are generated from scratch "
-                      "(no reference image)."
+                text=("Optional — fed through Krea 2's Qwen3-VL vision path so samples become visually "
+                      "aware of it ('prompt from a picture', not a pixel edit). Downscaled to a cap; leave "
+                      "empty for normal samples."
                       if is_krea2 else
                       "Optional — Klein is an edit model, so samples can be conditioned on a real image (they edit "
                       "it rather than generate from scratch). Auto-resized to ~0.20 MP so any size is safe. Leave "
@@ -14158,6 +14156,11 @@ class LoRATrainerGUI:
                     "--vae", self._krea2_pref("krea2_vae"),
                     "--text_encoder", self._krea2_pref("krea2_text_encoder"),
                 ]
+                # Reference image (Qwen3-VL vision path) — samples become visually aware of it.
+                ref_img = (getattr(self, "sample_ref_image_var", None).get().strip()
+                           if getattr(self, "sample_ref_image_var", None) else "")
+                if ref_img and os.path.exists(ref_img):
+                    cmd += ["--sample_ref_image", ref_img]
         return cmd
 
     # === Pause / Resume support ===

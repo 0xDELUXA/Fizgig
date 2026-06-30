@@ -8136,6 +8136,12 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 10, "bold"),
                  fg=COLORS["accent_hover"], bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(10, 0))
 
+        # Family-aware "how long this takes" note (set by _apply_extract_family_ui).
+        self.extract_time_note_var = tk.StringVar(value="")
+        tk.Label(run_card, textvariable=self.extract_time_note_var,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
+
         # Card 7: Output Log
         log_card = self._start_section_card(outer, "Output Log", None)
         self.extract_log = scrolledtext.ScrolledText(
@@ -8550,6 +8556,11 @@ class LoRATrainerGUI:
             # Force weight-only all-blocks regardless of stale Klein selections.
             self.extract_samples_var.set("0")
             self.extract_timesteps_var.set("all")
+            self.extract_time_note_var.set(
+                "⏱ Krea 2 is a 12.9B model — weight SVD runs over all 264 modules, several of "
+                "them very large (e.g. 36864×6144). Expect roughly 5–10 minutes on a free GPU. "
+                "If the GPU is busy (a training run, ComfyUI, another preview), each SVD falls back "
+                "to the CPU and the whole run can take 60 min+ — free up VRAM first for the fast path.")
         else:
             anchor = getattr(self, "_extract_options_anchor", None)
             if getattr(self, "_extract_preset_container", None) is not None and anchor is not None:
@@ -8564,6 +8575,10 @@ class LoRATrainerGUI:
             # Custom-block frame visibility is owned by the preset combo; refresh it.
             if hasattr(self, "_on_extract_preset_changed"):
                 self._on_extract_preset_changed()
+            self.extract_time_note_var.set(
+                "⏱ Fast SVD presets (weight-only) finish in well under a minute. Activation-weighted "
+                "presets load the full pipeline and run probe forward passes — budget a few minutes. "
+                "If the GPU is busy, SVD falls back to the CPU and runs much slower (a WARNING is logged).")
 
     def _run_extract_krea2(self):
         """Krea 2: pure weight SVD over all blocks — no pipeline, prompt, or block targeting."""

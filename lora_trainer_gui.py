@@ -6816,6 +6816,22 @@ class LoRATrainerGUI:
         self._explorer_locked_blocks = set()  # Freeze: blocks locked at their current value
         self._explorer_last_pick_blocks = set()  # blocks changed in the most recent pick
 
+        # Model family selector. Krea 2 explores on the fp8 Turbo (always) and has no ref-strength
+        # dial (vision-path reference), so the DiT radio + ref Strength are hidden in Krea 2 mode.
+        _xfam = "krea2" if str(self.last_used.get("explorer_family", "klein")) == "krea2" else "klein"
+        self.explorer_family_var = tk.StringVar(value=_xfam)
+        xfam_card = self._start_section_card(
+            outer, "Model Family",
+            "Klein 9B (Distilled/Base) or Krea 2 (fp8 Turbo, 8-step). Block roles are mapped for Klein; "
+            "Krea 2 explores its 32 blocks generically.",
+        )
+        _xf = tk.Frame(xfam_card, bg=COLORS["bg_surface"])
+        _xf.pack(anchor=tk.W)
+        ttk.Radiobutton(_xf, text="Klein 9B", variable=self.explorer_family_var, value="klein",
+                        command=self._on_explorer_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_xf, text="Krea 2 (experimental)", variable=self.explorer_family_var, value="krea2",
+                        command=self._on_explorer_family_changed).pack(side=tk.LEFT)
+
         # Card 1: Setup
         setup_card = self._start_section_card(
             outer, "Setup",
@@ -6824,10 +6840,12 @@ class LoRATrainerGUI:
         setup_card.columnconfigure(1, weight=1)
 
         r = 0
-        ttk.Label(setup_card, text="DiT:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+        self._explorer_dit_label = ttk.Label(setup_card, text="DiT:")
+        self._explorer_dit_label.grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=2)
         self.explorer_dit_var = tk.StringVar(value="distilled")
         dit_frame = ttk.Frame(setup_card)
         dit_frame.grid(row=r, column=1, sticky=tk.W, pady=2)
+        self._explorer_dit_frame = dit_frame
         ttk.Radiobutton(dit_frame, text="Distilled (4-step, fast)",
                         variable=self.explorer_dit_var, value="distilled",
                         style="Surface.TRadiobutton").pack(side=tk.LEFT, padx=(0, 12))
@@ -6869,9 +6887,11 @@ class LoRATrainerGUI:
         self.explorer_ref_mp_var = tk.StringVar(value="1.0")
         ttk.Combobox(ref_frame, textvariable=self.explorer_ref_mp_var,
                      values=["0.25", "0.5", "1.0", "2.0"], state="readonly", width=5).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(ref_frame, text="Strength:").pack(side=tk.LEFT, padx=(0, 2))
+        self._explorer_ref_strength_label = ttk.Label(ref_frame, text="Strength:")
+        self._explorer_ref_strength_label.pack(side=tk.LEFT, padx=(0, 2))
         self.explorer_ref_strength_var = tk.StringVar(value="1.0")
-        ttk.Entry(ref_frame, textvariable=self.explorer_ref_strength_var, width=6).pack(side=tk.LEFT)
+        self._explorer_ref_strength_entry = ttk.Entry(ref_frame, textvariable=self.explorer_ref_strength_var, width=6)
+        self._explorer_ref_strength_entry.pack(side=tk.LEFT)
         r += 1
 
         params_frame = ttk.Frame(setup_card)
@@ -7072,16 +7092,63 @@ class LoRATrainerGUI:
         self._explorer_gallery_frame.columnconfigure(0, weight=1)
         self._explorer_gallery_frame.columnconfigure(1, weight=1)
 
+        # Apply the persisted family (krea2 hides the DiT radio + ref Strength).
+        self._apply_explorer_family_ui(str(self.explorer_family_var.get()) == "krea2")
+
         self._add_youtube_help_button(outer, "explorer")
 
     # ------------------------------------------------------------------
     # Explorer actions
     # ------------------------------------------------------------------
 
+    def _explorer_is_krea2(self):
+        return str(getattr(self, "explorer_family_var", None) and self.explorer_family_var.get()) == "krea2"
+
+    def _explorer_anchor_block(self):
+        """The structural-composition anchor block — never locked/disabled, only inverted/pushed.
+        Klein: double_0. Krea 2: block_0 (its first single-stream block)."""
+        return "block_0" if self._explorer_is_krea2() else "double_0"
+
+    def _on_explorer_family_changed(self):
+        fam = "krea2" if str(self.explorer_family_var.get()) == "krea2" else "klein"
+        self.last_used["explorer_family"] = fam
+        self._save_last_used_paths()
+        # Switching family is a hard reset — the engine + loaded LoRA belong to the old family.
+        if self._explorer_engine is not None or self._explorer_baseline_state is not None:
+            self._explorer_full_reset()
+        self._apply_explorer_family_ui(fam == "krea2")
+
+    def _apply_explorer_family_ui(self, is_krea2):
+        """Krea 2: hide the Distilled/Base DiT radio (always Turbo) and the ref Strength control
+        (vision-path reference has no strength). Klein restores both."""
+        dit_label = getattr(self, "_explorer_dit_label", None)
+        dit_frame = getattr(self, "_explorer_dit_frame", None)
+        strength_lbl = getattr(self, "_explorer_ref_strength_label", None)
+        strength_entry = getattr(self, "_explorer_ref_strength_entry", None)
+        if is_krea2:
+            if dit_label is not None:
+                dit_label.grid_remove()
+            if dit_frame is not None:
+                dit_frame.grid_remove()
+            for w in (strength_lbl, strength_entry):
+                if w is not None:
+                    w.pack_forget()
+        else:
+            if dit_label is not None:
+                dit_label.grid()
+            if dit_frame is not None:
+                dit_frame.grid()
+            for w in (strength_lbl, strength_entry):
+                if w is not None:
+                    w.pack(side=tk.LEFT, padx=(0, 2) if w is strength_lbl else 0)
+
     def _explorer_ensure_engine(self):
         """Lazy-load engine + pipeline for the Explorer. Returns True on success."""
         if self._explorer_engine is not None and self._explorer_engine.pipeline is not None and self._explorer_engine.pipeline.is_loaded:
             return True
+
+        if self._explorer_is_krea2():
+            return self._explorer_ensure_engine_krea2()
 
         dit_choice = self.explorer_dit_var.get()
         dit_pref_key = "base_dit" if dit_choice == "base" else "distilled_dit"
@@ -7122,6 +7189,36 @@ class LoRATrainerGUI:
             self.explorer_status_var.set("Error loading models.")
             return False
 
+    def _explorer_ensure_engine_krea2(self):
+        """Lazy-load the Krea 2 Repair engine for the Explorer (always fp8 Turbo, 8-step)."""
+        dit_path = self.prefs_vars.get("krea2_turbo_dit", tk.StringVar()).get()
+        vae_path = self.prefs_vars.get("krea2_vae", tk.StringVar()).get()
+        te_path = self.prefs_vars.get("krea2_text_encoder", tk.StringVar()).get()
+        for label, p in (("Krea 2 Turbo DiT", dit_path), ("Qwen-Image VAE", vae_path),
+                         ("Qwen3-VL TE (bf16)", te_path)):
+            if not p or not os.path.exists(p):
+                messagebox.showerror("Error", f"{label} path not set or not found.\nConfigure on Preferences tab.")
+                return False
+
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.krea2_engine import Krea2RepairEngine
+        if self._explorer_engine is None or not isinstance(self._explorer_engine, Krea2RepairEngine):
+            self._explorer_engine = Krea2RepairEngine()
+        try:
+            self.explorer_status_var.set("Loading Krea 2 models (Turbo)...")
+            self.master.update_idletasks()
+            self._explorer_engine.ensure_pipeline(
+                turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+                device="cuda", model_kind="turbo")
+            self.explorer_status_var.set("Models loaded.")
+            return True
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Failed to load Krea 2 models:\n{traceback.format_exc()}")
+            self.explorer_status_var.set("Error loading models.")
+            return False
+
     def _explorer_load_lora(self):
         path = self.explorer_lora_var.get().strip()
         if not path or not os.path.exists(path):
@@ -7155,7 +7252,8 @@ class LoRATrainerGUI:
                 f"Loaded: {os.path.basename(path)} ({n_active}/32 blocks). Click Re-roll to start exploring.")
             # Initialize baseline state with user-specified LoRA strength
             from fizgig.repair_studio.state import SliderState
-            self._explorer_baseline_state = SliderState.default_klein9b()
+            self._explorer_baseline_state = (SliderState.default_krea2() if self._explorer_is_krea2()
+                                             else SliderState.default_klein9b())
             try:
                 base_strength = float(self.explorer_strength_var.get())
             except ValueError:
@@ -7209,13 +7307,14 @@ class LoRATrainerGUI:
 
         # Generate mutations (exclude locked blocks)
         active = self._explorer_engine.primary_block_ids - self._explorer_locked_blocks
-        # double_0 as structural anchor — only if not explicitly frozen
-        if "double_0" in self._explorer_engine.primary_block_ids and "double_0" not in self._explorer_locked_blocks:
-            active.add("double_0")
+        # Composition anchor (double_0 / block_0) as structural anchor — only if not explicitly frozen
+        anchor = self._explorer_anchor_block()
+        if anchor in self._explorer_engine.primary_block_ids and anchor not in self._explorer_locked_blocks:
+            active.add(anchor)
         intensity = self.explorer_intensity_var.get()
         structure = self.explorer_structure_var.get()
         n_muts = int(self.explorer_mutations_var.get() or 5)
-        # Variant 1 & 2: structural (double_0 anchor)
+        # Variant 1 & 2: structural (composition-anchor block)
         # Variant 3: pure random
         # Variant 4: random but avoids last pick's blocks (protects recent changes)
         variant_states = []
@@ -7227,10 +7326,10 @@ class LoRATrainerGUI:
                 if len(protected_active) < 2:
                     protected_active = active  # fallback if too few left
                 vs = state.mutate(protected_active, num_mutations=n_muts,
-                                  intensity=intensity, structure=vs_structure)
+                                  intensity=intensity, structure=vs_structure, anchor=anchor)
             else:
                 vs = state.mutate(active, num_mutations=n_muts, intensity=intensity,
-                                  structure=vs_structure)
+                                  structure=vs_structure, anchor=anchor)
             variant_states.append(vs)
 
         import threading
@@ -7549,7 +7648,8 @@ class LoRATrainerGUI:
         if choice:
             # Yes = reset to default values
             from fizgig.repair_studio.state import SliderState
-            self._explorer_baseline_state = SliderState.default_klein9b()
+            self._explorer_baseline_state = (SliderState.default_krea2() if self._explorer_is_krea2()
+                                             else SliderState.default_klein9b())
             try:
                 base_strength = float(self.explorer_strength_var.get())
             except ValueError:
@@ -7616,7 +7716,7 @@ class LoRATrainerGUI:
         if self._explorer_locked_blocks:
             # Already have frozen blocks — ask what to do
             active = self._explorer_engine.primary_block_ids if self._explorer_engine else set()
-            unlocked = active - self._explorer_locked_blocks - {"double_0"}
+            unlocked = active - self._explorer_locked_blocks - {self._explorer_anchor_block()}
 
             if not unlocked:
                 # All locked — offer unlock all or undo last
@@ -7726,6 +7826,13 @@ class LoRATrainerGUI:
             pass
 
         baseline = self._explorer_baseline_state
+
+        # Handoff inherits the Explorer's family — switch Repair Studio to match (rebuilds the
+        # slider panel for the right block layout so the value-push loop below finds the block ids).
+        target_family = "krea2" if self._explorer_is_krea2() else "klein"
+        if hasattr(self, "repair_family_var") and self.repair_family_var.get() != target_family:
+            self.repair_family_var.set(target_family)
+            self._on_repair_family_changed()
 
         # Set the LoRA path in Repair Studio
         self.repair_primary_var.set(lora_path)
@@ -8416,7 +8523,7 @@ class LoRATrainerGUI:
     def _on_extract_family_changed(self):
         fam = "krea2" if str(self.extract_family_var.get()) == "krea2" else "klein"
         self.last_used["extract_family"] = fam
-        self._save_last_used()
+        self._save_last_used_paths()
         self._apply_extract_family_ui(fam == "krea2")
 
     def _apply_extract_family_ui(self, is_krea2):
@@ -12990,6 +13097,14 @@ class LoRATrainerGUI:
             self.explorer_ref_path_var.set(self.repair_ref_path_var.get().strip())
             self.explorer_ref_mp_var.set(self.repair_ref_mp_var.get())
             self.explorer_ref_strength_var.set(self.repair_ref_strength_var.get())
+
+        # Handoff inherits the Repair Studio's family — switch the Explorer to match (so it loads
+        # the right engine + hides the DiT radio/ref-strength for krea2).
+        target_family = "krea2" if self.repair_family_var.get() == "krea2" else "klein"
+        if self.explorer_family_var.get() != target_family:
+            self.explorer_family_var.set(target_family)
+            self.last_used["explorer_family"] = target_family
+            self._apply_explorer_family_ui(target_family == "krea2")
 
         # Switch to Explorer tab
         self.notebook.select(self.explorer_tab)

@@ -110,31 +110,34 @@ class SliderState:
         )
 
     def mutate(self, active_blocks: set, num_mutations: int = 3,
-               intensity: float = 0.5, structure: float = 1.0) -> "SliderState":
+               intensity: float = 0.5, structure: float = 1.0,
+               anchor: str = "double_0") -> "SliderState":
         """Return a new SliderState with random perturbations to num_mutations blocks.
 
         active_blocks: set of block_ids the LoRA touches (skip others).
         intensity: 0.0 = tiny nudges (±0.2), 1.0 = bold moves (±3.0).
         structure: 0.0 = no structural changes, 1.0 = full structural (off/invert/extreme).
                    Scales the magnitude of the guaranteed structural change on the first block.
+        anchor: the composition-anchor block id that receives the structural change first and is
+                never disabled (Klein: double_0; Krea 2: block_0).
         """
         import random
         new = self.copy()
         candidates = [bid for bid in new.blocks if bid in active_blocks]
         if not candidates:
             return new
-        # When structure > 0, ensure double_0 is first so it gets the structural change
+        # When structure > 0, ensure the anchor block is first so it gets the structural change
         n = min(num_mutations, len(candidates))
-        if structure > 0.05 and "double_0" in candidates:
-            others = [bid for bid in candidates if bid != "double_0"]
-            chosen = ["double_0"] + random.sample(others, min(n - 1, len(others)))
+        if structure > 0.05 and anchor in candidates:
+            others = [bid for bid in candidates if bid != anchor]
+            chosen = [anchor] + random.sample(others, min(n - 1, len(others)))
         else:
             chosen = random.sample(candidates, n)
         for i, bid in enumerate(chosen):
             bs = new.blocks[bid]
             magnitude = 0.2 + intensity * 2.8
             # First mutated block: structural change scaled by structure parameter
-            # Never disables double_0 — only inverts or pushes to extreme
+            # Never disables the anchor — only inverts or pushes to extreme
             if i == 0 and intensity > 0.3 and structure > 0.05:
                 structural = random.choice(["invert", "extreme"])
                 if structural == "invert":

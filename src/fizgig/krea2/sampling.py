@@ -86,7 +86,8 @@ def timesteps(seq_len, steps, x1, x2, y1=0.5, y2=1.15, sigma=1.0, mu=None):
 
 
 @torch.no_grad()
-def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True):
+def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True,
+                   images=None, vision_megapixels=1.0):
     """Encode prompts (and optional negatives) into gathered varlen text embeddings.
 
     Returns ``(txt, txtmask, untxt, untxtmask)``; the unconditional pair is ``None`` when
@@ -94,8 +95,11 @@ def encode_prompts(encoder, prompts, negative_prompts=None, *, cfg=True):
     freed and not compete with the DiT for VRAM — on a 24GB card the encoder and the DiT do
     not fit at the same time. ``gather_valid_text`` drops the interior padding the encoder
     inserts between prompt and suffix so the valid tokens form a contiguous prefix.
+
+    ``images`` (per-prompt PIL lists) routes reference images through Qwen3-VL's vision path
+    (negatives stay text-only).
     """
-    txt, txtmask = encoder(prompts)
+    txt, txtmask = encoder(prompts, images=images, vision_megapixels=vision_megapixels)
     txt, txtmask = gather_valid_text(txt, txtmask)
 
     untxt = untxtmask = None

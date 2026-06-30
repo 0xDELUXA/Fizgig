@@ -15,6 +15,7 @@ plus a `pipeline` holder exposing `is_loaded`.
 
 import gc
 import logging
+import os
 import threading
 from typing import Optional, Set
 
@@ -169,19 +170,29 @@ class Krea2RepairEngine:
         self._cancel_event.clear()
 
     # ----- preview -----------------------------------------------------------
-    def _encode_prompt(self, prompt: str):
-        """Encode the prompt once (load TE -> encode -> free), cached on the prompt string."""
-        if self._prompt_cache_key == prompt and self._prompt_cache is not None:
+    def _encode_prompt(self, prompt: str, ref_path: str = "", ref_megapixels: float = 1.0):
+        """Encode the prompt once (load TE -> encode -> free), cached on (prompt, ref, mp).
+
+        An optional reference image is pushed through Qwen3-VL's vision path so the conditioning
+        becomes visually aware of it (Krea 2's reference mechanism — see embedder.py). Re-encodes
+        only when the prompt or reference changes (slider tweaks don't)."""
+        key = (prompt, ref_path or "", round(float(ref_megapixels), 4))
+        if self._prompt_cache_key == key and self._prompt_cache is not None:
             return self._prompt_cache
         from fizgig.krea2.utils import load_krea2_text_encoder
         from fizgig.krea2 import sampling
+        images = None
+        if ref_path and os.path.exists(ref_path):
+            from PIL import Image as _Image
+            images = [[_Image.open(ref_path)]]
         enc = load_krea2_text_encoder(self.te_path, dtype=self.dtype, device=self.device)
-        txt, txtmask, _, _ = sampling.encode_prompts(enc, [prompt], cfg=False)
+        txt, txtmask, _, _ = sampling.encode_prompts(enc, [prompt], cfg=False,
+                                                     images=images, vision_megapixels=float(ref_megapixels))
         del enc
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        self._prompt_cache_key = prompt
+        self._prompt_cache_key = key
         self._prompt_cache = (txt.cpu(), txtmask.cpu())
         return self._prompt_cache
 
@@ -204,7 +215,11 @@ class Krea2RepairEngine:
         width = width or state.preview_width
         height = height or state.preview_height
         steps = steps or getattr(self, "_default_steps", 8)
-        txt, txtmask = self._encode_prompt(prompt)
+        # Reference image (if any) goes through the Qwen3-VL vision path. ref_strength is a Klein
+        # edit-conditioning knob with no Krea 2 analogue, so it's not used here; ref_megapixels
+        # maps to the vision encoder's downscale cap.
+        txt, txtmask = self._encode_prompt(prompt, getattr(state, "ref_image_path", ""),
+                                           getattr(state, "ref_megapixels", 1.0))
         txt = txt.to(self.device)
         txtmask = txtmask.to(self.device)
 
@@ -261,7 +276,8 @@ class Krea2RepairEngine:
         (primary_path, seed, prompt, w, h) — slider tweaks don't invalidate it."""
         from fizgig.repair_studio.state import SliderState
         key = (self.primary_path, state.seed, state.prompt,
-               state.preview_width, state.preview_height)
+               state.preview_width, state.preview_height,
+               getattr(state, "ref_image_path", ""), round(float(getattr(state, "ref_megapixels", 1.0)), 4))
         if self._baseline_cache_key == key and self._baseline_cache_image is not None:
             return self._baseline_cache_image
         base = SliderState.default_krea2()
@@ -269,6 +285,9 @@ class Krea2RepairEngine:
         base.prompt = state.prompt
         base.preview_width = state.preview_width
         base.preview_height = state.preview_height
+        # Same reference as the tweaked side, so the comparison differs only by the slider tweaks.
+        base.ref_image_path = getattr(state, "ref_image_path", "")
+        base.ref_megapixels = getattr(state, "ref_megapixels", 1.0)
         img = self.generate_preview(base)
         self._baseline_cache_key = key
         self._baseline_cache_image = img

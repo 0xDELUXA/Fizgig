@@ -10419,10 +10419,12 @@ class LoRATrainerGUI:
         ttk.Entry(_rr, textvariable=self.royale_ref_var, state="readonly").pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(_rr, text="Browse…", command=self._royale_browse_ref).pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(_rr, text="Clear", command=lambda: self.royale_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
-        tk.Label(_rr, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self._royale_ref_strength_lbl = tk.Label(_rr, text="Strength", bg=_sbg, fg=COLORS["text_muted"])
+        self._royale_ref_strength_lbl.pack(side=tk.LEFT, padx=(8, 3))
         self.royale_ref_strength_var = tk.StringVar(value=self.last_used.get("royale_ref_strength", "1.0"))
         _rse = ttk.Entry(_rr, textvariable=self.royale_ref_strength_var, width=5)
         _rse.pack(side=tk.LEFT)
+        self._royale_ref_strength_entry = _rse
         ToolTip(_rse, "How strongly the reference anchors each epoch render.\n"
                       "1.0 = full edit-model anchor (the reference holds the composition while each epoch's "
                       "LoRA renders the prompt), lower lets the prompt vary more, 0 = off.")
@@ -10582,21 +10584,25 @@ class LoRATrainerGUI:
             variable=self.royale_travel_use_epoch_ref_var,
             command=self._royale_travel_toggle_ref_widgets)
         self._royale_travel_useepoch_cb.pack(side=tk.LEFT)
-        tk.Label(_tru, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self._royale_travel_ref_strength_lbl = tk.Label(_tru, text="Strength", bg=_sbg, fg=COLORS["text_muted"])
+        self._royale_travel_ref_strength_lbl.pack(side=tk.LEFT, padx=(16, 3))
         self.royale_travel_ref_strength_var = tk.StringVar(
             value=self.last_used.get("royale_travel_ref_strength", "0.25"))
         _trse = ttk.Entry(_tru, textvariable=self.royale_travel_ref_strength_var, width=5)
         _trse.pack(side=tk.LEFT)
+        self._royale_travel_ref_strength_entry = _trse
         ToolTip(_trse, "How strongly the reference anchors the morph.\n"
                        "0.1–0.4 is the sweet range for seed travel — enough to hold the subject, loose "
                        "enough to let the seeds actually travel. 1.0 clamps too hard here, 0 = off.")
         _tseq = ttk.Checkbutton(_tru, text="Sequential reference", variable=self.royale_travel_seq_ref_var)
+        self._royale_travel_seq_cb = _tseq
         _tseq.pack(side=tk.LEFT, padx=(16, 0))
         ToolTip(_tseq, "Feedback chain: frame 1 uses your reference, each later frame edits the previous one "
                        "(the morph compounds and evolves).\n"
                        "⚠ With this ON, keep Strength low — high strength compounds every frame and causes "
                        "distortion / low-quality results. Recommended max ≈ 0.4 in this mode.")
-        tk.Label(_tru, text="Max MP", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self._royale_travel_maxmp_lbl = tk.Label(_tru, text="Max MP", bg=_sbg, fg=COLORS["text_muted"])
+        self._royale_travel_maxmp_lbl.pack(side=tk.LEFT, padx=(16, 3))
         self.royale_travel_ref_mp_var = tk.StringVar(value=self.last_used.get("royale_travel_ref_mp", "0.2"))
         _trmp = ttk.Entry(_tru, textvariable=self.royale_travel_ref_mp_var, width=5)
         _trmp.pack(side=tk.LEFT)
@@ -10785,22 +10791,26 @@ class LoRATrainerGUI:
             variable=self.royale_pt_use_epoch_ref_var,
             command=self._royale_pt_toggle_ref_widgets)
         self._royale_pt_useepoch_cb.pack(side=tk.LEFT)
-        tk.Label(_ptu, text="Strength", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self._royale_pt_ref_strength_lbl = tk.Label(_ptu, text="Strength", bg=_sbg, fg=COLORS["text_muted"])
+        self._royale_pt_ref_strength_lbl.pack(side=tk.LEFT, padx=(16, 3))
         self.royale_pt_ref_strength_var = tk.StringVar(
             value=self.last_used.get("royale_pt_ref_strength", "1.0"))
         _ptse = ttk.Entry(_ptu, textvariable=self.royale_pt_ref_strength_var, width=5)
         _ptse.pack(side=tk.LEFT)
+        self._royale_pt_ref_strength_entry = _ptse
         ToolTip(_ptse, "How strongly the reference anchors the morph.\n"
                        "1.0 is the right default for prompt travel — this is the edit model working as "
                        "intended: the reference holds the subject at full strength while the prompt does "
                        "the editing. Lower only if you want the prompt to override the reference more. 0 = off.")
         _pseq = ttk.Checkbutton(_ptu, text="Sequential reference", variable=self.royale_pt_seq_ref_var)
+        self._royale_pt_seq_cb = _pseq
         _pseq.pack(side=tk.LEFT, padx=(16, 0))
         ToolTip(_pseq, "Feedback chain: frame 1 uses your reference, each later frame edits the previous one.\n"
                        "⚠ With this ON, high Strength compounds every frame and can cause distortion / low quality "
                        "over a long run. Keep Strength modest (≈0.4) — or turn on 'Anchor to original' below, which "
                        "re-injects the clean reference each frame and lets you run higher Strength safely.")
-        tk.Label(_ptu, text="Max MP", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 3))
+        self._royale_pt_maxmp_lbl = tk.Label(_ptu, text="Max MP", bg=_sbg, fg=COLORS["text_muted"])
+        self._royale_pt_maxmp_lbl.pack(side=tk.LEFT, padx=(16, 3))
         self.royale_pt_ref_mp_var = tk.StringVar(value=self.last_used.get("royale_pt_ref_mp", "0.2"))
         _ptmp = ttk.Entry(_ptu, textvariable=self.royale_pt_ref_mp_var, width=5)
         _ptmp.pack(side=tk.LEFT)
@@ -10811,10 +10821,12 @@ class LoRATrainerGUI:
             value=bool(self.last_used.get("royale_pt_anchor", True)))
         ttk.Checkbutton(_ptsq, text="Anchor to original",
                         variable=self.royale_pt_anchor_var).pack(side=tk.LEFT, padx=(14, 0))
-        tk.Label(_ptsq, text="Anchor str", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self._royale_pt_anchor_str_lbl = tk.Label(_ptsq, text="Anchor str", bg=_sbg, fg=COLORS["text_muted"])
+        self._royale_pt_anchor_str_lbl.pack(side=tk.LEFT, padx=(8, 3))
         self.royale_pt_anchor_str_var = tk.StringVar(
             value=self.last_used.get("royale_pt_anchor_str", "1.0"))
         _ptast = ttk.Entry(_ptsq, textvariable=self.royale_pt_anchor_str_var, width=5)
+        self._royale_pt_anchor_str_entry = _ptast
         _ptast.pack(side=tk.LEFT)
         ToolTip(_ptast, "With 'Anchor to original' on, every frame also references the ORIGINAL image at this "
                         "strength alongside the previous frame. The original re-injects clean identity/detail "
@@ -11075,6 +11087,9 @@ class LoRATrainerGUI:
         # Cards that only make sense with a folder of epochs (hidden in Single-LoRA mode).
         self._royale_folder_only_cards = {cf, exp, grid_card, like, promote}
         self._royale_apply_mode()
+
+        # Apply the persisted family (krea2 hides the Klein-only reference-latent knobs).
+        self._apply_royale_family_ui(str(self.royale_family_var.get()) == "krea2")
 
         # Scan the pre-filled output folder so the count shows on first open.
         try:
@@ -11383,9 +11398,53 @@ class LoRATrainerGUI:
             return
         self._royale_unload()
         self.royale_engine = None
+        self._apply_royale_family_ui(fam == "krea2")
         self.royale_status_var.set(
             f"Switched to {'Krea 2 (Turbo previews)' if fam == 'krea2' else 'Klein 9B (Distilled previews)'}. "
             f"Pick a source and render.")
+
+    def _apply_royale_family_ui(self, is_krea2):
+        """Krea 2's reference goes through the Qwen3-VL vision path — a static per-frame anchor with
+        no strength dial and no latent feedback chain. So hide the Klein-only reference-latent knobs
+        (ref Strength on Setup + both travel cards, the Sequential-reference checkboxes, and the
+        prompt-travel Anchor-strength) in Krea 2 mode. The reference picker, Max MP and 'Anchor to
+        original' (which maps to 'keep the original as each frame's vision reference') stay.
+
+        Specs are (widget_attr, pack_kwargs, before_anchor_attr) restored verbatim on the klein
+        path; ordered so each before-anchored group re-packs in its original left-to-right order."""
+        specs = [
+            ("_royale_ref_strength_lbl", dict(side=tk.LEFT, padx=(8, 3)), None),
+            ("_royale_ref_strength_entry", dict(side=tk.LEFT), None),
+            ("_royale_travel_ref_strength_lbl", dict(side=tk.LEFT, padx=(16, 3)), "_royale_travel_maxmp_lbl"),
+            ("_royale_travel_ref_strength_entry", dict(side=tk.LEFT), "_royale_travel_maxmp_lbl"),
+            ("_royale_travel_seq_cb", dict(side=tk.LEFT, padx=(16, 0)), "_royale_travel_maxmp_lbl"),
+            ("_royale_pt_ref_strength_lbl", dict(side=tk.LEFT, padx=(16, 3)), "_royale_pt_maxmp_lbl"),
+            ("_royale_pt_ref_strength_entry", dict(side=tk.LEFT), "_royale_pt_maxmp_lbl"),
+            ("_royale_pt_seq_cb", dict(side=tk.LEFT, padx=(16, 0)), "_royale_pt_maxmp_lbl"),
+            ("_royale_pt_anchor_str_lbl", dict(side=tk.LEFT, padx=(8, 3)), None),
+            ("_royale_pt_anchor_str_entry", dict(side=tk.LEFT), None),
+        ]
+        for attr, kwargs, anchor_attr in specs:
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            if is_krea2:
+                w.pack_forget()
+            elif w.winfo_manager() == "":
+                anchor = getattr(self, anchor_attr, None) if anchor_attr else None
+                kw = dict(kwargs)
+                if anchor is not None and anchor.winfo_manager() != "":
+                    kw["before"] = anchor
+                w.pack(**kw)
+        # Krea 2 has no sequential latent chain — force the (now-hidden) flags off so each travel
+        # frame takes the non-sequential path in _royale_apply_travel_ref (the selected image as a
+        # per-frame vision reference) instead of dropping the reference for a prev-latent that the
+        # Krea 2 engine ignores.
+        if is_krea2:
+            for v in ("royale_travel_seq_ref_var", "royale_pt_seq_ref_var"):
+                var = getattr(self, v, None)
+                if var is not None:
+                    var.set(False)
 
     def _royale_validate_models(self):
         """Fast main-thread pre-flight before a render: verify the model paths exist,

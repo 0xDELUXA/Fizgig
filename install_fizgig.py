@@ -3,8 +3,8 @@
 Fizgig Installer
 ================
 Sets up Fizgig with its own Python virtual environment.
-Installs PyTorch built against CUDA 12.8 — required for Klein 9B training, preview
-rendering, profiling, extraction, and Repair Studio on NVIDIA GPUs.
+Installs PyTorch built against CUDA 12.8 — required for Klein 9B and Krea 2 training,
+preview rendering, profiling, extraction, and Repair Studio on NVIDIA GPUs.
 
 Features:
 - Creates isolated venv for Fizgig dependencies
@@ -153,7 +153,7 @@ if torch.cuda.is_available():
         sys.exit(1)
 else:
     print("WARN PyTorch installed but torch.cuda.is_available() is False.")
-    print("     Klein 9B training needs a CUDA-capable GPU.")
+    print("     Fizgig training (Klein 9B / Krea 2) needs a CUDA-capable GPU.")
     print("     If you have one, update your NVIDIA driver to 555+ and re-run this installer.")
     sys.exit(1)
 '''
@@ -286,7 +286,7 @@ def print_summary():
 
 
 def main():
-    print_header("Fizgig Installer")
+    print_header("Fizgig Installer — Klein 9B & Krea 2 LoRA Workbench")
     print(f"Installation directory: {SCRIPT_DIR}")
 
     # Step 1: Check Python version

@@ -657,7 +657,7 @@ PRESETS = {
 class LoRATrainerGUI:
     def __init__(self, master):
         self.master = master
-        master.title("Fizgig — Klein 9B LoRA Studio")
+        master.title("Fizgig — Klein 9B & Krea 2 LoRA Studio")
         master.geometry("1360x1124")  # wide enough that the IDLE/BUSY light clears the last tab ("Preferences"); +100 height for the bottom status bar
         master.minsize(1180, 900)  # keeps the tab row clear of the status light + tab content not cut off
         master.configure(bg=BG_COLOR)
@@ -1932,7 +1932,7 @@ class LoRATrainerGUI:
             lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
 
         heading("Fizgig", 22)
-        tk.Label(pad, text="Klein 9B LoRA Studio — by Peter Neill",
+        tk.Label(pad, text="Klein 9B & Krea 2 LoRA Studio — by Peter Neill",
                  font=(FONT_FAMILY, 11), fg=COLORS["text_secondary"],
                  bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 14))
 
@@ -2071,7 +2071,7 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 22, "bold"),
                  fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(anchor=tk.W)
         tk.Label(container,
-                 text="A focused, local trainer and workbench for Flux 2 Klein 9B LoRAs — "
+                 text="A focused, local trainer and workbench for Flux 2 Klein 9B and Krea 2 LoRAs — "
                       "train, profile, repair, explore, and extract, all in one place.",
                  font=(FONT_FAMILY, 11),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_deep"],

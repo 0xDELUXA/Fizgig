@@ -109,6 +109,7 @@ class RepairEngine:
         self._turbo_enabled: bool = False
         self._act_cache: Optional[dict] = None       # timestep_idx → ActivationCacheEntry
         self._act_cache_key: Optional[tuple] = None   # (primary_path, donor_path, seed, prompt, w, h)
+        self._act_cache_state: Optional[SliderState] = None  # the state the cache reflects (resume diff)
 
         # Prompt encoding cache — avoids reloading TE + re-encoding on slider-only changes
         self._prompt_cache_key: Optional[tuple] = None   # (prompt, primary_path)
@@ -356,13 +357,16 @@ class RepairEngine:
         """Release all cached activation tensors."""
         self._act_cache = None
         self._act_cache_key = None
+        self._act_cache_state = None
 
-    def _compute_resume_point(self) -> Optional[tuple]:
-        """From _changed_blocks, find the earliest block to resume from."""
-        if not self._changed_blocks:
+    def _compute_resume_point(self, changed) -> Optional[tuple]:
+        """Earliest block to resume from, given the list of changed block ids (a state diff).
+        Doubles run before singles, so any changed double resumes from that double; otherwise
+        the earliest changed single."""
+        if not changed:
             return None
-        doubles = sorted(int(b.split("_")[1]) for b in self._changed_blocks if b.startswith("double_"))
-        singles = sorted(int(b.split("_")[1]) for b in self._changed_blocks if b.startswith("single_"))
+        doubles = sorted(int(b.split("_")[1]) for b in changed if b.startswith("double_"))
+        singles = sorted(int(b.split("_")[1]) for b in changed if b.startswith("single_"))
         if doubles:
             return ("double", doubles[0])
         if singles:
@@ -387,9 +391,10 @@ class RepairEngine:
                 self.donor_network.set_module_multiplier_by_pattern(pat, bs.donor_strength, target="unet")
 
     def mark_blocks_changed(self, block_ids: List[str]) -> None:
-        """v2 hook — UI calls this BEFORE generate_preview with diffed block ids.
-        v1: noop (kept on the engine, not on SliderState, so presets stay clean)."""
-        self._changed_blocks.update(block_ids)
+        # No-op compatibility shim: the resume point is now derived from a state diff against
+        # _act_cache_state at render time (race-free), not a mutable changed-set that could be
+        # cleared mid-render and drop edits made while a preview was in flight.
+        pass
 
     # ------------------------------------------------------------------
     # Generation — the single preview entry point (v2 replaces body only)
@@ -753,6 +758,10 @@ class RepairEngine:
                      state.prompt, width, height,
                      state.ref_image_path, round(float(state.ref_megapixels), 4),
                      round(float(state.ref_strength), 4))
+        # Resume point from a STATE DIFF against what the cache was built from — race-free, so
+        # edits made while a previous render was in flight are never dropped.
+        changed = (state.diff_blocks(self._act_cache_state)
+                   if self._act_cache_state is not None else None)
         can_use_cache = (
             self._turbo_enabled
             and pipeline.is_distilled
@@ -760,12 +769,12 @@ class RepairEngine:
             and not bypass_cache
             and self._act_cache is not None
             and self._act_cache_key == cache_key
-            and self._changed_blocks
+            and changed
         )
         # No VRAM pre-check — the try/except around forward_cached() handles
         # OOM gracefully by falling back to full forward.
 
-        resume_point = self._compute_resume_point() if can_use_cache else None
+        resume_point = self._compute_resume_point(changed) if can_use_cache else None
         if resume_point:
             dlog(f"Turbo resume from {resume_point[0]}_{resume_point[1]}")
         elif self._turbo_enabled and pipeline.is_distilled:
@@ -831,10 +840,11 @@ class RepairEngine:
                 x = x + (t_prev - t_curr) * pred
                 dlog(f"  x after step: {_stats(x)}")
 
-            # Store cache for next preview
+            # Store cache for next preview (+ the state it reflects, for the resume diff)
             if self._turbo_enabled and not turbo_fallback and new_cache:
                 self._act_cache = new_cache
                 self._act_cache_key = cache_key
+                self._act_cache_state = state.copy()
         elif has_ref:
             # Base + CFG with a reference: the ref conditions the POSITIVE pass
             # only (uncond stays ref-free), mirroring ComfyUI's ReferenceLatent.
@@ -901,8 +911,6 @@ class RepairEngine:
         except Exception:
             logger.exception("Failed to write diagnostic log")
 
-        # v2 hook: clear after preview so next mark_blocks_changed accumulates fresh.
-        self._changed_blocks.clear()
         return img
 
     def generate_baseline(self, state: SliderState) -> Image.Image:

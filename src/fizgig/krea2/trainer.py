@@ -11,6 +11,7 @@ import gc
 import json
 import logging
 import os
+import sys
 from multiprocessing import Value
 
 from tqdm import tqdm
@@ -105,6 +106,54 @@ class _Krea2Collator:
         ds = wi.dataset if wi is not None else self.dataset
         ds.set_current_epoch(self.shared_epoch.value)
         return examples[0]
+
+
+def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, global_step,
+                         network_dim, network_alpha, dtype, extra=None):
+    """Save a resumable training-state dir matching Klein's naming: <name>-<NNNNNN>-state/.
+
+    NNNNNN is the number of COMPLETED epochs (= the next 0-indexed epoch to run). The dir
+    holds the LoRA weights, the optimizer state, RNG states, and a small JSON. The GUI's
+    _detect_latest_state_dir finds the highest-numbered one and passes it to --resume."""
+    state_dir = os.path.join(output_dir, f"{output_name}-{epoch:06d}-state")
+    os.makedirs(state_dir, exist_ok=True)
+    _save_lora(network, os.path.join(state_dir, "lora.safetensors"), network_dim, network_alpha, dtype)
+    torch.save(optimizer.state_dict(), os.path.join(state_dir, "optimizer.pt"))
+    rng = {"torch": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        rng["cuda"] = torch.cuda.get_rng_state_all()
+    torch.save(rng, os.path.join(state_dir, "rng.pt"))
+    meta = {"epoch": epoch, "global_step": global_step}
+    if extra:
+        meta.update(extra)
+    with open(os.path.join(state_dir, "training_state.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    logger.info(f"[state] saved -> {state_dir}")
+    return state_dir
+
+
+def _load_training_state(state_dir, network, optimizer, *, device):
+    """Restore network + optimizer + RNG from a state dir. Returns (start_epoch, global_step, meta)."""
+    from safetensors.torch import load_file
+    network.load_state_dict(load_file(os.path.join(state_dir, "lora.safetensors")), strict=False)
+    opt_path = os.path.join(state_dir, "optimizer.pt")
+    if os.path.exists(opt_path):
+        optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+    rng_path = os.path.join(state_dir, "rng.pt")
+    if os.path.exists(rng_path):
+        try:
+            rng = torch.load(rng_path)
+            torch.set_rng_state(rng["torch"].to("cpu", dtype=torch.uint8) if hasattr(rng["torch"], "to") else rng["torch"])
+            if "cuda" in rng and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng["cuda"])
+        except Exception:
+            logger.warning("[state] RNG restore failed; continuing with fresh RNG", exc_info=True)
+    meta_path = os.path.join(state_dir, "training_state.json")
+    meta = {}
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    return int(meta.get("epoch", 0)), int(meta.get("global_step", 0)), meta
 
 
 def _save_lora(network, path, network_dim, network_alpha, dtype):
@@ -221,6 +270,7 @@ def train_krea2(
     sample_height: int = 512,
     sample_steps: int = 8,
     sample_seed: int = 42,
+    resume_state_dir: str = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ):
@@ -276,16 +326,24 @@ def train_krea2(
 
     os.makedirs(output_dir, exist_ok=True)
     global_step = 0
+    start_epoch = 0
+    # Resume: restore LoRA + optimizer + RNG + (start_epoch, global_step) from a saved state dir.
+    if resume_state_dir and os.path.isdir(resume_state_dir):
+        start_epoch, global_step, _ = _load_training_state(resume_state_dir, network, optimizer, device=device)
+        logger.info(f"[resume] from {resume_state_dir}: continuing at epoch {start_epoch + 1}/{max_train_epochs} "
+                    f"(global_step {global_step})")
     try:
         steps_per_epoch = len(loader)
     except TypeError:
         steps_per_epoch = group.num_train_items
+    pause_flag = os.path.join(output_dir, ".pause_requested")
     # Progress + loss display exactly as Klein: one continuous tqdm bar over all steps with
     # a smoothed avr_loss in the postfix (the raw per-step loss is very noisy — batch size 1
     # plus a random flow-matching timestep each step — so the moving average is the signal).
     loss_recorder = LossRecorder()
-    progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, desc="steps", smoothing=0)
-    for epoch in range(max_train_epochs):
+    progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
+                        desc="steps", smoothing=0)
+    for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         for i, batch in enumerate(loader):
             loss = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
@@ -341,6 +399,22 @@ def train_krea2(
                     dit.to(device)
             dit.train()
             network.train()
+
+        # Graceful pause (GUI wrote <output_dir>/.pause_requested): save a full resumable
+        # state at this epoch boundary and exit cleanly so the GPU frees. The GUI detects the
+        # clean exit, records the paused state, and offers Resume. Same contract as Klein.
+        if os.path.exists(pause_flag):
+            logger.info(f"[pause] requested — saving state at epoch {epoch + 1} and exiting cleanly")
+            _save_training_state(output_dir, output_name, network, optimizer,
+                                 epoch=epoch + 1, global_step=global_step,
+                                 network_dim=network_dim, network_alpha=network_alpha, dtype=dtype)
+            try:
+                os.remove(pause_flag)
+            except Exception:
+                pass
+            progress_bar.close()
+            logger.info("[pause] state saved — exiting (exit 0).")
+            sys.exit(0)
 
     progress_bar.close()
     out = os.path.join(output_dir, f"{output_name}.safetensors")

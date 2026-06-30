@@ -13338,9 +13338,13 @@ class LoRATrainerGUI:
         if self.sample_enabled_var.get():
             self.start_samples_watcher()
 
-        # Clear cache directory before training
+        # Clear cache directory before training — but NOT when resuming: the cache is already
+        # built and we skip re-caching, so wiping it would leave the resumed run with no latents
+        # /text. Read the resume path from the entry (the live source of truth at this point).
+        _resume_entry = self.entries.get("RESUME_TRAINING")
+        _is_resuming_clear = bool(_resume_entry and _resume_entry.get().strip())
         cache_dir = self.dataset_cache_dir_var.get().strip()
-        if cache_dir and os.path.isdir(cache_dir):
+        if cache_dir and os.path.isdir(cache_dir) and not _is_resuming_clear:
             try:
                 import shutil
                 for item in os.listdir(cache_dir):
@@ -13903,6 +13907,10 @@ class LoRATrainerGUI:
             "--seed", str(self.settings["SEED"]),
             "--discrete_flow_shift", "2.5",
         ]
+        # Resume from a saved <name>-NNNNNN-state dir (set by the Resume button / pause flow).
+        resume_path = (self.settings.get("RESUME_TRAINING") or "").strip()
+        if resume_path:
+            cmd += ["--resume", resume_path]
         # FP8 base (dynamic-quantize the RAW model) is the default — fits lower-VRAM cards.
         # Unchecking "FP8 Base" trains the base in bf16 (26 GB, big-card / heavy-swap only).
         if not self.settings.get("FP8", True):
@@ -13945,19 +13953,16 @@ class LoRATrainerGUI:
         """Show/hide Pause and Resume buttons based on self.training_state."""
         if not hasattr(self, "training_state"):
             self.training_state = "idle"
-        # Krea 2's native trainer doesn't save_state (no optimizer/scheduler/RNG/dataloader
-        # snapshot), so graceful Pause/Resume can't work yet — only Start/Stop apply. Deferred,
-        # not removed: when krea2_train gains state saving + --resume, drop this guard.
-        krea2 = self._is_krea2_arch()
-        # Pause: visible while running (Klein only)
-        if self.training_state == "running" and not krea2:
+        # Pause: visible while running (Krea 2 now saves full state at the epoch boundary, so
+        # graceful Pause/Resume works the same as Klein).
+        if self.training_state == "running":
             try: self._pause_training_btn.pack(side=tk.LEFT, padx=(0, 12), after=self._start_training_btn)
             except Exception: pass
         else:
             try: self._pause_training_btn.pack_forget()
             except Exception: pass
-        # Resume: visible while paused (Klein only — Krea 2 can't reach a paused state anyway)
-        if self.training_state == "paused" and not krea2:
+        # Resume: visible while paused
+        if self.training_state == "paused":
             try: self._resume_training_btn.pack(side=tk.LEFT, padx=(0, 12), after=self._start_training_btn)
             except Exception: pass
         else:

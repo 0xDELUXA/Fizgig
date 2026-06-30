@@ -9057,6 +9057,14 @@ class LoRATrainerGUI:
                                                    before=self._repair_sliders_container)
         except Exception:
             pass
+        # Turbo Preview (activation cache) is Klein-only — krea always does the full forward.
+        try:
+            if krea2:
+                self._repair_turbo_chk.pack_forget()
+            elif self._repair_turbo_chk.winfo_manager() == "":
+                self._repair_turbo_chk.pack(side=tk.RIGHT)
+        except Exception:
+            pass
 
     def _on_repair_family_changed(self):
         """Family toggle: reset any loaded session (engine type changes), reset the slider
@@ -9228,12 +9236,13 @@ class LoRATrainerGUI:
                                  values=["256", "384", "512", "768"], state="readonly", width=6)
         res_combo.pack(side=tk.LEFT)
         res_combo.bind("<<ComboboxSelected>>", lambda e: self._on_preview_param_changed())
-        # Turbo Preview toggle
+        # Turbo Preview toggle (Klein activation cache). Hidden in Krea 2 mode — krea's 8-step
+        # denoise makes the per-step cache too lossy, so Krea 2 always does the full forward.
         self.repair_turbo_var = tk.BooleanVar(value=True)
-        turbo_chk = ttk.Checkbutton(params_frame, text="Turbo Preview",
+        self._repair_turbo_chk = ttk.Checkbutton(params_frame, text="Turbo Preview",
                                      variable=self.repair_turbo_var,
                                      command=self._on_turbo_toggled)
-        turbo_chk.pack(side=tk.RIGHT)
+        self._repair_turbo_chk.pack(side=tk.RIGHT)
         r += 1
 
         # Reference image row (Klein is an edit model — condition the preview on a

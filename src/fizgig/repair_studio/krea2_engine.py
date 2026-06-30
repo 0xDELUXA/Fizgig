@@ -176,9 +176,16 @@ class Krea2RepairEngine:
     def generate_preview(self, state, *, seed: Optional[int] = None,
                          prompt: Optional[str] = None, width: Optional[int] = None,
                          height: Optional[int] = None, steps: Optional[int] = None) -> Image.Image:
-        """Apply the slider state and render one preview with the live LoRA(s). With Turbo
-        Preview on, reuses per-step activation cache so a late-block tweak skips earlier blocks.
-        Default step count follows model_kind (8 Turbo / 20 RAW)."""
+        """Apply the slider state and render one preview with the live LoRA(s). Always a full
+        forward — the per-step activation cache (forward_cached) is NOT used here.
+
+        Why: across a multi-step denoise, img is chained (img_{t+1} = img_t + dt*model(img_t)).
+        A block tweak changes step 0's output, which changes step 1's input img, which makes the
+        cached prefix of EVERY later step stale. Reusing it (Klein's "approximate" cache) is
+        visually fine at Klein's 4 steps but compounds badly over krea's 8 — the symptom was
+        tweaks only partially registering. forward_cached stays on the model (correct within a
+        single pass, and a future multi-step-aware cache could use it), but the live preview does
+        the correct full forward, which on the 8-step Turbo is already fast (~7 s)."""
         self.apply_state(state)
         prompt = prompt if prompt is not None else state.prompt
         seed = seed if seed is not None else state.seed
@@ -188,26 +195,6 @@ class Krea2RepairEngine:
         txt, txtmask = self._encode_prompt(prompt)
         txt = txt.to(self.device)
         txtmask = txtmask.to(self.device)
-
-        if getattr(self, "_turbo_enabled", True):
-            key = (self.primary_path, self.donor_path, seed, prompt, width, height)
-            if key != self._act_cache_key:
-                # Prompt/seed/res/LoRA changed — the cached activations are stale; full pass.
-                self._invalidate_activation_cache()
-                resume_from = None
-            else:
-                resume_from = self._resume_from_diff(state)
-            try:
-                with torch.no_grad():
-                    img, new_cache = self._sample_cached(txt, txtmask, seed=seed, width=width,
-                                                         height=height, steps=steps, resume_from=resume_from)
-                self._act_cache = new_cache
-                self._act_cache_key = key
-                self._act_cache_state = state.copy()  # the state the cache now reflects
-                return img
-            except Exception:
-                logger.warning("krea2 Turbo-cache preview failed; full forward fallback", exc_info=True)
-                self._invalidate_activation_cache()
 
         from fizgig.krea2 import sampling
         with torch.no_grad():

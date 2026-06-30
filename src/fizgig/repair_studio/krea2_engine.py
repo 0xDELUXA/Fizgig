@@ -1,0 +1,201 @@
+"""Repair-Studio engine for Krea 2 — the parallel of `engine.RepairEngine`.
+
+Klein's RepairEngine inlines a 270-line Klein denoise loop that doesn't transfer; Krea 2's
+`sampling.sample` is a complete sampler, so the Krea 2 preview is simpler: apply the slider
+state to the LoRA networks (the model-agnostic `set_module_*_by_pattern` API) and call
+`sampling.sample`. Previews always render on the fp8 Turbo (8-step, CFG-free). The per-block
+slider config is the shared `SliderState`; only the block ids/regex are Krea 2-specific
+(`krea2_blocks`).
+
+Public surface mirrors RepairEngine so the Repair Studio UI can drive either: `ensure_pipeline`,
+`load_primary`, `load_donor` / `unload_donor`, `apply_state`, `generate_preview`, `reset`, and
+the `primary_network` / `donor_network` / `*_block_ids` / `*_path` / `primary_hash` attributes,
+plus a `pipeline` holder exposing `is_loaded`.
+"""
+
+import gc
+import logging
+from typing import Optional, Set
+
+import torch
+from PIL import Image
+
+from fizgig.repair_studio.krea2_blocks import block_regex_krea2, extract_block_ids_krea2
+
+logger = logging.getLogger(__name__)
+
+
+class _Loaded:
+    """Tiny stand-in for KleinInferencePipeline.is_loaded so the shared UI checks
+    `engine.pipeline.is_loaded` uniformly across both engines."""
+
+    def __init__(self):
+        self.is_loaded = True
+
+
+def _apply_lora(target, sd, multiplier, device, dtype):
+    """Normalize foreign formats, build the network, apply it live, load the weights. Returns
+    the network. Mirrors the verified Context-LoRA / preview path (ensure_kohya -> apply_to ->
+    load_state_dict — create_network_from_weights only builds STRUCTURE, the values must be
+    loaded or lora_up stays 0)."""
+    from fizgig.networks.lora import create_network_from_weights, ensure_kohya_lora_state_dict
+    sd = ensure_kohya_lora_state_dict(sd)
+    net = create_network_from_weights(None, float(multiplier), sd, None, target, for_inference=True)
+    net.apply_to(text_encoders=None, unet=target, apply_text_encoder=False, apply_unet=True)
+    net.load_state_dict(sd, strict=False)
+    net.to(device=device, dtype=dtype).eval()
+    return net
+
+
+class Krea2RepairEngine:
+    def __init__(self):
+        self.pipeline: Optional[_Loaded] = None
+        self.turbo = None          # fp8 Turbo DiT
+        self.ae = None             # Qwen-Image VAE (kept on CPU; sampling moves it for decode)
+        self.te_path: Optional[str] = None
+        self.device = "cuda"
+        self.dtype = torch.bfloat16
+
+        self.primary_network = None
+        self.donor_network = None
+        self.primary_path: Optional[str] = None
+        self.donor_path: Optional[str] = None
+        self.primary_block_ids: Set[str] = set()
+        self.donor_block_ids: Set[str] = set()
+        self.primary_hash: Optional[str] = None
+
+        # Encoded-prompt cache: prompt -> (txt, txtmask) on CPU. Slider tweaks don't change the
+        # prompt, so the 8 GB TE only loads when the prompt actually changes.
+        self._prompt_cache_key: Optional[str] = None
+        self._prompt_cache = None
+
+    # ----- pipeline + LoRA loading -------------------------------------------
+    def ensure_pipeline(self, turbo_path: str, vae_path: str, text_encoder_path: str,
+                        device: str = "cuda", **_ignored) -> None:
+        """Load the fp8 Turbo + VAE once (TE is loaded on demand per prompt-encode)."""
+        if self.pipeline is not None and self.pipeline.is_loaded:
+            return
+        from fizgig.krea2.utils import load_krea2_dit
+        from fizgig.krea2.vae_loader import load_vae
+        self.device = device
+        self.te_path = text_encoder_path
+        self.turbo = load_krea2_dit(turbo_path, device=device, dtype=self.dtype)  # prequant fp8 auto-detected
+        self.ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
+        self.turbo.eval()
+        self.pipeline = _Loaded()
+        logger.info("Krea2 Repair engine ready (turbo=%s)", turbo_path)
+
+    def load_primary(self, path: str) -> None:
+        if self.pipeline is None or not self.pipeline.is_loaded:
+            raise RuntimeError("Pipeline not loaded; call ensure_pipeline() first.")
+        if self.primary_network is not None:
+            raise RuntimeError("Primary already loaded — call reset() to swap.")
+        from safetensors.torch import load_file
+        self.primary_network = _apply_lora(self.turbo, load_file(path), 1.0, self.device, self.dtype)
+        self.primary_path = path
+        self.primary_block_ids = extract_block_ids_krea2(self.primary_network)
+        try:
+            from fizgig.profiler.visualize import compute_lora_hash
+            self.primary_hash = compute_lora_hash(path)
+        except Exception:
+            self.primary_hash = None
+        logger.info("Krea2 primary loaded: %s (%d blocks)", path, len(self.primary_block_ids))
+
+    def load_donor(self, path: str) -> None:
+        if self.primary_network is None:
+            raise RuntimeError("Load primary LoRA before donor.")
+        if self.donor_network is not None:
+            raise RuntimeError("Donor already loaded — unload_donor() or reset() first.")
+        from safetensors.torch import load_file
+        net = _apply_lora(self.turbo, load_file(path), 1.0, self.device, self.dtype)
+        net.set_enabled(False)  # donor blocks are opt-in per-slider
+        self.donor_network = net
+        self.donor_path = path
+        self.donor_block_ids = extract_block_ids_krea2(net)
+        logger.info("Krea2 donor loaded: %s (%d blocks)", path, len(self.donor_block_ids))
+
+    def unload_donor(self) -> None:
+        if self.donor_network is not None:
+            self.donor_network.set_enabled(False)
+            self.donor_network = None
+            self.donor_path = None
+            self.donor_block_ids = set()
+
+    # ----- slider state ------------------------------------------------------
+    def apply_state(self, state) -> None:
+        """Push the per-block slider config into the live networks (regex-based, no reload)."""
+        if self.primary_network is None:
+            return
+        for bid, bs in state.blocks.items():
+            try:
+                pat = block_regex_krea2(bid)
+            except ValueError:
+                continue
+            self.primary_network.set_module_enabled_by_pattern(pat, bool(bs.primary_enabled))
+            self.primary_network.set_module_multiplier_by_pattern(pat, float(bs.primary_strength))
+            if self.donor_network is not None:
+                self.donor_network.set_module_enabled_by_pattern(pat, bool(bs.donor_enabled))
+                self.donor_network.set_module_multiplier_by_pattern(pat, float(bs.donor_strength))
+
+    # ----- preview -----------------------------------------------------------
+    def _encode_prompt(self, prompt: str):
+        """Encode the prompt once (load TE -> encode -> free), cached on the prompt string."""
+        if self._prompt_cache_key == prompt and self._prompt_cache is not None:
+            return self._prompt_cache
+        from fizgig.krea2.utils import load_krea2_text_encoder
+        from fizgig.krea2 import sampling
+        enc = load_krea2_text_encoder(self.te_path, dtype=self.dtype, device=self.device)
+        txt, txtmask, _, _ = sampling.encode_prompts(enc, [prompt], cfg=False)
+        del enc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self._prompt_cache_key = prompt
+        self._prompt_cache = (txt.cpu(), txtmask.cpu())
+        return self._prompt_cache
+
+    def generate_preview(self, state, *, seed: Optional[int] = None,
+                         prompt: Optional[str] = None, width: Optional[int] = None,
+                         height: Optional[int] = None, steps: int = 8) -> Image.Image:
+        """Apply the slider state and render one preview on the Turbo with the live LoRA(s)."""
+        from fizgig.krea2 import sampling
+        self.apply_state(state)
+        prompt = prompt if prompt is not None else state.prompt
+        seed = seed if seed is not None else state.seed
+        width = width or state.preview_width
+        height = height or state.preview_height
+        txt, txtmask = self._encode_prompt(prompt)
+        txt = txt.to(self.device)
+        txtmask = txtmask.to(self.device)
+        with torch.no_grad():
+            imgs = sampling.sample(self.turbo, self.ae, txt, txtmask, untxt=None, untxtmask=None,
+                                   device=self.device, dtype=self.dtype, width=width, height=height,
+                                   steps=steps, cfg_scale=1.0, mu=1.15, seed=seed)
+        return imgs[0]
+
+    # ----- teardown ----------------------------------------------------------
+    def reset(self) -> None:
+        """Full unload — drop networks (break forward-hook ref cycles) then the Turbo + VAE."""
+        for net in (self.primary_network, self.donor_network):
+            if net is not None:
+                try:
+                    for lora in net.unet_loras:
+                        lora.org_forward = None
+                    net.unet_loras.clear()
+                except Exception:
+                    pass
+        self.primary_network = None
+        self.donor_network = None
+        self.turbo = None
+        self.ae = None
+        self.pipeline = None
+        self.primary_path = None
+        self.donor_path = None
+        self.primary_block_ids = set()
+        self.donor_block_ids = set()
+        self.primary_hash = None
+        self._prompt_cache_key = None
+        self._prompt_cache = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

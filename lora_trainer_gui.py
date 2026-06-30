@@ -7442,11 +7442,24 @@ class LoRATrainerGUI:
         self._explorer_thumbnails[f"variant_{idx}"] = tk_img
         lbl.configure(image=tk_img, text="")
 
+    @staticmethod
+    def _explorer_block_sort_key(b):
+        """Stable ordering for block ids of either family. Klein ids are `<prefix>_<n>`
+        (double_0, single_23); Krea 2 ids can be `<prefix>_<prefix>_<n>` (txt_lw_0, txt_rf_1)
+        or `block_0`, plus the odd non-numeric `io`. Sort by the textual prefix then the trailing
+        integer (0 when there isn't one) — naive `int(b.split('_')[1])` crashes on 'txt_lw_0'."""
+        parts = str(b).split("_")
+        try:
+            num = int(parts[-1])
+            prefix = "_".join(parts[:-1])
+        except ValueError:
+            num, prefix = 0, str(b)
+        return (prefix, num)
+
     def _explorer_update_state_text(self, state):
         """Show the baseline's slider state as read-only text, with lock indicators."""
         lines = []
-        for bid in sorted(state.blocks.keys(),
-                          key=lambda b: (b.split("_")[0], int(b.split("_")[1]))):
+        for bid in sorted(state.blocks.keys(), key=self._explorer_block_sort_key):
             bs = state.blocks[bid]
             if not bs.primary_enabled or bs.primary_strength != 1.0:
                 en = "ON" if bs.primary_enabled else "OFF"

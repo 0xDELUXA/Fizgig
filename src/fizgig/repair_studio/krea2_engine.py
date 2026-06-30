@@ -68,22 +68,30 @@ class Krea2RepairEngine:
         # prompt, so the 8 GB TE only loads when the prompt actually changes.
         self._prompt_cache_key: Optional[str] = None
         self._prompt_cache = None
+        # Baseline render cache (LoRA at original strengths; slider tweaks don't invalidate it).
+        self._baseline_cache_key = None
+        self._baseline_cache_image: Optional[Image.Image] = None
 
     # ----- pipeline + LoRA loading -------------------------------------------
     def ensure_pipeline(self, turbo_path: str, vae_path: str, text_encoder_path: str,
-                        device: str = "cuda", **_ignored) -> None:
-        """Load the fp8 Turbo + VAE once (TE is loaded on demand per prompt-encode)."""
+                        device: str = "cuda", model_kind: str = "turbo", **_ignored) -> None:
+        """Load the preview DiT + VAE once (TE loads on demand per prompt-encode).
+
+        model_kind: 'turbo' (fp8, 8-step, CFG-free — the default) or 'raw' (the undistilled
+        base — slower, more steps). The DiT loader auto-detects pre-quant fp8 either way."""
         if self.pipeline is not None and self.pipeline.is_loaded:
             return
         from fizgig.krea2.utils import load_krea2_dit
         from fizgig.krea2.vae_loader import load_vae
         self.device = device
         self.te_path = text_encoder_path
+        self.model_kind = model_kind
+        self._default_steps = 20 if model_kind == "raw" else 8
         self.turbo = load_krea2_dit(turbo_path, device=device, dtype=self.dtype)  # prequant fp8 auto-detected
         self.ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
         self.turbo.eval()
         self.pipeline = _Loaded()
-        logger.info("Krea2 Repair engine ready (turbo=%s)", turbo_path)
+        logger.info("Krea2 Repair engine ready (%s=%s)", model_kind, turbo_path)
 
     def load_primary(self, path: str) -> None:
         if self.pipeline is None or not self.pipeline.is_loaded:
@@ -94,6 +102,7 @@ class Krea2RepairEngine:
         self.primary_network = _apply_lora(self.turbo, load_file(path), 1.0, self.device, self.dtype)
         self.primary_path = path
         self.primary_block_ids = extract_block_ids_krea2(self.primary_network)
+        self._invalidate_baseline_cache()
         try:
             from fizgig.profiler.visualize import compute_lora_hash
             self.primary_hash = compute_lora_hash(path)
@@ -156,14 +165,16 @@ class Krea2RepairEngine:
 
     def generate_preview(self, state, *, seed: Optional[int] = None,
                          prompt: Optional[str] = None, width: Optional[int] = None,
-                         height: Optional[int] = None, steps: int = 8) -> Image.Image:
-        """Apply the slider state and render one preview on the Turbo with the live LoRA(s)."""
+                         height: Optional[int] = None, steps: Optional[int] = None) -> Image.Image:
+        """Apply the slider state and render one preview with the live LoRA(s). Default step
+        count follows model_kind (8 Turbo / 20 RAW)."""
         from fizgig.krea2 import sampling
         self.apply_state(state)
         prompt = prompt if prompt is not None else state.prompt
         seed = seed if seed is not None else state.seed
         width = width or state.preview_width
         height = height or state.preview_height
+        steps = steps or getattr(self, "_default_steps", 8)
         txt, txtmask = self._encode_prompt(prompt)
         txt = txt.to(self.device)
         txtmask = txtmask.to(self.device)
@@ -172,6 +183,36 @@ class Krea2RepairEngine:
                                    device=self.device, dtype=self.dtype, width=width, height=height,
                                    steps=steps, cfg_scale=1.0, mu=1.15, seed=seed)
         return imgs[0]
+
+    def generate_baseline(self, state) -> Image.Image:
+        """Baseline = primary at default 1.0 / all enabled, donor off. Cached on
+        (primary_path, seed, prompt, w, h) — slider tweaks don't invalidate it."""
+        from fizgig.repair_studio.state import SliderState
+        key = (self.primary_path, state.seed, state.prompt,
+               state.preview_width, state.preview_height)
+        if self._baseline_cache_key == key and self._baseline_cache_image is not None:
+            return self._baseline_cache_image
+        base = SliderState.default_krea2()
+        base.seed = state.seed
+        base.prompt = state.prompt
+        base.preview_width = state.preview_width
+        base.preview_height = state.preview_height
+        img = self.generate_preview(base)
+        self._baseline_cache_key = key
+        self._baseline_cache_image = img
+        return img
+
+    def _invalidate_baseline_cache(self) -> None:
+        self._baseline_cache_key = None
+        self._baseline_cache_image = None
+
+    def _invalidate_activation_cache(self) -> None:
+        # Krea 2 has no forward_cached activation cache (8-step is already fast). No-op.
+        pass
+
+    def mark_blocks_changed(self, blocks) -> None:
+        # Activation-cache hint for Klein's Turbo Preview; Krea 2 renders full each time. No-op.
+        pass
 
     # ----- teardown ----------------------------------------------------------
     def reset(self) -> None:
@@ -196,6 +237,8 @@ class Krea2RepairEngine:
         self.primary_hash = None
         self._prompt_cache_key = None
         self._prompt_cache = None
+        self._baseline_cache_key = None
+        self._baseline_cache_image = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()

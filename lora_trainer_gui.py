@@ -8945,9 +8945,18 @@ class LoRATrainerGUI:
         outer = tk.Frame(frame, bg=COLORS["bg_deep"])
         outer.pack(fill=tk.BOTH, expand=True)
 
+        # Model family (Klein 9B / Krea 2), restored from last_used.
+        _fam = "klein"
+        try:
+            if str(self.last_used.get("repair_family", "klein")) == "krea2":
+                _fam = "krea2"
+        except Exception:
+            pass
+        self.repair_family_var = tk.StringVar(value=_fam)
         # Engine + state — lazy
         self.repair_engine = None
-        self.repair_state = SliderState.default_klein9b()
+        self.repair_state = (SliderState.default_krea2() if _fam == "krea2"
+                             else SliderState.default_klein9b())
         self.repair_block_vars = {}   # block_id -> dict(primary_chk, primary_scale, primary_lbl, donor_chk, donor_scale, donor_lbl)
         self.repair_thumbnails = {}   # GC-safe ImageTk.PhotoImage refs
         self.repair_pil_images = {"baseline": None, "tweaked": None}  # raw PIL for resize-to-fit
@@ -8999,6 +9008,7 @@ class LoRATrainerGUI:
             "Category toggles next to the donor ones bulk on/off the donor's contribution per bucket.",
         )
         self._build_repair_master_controls(master_card)
+        self._repair_master_container = master_card.master.master  # for hide/show by family
 
         # Card 4: Per-Block Sliders
         sliders_card = self._start_section_card(
@@ -9007,6 +9017,7 @@ class LoRATrainerGUI:
             "Colour bands match the Profiler's 5-bucket scheme: blue Style+Comp, teal Style/ID, green Identity, olive ID/Detail, orange Details.",
         )
         self._build_repair_slider_panel(sliders_card)
+        self._repair_sliders_container = sliders_card.master.master
 
         # Card 5: Actions
         actions_card = self._start_section_card(outer, "Actions", None)
@@ -9025,6 +9036,50 @@ class LoRATrainerGUI:
                   command=self._repair_explore_in_explorer).pack(side=tk.RIGHT)
 
         self._add_youtube_help_button(outer, "repair_studio")
+        # Sync DiT-radio labels + Master Controls visibility for the restored family.
+        self._apply_repair_family_ui()
+
+    def _apply_repair_family_ui(self):
+        """Relabel the DiT radios per family and hide Master Controls in Krea 2 mode (no
+        semantic block map yet — the per-block sliders stay as the discovery instrument)."""
+        krea2 = (self.repair_family_var.get() == "krea2")
+        if krea2:
+            self._repair_dit_radio_a.configure(text="Turbo (8-step, default)")
+            self._repair_dit_radio_b.configure(text="RAW (slow, precise)")
+        else:
+            self._repair_dit_radio_a.configure(text="Distilled (4-step, fast)")
+            self._repair_dit_radio_b.configure(text="Base (20-step, precise but slow)")
+        try:
+            if krea2:
+                self._repair_master_container.pack_forget()
+            elif self._repair_master_container.winfo_manager() == "":
+                self._repair_master_container.pack(fill=tk.X, padx=36, pady=(0, 16),
+                                                   before=self._repair_sliders_container)
+        except Exception:
+            pass
+
+    def _on_repair_family_changed(self):
+        """Family toggle: reset any loaded session (engine type changes), reset the slider
+        state + rebuild the panel for the new block layout, relabel the DiT toggle, hide/show
+        Master Controls, and persist the choice."""
+        from fizgig.repair_studio.state import SliderState
+        try:
+            self._reset_repair_session()
+        except Exception:
+            pass
+        krea2 = (self.repair_family_var.get() == "krea2")
+        self.repair_state = (SliderState.default_krea2() if krea2 else SliderState.default_klein9b())
+        # Default preview resolution per family (Krea 2 likes 1024; Klein 512).
+        self.repair_res_var.set("1024" if krea2 else "512")
+        self._build_repair_slider_panel(self._repair_sliders_parent)
+        self._apply_repair_family_ui()
+        try:
+            self.last_used["repair_family"] = self.repair_family_var.get()
+            self._save_last_used_paths()
+        except Exception:
+            pass
+        self.repair_status_var.set(
+            f"Switched to {'Krea 2' if krea2 else 'Klein 9B'}. Set a LoRA path and click Start.")
 
     def _build_repair_outer_scroll(self, tab):
         """Wrap the Repair Studio tab in a vertical scrolling canvas. Returns the
@@ -9099,17 +9154,29 @@ class LoRATrainerGUI:
 
     def _build_repair_top_controls(self, parent):
         r = 0
-        # DiT toggle
+        # Model family selector (Klein 9B / Krea 2). Krea 2 swaps the engine + model paths,
+        # rebuilds the sliders for its block layout, and hides Master Controls (no block map).
+        ttk.Label(parent, text="Model:").grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
+        fam_frame = ttk.Frame(parent)
+        fam_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W, padx=4, pady=2)
+        ttk.Radiobutton(fam_frame, text="Klein 9B", variable=self.repair_family_var, value="klein",
+                        style="Surface.TRadiobutton", command=self._on_repair_family_changed).pack(side=tk.LEFT, padx=(0, 12))
+        ttk.Radiobutton(fam_frame, text="Krea 2 (experimental)", variable=self.repair_family_var, value="krea2",
+                        style="Surface.TRadiobutton", command=self._on_repair_family_changed).pack(side=tk.LEFT)
+        r += 1
+        # DiT toggle (relabelled per family — Distilled/Base for Klein, Turbo/RAW for Krea 2)
         ttk.Label(parent, text="DiT:").grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
         self.repair_dit_choice_var = tk.StringVar(value="distilled")
         choice_frame = ttk.Frame(parent)
         choice_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W, padx=4, pady=2)
-        ttk.Radiobutton(choice_frame, text="Distilled (4-step, fast)",
+        self._repair_dit_radio_a = ttk.Radiobutton(choice_frame, text="Distilled (4-step, fast)",
                         variable=self.repair_dit_choice_var, value="distilled",
-                        style="Surface.TRadiobutton").pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Radiobutton(choice_frame, text="Base (20-step, precise but slow)",
+                        style="Surface.TRadiobutton")
+        self._repair_dit_radio_a.pack(side=tk.LEFT, padx=(0, 12))
+        self._repair_dit_radio_b = ttk.Radiobutton(choice_frame, text="Base (20-step, precise but slow)",
                         variable=self.repair_dit_choice_var, value="base",
-                        style="Surface.TRadiobutton").pack(side=tk.LEFT)
+                        style="Surface.TRadiobutton")
+        self._repair_dit_radio_b.pack(side=tk.LEFT)
         r += 1
 
         # Primary LoRA
@@ -9475,6 +9542,15 @@ class LoRATrainerGUI:
             self._schedule_preview()
 
     def _build_repair_slider_panel(self, parent):
+        # Rebuildable: clear any previous rows + their tk vars so a Klein<->Krea2 family
+        # switch rebuilds the panel cleanly (the two families have different block ids).
+        self._repair_sliders_parent = parent
+        for child in parent.winfo_children():
+            child.destroy()
+        self.repair_block_vars = {}
+        if getattr(self, "repair_family_var", None) is not None and self.repair_family_var.get() == "krea2":
+            self._build_repair_slider_panel_krea2(parent)
+            return
         # Scrollable canvas (vertical) holding two columns: double on left, single on right.
         # Bounded height (500px) so the panel stays compact inside the outer scroll
         # and the user can independently scroll all 32 rows without losing the preview.
@@ -9533,11 +9609,68 @@ class LoRATrainerGUI:
             self._build_repair_block_row(col_right, f"single_{i}", r)
             r += 1
 
-    def _build_repair_block_row(self, parent, block_id: str, row: int):
+    def _build_repair_slider_panel_krea2(self, parent):
+        """Krea 2 layout: 28 main blocks (0-13 left, 14-27 right) + the 4 txtfusion blocks.
+        Generic per-block (no semantic bucket colouring \u2014 that map doesn't exist yet)."""
+        canvas = tk.Canvas(parent, highlightthickness=0, bg=COLORS["bg_surface"], height=500)
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        inner = ttk.Frame(canvas)
+        inner_id = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner_id, width=e.width))
+
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+
+        inner.columnconfigure(0, weight=1)
+        inner.columnconfigure(1, weight=1)
+        col_left = ttk.Frame(inner)
+        col_left.grid(row=0, column=0, sticky=tk.NSEW, padx=4)
+        col_right = ttk.Frame(inner)
+        col_right.grid(row=0, column=1, sticky=tk.NSEW, padx=4)
+
+        r = 0
+        ttk.Label(col_left, text="Main Blocks 0\u201313", font=(FONT_FAMILY, 10, "bold")).grid(
+            row=r, column=0, padx=0, pady=(2, 4), sticky=tk.W)
+        r += 1
+        for i in range(14):
+            self._build_repair_block_row(col_left, f"block_{i}", r)
+            r += 1
+
+        r = 0
+        ttk.Label(col_right, text="Main Blocks 14\u201327", font=(FONT_FAMILY, 10, "bold")).grid(
+            row=r, column=0, padx=0, pady=(2, 4), sticky=tk.W)
+        r += 1
+        for i in range(14, 28):
+            self._build_repair_block_row(col_right, f"block_{i}", r)
+            r += 1
+        ttk.Label(col_right, text="Text-Fusion Blocks", font=(FONT_FAMILY, 10, "bold")).grid(
+            row=r, column=0, padx=0, pady=(8, 4), sticky=tk.W)
+        r += 1
+        for bid in ("txt_lw_0", "txt_lw_1", "txt_rf_0", "txt_rf_1"):
+            self._build_repair_block_row(col_right, bid, r)
+            r += 1
+
+    def _repair_block_display(self, block_id: str):
+        """(label, colour, category_short_or_None) for a block row. Klein ids are
+        category-coloured; Krea 2 ids (block_N / txt_lw_N / txt_rf_N) are generic
+        (no semantic bucket map yet) → neutral colour, no category tag."""
+        if block_id.startswith("block_"):
+            return (f"Block {block_id.split('_')[1]}", COLORS["text_secondary"], None)
+        if block_id.startswith("txt_"):
+            _, kind, n = block_id.split("_")
+            return (f"Txt {kind.upper()} {n}", COLORS["text_secondary"], None)
         cat = self._repair_category_for_block(block_id)
-        color = self._REPAIR_CAT_COLOR[cat]
-        cat_short = self._REPAIR_CAT_SHORT[cat]
         kind, idx = block_id.split("_")
+        return (f"{kind} {idx}", self._REPAIR_CAT_COLOR[cat], self._REPAIR_CAT_SHORT[cat])
+
+    def _build_repair_block_row(self, parent, block_id: str, row: int):
+        lbl_text, color, cat_short = self._repair_block_display(block_id)
 
         rowf = ttk.Frame(parent)
         rowf.grid(row=row, column=0, sticky=tk.EW, pady=1)
@@ -9552,14 +9685,15 @@ class LoRATrainerGUI:
         chk_p = ttk.Checkbutton(rowf, variable=primary_enabled,
                                 command=lambda b=block_id: self._on_block_changed(b))
         chk_p.grid(row=0, column=0, padx=(2, 4))
-        # Block label with category color
-        lbl_text = f"{kind} {idx}"
+        # Block label (category-coloured for Klein; neutral for Krea 2)
         lbl = tk.Label(rowf, text=lbl_text, fg=color, bg=COLORS["bg_surface"],
                        width=10, anchor=tk.W, font=(FONT_FAMILY, 9, "bold"))
         lbl.grid(row=0, column=1, padx=(0, 2))
-        cat_lbl = tk.Label(rowf, text=f"[{cat_short}]", fg=color, bg=COLORS["bg_surface"],
-                           width=11, anchor=tk.W, font=(FONT_FAMILY, 8))
-        cat_lbl.grid(row=0, column=2, padx=(0, 4))
+        cat_lbl = None
+        if cat_short:
+            cat_lbl = tk.Label(rowf, text=f"[{cat_short}]", fg=color, bg=COLORS["bg_surface"],
+                               width=11, anchor=tk.W, font=(FONT_FAMILY, 8))
+            cat_lbl.grid(row=0, column=2, padx=(0, 4))
 
         scale_p = ttk.Scale(rowf, from_=-3.0, to=3.0, variable=primary_strength, orient=tk.HORIZONTAL)
         scale_p.grid(row=0, column=3, sticky=tk.EW, padx=2)
@@ -9669,6 +9803,9 @@ class LoRATrainerGUI:
         if self.repair_engine is not None and self.repair_engine.pipeline is not None and self.repair_engine.pipeline.is_loaded:
             return True
 
+        if self.repair_family_var.get() == "krea2":
+            return self._ensure_repair_engine_krea2()
+
         dit_choice = self.repair_dit_choice_var.get()
         dit_pref_key = "base_dit" if dit_choice == "base" else "distilled_dit"
         dit_path = self.prefs_vars[dit_pref_key].get() if dit_pref_key in self.prefs_vars else ""
@@ -9711,6 +9848,40 @@ class LoRATrainerGUI:
         except Exception:
             import traceback
             messagebox.showerror("Error", f"Failed to load models:\n{traceback.format_exc()}")
+            self.repair_status_var.set("Error loading models.")
+            return False
+
+    def _ensure_repair_engine_krea2(self):
+        """Lazy-load the Krea 2 Repair engine. Turbo (8-step, default) or RAW (slow). The DiT
+        radio's distilled/base values map to turbo/raw here."""
+        dit_choice = self.repair_dit_choice_var.get()  # 'distilled'->turbo, 'base'->raw
+        is_raw = (dit_choice == "base")
+        dit_key = "krea2_raw_dit" if is_raw else "krea2_turbo_dit"
+        dit_path = self.prefs_vars.get(dit_key, tk.StringVar()).get()
+        vae_path = self.prefs_vars.get("krea2_vae", tk.StringVar()).get()
+        te_path = self.prefs_vars.get("krea2_text_encoder", tk.StringVar()).get()
+        for label, p in ((f"Krea 2 {'RAW' if is_raw else 'Turbo'} DiT", dit_path),
+                         ("Qwen-Image VAE", vae_path), ("Qwen3-VL TE (bf16)", te_path)):
+            if not p or not os.path.exists(p):
+                messagebox.showerror("Error", f"{label} path not set or not found.\nConfigure on Preferences tab.")
+                return False
+
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.krea2_engine import Krea2RepairEngine
+        if self.repair_engine is None or not isinstance(self.repair_engine, Krea2RepairEngine):
+            self.repair_engine = Krea2RepairEngine()
+        try:
+            self.repair_status_var.set(f"Loading Krea 2 models ({'RAW' if is_raw else 'Turbo'})…")
+            self.master.update_idletasks()
+            self.repair_engine.ensure_pipeline(
+                turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+                device="cuda", model_kind="raw" if is_raw else "turbo")
+            self.repair_status_var.set("Models loaded.")
+            return True
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Failed to load Krea 2 models:\n{traceback.format_exc()}")
             self.repair_status_var.set("Error loading models.")
             return False
 
@@ -12730,7 +12901,8 @@ class LoRATrainerGUI:
                 btn.configure(state="normal" if p_active else "disabled")
             p_color = v["cat_color"] if p_active else grey_fg
             v["block_lbl"].configure(fg=p_color)
-            v["cat_lbl"].configure(fg=p_color)
+            if v.get("cat_lbl") is not None:  # Krea 2 rows have no category label
+                v["cat_lbl"].configure(fg=p_color)
             v["primary_lbl"].configure(foreground=p_color if not p_active else "")
             if not p_active:
                 # Reset var to default so an absent block never carries stale edits.

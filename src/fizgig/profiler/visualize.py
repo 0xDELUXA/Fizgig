@@ -87,7 +87,7 @@ def _category_totals(result: ProfileResult) -> dict:
 
 def _detect_lora_type_from_keys(keys) -> str:
     """Classify LoRA variant from key patterns (LoRA / LoKR / LoHa / GLoRA).
-    Ported from the ComfyUI realtime-lora analyzer — pure string matching, no GPU.
+    Carried over from our own ComfyUI realtime-lora node — pure string matching, no GPU.
     """
     for key in keys:
         kl = key.lower()

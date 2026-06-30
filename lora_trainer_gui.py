@@ -9065,6 +9065,19 @@ class LoRATrainerGUI:
                 self._repair_turbo_chk.pack(side=tk.RIGHT)
         except Exception:
             pass
+        # Reference Strength is a Klein edit-conditioning knob; Krea 2's vision-path reference
+        # has no strength dial, so hide it there (the MP cap still applies).
+        for _w in (getattr(self, "_repair_ref_strength_label", None),
+                   getattr(self, "_repair_ref_strength_entry", None)):
+            try:
+                if _w is None:
+                    continue
+                if krea2:
+                    _w.pack_forget()
+                elif _w.winfo_manager() == "":
+                    _w.pack(side=tk.LEFT, **({"padx": (0, 2)} if _w is self._repair_ref_strength_label else {}))
+            except Exception:
+                pass
 
     def _on_repair_family_changed(self):
         """Family toggle: reset any loaded session (engine type changes), reset the slider
@@ -9263,10 +9276,11 @@ class LoRATrainerGUI:
                                 values=["0.25", "0.5", "1.0", "2.0"], state="readonly", width=5)
         mp_combo.pack(side=tk.LEFT, padx=(0, 10))
         mp_combo.bind("<<ComboboxSelected>>", lambda e: self._on_repair_ref_changed())
-        ttk.Label(ref_params, text="Strength:").pack(side=tk.LEFT, padx=(0, 2))
+        self._repair_ref_strength_label = ttk.Label(ref_params, text="Strength:")
+        self._repair_ref_strength_label.pack(side=tk.LEFT, padx=(0, 2))
         self.repair_ref_strength_var = tk.StringVar(value="1.0")
-        ref_str_entry = ttk.Entry(ref_params, textvariable=self.repair_ref_strength_var, width=6)
-        ref_str_entry.pack(side=tk.LEFT)
+        self._repair_ref_strength_entry = ttk.Entry(ref_params, textvariable=self.repair_ref_strength_var, width=6)
+        self._repair_ref_strength_entry.pack(side=tk.LEFT)
         self.repair_ref_strength_var.trace_add("write", lambda *_: self._on_repair_ref_changed())
         r += 1
 

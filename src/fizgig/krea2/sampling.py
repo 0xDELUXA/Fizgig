@@ -134,6 +134,7 @@ def sample(
     y2=1.15,
     mu=None,
     should_abort=None,
+    noise=None,
 ):
     """Denoise pre-encoded text embeddings to images: euler+CFG denoise -> decode.
 
@@ -169,22 +170,29 @@ def sample(
     if cfg:
         untxt, untxtmask = untxt.to(device=device, dtype=dtype), untxtmask.to(device)
 
-    # Per-prompt seeded gaussian latent noise.
-    noise = torch.cat(
-        [
-            torch.randn(
-                1,
-                channels,
-                height // compression,
-                width // compression,
-                device=device,
-                dtype=dtype,
-                generator=torch.Generator(device=device).manual_seed(seed + i),
-            )
-            for i in range(n)
-        ],
-        dim=0,
-    )
+    # Per-prompt seeded gaussian latent noise. A caller can pass `noise` directly (e.g. a slerp
+    # between two seeds for seed-travel); it must match (n, channels, H//comp, W//comp).
+    if noise is not None:
+        noise = noise.to(device=device, dtype=dtype)
+        expected = (n, channels, height // compression, width // compression)
+        if tuple(noise.shape) != expected:
+            raise ValueError(f"sample(noise=...) shape {tuple(noise.shape)} != expected {expected}")
+    else:
+        noise = torch.cat(
+            [
+                torch.randn(
+                    1,
+                    channels,
+                    height // compression,
+                    width // compression,
+                    device=device,
+                    dtype=dtype,
+                    generator=torch.Generator(device=device).manual_seed(seed + i),
+                )
+                for i in range(n)
+            ],
+            dim=0,
+        )
 
     x, pos, mask = prepare(noise, txt.shape[1], patch, txtmask)
     if cfg:

@@ -10331,6 +10331,23 @@ class LoRATrainerGUI:
         self._add_tab_banner(outer, "LoRA Royale",
                              "Render every epoch of a training run on one seed, then crossfade between them to find the sweet spot.")
 
+        # Model family selector. Klein renders on the Distilled 4-step; Krea 2 on the fp8 Turbo
+        # 8-step. Seed/prompt/strength travel work for both; Krea 2 travel morphs come from the
+        # seed slerp / prompt interpolation with the vision-path image as the per-frame anchor
+        # (no Klein reference-latent chaining).
+        _rfam = "krea2" if str(self.last_used.get("royale_family", "klein")) == "krea2" else "klein"
+        self.royale_family_var = tk.StringVar(value=_rfam)
+        rfam_card = self._start_section_card(
+            outer, "Model Family",
+            "Klein 9B (Distilled previews) or Krea 2 (fp8 Turbo previews). Epoch comparison + all "
+            "three travel modes work for both families.")
+        _rf = tk.Frame(rfam_card, bg=COLORS["bg_surface"])
+        _rf.pack(anchor=tk.W)
+        ttk.Radiobutton(_rf, text="Klein 9B", variable=self.royale_family_var, value="klein",
+                        command=self._on_royale_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_rf, text="Krea 2 (experimental)", variable=self.royale_family_var, value="krea2",
+                        command=self._on_royale_family_changed).pack(side=tk.LEFT)
+
         setup = self._start_section_card(outer, "Setup",
                                          "Point at a training output folder. Renders use the Distilled 4-step model.")
         setup.columnconfigure(1, weight=1)
@@ -11347,12 +11364,37 @@ class LoRATrainerGUI:
         else:
             self.royale_scan_var.set("No .safetensors checkpoints found in this folder.")
 
+    def _royale_is_krea2(self):
+        return str(getattr(self, "royale_family_var", None) and self.royale_family_var.get()) == "krea2"
+
+    def _royale_default_state(self):
+        """A default SliderState for the active family (block ids differ: Klein double/single vs
+        Krea 2 block_/txt_)."""
+        from fizgig.repair_studio.state import SliderState
+        return SliderState.default_krea2() if self._royale_is_krea2() else SliderState.default_klein9b()
+
+    def _on_royale_family_changed(self):
+        """Family toggle: the engine type changes, so unload any loaded engine + clear rendered
+        frames, then persist. Klein renders on the Distilled; Krea 2 on the fp8 Turbo."""
+        fam = "krea2" if str(self.royale_family_var.get()) == "krea2" else "klein"
+        self.last_used["royale_family"] = fam
+        self._save_last_used_paths()
+        if self._royale_is_busy():
+            return
+        self._royale_unload()
+        self.royale_engine = None
+        self.royale_status_var.set(
+            f"Switched to {'Krea 2 (Turbo previews)' if fam == 'krea2' else 'Klein 9B (Distilled previews)'}. "
+            f"Pick a source and render.")
+
     def _royale_validate_models(self):
         """Fast main-thread pre-flight before a render: verify the model paths exist,
         make sure the engine object exists, and stash the pipeline kwargs for the worker
         to load with. Does NOT load anything (no blocking) — the worker thread does the
         heavy load via _royale_ensure_pipeline_loaded(). Shows a messagebox + returns
         False on a missing path."""
+        if self._royale_is_krea2():
+            return self._royale_validate_models_krea2()
         dit_path = self.prefs_vars["distilled_dit"].get() if "distilled_dit" in self.prefs_vars else ""
         vae_path = self._get_path("VAE_MODEL")
         te_path = self._get_path("TEXT_ENCODER")
@@ -11363,7 +11405,7 @@ class LoRATrainerGUI:
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.repair_studio.engine import RepairEngine
-        if self.royale_engine is None:
+        if self.royale_engine is None or self._royale_is_krea2_engine():
             self.royale_engine = RepairEngine()      # cheap constructor — no model load
         is_fp8 = "fp8" in os.path.basename(dit_path).lower()
         # Stash kwargs so the worker thread can load (and rebuild after reset() on a
@@ -11375,8 +11417,35 @@ class LoRATrainerGUI:
             blocks_to_swap=self._get_inference_blocks_to_swap())
         return True
 
+    def _royale_validate_models_krea2(self):
+        """Krea 2 pre-flight: the fp8 Turbo + Qwen-Image VAE + bf16 Qwen3-VL TE from Preferences,
+        and a Krea2RepairEngine. Stashes Krea2-shaped pipeline kwargs for the worker."""
+        dit_path = self.prefs_vars.get("krea2_turbo_dit", tk.StringVar()).get()
+        vae_path = self.prefs_vars.get("krea2_vae", tk.StringVar()).get()
+        te_path = self.prefs_vars.get("krea2_text_encoder", tk.StringVar()).get()
+        for label, p in (("Krea 2 Turbo DiT", dit_path), ("Qwen-Image VAE", vae_path),
+                         ("Qwen3-VL TE (bf16)", te_path)):
+            if not p or not os.path.exists(p):
+                messagebox.showerror("Error", f"{label} path not set or not found.\nConfigure on Preferences tab.")
+                return False
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.krea2_engine import Krea2RepairEngine
+        if self.royale_engine is None or not self._royale_is_krea2_engine():
+            self.royale_engine = Krea2RepairEngine()
+        self._royale_pipeline_kwargs = dict(
+            turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+            device="cuda", model_kind="turbo")
+        return True
+
+    def _royale_is_krea2_engine(self):
+        """True if the current royale_engine is a Krea2RepairEngine (so we know to rebuild it on a
+        family switch)."""
+        eng = getattr(self, "royale_engine", None)
+        return eng is not None and type(eng).__name__ == "Krea2RepairEngine"
+
     def _royale_ensure_pipeline_loaded(self):
-        """Worker-thread: load the Distilled pipeline if it isn't already. No Tk calls;
+        """Worker-thread: load the preview pipeline if it isn't already. No Tk calls;
         raises on failure (callers route it to their finish handler). The same load
         already runs on a worker thread in _royale_load_or_swap_primary, so it's
         proven-safe off the main thread."""
@@ -11481,7 +11550,7 @@ class LoRATrainerGUI:
                 # First-ever load patches the DiT; everything after (including a
                 # re-kicked render that reuses the loaded engine) swaps weights.
                 self._royale_load_or_swap_primary(eng, path)
-                st = SliderState.default_klein9b()
+                st = self._royale_default_state()
                 st.prompt = prompt
                 st.seed = seed
                 st.preview_width = width
@@ -12051,7 +12120,7 @@ class LoRATrainerGUI:
                 # Map global t onto the journey: which consecutive seed pair + local fraction.
                 pos = t * nseg
                 si = min(int(pos), nseg - 1)
-                st = SliderState.default_klein9b()
+                st = self._royale_default_state()
                 st.prompt = p["prompt"]; st.seed = seeds[si]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
                 pls = self._royale_apply_travel_ref(st, p, i)
@@ -12147,7 +12216,7 @@ class LoRATrainerGUI:
                 strength = p["s_start"] + (p["s_end"] - p["s_start"]) * t
                 self.master.after(0, lambda i=i: self.royale_lora_status_var.set(
                     f"Rendering frame {i + 1}/{n}…"))
-                st = SliderState.default_klein9b()
+                st = self._royale_default_state()
                 st.prompt = p["prompt"]; st.seed = p["seed"]
                 st.preview_width = p["width"]; st.preview_height = p["height"]
                 for bs in st.blocks.values():       # uniform LoRA strength across all blocks
@@ -12451,7 +12520,7 @@ class LoRATrainerGUI:
                 self.master.after(0, lambda i=i: self.royale_pt_status_var.set(
                     f"Rendering frame {i + 1}/{n}…"))
                 ctx = eng.interp_waypoints(ctx_list, t, mode=interp_mode)
-                st = SliderState.default_klein9b()
+                st = self._royale_default_state()
                 st.prompt = p["base"]
                 # Vary seed: deterministic sequential walk (base, base+1, …) so the
                 # image re-rolls per frame yet the whole clip stays reproducible.

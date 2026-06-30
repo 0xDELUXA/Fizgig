@@ -27,6 +27,27 @@ from fizgig.repair_studio.krea2_blocks import block_regex_krea2, extract_block_i
 logger = logging.getLogger(__name__)
 
 
+def _slerp(t, a, b):
+    """Spherical linear interpolation between two noise tensors at fraction t (0 -> a, 1 -> b).
+    Walks the hypersphere so the interpolated noise keeps a constant norm — lerp would shrink it
+    mid-way and the sample would go mushy. Falls back to lerp for (anti)parallel endpoints.
+    (Local copy of RepairEngine._slerp so krea2_engine doesn't import the heavy Klein engine.)"""
+    a_f = a.flatten().float()
+    b_f = b.flatten().float()
+    na, nb = a_f.norm(), b_f.norm()
+    if na.item() == 0.0 or nb.item() == 0.0:
+        out = (1.0 - t) * a_f + t * b_f
+    else:
+        dot = torch.dot(a_f / na, b_f / nb).clamp(-1.0, 1.0)
+        omega = torch.acos(dot)
+        so = torch.sin(omega)
+        if so.item() < 1e-6:
+            out = (1.0 - t) * a_f + t * b_f
+        else:
+            out = (torch.sin((1.0 - t) * omega) / so) * a_f + (torch.sin(t * omega) / so) * b_f
+    return out.reshape(a.shape).to(a.dtype)
+
+
 class _Loaded:
     """Tiny stand-in for KleinInferencePipeline.is_loaded so the shared UI checks
     `engine.pipeline.is_loaded` uniformly across both engines."""
@@ -76,6 +97,9 @@ class Krea2RepairEngine:
         # Baseline render cache (LoRA at original strengths; slider tweaks don't invalidate it).
         self._baseline_cache_key = None
         self._baseline_cache_image: Optional[Image.Image] = None
+        # Klein's sequential-travel latent chain has no Krea 2 analogue; kept as a None attribute
+        # so LoRA Royale's shared workers (which read eng._last_frame_latent) don't AttributeError.
+        self._last_frame_latent = None
 
         # Turbo Preview — per-step activation cache (forward_cached). Tweaking a late block
         # skips the earlier blocks. Cache key: (primary, donor, seed, prompt, w, h). The resume
@@ -124,6 +148,40 @@ class Krea2RepairEngine:
         except Exception:
             self.primary_hash = None
         logger.info("Krea2 primary loaded: %s (%d blocks)", path, len(self.primary_block_ids))
+
+    def swap_primary_weights(self, path: str) -> bool:
+        """LoRA Royale fast path: swap the primary network's weights to another checkpoint of the
+        SAME structure (epochs of one run) WITHOUT reloading the Turbo or re-patching the DiT —
+        load_state_dict in place. Returns True on a clean swap, False if the structure doesn't
+        match (different rank / unrelated LoRA), in which case the caller should reset() +
+        load_primary(). Model-agnostic mirror of RepairEngine.swap_primary_weights."""
+        if self.primary_network is None:
+            raise RuntimeError("No primary loaded; call load_primary() first.")
+        from fizgig.networks.lora import ensure_kohya_lora_state_dict
+        from safetensors.torch import load_file
+        try:
+            sd = ensure_kohya_lora_state_dict(load_file(path))
+        except Exception:
+            logger.exception("swap_primary_weights: failed to load %s", path)
+            return False
+        try:
+            info = self.primary_network.load_state_dict(sd, strict=False)
+        except Exception as e:
+            logger.info("swap_primary_weights: structure/shape mismatch, needs full reload (%s)", e)
+            return False
+        if sd and len(info.unexpected_keys) > 0.5 * len(sd):
+            return False
+        self.primary_network.to(device=self.device, dtype=self.dtype)
+        self.primary_path = path
+        self.primary_block_ids = extract_block_ids_krea2(self.primary_network)
+        try:
+            from fizgig.profiler.visualize import compute_lora_hash
+            self.primary_hash = compute_lora_hash(path)
+        except Exception:
+            self.primary_hash = None
+        self._invalidate_baseline_cache()
+        self._invalidate_activation_cache()
+        return True
 
     def load_donor(self, path: str) -> None:
         if self.primary_network is None:
@@ -198,7 +256,10 @@ class Krea2RepairEngine:
 
     def generate_preview(self, state, *, seed: Optional[int] = None,
                          prompt: Optional[str] = None, width: Optional[int] = None,
-                         height: Optional[int] = None, steps: Optional[int] = None) -> Image.Image:
+                         height: Optional[int] = None, steps: Optional[int] = None,
+                         seed_b: Optional[int] = None, travel_t: float = 0.0,
+                         override_ctx=None, override_neg_ctx=None,
+                         prev_latent=None, prev_latent_strength: float = 1.0) -> Image.Image:
         """Apply the slider state and render one preview with the live LoRA(s). Always a full
         forward — the per-step activation cache (forward_cached) is NOT used here.
 
@@ -208,7 +269,20 @@ class Krea2RepairEngine:
         visually fine at Klein's 4 steps but compounds badly over krea's 8 — the symptom was
         tweaks only partially registering. forward_cached stays on the model (correct within a
         single pass, and a future multi-step-aware cache could use it), but the live preview does
-        the correct full forward, which on the 8-step Turbo is already fast (~7 s)."""
+        the correct full forward, which on the 8-step Turbo is already fast (~7 s).
+
+        LoRA Royale travel hooks (model-agnostic, no Klein reference-latent involved):
+        - seed_b/travel_t: initial noise is slerp(noise(seed), noise(seed_b), travel_t) — a smooth
+          seed morph for seed-travel. travel_t=0 -> seed, 1 -> seed_b.
+        - override_ctx: a precomputed (txt, txtmask) pair (from interp_waypoints) used instead of
+          encoding state.prompt — drives prompt-travel. The Krea 2 reference is the vision-path
+          image on the state (no latent chaining), applied via the normal _encode_prompt path.
+
+        override_neg_ctx / prev_latent / prev_latent_strength are accepted for call-signature
+        parity with RepairEngine (so LoRA Royale's shared workers drive either engine) but are
+        Klein-only: the Turbo is CFG-free (no negative) and Krea 2 has no reference-latent, so the
+        morph comes purely from the seed slerp / prompt interpolation, with the vision-path image
+        as the (optional) per-frame anchor. They're intentionally ignored here."""
         self.apply_state(state)
         prompt = prompt if prompt is not None else state.prompt
         seed = seed if seed is not None else state.seed
@@ -218,18 +292,103 @@ class Krea2RepairEngine:
         # Reference image (if any) goes through the Qwen3-VL vision path. ref_strength is a Klein
         # edit-conditioning knob with no Krea 2 analogue, so it's not used here; ref_megapixels
         # maps to the vision encoder's downscale cap.
-        txt, txtmask = self._encode_prompt(prompt, getattr(state, "ref_image_path", ""),
-                                           getattr(state, "ref_megapixels", 1.0))
-        txt = txt.to(self.device)
+        if override_ctx is not None:
+            txt, txtmask = override_ctx
+        else:
+            txt, txtmask = self._encode_prompt(prompt, getattr(state, "ref_image_path", ""),
+                                               getattr(state, "ref_megapixels", 1.0))
+        txt = txt.to(self.device, dtype=self.dtype)
         txtmask = txtmask.to(self.device)
+
+        noise = None
+        if seed_b is not None:
+            noise = _slerp(float(travel_t or 0.0),
+                           self._seed_noise(seed, width, height),
+                           self._seed_noise(seed_b, width, height))
 
         from fizgig.krea2 import sampling
         with torch.no_grad():
             imgs = sampling.sample(self.turbo, self.ae, txt, txtmask, untxt=None, untxtmask=None,
                                    device=self.device, dtype=self.dtype, width=width, height=height,
                                    steps=steps, cfg_scale=1.0, mu=1.15, seed=seed,
-                                   should_abort=self._cancel_event.is_set)
+                                   should_abort=self._cancel_event.is_set, noise=noise)
         return imgs[0]
+
+    def _seed_noise(self, seed, width, height):
+        """One seeded gaussian latent matching sampling.sample's geometry (n=1), for seed-travel
+        slerp. Same channel count / compression / alignment the sampler would use."""
+        from fizgig.krea2.sampling import roundup
+        patch = self.turbo.config.patch
+        compression = 2 ** len(self.ae.temperal_downsample)
+        channels = self.ae.z_dim
+        align = compression * patch
+        width = roundup(width, align, "width")
+        height = roundup(height, align, "height")
+        return torch.randn(1, channels, height // compression, width // compression,
+                           device=self.device, dtype=self.dtype,
+                           generator=torch.Generator(device=self.device).manual_seed(int(seed)))
+
+    # ----- prompt travel ------------------------------------------------------
+    def encode_travel_prompts(self, prompts):
+        """Encode waypoint prompts for prompt-travel — ALL in one batch so gather_valid_text pads
+        them to a common length, making them shape-compatible for interp_waypoints. Returns a list
+        of (txt, txtmask) CPU pairs (one per waypoint). The Turbo is CFG-free, so the negative is
+        None — returned as (waypoints, None) to match RepairEngine.encode_travel_prompts' signature
+        so LoRA Royale's shared prompt-travel worker can unpack either engine's result."""
+        from fizgig.krea2.utils import load_krea2_text_encoder
+        from fizgig.krea2 import sampling
+        enc = load_krea2_text_encoder(self.te_path, dtype=self.dtype, device=self.device)
+        txt, txtmask, _, _ = sampling.encode_prompts(enc, list(prompts), cfg=False)
+        del enc
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        # The slider-preview prompt cache is stale (the TE was cycled).
+        self._prompt_cache_key = None
+        self._prompt_cache = None
+        waypoints = [(txt[i:i + 1].cpu(), txtmask[i:i + 1].cpu()) for i in range(txt.shape[0])]
+        return waypoints, None
+
+    @staticmethod
+    def interp_waypoints(vecs, t, mode="lerp"):
+        """Piecewise interpolation across ordered (txt, txtmask) waypoints. `t` in [0,1] walks the
+        whole chain (0 -> vecs[0], 1 -> vecs[-1]). Mirrors RepairEngine.interp_waypoints' lerp /
+        norm / slerp on the embedding; the mask is the union of the two segment endpoints (a token
+        attended in either neighbour stays attended). Returns (txt, txtmask)."""
+        if len(vecs) == 1:
+            return vecs[0]
+        t = min(max(float(t), 0.0), 1.0)
+        segs = len(vecs) - 1
+        pos = t * segs
+        i = min(int(pos), segs - 1)
+        local = pos - i
+        (ta, ma), (tb, mb) = vecs[i], vecs[i + 1]
+        a, b = ta.float(), tb.float()
+        eps = 1e-6
+        if mode in (None, "lerp"):
+            blended = torch.lerp(a, b, local)
+        else:
+            na = a.norm(dim=-1, keepdim=True)
+            nb = b.norm(dim=-1, keepdim=True)
+            target = (1.0 - local) * na + local * nb
+            if mode == "norm":
+                out = torch.lerp(a, b, local)
+                blended = out * (target / out.norm(dim=-1, keepdim=True).clamp_min(eps))
+            elif mode == "slerp":
+                ua = a / na.clamp_min(eps)
+                ub = b / nb.clamp_min(eps)
+                dot = (ua * ub).sum(dim=-1, keepdim=True).clamp(-1.0 + 1e-7, 1.0 - 1e-7)
+                omega = torch.acos(dot)
+                so = torch.sin(omega)
+                w_a = torch.sin((1.0 - local) * omega) / so
+                w_b = torch.sin(local * omega) / so
+                arc = w_a * ua + w_b * ub
+                lin = torch.lerp(ua, ub, local)
+                dir_ = torch.where(so < 1e-4, lin, arc)
+                blended = dir_ * target
+            else:
+                blended = torch.lerp(a, b, local)
+        return blended.to(ta.dtype), (ma.bool() | mb.bool())
 
     def _sample_cached(self, txt, txtmask, *, seed, width, height, steps, resume_from):
         """Denoise loop mirroring sampling.sample but via forward_cached, threading a per-step

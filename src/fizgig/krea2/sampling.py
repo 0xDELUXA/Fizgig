@@ -1,6 +1,8 @@
 """Functional flow-matching sampler for the K2 MMDiT (no Scheduler class).
 
-Ported verbatim from references/Krea2/sampling.py.
+Ported from ai-toolkit (Ostris, LLC — MIT; https://github.com/ostris/ai-toolkit,
+extensions_built_in/diffusion_models/flux2/src/sampling.py), adapted for Fizgig.
+See THIRD_PARTY_NOTICES.md.
 """
 
 import gc

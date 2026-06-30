@@ -1,3 +1,5 @@
+# Adapted from musubi-tuner (https://github.com/kohya-ss/musubi-tuner), Apache-2.0.
+# Modified for Fizgig. See THIRD_PARTY_NOTICES.md.
 import os
 import re
 from typing import Dict, List, Optional, Union

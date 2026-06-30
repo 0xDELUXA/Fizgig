@@ -1,10 +1,12 @@
 """Krea 2 (K2) single-stream MMDiT.
 
-Ported from references/Krea2/mmdit.py, plus musubi training hooks (gradient checkpointing,
-block swap) and the shared attention backend. The core attention now goes through
-musubi's common ``modules.attention`` (SDPA / flash / sageattn, selectable via attn_mode),
-with the combined sequence ordered image-first so that valid tokens form a contiguous
-prefix per sample — this lets the shared varlen / cu_seqlens machinery handle text padding.
+The backbone is ported from ai-toolkit (Ostris, LLC — MIT;
+https://github.com/ostris/ai-toolkit, extensions_built_in/diffusion_models/krea2/src/mmdit.py),
+plus musubi-tuner training hooks (gradient checkpointing, block swap — Apache-2.0) and the
+shared attention backend. The core attention goes through the common ``attention`` module
+(SDPA / flash / sageattn, selectable via attn_mode), with the combined sequence ordered
+image-first so that valid tokens form a contiguous prefix per sample — this lets the shared
+varlen / cu_seqlens machinery handle text padding. See THIRD_PARTY_NOTICES.md.
 """
 
 from __future__ import annotations

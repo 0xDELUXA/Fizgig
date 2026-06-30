@@ -22,6 +22,21 @@ from torch import Tensor
 from fizgig.krea2.attention import AttentionParams, attention as common_attention
 
 
+@dataclass
+class KreaActivationCacheEntry:
+    """Cached intermediate state for one denoising step's forward pass, so a later call can
+    resume from a changed block (Repair Studio Turbo Preview). `block_inputs[k]` is the input
+    to main block k; the pre-block setup (tvec / t_emb / freqs / attn_params / imglen) is
+    reused unchanged when resuming, since it depends only on img/context/pos/t (constant across
+    a slider tweak). Tensors may live on CPU — the engine moves them to GPU on use."""
+    block_inputs: list                  # [k] -> combined input to block k (length = num blocks)
+    tvec: Tensor | None = None
+    t_emb: Tensor | None = None
+    freqs: Tensor | None = None
+    attn_params: object | None = None
+    imglen: int = 0
+
+
 def rope(pos: Tensor, dim: int, theta: float = 1e4, ntk: float = 1.0) -> Tensor:
     scale = torch.arange(0, dim, 2, dtype=torch.float64, device=pos.device) / dim
     omega = 1.0 / ((theta * ntk) ** scale)
@@ -455,3 +470,80 @@ class SingleStreamDiT(nn.Module):
         output = final[:, :imglen, :]  # image tokens are the leading slice now
 
         return output
+
+    def forward_cached(
+        self,
+        img: Tensor,
+        context: Tensor,
+        t: Tensor,
+        pos: Tensor,
+        mask: Tensor | None = None,
+        *,
+        resume_from: int | None = None,
+        cached: "KreaActivationCacheEntry | None" = None,
+        new_cache: "KreaActivationCacheEntry | None" = None,
+    ) -> Tensor:
+        """Inference forward with per-block activation caching (Repair Studio Turbo Preview).
+
+        `resume_from` = the earliest changed main-block index (or None for a full pass). When
+        resuming with a valid `cached`, the pre-block setup (first / txtfusion / posemb) and the
+        cached input to block `resume_from` are reused, so only blocks >= resume_from run. If
+        `new_cache` is given, each block's input is stored into it for the next call. Inference
+        only (no gradient checkpointing). Numerically identical to forward() for resume_from=None.
+        """
+        nblocks = len(self.blocks)
+        dev = next(self.parameters()).device
+
+        if (resume_from is not None and cached is not None and cached.block_inputs
+                and 0 <= resume_from < nblocks and cached.block_inputs[resume_from] is not None):
+            tvec = cached.tvec.to(dev)
+            t_emb = cached.t_emb.to(dev)
+            freqs = cached.freqs.to(dev)
+            attn_params = cached.attn_params
+            imglen = cached.imglen
+            combined = cached.block_inputs[resume_from].to(dev)
+            start = resume_from
+            if new_cache is not None:
+                # Carry the unchanged prefix forward (move to the cache's storage device lazily).
+                new_cache.block_inputs = list(cached.block_inputs)
+        else:
+            img = self.first(img)
+            t_emb = self.tmlp(temb(t, self.config.tdim, device=img.device, dtype=img.dtype))
+            tvec = self.tproj(t_emb)
+            imglen = img.shape[1]
+            txtmask = mask[:, imglen:]
+            txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, None)
+            txt_attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, txtmask)
+            context = self.txtfusion(context, txt_attn_params_nomask, txt_attn_params)
+            context = self.txtmlp(context)
+            combined = torch.cat((img, context), dim=1)
+            fulllen = combined.shape[1]
+            padlen = (-fulllen) % 256
+            if padlen > 0:
+                combined = F.pad(combined, (0, 0, 0, padlen))
+                pos = F.pad(pos, (0, 0, 0, padlen))
+                txtmask = F.pad(txtmask, (0, padlen), value=False)
+            attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, imglen, txtmask)
+            freqs = self.posemb(pos)
+            start = 0
+            if new_cache is not None:
+                new_cache.block_inputs = [None] * nblocks
+
+        if new_cache is not None:
+            new_cache.tvec = tvec
+            new_cache.t_emb = t_emb
+            new_cache.freqs = freqs
+            new_cache.attn_params = attn_params
+            new_cache.imglen = imglen
+
+        for index in range(start, nblocks):
+            if self.blocks_to_swap:
+                self.offloader.wait_for_block(index)
+            if new_cache is not None:
+                new_cache.block_inputs[index] = combined
+            combined = self.blocks[index](combined, tvec, freqs, attn_params)
+            if self.blocks_to_swap:
+                self.offloader.submit_move_blocks_forward(self.blocks, index)
+
+        final = self.last(combined, t_emb)
+        return final[:, :imglen, :]

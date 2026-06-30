@@ -516,6 +516,7 @@ def train_krea2(
     fp8_scaled: bool = True,
     blocks_to_swap: int = 0,
     shift: float = 2.5,
+    max_grad_norm: float = 1.0,
     seed: int = 42,
     # in-training previews (sample the fp8 Turbo with the live LoRA)
     sample_prompts: list = None,
@@ -625,6 +626,9 @@ def train_krea2(
             loss = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
                                 shift=shift, dtype=dtype)
             loss.backward()
+            # Gradient clipping to match the musubi reference (max_grad_norm default 1.0). 0 disables.
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             global_step += 1

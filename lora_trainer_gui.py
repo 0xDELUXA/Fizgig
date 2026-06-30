@@ -12370,9 +12370,12 @@ class LoRATrainerGUI:
         if self._repair_preview_in_flight:
             # A preview is running. Mark dirty so its completion hook
             # (_set_repair_preview_images) fires a fresh preview once it lands.
-            # (No more 500ms polling — was fragile and made races worse.)
             self._repair_preview_dirty = True
-            print("[repair] run_async: in-flight, marked dirty; will refire after completion")
+            # Abort the in-flight pass (krea engine) so this newest edit restarts NOW instead of
+            # queueing behind the full 8-step render.
+            if hasattr(self.repair_engine, "request_cancel"):
+                self.repair_engine.request_cancel()
+            print("[repair] run_async: in-flight, requested cancel + marked dirty; will refire")
             return
         # Sync state from UI to repair_state (prompt/seed/res live in entries, not bound)
         prompt_text = self.repair_prompt_var.get().strip()
@@ -12419,10 +12422,14 @@ class LoRATrainerGUI:
         thread.start()
 
     def _repair_preview_worker(self, snapshot):
+        from fizgig.krea2.sampling import SampleAborted
         try:
             if self.repair_engine is None:
                 self._repair_preview_in_flight = False
                 return
+            # Fresh render cycle — clear any pending cancel from a previous aborted pass.
+            if hasattr(self.repair_engine, "clear_cancel"):
+                self.repair_engine.clear_cancel()
             print(f"[repair] worker: generating baseline at "
                   f"{snapshot.preview_width}x{snapshot.preview_height}")
             baseline = self.repair_engine.generate_baseline(snapshot)
@@ -12432,6 +12439,14 @@ class LoRATrainerGUI:
             tweaked = self.repair_engine.generate_preview(snapshot)
             print(f"[repair] worker: tweaked done, size={tweaked.size}")
             self.master.after(0, lambda: self._set_repair_preview_images(baseline, tweaked))
+        except SampleAborted:
+            # Cancelled mid-pass by a newer edit — quietly re-fire with the latest state.
+            print("[repair] worker: aborted; re-firing with newest state")
+            def _refire():
+                self._repair_preview_in_flight = False
+                self._repair_preview_dirty = False
+                self._schedule_preview(force=True)
+            self.master.after(0, _refire)
         except Exception:
             import traceback
             err = traceback.format_exc()

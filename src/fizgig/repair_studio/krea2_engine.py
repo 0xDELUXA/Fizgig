@@ -15,6 +15,7 @@ plus a `pipeline` holder exposing `is_loaded`.
 
 import gc
 import logging
+import threading
 from typing import Optional, Set
 
 import torch
@@ -68,6 +69,9 @@ class Krea2RepairEngine:
         # prompt, so the 8 GB TE only loads when the prompt actually changes.
         self._prompt_cache_key: Optional[str] = None
         self._prompt_cache = None
+        # Cooperative cancellation: set to abort an in-flight render so a new edit restarts it
+        # immediately instead of queueing behind the full 8-step pass.
+        self._cancel_event = threading.Event()
         # Baseline render cache (LoRA at original strengths; slider tweaks don't invalidate it).
         self._baseline_cache_key = None
         self._baseline_cache_image: Optional[Image.Image] = None
@@ -156,6 +160,14 @@ class Krea2RepairEngine:
                 self.donor_network.set_module_enabled_by_pattern(pat, bool(bs.donor_enabled))
                 self.donor_network.set_module_multiplier_by_pattern(pat, float(bs.donor_strength))
 
+    # ----- cancellation ------------------------------------------------------
+    def request_cancel(self) -> None:
+        """Signal the in-flight render to abort at the next step boundary."""
+        self._cancel_event.set()
+
+    def clear_cancel(self) -> None:
+        self._cancel_event.clear()
+
     # ----- preview -----------------------------------------------------------
     def _encode_prompt(self, prompt: str):
         """Encode the prompt once (load TE -> encode -> free), cached on the prompt string."""
@@ -200,7 +212,8 @@ class Krea2RepairEngine:
         with torch.no_grad():
             imgs = sampling.sample(self.turbo, self.ae, txt, txtmask, untxt=None, untxtmask=None,
                                    device=self.device, dtype=self.dtype, width=width, height=height,
-                                   steps=steps, cfg_scale=1.0, mu=1.15, seed=seed)
+                                   steps=steps, cfg_scale=1.0, mu=1.15, seed=seed,
+                                   should_abort=self._cancel_event.is_set)
         return imgs[0]
 
     def _sample_cached(self, txt, txtmask, *, seed, width, height, steps, resume_from):

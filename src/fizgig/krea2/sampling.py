@@ -12,6 +12,11 @@ from PIL import Image
 from tqdm import tqdm
 
 
+class SampleAborted(Exception):
+    """Raised inside sample() when should_abort() returns True — a cooperative cancel so a
+    live preview can stop mid-pass and restart with the newest state."""
+
+
 def roundup(value, multiple, name):
     """Round `value` up to the nearest multiple, logging when padding is applied."""
     aligned = ((value + multiple - 1) // multiple) * multiple
@@ -124,6 +129,7 @@ def sample(
     y1=0.5,
     y2=1.15,
     mu=None,
+    should_abort=None,
 ):
     """Denoise pre-encoded text embeddings to images: euler+CFG denoise -> decode.
 
@@ -194,6 +200,10 @@ def sample(
     device_type = torch.device(device).type
     with torch.autocast(device_type=device_type, dtype=dtype):
         for tcurr, tprev in tqdm(zip(ts[:-1], ts[1:]), total=len(ts) - 1, desc="sampling"):
+            # Cooperative cancellation between steps — lets a live preview bail out the instant
+            # a slider changes, instead of finishing the whole pass first.
+            if should_abort is not None and should_abort():
+                raise SampleAborted()
             t = torch.full((len(img),), tcurr, dtype=img.dtype, device=img.device)
             cond = model(img=img, context=txt, t=t, pos=pos, mask=mask)
             if cfg:

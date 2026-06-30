@@ -8450,27 +8450,27 @@ class LoRATrainerGUI:
         kr = 0
         kr = self._add_pref_row(
             krea_card, kr, "RAW DiT:", "krea2_raw_dit",
-            "Krea 2 RAW (undistilled 12B base) — the training model (Krea-2-raw.safetensors)",
-            download_url="https://docs.comfy.org/tutorials/image/krea/krea-2",
-            download_note="~26GB bf16 — Krea 2 RAW base (train on this)",
+            "Krea 2 RAW (undistilled 12.9B base) — the training model (krea2_raw_bf16.safetensors)",
+            download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_raw_bf16.safetensors",
+            download_note="~26GB bf16 — Comfy-Org/Krea-2 → diffusion_models/krea2_raw_bf16.safetensors (train on this)",
         )
         kr = self._add_pref_row(
             krea_card, kr, "Turbo DiT (fp8):", "krea2_turbo_dit",
             "Krea 2 Turbo, pre-quantized fp8 (ComfyUI) — fast previews + inference (8-step, CFG-free)",
-            download_url="https://docs.comfy.org/tutorials/image/krea/krea-2",
-            download_note="~13GB fp8 — krea2_turbo_fp8_scaled.safetensors",
+            download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors",
+            download_note="~13GB fp8 — Comfy-Org/Krea-2 → diffusion_models/krea2_turbo_fp8_scaled.safetensors",
         )
         kr = self._add_pref_row(
             krea_card, kr, "Qwen-Image VAE:", "krea2_vae",
             "The Qwen-Image VAE used by Krea 2 (qwen_image_vae.safetensors)",
-            download_url="https://docs.comfy.org/tutorials/image/krea/krea-2",
-            download_note="~250MB — Qwen-Image VAE",
+            download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/vae/qwen_image_vae.safetensors",
+            download_note="~250MB — Comfy-Org/Krea-2 → vae/qwen_image_vae.safetensors",
         )
         kr = self._add_pref_row(
             krea_card, kr, "Qwen3-VL TE (bf16):", "krea2_text_encoder",
             "Qwen3-VL-4B text encoder in bf16 — NOT the fp8 ComfyUI variant (not loadable for training)",
-            download_url="https://docs.comfy.org/tutorials/image/krea/krea-2",
-            download_note="~8GB bf16 — qwen3vl_4b_bf16.safetensors",
+            download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors",
+            download_note="~8GB bf16 — Comfy-Org/Krea-2 → text_encoders/qwen3vl_4b_bf16.safetensors",
         )
 
         # Card 2: Inference Performance

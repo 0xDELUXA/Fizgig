@@ -595,7 +595,10 @@ def train_krea2(
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
-            progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}")
+            # refresh=False so only update(1) draws the bar — otherwise set_postfix AND update each
+            # force a refresh, which a captured (non-tty) stderr logs as two lines per step (the
+            # "187, 187, 188, 188" doubling). Training itself is one step per iteration.
+            progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)
             progress_bar.update(1)
         logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  step={global_step}")
 

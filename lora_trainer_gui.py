@@ -2708,22 +2708,23 @@ class LoRATrainerGUI:
         self._on_quant_4bit_toggle()  # sync initial enabled/disabled state
 
         # Gradient checkpointing — trades compute for VRAM.
-        tk.Label(memory_content, text="Grad Checkpoint:", font=(FONT_FAMILY, 10),
-                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).grid(
-            row=7, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self._grad_checkpoint_label = tk.Label(memory_content, text="Grad Checkpoint:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
+        self._grad_checkpoint_label.grid(row=7, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         self.grad_checkpoint_var = tk.BooleanVar(value=self.settings.get("GRADIENT_CHECKPOINTING", True))
         self.grad_checkpoint_check = ttk.Checkbutton(
             memory_content, text="Gradient checkpointing (recommended — lower VRAM)",
             variable=self.grad_checkpoint_var, command=self._on_grad_checkpoint_toggle,
             style="Surface.TCheckbutton")
         self.grad_checkpoint_check.grid(row=7, column=1, sticky=tk.W, padx=5, pady=4)
-        tk.Label(memory_content,
+        self._grad_checkpoint_hint = tk.Label(memory_content,
                  text="On (default) recomputes activations during the backward pass to save VRAM — it's what lets "
                       "a 9B LoRA fit on a 16 GB card. Turning it OFF makes training ~20–30% faster but uses far more "
                       "VRAM, so it's only for big cards (24 GB+, ideally 32 GB) with Blocks Swap at 0. On 16 GB, or "
                       "with block swap on, leave it ON.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
-                 wraplength=600, justify=tk.LEFT).grid(row=8, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+                 wraplength=600, justify=tk.LEFT)
+        self._grad_checkpoint_hint.grid(row=8, column=1, sticky=tk.W, padx=5, pady=(0, 4))
         # Re-sync now that the GC checkbox exists: the earlier _on_quant_4bit_toggle
         # call ran before it was created, so this applies the NF4→force-GC-on lock
         # when a saved config has 4-bit already enabled.
@@ -3404,6 +3405,33 @@ class LoRATrainerGUI:
     def _is_krea2_arch(self) -> bool:
         return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)
 
+    def _set_widget_visible(self, w, show: bool):
+        """Show/hide a single widget, working for both grid- and pack-managed widgets.
+        grid widgets use grid_remove()/grid() (position preserved); pack widgets stash their
+        pack_info on hide and restore it on show (with the 'in'→'in_' kwarg fix)."""
+        if w is None:
+            return
+        try:
+            if show:
+                saved = getattr(w, "_fizgig_pack_info", None)
+                if saved is not None:
+                    w.pack(**saved)
+                    w._fizgig_pack_info = None
+                elif w.winfo_manager() == "":   # grid_remove'd → restore remembered slot
+                    w.grid()
+            else:
+                mgr = w.winfo_manager()
+                if mgr == "pack":
+                    info = {k: v for k, v in w.pack_info().items()}
+                    if "in" in info:
+                        info["in_"] = info.pop("in")
+                    w._fizgig_pack_info = info
+                    w.pack_forget()
+                elif mgr == "grid":
+                    w.grid_remove()
+        except Exception:
+            pass
+
     def _set_training_section_visible(self, key: str, before_key: str, visible: bool):
         """Show/hide a whole collapsible section, preserving the canonical pack order.
         When showing, pack it before `before_key` (which must be a currently-packed section)
@@ -3433,27 +3461,30 @@ class LoRATrainerGUI:
           • Optimizer section                                   — krea2 hardcodes AdamW8bit
           • Timestep & Noise section                            — krea2 uses a fixed shift schedule
           • 4-bit NF4 base (in Memory & FP8)                    — krea2_train has no --quant_4bit
+          • FP8 Scaled (in Memory & FP8)                        — krea2's fp8 path is always scaled
+          • FP8 Text Encoder (in Memory & FP8)                  — krea2 caches the TE in bf16
+          • Gradient Checkpointing (in Memory & FP8)            — krea2_train hardcodes it ON
+        Kept (model-agnostic / wired): FP8 Base (-> --no_fp8), and the live "Override next
+        sample" status-bar panel (krea2 reads the override sentinel for previews — prompt/seed/
+        resolution; the edit-reference field is ignored since krea2 isn't an edit model).
         """
         # Guard: this may run via update_ui_for_architecture before the Training tab is built.
         if not hasattr(self, "_adaptive_cb"):
             return
-        # Per-widget groups in the (always-visible) Training Parameters + Memory sections.
-        # (The FP8 Base toggle in Memory IS wired for krea2 -> --no_fp8, so it stays visible;
-        #  only the unwired 4-bit NF4 row is hidden here.)
+        # Per-widget groups across the Training Parameters + Memory & FP8 sections. FP8 Base
+        # stays visible (wired -> --no_fp8); only the unwired Memory controls are hidden.
         widgets = [
             self._adaptive_cb, self._adaptive_frame, self._adaptive_desc_label,
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
             self._contextlora_label, self._contextlora_frame,
             self._contextlora_desc_label, self._contextlora_warn_label,
             self._quant_4bit_label, self.quant_4bit_check, self._quant_4bit_hint,
+            self.scaled_check,                                   # FP8 Scaled
+            self.fp8_text_encoder_label, self.fp8_text_encoder_check,
+            self._grad_checkpoint_label, self.grad_checkpoint_check, self._grad_checkpoint_hint,
         ]
         for w in widgets:
-            if w is None:
-                continue
-            try:
-                w.grid_remove() if is_krea2 else w.grid()
-            except Exception:
-                pass
+            self._set_widget_visible(w, not is_krea2)
 
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
         # dropdown decide (only shown when the preset is "Custom").

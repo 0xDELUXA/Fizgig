@@ -8,6 +8,7 @@ dataloader (same framework as Klein) over the krea2 latent/TE caches.
 
 import argparse
 import gc
+import json
 import logging
 import os
 from multiprocessing import Value
@@ -131,6 +132,28 @@ def encode_sample_prompts(te_path, prompts, *, device="cuda"):
     del enc
     torch.cuda.empty_cache()
     return out
+
+
+def _read_sample_override(output_dir):
+    """Live sample override written by the GUI to <output_dir>/.sample_override.json.
+
+    Returns {prompt, seed, width, height} while active, else None. Model-agnostic fields
+    only — the override's ref_image (Klein edit conditioning) is ignored, since Krea 2 isn't
+    an edit model and generates previews from scratch."""
+    path = os.path.join(output_dir, ".sample_override.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        if str(d.get("prompt", "")).strip():
+            return {"prompt": str(d["prompt"]).strip(),
+                    "seed": int(d.get("seed", 1234)),
+                    "width": int(d.get("width", 1024)),
+                    "height": int(d.get("height", 1024))}
+    except Exception:
+        pass
+    return None
 
 
 def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
@@ -293,9 +316,20 @@ def train_krea2(
             gc.collect()
             torch.cuda.empty_cache()
             try:
-                sample_previews(turbo_path, sample_ae, encoded_prompts, load_file(tmp), sample_dir, epoch + 1,
-                                output_name=output_name, steps=sample_steps, width=sample_width,
-                                height=sample_height, seed=sample_seed, device=device)
+                # Live sample override (GUI status-bar panel) — model-agnostic prompt/seed/res
+                # for the next preview. Encoded here (after the training DiT is on CPU) so the
+                # text encoder has room. No override -> the configured pre-encoded prompts.
+                ov = _read_sample_override(output_dir)
+                if ov:
+                    logger.info(f"[sample override] active — '{ov['prompt'][:60]}' "
+                                f"seed={ov['seed']} {ov['width']}x{ov['height']}")
+                    prev_enc = encode_sample_prompts(te_path, [ov["prompt"]], device=device)
+                    prev_w, prev_h, prev_seed = ov["width"], ov["height"], ov["seed"]
+                else:
+                    prev_enc, prev_w, prev_h, prev_seed = encoded_prompts, sample_width, sample_height, sample_seed
+                sample_previews(turbo_path, sample_ae, prev_enc, load_file(tmp), sample_dir, epoch + 1,
+                                output_name=output_name, steps=sample_steps, width=prev_w,
+                                height=prev_h, seed=prev_seed, device=device)
             finally:
                 gc.collect()
                 torch.cuda.empty_cache()

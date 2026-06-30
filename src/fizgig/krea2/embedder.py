@@ -165,7 +165,8 @@ def load_qwen3_vl_conditioner(
     qwen = _load_qwen3_vl_model(model_path, dtype=dtype, device=device, disable_mmap=disable_mmap)
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_repo, max_length=max_length)
     processor = Qwen2TokenizerFast.from_pretrained(tokenizer_repo, max_length=max_length)
-    conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length, select_layers=select_layers)
+    conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length,
+                                     select_layers=select_layers, tokenizer_repo=tokenizer_repo)
     return conditioner.eval().requires_grad_(False)
 
 
@@ -177,19 +178,40 @@ class Qwen3VLConditioner(torch.nn.Module):
         processor,
         max_length: int = 512,
         select_layers: tuple[int, ...] = (2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35),
+        tokenizer_repo: str | None = None,
     ):
         super().__init__()
         self.qwen = qwen.eval().requires_grad_(False)
         self.tokenizer = tokenizer
         self.processor = processor
+        self.tokenizer_repo = tokenizer_repo
+        self._image_processor = None  # lazily-loaded full Qwen3-VL processor (for image refs)
         self.max_length = max_length
         self.select_layers = select_layers
-        self.prompt_template_encode_prefix = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n"
+        self.system_descriptor = ("Describe the image by detailing the color, shape, size, texture, "
+                                  "quantity, text, spatial relationships of the objects and background:")
+        self.prompt_template_encode_prefix = "<|im_start|>system\n" + self.system_descriptor + "<|im_end|>\n<|im_start|>user\n"
         self.prompt_template_encode_suffix = "<|im_end|>\n<|im_start|>assistant\n"
         self.prompt_template_encode_start_idx = 34
         self.prompt_template_encode_suffix_start_idx = 5
 
-    def forward(self, text: list[str]) -> tuple[Tensor, Tensor]:
+    def forward(self, text: list[str], images: list | None = None,
+                vision_megapixels: float = 1.0) -> tuple[Tensor, Tensor]:
+        """Encode prompts to the K2 multi-layer hidden stack + mask.
+
+        `images`, when given, is a per-prompt list (same length as `text`); each entry is a
+        list of PIL.Image references (or None). When any prompt has references they are fed
+        through Qwen3-VL's *vision* path under the same descriptor template, so the conditioning
+        becomes "visually aware" of the image (a prompt-from-a-picture effect — Krea 2's DiT has
+        no reference-latent slot, so this is the only reference mechanism). Requires the bf16 TE:
+        ComfyUI's Qwen3-VL vision tower can't run in fp8.
+        """
+        has_imgs = bool(images) and any(images[i] for i in range(min(len(images), len(text))))
+        if has_imgs:
+            return self._forward_with_images(text, images, vision_megapixels)
+        return self._forward_text(text)
+
+    def _forward_text(self, text: list[str]) -> tuple[Tensor, Tensor]:
         prefix_idx = self.prompt_template_encode_start_idx
         text = [self.prompt_template_encode_prefix + item for item in text]
         suffix_text = [self.prompt_template_encode_suffix] * len(text)
@@ -217,4 +239,56 @@ class Qwen3VLConditioner(torch.nn.Module):
             hiddens = hiddens[:, prefix_idx:]
             mask = mask[:, prefix_idx:]
 
+            return hiddens, mask
+
+    def _get_image_processor(self):
+        """Lazily load the full Qwen3-VL processor (text + image). Only needed for image refs,
+        so text-only training never pays for it."""
+        if self._image_processor is None:
+            from transformers import AutoProcessor
+            repo = self.tokenizer_repo or QWEN3_VL_4B_INSTRUCT_REPO_ID
+            self._image_processor = AutoProcessor.from_pretrained(repo)
+        return self._image_processor
+
+    @staticmethod
+    def _cap_image(im, megapixels: float):
+        """RGB + downscale an image so its pixel area is <= megapixels (never upscale)."""
+        from PIL import Image
+        im = im.convert("RGB")
+        cap = int(megapixels * 1024 * 1024)
+        w, h = im.size
+        if w * h > cap and w > 0 and h > 0:
+            scale = (cap / (w * h)) ** 0.5
+            im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+        return im
+
+    def _forward_with_images(self, text, images, vision_megapixels) -> tuple[Tensor, Tensor]:
+        """Vision-aware encode: build the descriptor template with vision placeholders, run the
+        Qwen3-VL processor (text + pixel_values), and extract the same select-layer stack.
+
+        Mirrors the ComfyUI Text-Encode-(Krea2) node: forced Krea 2 descriptor system prompt,
+        image tokens in the user turn, vision_megapixels as a downscale cap. The system prefix
+        (start_idx tokens) is trimmed exactly as in the text path.
+        """
+        proc = self._get_image_processor()
+        prefix_idx = self.prompt_template_encode_start_idx
+        full_texts, flat_images = [], []
+        for i, prompt in enumerate(text):
+            imgs = (images[i] if images and i < len(images) and images[i] else [])
+            imgs = [self._cap_image(im, vision_megapixels) for im in imgs]
+            vis = "".join("<|vision_start|><|image_pad|><|vision_end|>" for _ in imgs)
+            full_texts.append(self.prompt_template_encode_prefix + vis + prompt
+                              + self.prompt_template_encode_suffix)
+            flat_images.extend(imgs)
+
+        with torch.no_grad():
+            inputs = proc(text=full_texts, images=flat_images or None,
+                          padding=True, return_tensors="pt").to(self.qwen.device)
+            states = self.qwen(**inputs, output_hidden_states=True)
+            hiddens = torch.stack([states.hidden_states[i] for i in self.select_layers], dim=2)
+            mask = inputs["attention_mask"].bool()
+            # Trim the system descriptor prefix (same fixed prefix as the text path; the image
+            # tokens live in the user turn, after it).
+            hiddens = hiddens[:, prefix_idx:]
+            mask = mask[:, prefix_idx:]
             return hiddens, mask

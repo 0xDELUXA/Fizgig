@@ -2688,22 +2688,23 @@ class LoRATrainerGUI:
         self.fp8_text_encoder_check.grid(row=4, column=1, sticky=tk.W, padx=5, pady=4)
 
         # 4-bit (NF4) base — low-VRAM mode
-        tk.Label(memory_content, text="4-bit Base:", font=(FONT_FAMILY, 10),
-                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).grid(
-            row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self._quant_4bit_label = tk.Label(memory_content, text="4-bit Base:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
+        self._quant_4bit_label.grid(row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         self.quant_4bit_var = tk.BooleanVar(value=self.settings.get("QUANT_4BIT", False))
         self.quant_4bit_check = ttk.Checkbutton(
             memory_content, text="Quantize base to 4-bit NF4 (low VRAM)",
             variable=self.quant_4bit_var, command=self._on_quant_4bit_toggle,
             style="Surface.TCheckbutton")
         self.quant_4bit_check.grid(row=5, column=1, sticky=tk.W, padx=5, pady=4)
-        tk.Label(memory_content,
+        self._quant_4bit_hint = tk.Label(memory_content,
                  text="Halves DiT VRAM (~9.6 → ~5.6 GB) so a full 9B LoRA trains on 10–12 GB cards — "
                       "a LoRA trained on a frozen 4-bit base (QLoRA-style). This is for cards that can't fit "
                       "fp8 training (~14 GB); 16 GB+ should use fp8. Forces block swap off, and supersedes the "
                       "FP8 Base options. Slight quality trade vs fp8 — always check the output LoRA in ComfyUI.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
-                 wraplength=600, justify=tk.LEFT).grid(row=6, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+                 wraplength=600, justify=tk.LEFT)
+        self._quant_4bit_hint.grid(row=6, column=1, sticky=tk.W, padx=5, pady=(0, 4))
         self._on_quant_4bit_toggle()  # sync initial enabled/disabled state
 
         # Gradient checkpointing — trades compute for VRAM.
@@ -3431,16 +3432,20 @@ class LoRATrainerGUI:
           • Context LoRA (path/Browse/Strength + 2 descriptions) — no --context_lora in krea2_train
           • Optimizer section                                   — krea2 hardcodes AdamW8bit
           • Timestep & Noise section                            — krea2 uses a fixed shift schedule
+          • 4-bit NF4 base (in Memory & FP8)                    — krea2_train has no --quant_4bit
         """
         # Guard: this may run via update_ui_for_architecture before the Training tab is built.
         if not hasattr(self, "_adaptive_cb"):
             return
-        # Per-widget groups in the (always-visible) Training Parameters section.
+        # Per-widget groups in the (always-visible) Training Parameters + Memory sections.
+        # (The FP8 Base toggle in Memory IS wired for krea2 -> --no_fp8, so it stays visible;
+        #  only the unwired 4-bit NF4 row is hidden here.)
         widgets = [
             self._adaptive_cb, self._adaptive_frame, self._adaptive_desc_label,
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
             self._contextlora_label, self._contextlora_frame,
             self._contextlora_desc_label, self._contextlora_warn_label,
+            self._quant_4bit_label, self.quant_4bit_check, self._quant_4bit_hint,
         ]
         for w in widgets:
             if w is None:

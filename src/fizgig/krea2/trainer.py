@@ -484,7 +484,7 @@ def _read_sample_override(output_dir):
 def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
                     output_name="krea2", steps=8, cfg_scale=1.0, width=512, height=512,
                     seed=42, context_lora_path=None, context_lora_strength=1.0,
-                    blocks_to_swap=0, device="cuda"):
+                    blocks_to_swap=0, int8=False, device="cuda"):
     """Load the (clean) pre-quant fp8 Turbo, apply the current LoRA LIVE (no merge -> no grid),
     and render each pre-encoded prompt. Turbo is freed afterwards.
 
@@ -500,8 +500,20 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
     from fizgig.networks.lora import create_network_from_weights
     from fizgig.krea2 import sampling
 
+    _ld = "cpu" if blocks_to_swap > 0 else device
     turbo = load_krea2_dit(turbo_path, device=device, dtype=torch.bfloat16,
-                           loading_device="cpu" if blocks_to_swap > 0 else None)  # prequant fp8 auto-detected
+                           loading_device=_ld)  # prequant fp8 auto-detected
+    if int8:
+        # INT8 (W8A8) fast preview matmul — quantize the block Linears BEFORE the LoRA wraps them
+        # (so the LoRA wraps the int8 forward) and before block swap (so the offloader stages int8).
+        # Quantize on the load device so a swapped (CPU-loaded) model doesn't need the whole int8
+        # model resident on GPU.
+        from fizgig.modules.int8 import apply_int8_quantization
+        from fizgig.krea2.utils import (KREA2_FP8_OPTIMIZATION_TARGET_KEYS,
+                                        KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS)
+        apply_int8_quantization(turbo, target_keys=KREA2_FP8_OPTIMIZATION_TARGET_KEYS,
+                                exclude_keys=KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS,
+                                compute_device=torch.device(_ld))
     # Context LoRA (frozen) goes on FIRST so previews match deployment: the trained LoRA runs
     # on top of the same context at the same strength it was trained with.
     ctx_net = None
@@ -567,6 +579,7 @@ def train_krea2(
     sample_seed: int = 42,
     sample_ref_image: str = None,
     preview_blocks_to_swap: int = 0,
+    preview_int8: bool = False,
     resume_state_dir: str = None,
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
@@ -727,7 +740,7 @@ def train_krea2(
                                 output_name=output_name, steps=sample_steps, width=prev_w,
                                 height=prev_h, seed=prev_seed,
                                 context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
-                                blocks_to_swap=preview_blocks_to_swap, device=device)
+                                blocks_to_swap=preview_blocks_to_swap, int8=preview_int8, device=device)
             except Exception as _prev_err:
                 # A preview failure — almost always CUDA OOM (the ~13 GB Turbo + the Qwen3-VL
                 # encoder won't fit alongside the parked training DiT on a small card) — must NEVER

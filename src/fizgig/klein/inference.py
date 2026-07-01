@@ -121,6 +121,7 @@ class KleinInferencePipeline:
         blocks_to_swap: int = 0,
         use_scaled_mm: bool = False,
         keep_fp8_resident: bool = False,
+        int8: bool = False,
     ):
         """Load all models for inference.
 
@@ -154,6 +155,14 @@ class KleinInferencePipeline:
             use_scaled_mm=use_scaled_mm,
             keep_fp8_resident=keep_fp8_resident,
         )
+
+        # INT8 (W8A8) fast inference — quantize the DiT block Linears BEFORE block swap so the
+        # offloader stages int8 (see modules/int8.py). Same VRAM as fp8, faster matmul.
+        if int8:
+            from fizgig.modules.int8 import apply_int8_quantization
+            from fizgig.klein.model import FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS
+            apply_int8_quantization(self.dit, target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+                                    exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS, compute_device=self.device)
 
         # Enable block swap if requested
         if blocks_to_swap > 0:

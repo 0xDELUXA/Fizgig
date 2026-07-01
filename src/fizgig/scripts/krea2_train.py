@@ -44,6 +44,8 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample_ref_image", default=None, help="Reference image (Qwen3-VL vision path)")
     p.add_argument("--preview_blocks_to_swap", type=int, default=0,
                    help="Forward-only block swap on the preview Turbo (fits smaller cards)")
+    p.add_argument("--preview_int8", action="store_true",
+                   help="INT8 (W8A8) fast matmul for the preview Turbo (experimental, same VRAM as fp8)")
     p.add_argument("--resume", default=None, help="Path to a <name>-NNNNNN-state dir to resume from")
     p.add_argument("--context_lora_path", default=None, help="Frozen+active context LoRA on the base")
     p.add_argument("--context_lora_strength", type=float, default=1.0)
@@ -76,6 +78,7 @@ def main():
         sample_width=args.sample_width, sample_height=args.sample_height,
         sample_ref_image=args.sample_ref_image,
         preview_blocks_to_swap=args.preview_blocks_to_swap,
+        preview_int8=args.preview_int8,
         resume_state_dir=args.resume,
         context_lora_path=args.context_lora_path, context_lora_strength=args.context_lora_strength,
         adaptive_lr=args.adaptive_lr,

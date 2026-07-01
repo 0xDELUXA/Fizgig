@@ -142,6 +142,7 @@ class RepairEngine:
         fp8_scaled: bool = False,
         fp8_text_encoder: bool = True,
         blocks_to_swap: int = 0,
+        int8: bool = False,
     ) -> None:
         """Lazy-load the Klein pipeline. No-op if already loaded.
 
@@ -163,6 +164,7 @@ class RepairEngine:
             fp8_scaled=fp8_scaled,
             fp8_text_encoder=fp8_text_encoder,
             blocks_to_swap=blocks_to_swap,
+            int8=int8,
         )
         # Offload TE to CPU between calls (saves ~8GB). generate_preview
         # reloads it to GPU before each encode.

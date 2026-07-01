@@ -7214,6 +7214,7 @@ class LoRATrainerGUI:
                 model_version=model_version, device="cuda",
                 fp8_scaled=False if is_fp8_model else True,
                 blocks_to_swap=self._get_inference_blocks_to_swap(),
+                int8=self._get_inference_int8(),
             )
             self.explorer_status_var.set("Models loaded.")
             return True
@@ -10323,6 +10324,7 @@ class LoRATrainerGUI:
                 model_version=model_version, device="cuda",
                 fp8_scaled=False if is_fp8_model else True,
                 blocks_to_swap=self._get_inference_blocks_to_swap(),
+                int8=self._get_inference_int8(),
             )
             self.repair_status_var.set("Models loaded.")
             return True
@@ -11536,7 +11538,8 @@ class LoRATrainerGUI:
             dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
             model_version="klein-9b", device="cuda",
             fp8_scaled=False if is_fp8 else True,
-            blocks_to_swap=self._get_inference_blocks_to_swap())
+            blocks_to_swap=self._get_inference_blocks_to_swap(),
+            int8=self._get_inference_int8())
         return True
 
     def _royale_validate_models_krea2(self):
@@ -14780,6 +14783,9 @@ class LoRATrainerGUI:
                     # VRAM profile so previews fit the card — mirrors Klein's Distilled sample swap.
                     "--preview_blocks_to_swap", str(self._auto_krea2_inference_blocks_swap()),
                 ]
+                # INT8 fast preview matmul — same app-wide 'INT8 fast inference' toggle as the workbench.
+                if self._get_inference_int8():
+                    cmd.append("--preview_int8")
                 if prompt_file:
                     cmd += ["--sample_prompts", prompt_file]
                 if ref_img:

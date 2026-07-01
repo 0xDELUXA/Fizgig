@@ -547,6 +547,9 @@ DEFAULT_PREFS = {
     # (0 ≈ 24GB). 16 = max swap for the smallest cards. Applies to Repair Studio,
     # Profiler, and Extractor. The Training tab has its own separate BLOCKS_SWAP.
     "inference_blocks_to_swap": "Auto (detect from GPU)",
+    # INT8 fast inference (experimental): quantize the workbench/preview DiT's block Linears to int8
+    # (W8A8) for a faster matmul. Same VRAM as fp8 (8-bit either way); composes with block swap.
+    "inference_int8": "0",
 }
 
 
@@ -3612,6 +3615,13 @@ class LoRATrainerGUI:
             return _auto_detect_blocks_to_swap()
         m = _re.match(r'\d+', raw)
         return int(m.group()) if m else 0
+
+    def _get_inference_int8(self) -> bool:
+        """Resolve the Preferences 'INT8 fast inference' toggle (workbench + previews) to a bool."""
+        try:
+            return str(self.prefs_vars["inference_int8"].get()).strip() in ("1", "True", "true")
+        except Exception:
+            return False
 
     def _resolve_script(self, config: dict, script_key: str) -> str:
         """Resolve an absolute script path from an architecture config entry.
@@ -7235,7 +7245,8 @@ class LoRATrainerGUI:
             self._explorer_engine.ensure_pipeline(
                 turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
                 device="cuda", model_kind="turbo",
-                blocks_to_swap=self._auto_krea2_inference_blocks_swap())
+                blocks_to_swap=self._auto_krea2_inference_blocks_swap(),
+                int8=self._get_inference_int8())
             self.explorer_status_var.set("Models loaded.")
             return True
         except Exception:
@@ -8831,6 +8842,18 @@ class LoRATrainerGUI:
                     self.prefs_vars["inference_blocks_to_swap"].set(_opt)
                     break
 
+        # INT8 fast inference (experimental). Quantizes the workbench/preview DiT's block Linears to
+        # int8 for a faster matmul. Same VRAM as fp8 (8-bit either way) — this is a speed knob, not a
+        # memory one — and it stacks with block swap. Faster on RTX 40/50-series, more on 30-series.
+        ttk.Label(inf_card, text="INT8 fast inference:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        ttk.Checkbutton(
+            inf_card, text="Quantize previews/workbench to int8 (faster matmul, experimental)",
+            variable=self.prefs_vars["inference_int8"], onvalue="1", offvalue="0",
+        ).grid(row=1, column=1, sticky=tk.W, pady=4)
+        tk.Label(inf_card, text="Speed only (int8 is the same VRAM as fp8). Near-identical quality; on by choice.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
+            row=2, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+
         # Card 3: Output Directories
         out_card = self._start_section_card(
             outer, "Output Directories",
@@ -10335,7 +10358,8 @@ class LoRATrainerGUI:
             self.repair_engine.ensure_pipeline(
                 turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
                 device="cuda", model_kind="raw" if is_raw else "turbo",
-                blocks_to_swap=self._auto_krea2_inference_blocks_swap())
+                blocks_to_swap=self._auto_krea2_inference_blocks_swap(),
+                int8=self._get_inference_int8())
             self.repair_status_var.set("Models loaded.")
             return True
         except Exception:
@@ -11534,7 +11558,8 @@ class LoRATrainerGUI:
         self._royale_pipeline_kwargs = dict(
             turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
             device="cuda", model_kind="turbo",
-            blocks_to_swap=self._auto_krea2_inference_blocks_swap())
+            blocks_to_swap=self._auto_krea2_inference_blocks_swap(),
+            int8=self._get_inference_int8())
         return True
 
     def _royale_is_krea2_engine(self):

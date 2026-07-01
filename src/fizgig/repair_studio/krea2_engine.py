@@ -114,7 +114,7 @@ class Krea2RepairEngine:
     # ----- pipeline + LoRA loading -------------------------------------------
     def ensure_pipeline(self, turbo_path: str, vae_path: str, text_encoder_path: str,
                         device: str = "cuda", model_kind: str = "turbo",
-                        blocks_to_swap: int = 0, **_ignored) -> None:
+                        blocks_to_swap: int = 0, int8: bool = False, **_ignored) -> None:
         """Load the preview DiT + VAE once (TE loads on demand per prompt-encode).
 
         model_kind: 'turbo' (fp8, 8-step, CFG-free — the default) or 'raw' (the undistilled
@@ -132,8 +132,19 @@ class Krea2RepairEngine:
         self.te_path = text_encoder_path
         self.model_kind = model_kind
         self._default_steps = 20 if model_kind == "raw" else 8
+        loading_device = "cpu" if blocks_to_swap > 0 else device
         self.turbo = load_krea2_dit(turbo_path, device=device, dtype=self.dtype,
-                                    loading_device="cpu" if blocks_to_swap > 0 else None)
+                                    loading_device=loading_device)
+        if int8:
+            # INT8 (W8A8) fast inference — quantize the block Linears BEFORE block swap so the
+            # offloader stages int8 (see modules/int8.py). Quantize on the model's load device so a
+            # swapped (CPU-loaded) model doesn't briefly need the whole int8 model resident on GPU.
+            from fizgig.modules.int8 import apply_int8_quantization
+            from fizgig.krea2.utils import (KREA2_FP8_OPTIMIZATION_TARGET_KEYS,
+                                            KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS)
+            apply_int8_quantization(self.turbo, target_keys=KREA2_FP8_OPTIMIZATION_TARGET_KEYS,
+                                    exclude_keys=KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS,
+                                    compute_device=torch.device(loading_device))
         if blocks_to_swap > 0:
             from fizgig.krea2.offloading import BlockSwapConfig
             self.turbo.enable_block_swap(blocks_to_swap, BlockSwapConfig(torch.device(device), supports_backward=False))

@@ -14588,6 +14588,10 @@ class LoRATrainerGUI:
                     cache_mode = getattr(self, "cache_sample_model_var", None)
                     cache_mode = cache_mode.get() if cache_mode else self.settings.get("CACHE_SAMPLE_MODEL", "auto")
                     command.extend(["--cache_sample_model", cache_mode])
+                    # INT8 fast preview matmul — same app-wide 'INT8 fast inference' toggle as the
+                    # workbench + Krea 2 previews; applies to the Distilled sample DiT.
+                    if self._get_inference_int8():
+                        command.append("--sample_int8")
                     # Note: we deliberately do NOT forward the Preferences "DiT Block
                     # Swap (inference)" pref here. That setting governs the in-app
                     # inference tools (Repair Studio / Profiler / Extract / Explorer).

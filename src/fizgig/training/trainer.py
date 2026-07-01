@@ -1495,6 +1495,17 @@ class KleinTrainer:
                     dit_weight_dtype=torch.bfloat16,
                     fp8_scaled=False,
                 )
+                if getattr(args, "sample_int8", False):
+                    # INT8 (W8A8) fast preview matmul — quantize the Distilled block Linears BEFORE
+                    # block swap (so the offloader stages int8) and before the LoRA wraps them. On
+                    # the load device so a swapped (CPU-loaded) sample model doesn't need the whole
+                    # int8 model resident on GPU. Cached below, so later epochs reuse the int8 model.
+                    from fizgig.modules.int8 import apply_int8_quantization
+                    from fizgig.klein.model import FP8_OPTIMIZATION_TARGET_KEYS, FP8_OPTIMIZATION_EXCLUDE_KEYS
+                    apply_int8_quantization(_distilled_dit,
+                                            target_keys=FP8_OPTIMIZATION_TARGET_KEYS,
+                                            exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
+                                            compute_device=torch.device(_loading_device))
                 if _sample_blocks > 0:
                     _distilled_dit.enable_block_swap(
                         _sample_blocks, device=accelerator.device, supports_backward=False,
@@ -2966,6 +2977,8 @@ def setup_parser() -> argparse.ArgumentParser:
                              "Loads separately alongside the training Base model.")
     parser.add_argument("--sample_blocks_to_swap", type=int, default=0,
                         help="Block swap for Distilled sampling DiT (from inference prefs).")
+    parser.add_argument("--sample_int8", action="store_true",
+                        help="INT8 (W8A8) fast matmul for the Distilled sample DiT (experimental, same VRAM as fp8).")
     parser.add_argument("--cache_sample_model", type=str, default="auto",
                         choices=["auto", "on", "off"],
                         help="Keep the Distilled sample model in CPU RAM between epochs "

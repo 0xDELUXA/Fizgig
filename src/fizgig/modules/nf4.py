@@ -114,3 +114,39 @@ def apply_nf4_quantization(
         f"(freed ~{freed_bytes/1e9:.2f} GB of fp8/bf16 weights, packed ~{packed_bytes/1e9:.2f} GB)."
     )
     return count
+
+
+def _move_quant_state(state, device: torch.device):
+    """Move a bitsandbytes QuantState's tensors to `device`. QuantState.to() is broken for the
+    non-nested (compress_statistics=False) case in bnb 0.48.x — it dereferences a None state2 —
+    so we move the constituent tensors ourselves. Recurses into the nested state2 when present."""
+    for attr in ("absmax", "code", "offset"):
+        t = getattr(state, attr, None)
+        if isinstance(t, torch.Tensor):
+            setattr(state, attr, t.to(device))
+    s2 = getattr(state, "state2", None)
+    if s2 is not None:
+        _move_quant_state(s2, device)
+
+
+def move_nf4_to_device(model: nn.Module, device) -> int:
+    """Move an NF4-quantized model's packed weights + quant state to `device`.
+
+    `nn.Module.to()` leaves these behind — `_nf4_packed` and `_nf4_state` are plain attributes,
+    not registered buffers/params — so `model.to("cpu")` frees only the (empty) `.weight` shells
+    and the ~6 GB of 4-bit data stays put. To actually park an NF4 model on CPU for a preview
+    (freeing that VRAM for the preview model) and restore it afterwards, call this explicitly.
+    Returns the number of NF4 modules moved."""
+    device = torch.device(device)
+    n = 0
+    for module in model.modules():
+        if not getattr(module, "_is_nf4", False):
+            continue
+        packed = getattr(module, "_nf4_packed", None)
+        if packed is not None:
+            module._nf4_packed = packed.to(device)
+        state = getattr(module, "_nf4_state", None)
+        if state is not None:
+            _move_quant_state(state, device)
+        n += 1
+    return n

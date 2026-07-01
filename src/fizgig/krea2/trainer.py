@@ -701,6 +701,12 @@ def train_krea2(
             # Park the training DiT on CPU for the preview, then restore it (and its block-swap
             # placement) before the next epoch. Costs one CPU<->GPU round-trip per preview.
             dit.to("cpu")
+            if getattr(dit, "_nf4_quantized", False):
+                # NF4's packed weights + quant state are plain attributes that .to("cpu") ignores
+                # (~6 GB would stay on the GPU), so move them explicitly to free the VRAM the
+                # preview needs — restored in the finally below.
+                from fizgig.modules.nf4 import move_nf4_to_device
+                move_nf4_to_device(dit, "cpu")
             gc.collect()
             torch.cuda.empty_cache()
             try:
@@ -744,6 +750,11 @@ def train_krea2(
                     dit.switch_block_swap_for_training()
                 else:
                     dit.to(device)
+                if getattr(dit, "_nf4_quantized", False):
+                    # Restore the 4-bit packed weights + quant state to the GPU (they were parked
+                    # on CPU above; .to(device) doesn't touch them). NF4 forces blocks_to_swap=0.
+                    from fizgig.modules.nf4 import move_nf4_to_device
+                    move_nf4_to_device(dit, device)
             dit.train()
             network.train()
 

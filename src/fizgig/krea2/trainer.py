@@ -692,6 +692,19 @@ def train_krea2(
                                 height=prev_h, seed=prev_seed,
                                 context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
                                 blocks_to_swap=preview_blocks_to_swap, device=device)
+            except Exception as _prev_err:
+                # A preview failure — almost always CUDA OOM (the ~13 GB Turbo + the Qwen3-VL
+                # encoder won't fit alongside the parked training DiT on a small card) — must NEVER
+                # kill the run. Training and LoRA saving are independent of previews, so we log,
+                # disable previews for the rest of this run (so we don't re-OOM every sample epoch),
+                # and carry on. The training DiT is restored in the finally below.
+                _oom = "out of memory" in str(_prev_err).lower()
+                logger.warning(
+                    f"[preview] epoch {epoch + 1} preview failed "
+                    f"({'CUDA OOM — this card is too small for the Turbo preview' if _oom else type(_prev_err).__name__}); "
+                    f"disabling previews for the rest of the run. Training continues and LoRAs still save normally."
+                )
+                do_previews = False
             finally:
                 gc.collect()
                 torch.cuda.empty_cache()

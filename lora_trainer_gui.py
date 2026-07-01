@@ -547,9 +547,10 @@ DEFAULT_PREFS = {
     # (0 ≈ 24GB). 16 = max swap for the smallest cards. Applies to Repair Studio,
     # Profiler, and Extractor. The Training tab has its own separate BLOCKS_SWAP.
     "inference_blocks_to_swap": "Auto (detect from GPU)",
-    # INT8 fast inference (experimental): quantize the workbench/preview DiT's block Linears to int8
-    # (W8A8) for a faster matmul. Same VRAM as fp8 (8-bit either way); composes with block swap.
-    "inference_int8": "0",
+    # INT8 fast inference: quantize the workbench/preview DiT's block Linears to int8 (W8A8) for a
+    # faster matmul. On by default — same VRAM as fp8 (8-bit either way), composes with block swap,
+    # and only affects previews (never the saved LoRA). Toggle off in Preferences to use fp8.
+    "inference_int8": "1",
 }
 
 
@@ -8843,15 +8844,16 @@ class LoRATrainerGUI:
                     self.prefs_vars["inference_blocks_to_swap"].set(_opt)
                     break
 
-        # INT8 fast inference (experimental). Quantizes the workbench/preview DiT's block Linears to
-        # int8 for a faster matmul. Same VRAM as fp8 (8-bit either way) — this is a speed knob, not a
-        # memory one — and it stacks with block swap. Faster on RTX 40/50-series, more on 30-series.
+        # INT8 fast inference (on by default). Quantizes the workbench/preview DiT's block Linears to
+        # int8 for a faster matmul. Same VRAM as fp8 (8-bit either way) — a speed knob, not a memory
+        # one — stacks with block swap, and only affects previews (never the saved LoRA). Biggest win
+        # on RTX 30-series (no fast fp8), modest on 40/50-series.
         ttk.Label(inf_card, text="INT8 fast inference:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         ttk.Checkbutton(
-            inf_card, text="Quantize previews/workbench to int8 (faster matmul, experimental)",
+            inf_card, text="Quantize previews/workbench to int8 for a faster matmul (recommended)",
             variable=self.prefs_vars["inference_int8"], onvalue="1", offvalue="0",
         ).grid(row=1, column=1, sticky=tk.W, pady=4)
-        tk.Label(inf_card, text="Speed only (int8 is the same VRAM as fp8). Near-identical quality; on by choice.",
+        tk.Label(inf_card, text="On by default. Same VRAM as fp8, near-identical quality, previews only. Turn off to use fp8.",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
             row=2, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 

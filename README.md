@@ -216,6 +216,18 @@ Krea 2 is a bigger model, so the numbers differ — but Fizgig **auto-sizes bloc
 
 ---
 
+## INT8 fast inference (on by default)
+
+Previews and the whole workbench (Repair Studio / Explorer / LoRA Royale, plus in-training previews) run an **INT8 (W8A8)** matmul instead of fp8 — faster, at **near-identical quality**, on **both Klein and Krea 2**. Key points:
+
+- It **only affects previews** — your **saved LoRA is always exact**, INT8 or not. It changes what you *see* while working, never what you *ship*.
+- It's a **speed** knob, not a memory one: int8 is 8-bit like fp8, so **same VRAM**. It also **stacks with block swap**, so it helps small cards too.
+- The win **varies by GPU**: **biggest on RTX 30-series** (which have no fast fp8 tensor cores), modest on 40/50-series where fp8 is already fast. Measured so far: ~1.19× vs fp8 on a 5090, larger on a 3090.
+
+It's **on by default**; flip **INT8 fast inference** off in **Preferences → Inference Performance** to fall back to fp8.
+
+---
+
 ## Getting started
 
 Launch Fizgig and work left-to-right through the numbered tabs:

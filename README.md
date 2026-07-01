@@ -1,8 +1,8 @@
-<h1 align="center">Fizgig — Klein 9B LoRA Studio</h1>
+<h1 align="center">Fizgig — Klein 9B & Krea 2 LoRA Studio</h1>
 
 <p align="center">
   <strong>Fix broken LoRAs without retraining. Remix any LoRA into new variations in seconds.</strong><br>
-  A train · repair · explore workbench built end-to-end for <strong>Flux 2 Klein 9B</strong>.
+  A train · repair · explore workbench built end-to-end for <strong>Flux 2 Klein 9B</strong> and <strong>Krea 2</strong>.
 </p>
 
 <p align="center">
@@ -15,10 +15,10 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Krea%202-experimental-orange?style=for-the-badge" alt="Krea 2 — experimental">
+  <img src="https://img.shields.io/badge/models-Klein%209B%20%2B%20Krea%202-blue?style=for-the-badge" alt="Klein 9B + Krea 2">
 </p>
 
-> **🧪 New — Krea 2 (experimental).** Fizgig now has a **second, fully native model family**: **Krea 2 (12.9B)**, on the `experiment/krea2-training` branch. The whole workbench is ported — Repair Studio, Explorer, Royale, Profiler, Extract — plus Context LoRA, Adaptive LR, Pause/Resume, and the live sample override. It's freshly stabilised and **not yet merged**; Klein 9B remains the stable, recommended path. [Details below ↓](#krea-2--second-model-family-experimental)
+> **🎉 New — Krea 2.** Fizgig now supports a **second, fully native model family**: **Krea 2 (12.9B)**. The whole workbench works with it — Repair Studio, Explorer, Royale, Profiler, Extract — plus Context LoRA, Adaptive LR, Pause/Resume, 4-bit (NF4) low-VRAM training, and the live sample override. [Details below ↓](#krea-2--second-model-family)
 
 ---
 
@@ -32,7 +32,7 @@ Every trainer makes LoRAs. Fizgig is built around what you do with them **afterw
 - **Share** what you made — LoRA Royale exports the epoch morph, or travels a single LoRA through seeds, prompts, or strength, as a looping MP4/GIF made to share.
 - **Profile** exactly which blocks carry identity, style, and detail — so you know what to touch before you touch it.
 
-Under that workbench sits a fast, light trainer tuned for a single model. Because everything is built for Klein 9B instead of bolted on to a dozen models, the whole thing can do things the generalists can't: a full 9B LoRA trains comfortably on a **16 GB card**, and the post-training tools all read each other's output.
+Under that workbench sits a fast, light trainer tuned for its models. Because everything is built natively for Klein 9B and Krea 2 instead of bolted on to a dozen models, the whole thing can do things the generalists can't: a full 9B LoRA trains comfortably on a **16 GB card**, and the post-training tools all read each other's output.
 
 **Free and open source.** A good first run is the **✨ Old Reliable** preset on the Training tab — then try **✨ Old Reliable · Flavour 8** (rank 8). Much of the old rank-16 instinct predates models this size; on Klein 9B, rank 8 is often plenty.
 
@@ -61,13 +61,11 @@ Distil any Klein LoRA to a lower rank with block and timestep targeting. Fast pr
 
 ---
 
-## Krea 2 — second model family (experimental)
-
-*Branch: `experiment/krea2-training` · not yet merged · interface may still change.*
+## Krea 2 — second model family
 
 Krea 2 is a from-scratch **native** port — no external tooling at runtime: a 12.9B single-stream MMDiT, the Qwen-Image VAE, and a Qwen3-VL-4B text encoder. **Train on the RAW model** (fp8, ~14 GB resident) and **preview on the fp8 Turbo** (8-step, CFG-free) with your live LoRA applied. Pick it from the **Base Model selector** at the top of the Training tab.
 
-Already working on Krea 2: **all five workbench tools** (Profiler, Extract, Repair Studio, Explorer, Royale), plus **Pause/Resume** (full state), **Context LoRA**, **Adaptive LR**, **reference images** (through the text encoder's vision path — "prompt from a picture"), and the live sample override. Still deferred (hidden in the GUI, not removed): per-block Model-Area targeting (no Krea 2 block map yet), the Optimizer and Timestep sections, and the FP8-Scaled / FP8-TE / Gradient-Checkpointing toggles.
+Everything works on Krea 2: **all five workbench tools** (Profiler, Extract, Repair Studio, Explorer, Royale), plus **Pause/Resume** (full state), **Context LoRA**, **Adaptive LR**, **reference images** (through the text encoder's vision path — "prompt from a picture"), and the live sample override. A few Training-tab controls are hidden for Krea 2 for now (not removed): per-block Model-Area targeting (no Krea 2 block map yet), the Optimizer and Timestep sections, and the FP8-Scaled / FP8-TE / Gradient-Checkpointing toggles.
 
 **Runs on smaller cards, and adapts to yours.** Krea 2 is a bigger model than Klein, but the low-VRAM paths are wired:
 
@@ -75,7 +73,7 @@ Already working on Krea 2: **all five workbench tools** (Profiler, Extract, Repa
 - **VRAM-adaptive previews & workbench** — the fp8 Turbo (used for in-training previews *and* Repair Studio / Explorer / Royale) auto-sizes its own block swap to your GPU, so the tools fit smaller cards without you tuning anything.
 - **Previews never crash a run** — if the Turbo preview can't fit even swapped, previews auto-disable and **training keeps going and saving**; evaluate the LoRA in ComfyUI. (With 4-bit, the base even parks off the GPU during each preview, so the two coexist.)
 
-**Status: experimental.** It trains real, ComfyUI-compatible LoRAs and its training recipe is verified against the reference implementation — but it hasn't had Klein's mileage. For production work, use Klein 9B.
+Krea 2 trains real, ComfyUI-compatible LoRAs, and its training recipe is verified against the reference implementation — same noised/target flow-matching, `krea2_shift` timestep sampling, and gradient clipping.
 
 ---
 

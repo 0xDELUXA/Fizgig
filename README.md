@@ -67,6 +67,8 @@ Krea 2 is a from-scratch **native** port — no external tooling at runtime: a 1
 
 Everything works on Krea 2: **all five workbench tools** (Profiler, Extract, Repair Studio, Explorer, Royale), plus **Pause/Resume** (full state), **Context LoRA**, **Adaptive LR**, **reference images** (through the text encoder's vision path — "prompt from a picture"), and the live sample override. A few Training-tab controls are hidden for Krea 2 for now (not removed): per-block Model-Area targeting (no Krea 2 block map yet), the Optimizer and Timestep sections, and the FP8-Scaled / FP8-TE / Gradient-Checkpointing toggles.
 
+> **📣 Help map Krea 2's blocks — [open an issue](https://github.com/shootthesound/Fizgig/issues).** The colour-coded sliders, Model-Area targeting, and block-aware presets are Klein-only right now because Krea 2's per-block roles (which blocks carry **identity**, **style**, and **detail**) aren't mapped yet. The **Profiler**'s weight-only report is the instrument for discovering them. If you find patterns — a block that clearly drives identity, a range that governs style — please share your findings in the **[GitHub Issues](https://github.com/shootthesound/Fizgig/issues)**. Community block-discovery is what will drive the colour-coding and finer layer targeting coming to the Krea 2 presets and Repair Studio.
+
 **Runs on smaller cards, and adapts to yours.** Krea 2 is a bigger model than Klein, but the low-VRAM paths are wired:
 
 - **4-bit (NF4) base** — the *4-bit Base* toggle (Memory & FP8) trains the frozen base at ~5.6 GB (base + LoRA ~8.3 GB), so a full Krea 2 LoRA fits a **10–12 GB card with no block swap** — QLoRA-style, the LoRA still trains in bf16 on top.

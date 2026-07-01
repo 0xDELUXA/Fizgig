@@ -67,7 +67,13 @@ Distil any Klein LoRA to a lower rank with block and timestep targeting. Fast pr
 
 Krea 2 is a from-scratch **native** port — no external tooling at runtime: a 12.9B single-stream MMDiT, the Qwen-Image VAE, and a Qwen3-VL-4B text encoder. **Train on the RAW model** (fp8, ~14 GB resident) and **preview on the fp8 Turbo** (8-step, CFG-free) with your live LoRA applied. Pick it from the **Base Model selector** at the top of the Training tab.
 
-Already working on Krea 2: **all five workbench tools** (Profiler, Extract, Repair Studio, Explorer, Royale), plus **Pause/Resume** (full state), **Context LoRA**, **Adaptive LR**, **reference images** (through the text encoder's vision path — "prompt from a picture"), and the live sample override. Still deferred (hidden in the GUI, not removed): per-block Model-Area targeting (no Krea 2 block map yet), the Optimizer and Timestep sections, and a few memory toggles.
+Already working on Krea 2: **all five workbench tools** (Profiler, Extract, Repair Studio, Explorer, Royale), plus **Pause/Resume** (full state), **Context LoRA**, **Adaptive LR**, **reference images** (through the text encoder's vision path — "prompt from a picture"), and the live sample override. Still deferred (hidden in the GUI, not removed): per-block Model-Area targeting (no Krea 2 block map yet), the Optimizer and Timestep sections, and the FP8-Scaled / FP8-TE / Gradient-Checkpointing toggles.
+
+**Runs on smaller cards, and adapts to yours.** Krea 2 is a bigger model than Klein, but the low-VRAM paths are wired:
+
+- **4-bit (NF4) base** — the *4-bit Base* toggle (Memory & FP8) trains the frozen base at ~5.6 GB (base + LoRA ~8.3 GB), so a full Krea 2 LoRA fits a **10–12 GB card with no block swap** — QLoRA-style, the LoRA still trains in bf16 on top.
+- **VRAM-adaptive previews & workbench** — the fp8 Turbo (used for in-training previews *and* Repair Studio / Explorer / Royale) auto-sizes its own block swap to your GPU, so the tools fit smaller cards without you tuning anything.
+- **Previews never crash a run** — if the Turbo preview can't fit even swapped, previews auto-disable and **training keeps going and saving**; evaluate the LoRA in ComfyUI. (With 4-bit, the base even parks off the GPU during each preview, so the two coexist.)
 
 **Status: experimental.** It trains real, ComfyUI-compatible LoRAs and its training recipe is verified against the reference implementation — but it hasn't had Klein's mileage. For production work, use Klein 9B.
 

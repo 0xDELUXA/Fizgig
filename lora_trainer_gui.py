@@ -3552,6 +3552,30 @@ class LoRATrainerGUI:
             pass
         return 12  # safe default for an unknown smaller card
 
+    def _auto_krea2_inference_blocks_swap(self) -> int:
+        """Pick Krea 2 INFERENCE/preview block swap from GPU VRAM, tuned for the fp8 Turbo.
+        Measured: the Turbo peaks ~22.6 GB at swap 0 (DiT + the transient Qwen3-VL encode
+        spike) and drops ~0.43 GB per swapped block — heavier than Klein's ~9 GB Distilled, so
+        reusing the Klein inference preset would under-swap and OOM smaller cards. This adapts to
+        the actual card so the workbench + previews 'just work'. Forward-only (lighter than the
+        training step); max swap is 26 (28 main blocks − 2)."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                vram_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                if vram_gb >= 30:
+                    return 0    # 32 GB — Turbo (~22.6 GB peak) fits resident, fastest
+                if vram_gb >= 22:
+                    return 4    # 24 GB — light swap for headroom over the encode spike
+                if vram_gb >= 18:
+                    return 12   # 20 GB
+                if vram_gb >= 15:
+                    return 20   # 16 GB
+                return 26       # <16 GB — maximum
+        except Exception:
+            pass
+        return 20  # safe default for an unknown smaller card
+
     def _auto_training_blocks_swap(self) -> int:
         """Pick training block swap based on GPU VRAM."""
         try:
@@ -7211,7 +7235,7 @@ class LoRATrainerGUI:
             self._explorer_engine.ensure_pipeline(
                 turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
                 device="cuda", model_kind="turbo",
-                blocks_to_swap=self._get_inference_blocks_to_swap())
+                blocks_to_swap=self._auto_krea2_inference_blocks_swap())
             self.explorer_status_var.set("Models loaded.")
             return True
         except Exception:
@@ -10311,7 +10335,7 @@ class LoRATrainerGUI:
             self.repair_engine.ensure_pipeline(
                 turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
                 device="cuda", model_kind="raw" if is_raw else "turbo",
-                blocks_to_swap=self._get_inference_blocks_to_swap())
+                blocks_to_swap=self._auto_krea2_inference_blocks_swap())
             self.repair_status_var.set("Models loaded.")
             return True
         except Exception:
@@ -11510,7 +11534,7 @@ class LoRATrainerGUI:
         self._royale_pipeline_kwargs = dict(
             turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
             device="cuda", model_kind="turbo",
-            blocks_to_swap=self._get_inference_blocks_to_swap())
+            blocks_to_swap=self._auto_krea2_inference_blocks_swap())
         return True
 
     def _royale_is_krea2_engine(self):
@@ -14709,9 +14733,9 @@ class LoRATrainerGUI:
                     "--turbo_dit", self._krea2_pref("krea2_turbo_dit"),
                     "--vae", self._krea2_pref("krea2_vae"),
                     "--text_encoder", self._krea2_pref("krea2_text_encoder"),
-                    # Forward-only block swap on the preview Turbo (fits smaller cards), from the
-                    # app-wide inference block-swap preference — mirrors Klein's Distilled sample swap.
-                    "--preview_blocks_to_swap", str(self._get_inference_blocks_to_swap()),
+                    # Forward-only block swap on the preview Turbo, auto-detected for the Turbo's
+                    # VRAM profile so previews fit the card — mirrors Klein's Distilled sample swap.
+                    "--preview_blocks_to_swap", str(self._auto_krea2_inference_blocks_swap()),
                 ]
                 if prompt_file:
                     cmd += ["--sample_prompts", prompt_file]

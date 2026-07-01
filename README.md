@@ -32,7 +32,7 @@ Every trainer makes LoRAs. Fizgig is built around what you do with them **afterw
 - **Share** what you made — LoRA Royale exports the epoch morph, or travels a single LoRA through seeds, prompts, or strength, as a looping MP4/GIF made to share.
 - **Profile** exactly which blocks carry identity, style, and detail — so you know what to touch before you touch it.
 
-Under that workbench sits a fast, light trainer tuned for a single model. Because everything is built for Klein 9B instead of bolted on to a dozen models, the whole thing can do things the generalists can't: a full 9B LoRA trains comfortably on a **16 GB card**, fp8 steps run **~1.5× faster** on RTX 40/50-series, and the post-training tools all read each other's output.
+Under that workbench sits a fast, light trainer tuned for a single model. Because everything is built for Klein 9B instead of bolted on to a dozen models, the whole thing can do things the generalists can't: a full 9B LoRA trains comfortably on a **16 GB card**, and the post-training tools all read each other's output.
 
 **Free and open source.** A good first run is the **✨ Old Reliable** preset on the Training tab — then try **✨ Old Reliable · Flavour 8** (rank 8). Much of the old rank-16 instinct predates models this size; on Klein 9B, rank 8 is often plenty.
 
@@ -82,8 +82,8 @@ The foundation: fast, light, and tuned for one model.
 - **Distilled training samples** — 4-step previews that match ComfyUI output closely (a separate Distilled DiT, ComfyUI Euler Simple schedule). On by default; toggle on the Samples tab. On tight cards the sample model auto-swaps its own blocks by VRAM so 4-step previews keep working on 16 GB. On 24 GB+ it stays resident and is cached in system RAM between epochs (RAM-checked, saves ~3–4 s/epoch).
 - **Reference-conditioned samples** — Klein is an edit model, so previews can *edit* a reference photo instead of generating from scratch. Auto-resized to ~0.20 MP so it can't OOM; works on Base and Distilled samples.
 - **Adaptive LR** — a bi-directional plateau tracker that probes up on steady loss descent and pulls down (with optional weight rollback) on plateau, heavy gradient clipping, or weight-norm runaway.
-- **Faster fp8 training** — on the fp8 Base DiT the frozen-base matmuls run in fp8 on the tensor cores (`torch._scaled_mm`, forward *and* backward) for **~1.5× faster steps**, no quality cost in testing. Automatic, no flag. Needs RTX 40/50-series; older cards fall back automatically.
-- **Gradient checkpointing toggle** — on by default (it's what fits a 9B LoRA on 16 GB). Turn it **off** on a 24 GB+ card for meaningfully faster steps; the fp8 path keeps the `scaled_mm` speedup active either way, so 24/32 GB cards stack both wins. A VRAM-aware warning fires if you switch it off on a card that can't spare the activation memory.
+- **fp8 Base training** — the fp8 Base DiT stays resident at ~9.6 GB instead of dequantising to ~18 GB, so a full 9B LoRA trains in ~14 GB and fits a 16 GB card — lossless, no quality cost. Automatic (Fizgig detects the pre-quantised file), no flag.
+- **Gradient checkpointing toggle** — on by default (it's what fits a 9B LoRA on 16 GB). Turn it **off** on a 24 GB+ card for meaningfully faster steps. A VRAM-aware warning fires if you switch it off on a card that can't spare the activation memory.
 - **Pause / Resume** — graceful epoch-boundary pause that frees your GPU mid-run and resumes with full optimizer state and no quality regression. Fire up Rocket League, come back, carry on.
 - **Model Area targeting** — train only Identity, Style, or Detail blocks, or the full model.
 - **Auto VRAM management** — block swap auto-detects from GPU VRAM; OOM detection tells you exactly what to change. Supports bf16 and fp8 Base DiT, with block swap.
@@ -108,7 +108,7 @@ Loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / Lo
 
 ## Requirements
 
-- **GPU** — NVIDIA RTX 30 / 40 / 50-series. **16 GB+ VRAM** recommended (24 GB+ comfortable). The fp8 *speedup* needs 40-series or newer (fp8 tensor cores); 30-series still gets the fp8 VRAM savings, just not the extra speed.
+- **GPU** — NVIDIA RTX 30 / 40 / 50-series. **16 GB+ VRAM** recommended (24 GB+ comfortable). The fp8 Base's VRAM savings apply on every supported card.
 - **NVIDIA driver** — 555+ on Windows, 550+ on Linux (for the CUDA 12.8 PyTorch wheels).
 - **OS** — Windows 10 / 11 or Linux. macOS handles captioning and image prep, but training needs CUDA.
 - **Python** — 3.10, 3.11, 3.12, or 3.13.
@@ -154,8 +154,7 @@ Fizgig doesn't bundle weights — they're ~40 GB combined and licensing varies. 
 
 Training runs on the **Base DiT**, and the **fp8 version is recommended on every GPU**: same training quality at roughly half the VRAM (resident at ~9.6 GB, so a 9B LoRA trains in ~14 GB and fits a 16 GB card).
 
-- **RTX 40 / 50-series** — you *also* get **~1.5× faster steps**: the frozen-base matmuls run in fp8 on the tensor cores (`torch._scaled_mm`, automatic).
-- **RTX 30-series and older** — the speedup is skipped automatically (no fp8 tensor cores), but you keep the full VRAM savings and the same quality, so fp8 Base is still worth it.
+The VRAM savings and quality are the same across all supported cards (RTX 30 / 40 / 50-series) — fp8 Base is worth it on every GPU.
 
 It's all automatic — Fizgig detects pre-quantised files and the right path for your GPU, so you never need to touch the "FP8 Base" checkbox (the bf16 version works too if you prefer). The **Distilled DiT** powers the fast 4-step previews — on by default during training, and always used in the Profiler, Repair Studio, and Explorer — so grab both if you'll use the workbench.
 
@@ -175,7 +174,7 @@ It's all automatic — Fizgig detects pre-quantised files and the right path for
 
 **Training** — the fp8 Base DiT stays resident at ~9.6 GB (not dequantised to bf16), so a 9B LoRA fits comfortably in **16 GB** — around 14 GB observed at block-swap 0 with a Context LoRA active, a little less without. VRAM scales with resolution and batch size; raise block swap to fit smaller cards.
 
-**Smaller cards — 4-bit (NF4) base.** fp8 training needs ~14 GB: it fits a 16 GB card with no swap, but a **10–12 GB card has to block-swap**, paying a PCIe-transfer penalty every step. The opt-in **4-bit (NF4) base** mode (the *4-bit Base* toggle in Memory & FP8 / FP4) quantizes the frozen base to 4-bit — halving DiT VRAM to ~5.6 GB so a full 9B LoRA trains in **~7.5 GB**, which fits 10–12 GB cards with **no swap at all** (and so beats fp8-with-swap on those cards). The LoRA still trains in bf16 on top, QLoRA-style, and the base loads layer-by-layer so the card never holds the whole model. It's a lower-precision base, so it's a slight quality trade — always check the output in ComfyUI — and **16 GB+ cards should stick with fp8** (same quality, plus the speedup, no swap).
+**Smaller cards — 4-bit (NF4) base.** fp8 training needs ~14 GB: it fits a 16 GB card with no swap, but a **10–12 GB card has to block-swap**, paying a PCIe-transfer penalty every step. The opt-in **4-bit (NF4) base** mode (the *4-bit Base* toggle in Memory & FP8 / FP4) quantizes the frozen base to 4-bit — halving DiT VRAM to ~5.6 GB so a full 9B LoRA trains in **~7.5 GB**, which fits 10–12 GB cards with **no swap at all** (and so beats fp8-with-swap on those cards). The LoRA still trains in bf16 on top, QLoRA-style, and the base loads layer-by-layer so the card never holds the whole model. It's a lower-precision base, so it's a slight quality trade — always check the output in ComfyUI — and **16 GB+ cards should stick with fp8** (same quality, no swap).
 
 **DiT Block Swap (inference)** in Preferences applies only to the workbench tools. Training has its own separate block-swap setting, and its Distilled samples auto-swap by VRAM — so this preference never touches a training run. On first launch Fizgig auto-detects your VRAM and picks a sensible default; once you choose a value, your choice sticks.
 

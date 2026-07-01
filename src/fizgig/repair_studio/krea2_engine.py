@@ -113,11 +113,17 @@ class Krea2RepairEngine:
 
     # ----- pipeline + LoRA loading -------------------------------------------
     def ensure_pipeline(self, turbo_path: str, vae_path: str, text_encoder_path: str,
-                        device: str = "cuda", model_kind: str = "turbo", **_ignored) -> None:
+                        device: str = "cuda", model_kind: str = "turbo",
+                        blocks_to_swap: int = 0, **_ignored) -> None:
         """Load the preview DiT + VAE once (TE loads on demand per prompt-encode).
 
         model_kind: 'turbo' (fp8, 8-step, CFG-free — the default) or 'raw' (the undistilled
-        base — slower, more steps). The DiT loader auto-detects pre-quant fp8 either way."""
+        base — slower, more steps). The DiT loader auto-detects pre-quant fp8 either way.
+
+        blocks_to_swap: forward-only block swap on the Turbo so the workbench fits smaller cards
+        (mirrors Klein's inference block swap). The SingleStreamDiT forward already streams blocks
+        via the offloader; we just load on CPU, place the resident blocks, and switch to the
+        forward-only (inference) offload mode."""
         if self.pipeline is not None and self.pipeline.is_loaded:
             return
         from fizgig.krea2.utils import load_krea2_dit
@@ -126,11 +132,17 @@ class Krea2RepairEngine:
         self.te_path = text_encoder_path
         self.model_kind = model_kind
         self._default_steps = 20 if model_kind == "raw" else 8
-        self.turbo = load_krea2_dit(turbo_path, device=device, dtype=self.dtype)  # prequant fp8 auto-detected
+        self.turbo = load_krea2_dit(turbo_path, device=device, dtype=self.dtype,
+                                    loading_device="cpu" if blocks_to_swap > 0 else None)
+        if blocks_to_swap > 0:
+            from fizgig.krea2.offloading import BlockSwapConfig
+            self.turbo.enable_block_swap(blocks_to_swap, BlockSwapConfig(torch.device(device), supports_backward=False))
+            self.turbo.move_to_device_except_swap_blocks(torch.device(device))
+            self.turbo.switch_block_swap_for_inference()
         self.ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
         self.turbo.eval()
         self.pipeline = _Loaded()
-        logger.info("Krea2 Repair engine ready (%s=%s)", model_kind, turbo_path)
+        logger.info("Krea2 Repair engine ready (%s=%s, block_swap=%d)", model_kind, turbo_path, blocks_to_swap)
 
     def load_primary(self, path: str) -> None:
         if self.pipeline is None or not self.pipeline.is_loaded:

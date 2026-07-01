@@ -458,9 +458,14 @@ def _read_sample_override(output_dir):
 
 def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
                     output_name="krea2", steps=8, cfg_scale=1.0, width=512, height=512,
-                    seed=42, context_lora_path=None, context_lora_strength=1.0, device="cuda"):
+                    seed=42, context_lora_path=None, context_lora_strength=1.0,
+                    blocks_to_swap=0, device="cuda"):
     """Load the (clean) pre-quant fp8 Turbo, apply the current LoRA LIVE (no merge -> no grid),
     and render each pre-encoded prompt. Turbo is freed afterwards.
+
+    `blocks_to_swap` > 0 puts the Turbo on forward-only block swap so previews fit smaller cards
+    (mirrors Klein's Distilled sample-model auto-swap). Order mirrors load_dit_for_training: load
+    the base on CPU, apply the LoRA(s), then enable swap + place the resident blocks.
 
     Filenames follow the Fizgig samples-gallery pattern
     `{name}_e{epoch:06d}_{idx:02d}_{timestamp:14d}_{seed}.png` so the live preview gallery
@@ -470,7 +475,8 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
     from fizgig.networks.lora import create_network_from_weights
     from fizgig.krea2 import sampling
 
-    turbo = load_krea2_dit(turbo_path, device=device, dtype=torch.bfloat16)  # prequant fp8 auto-detected
+    turbo = load_krea2_dit(turbo_path, device=device, dtype=torch.bfloat16,
+                           loading_device="cpu" if blocks_to_swap > 0 else None)  # prequant fp8 auto-detected
     # Context LoRA (frozen) goes on FIRST so previews match deployment: the trained LoRA runs
     # on top of the same context at the same strength it was trained with.
     ctx_net = None
@@ -485,6 +491,11 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
     # (inference.py: apply_to -> load_state_dict(strict=False)).
     net.load_state_dict(lora_sd, strict=False)
     net.to(device=device, dtype=torch.bfloat16).eval()
+    if blocks_to_swap > 0:
+        from fizgig.krea2.offloading import BlockSwapConfig
+        turbo.enable_block_swap(blocks_to_swap, BlockSwapConfig(torch.device(device), supports_backward=False))
+        turbo.move_to_device_except_swap_blocks(torch.device(device))
+        turbo.switch_block_swap_for_inference()
     turbo.eval()
     os.makedirs(out_dir, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")  # 14-digit timestamp
@@ -529,6 +540,7 @@ def train_krea2(
     sample_steps: int = 8,
     sample_seed: int = 42,
     sample_ref_image: str = None,
+    preview_blocks_to_swap: int = 0,
     resume_state_dir: str = None,
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
@@ -679,7 +691,7 @@ def train_krea2(
                                 output_name=output_name, steps=sample_steps, width=prev_w,
                                 height=prev_h, seed=prev_seed,
                                 context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
-                                device=device)
+                                blocks_to_swap=preview_blocks_to_swap, device=device)
             finally:
                 gc.collect()
                 torch.cuda.empty_cache()

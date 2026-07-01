@@ -7210,7 +7210,8 @@ class LoRATrainerGUI:
             self.master.update_idletasks()
             self._explorer_engine.ensure_pipeline(
                 turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
-                device="cuda", model_kind="turbo")
+                device="cuda", model_kind="turbo",
+                blocks_to_swap=self._get_inference_blocks_to_swap())
             self.explorer_status_var.set("Models loaded.")
             return True
         except Exception:
@@ -10309,7 +10310,8 @@ class LoRATrainerGUI:
             self.master.update_idletasks()
             self.repair_engine.ensure_pipeline(
                 turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
-                device="cuda", model_kind="raw" if is_raw else "turbo")
+                device="cuda", model_kind="raw" if is_raw else "turbo",
+                blocks_to_swap=self._get_inference_blocks_to_swap())
             self.repair_status_var.set("Models loaded.")
             return True
         except Exception:
@@ -11507,7 +11509,8 @@ class LoRATrainerGUI:
             self.royale_engine = Krea2RepairEngine()
         self._royale_pipeline_kwargs = dict(
             turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
-            device="cuda", model_kind="turbo")
+            device="cuda", model_kind="turbo",
+            blocks_to_swap=self._get_inference_blocks_to_swap())
         return True
 
     def _royale_is_krea2_engine(self):
@@ -14706,6 +14709,9 @@ class LoRATrainerGUI:
                     "--turbo_dit", self._krea2_pref("krea2_turbo_dit"),
                     "--vae", self._krea2_pref("krea2_vae"),
                     "--text_encoder", self._krea2_pref("krea2_text_encoder"),
+                    # Forward-only block swap on the preview Turbo (fits smaller cards), from the
+                    # app-wide inference block-swap preference — mirrors Klein's Distilled sample swap.
+                    "--preview_blocks_to_swap", str(self._get_inference_blocks_to_swap()),
                 ]
                 if prompt_file:
                     cmd += ["--sample_prompts", prompt_file]

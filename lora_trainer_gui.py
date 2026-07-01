@@ -3051,6 +3051,14 @@ class LoRATrainerGUI:
         if "SCALED" in preset:
             self.scaled_var.set(preset["SCALED"])
 
+        # 4-bit (NF4) base checkbox — lives on a dedicated var (not in self.entries), so the generic
+        # loop above never restores it. Set it explicitly and re-run its toggle to re-apply the
+        # dependent locks (block swap off + force-GC-on) that _on_quant_4bit_toggle owns.
+        if "QUANT_4BIT" in preset and hasattr(self, 'quant_4bit_var'):
+            self.quant_4bit_var.set(bool(preset["QUANT_4BIT"]))
+            if hasattr(self, '_on_quant_4bit_toggle'):
+                self._on_quant_4bit_toggle()
+
         # Adaptive LR checkbox + sync enabled state of Min/Max LR dropdowns
         if "ADAPTIVE_LR" in preset and hasattr(self, 'adaptive_lr_var'):
             self.adaptive_lr_var.set(bool(preset["ADAPTIVE_LR"]))
@@ -5448,9 +5456,11 @@ class LoRATrainerGUI:
 
         gallery_path = os.path.join(samples_dir, "gallery.html")
 
-        # Create gallery.html if it doesn't exist
-        if not os.path.exists(gallery_path):
-            self.create_gallery_html(gallery_path)
+        # Always regenerate the template so template changes (e.g. the per-epoch download link) are
+        # picked up — otherwise a stale gallery.html from an earlier run keeps the old JS forever.
+        # The file is purely generated (static template + embedded data filled by update_gallery_html),
+        # so overwriting it loses nothing.
+        self.create_gallery_html(gallery_path)
 
         # Generate/update the gallery HTML with current files
         self.update_gallery_html()

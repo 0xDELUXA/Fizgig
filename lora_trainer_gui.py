@@ -5396,14 +5396,25 @@ class LoRATrainerGUI:
 
         samples_dir = self.get_samples_dir()
         os.makedirs(samples_dir, exist_ok=True)
+        # LoRA checkpoints live in the output dir (parent of sample/); serve them via /loras/.
+        output_dir = self.settings.get("LORA_OUTPUT_DIR", "") or os.path.dirname(samples_dir)
 
         # Find free port
         self.gallery_server_port = self.find_free_port()
 
-        # Create handler that serves from samples directory
+        # Create handler that serves images from samples/ and checkpoints from /loras/ (output dir).
         class SamplesHandler(SimpleHTTPRequestHandler):
             def __init__(handler_self, *args, **kwargs):
                 super().__init__(*args, directory=samples_dir, **kwargs)
+
+            def translate_path(handler_self, path):
+                # /loras/<file> -> the checkpoint in the output dir (basename-only, no traversal).
+                clean = path.split('?', 1)[0].split('#', 1)[0]
+                if clean.startswith('/loras/'):
+                    import posixpath, urllib.parse
+                    fname = posixpath.basename(urllib.parse.unquote(clean[len('/loras/'):]))
+                    return os.path.join(output_dir, fname)
+                return super().translate_path(path)
 
             def log_message(handler_self, format, *args):
                 pass  # Suppress logging
@@ -5497,6 +5508,9 @@ class LoRATrainerGUI:
         .lora-name { color: #9B59B6; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
         .meta-row { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
         .meta-item { font-size: 13px; color: #BDC3C7; }
+        .lora-download { display: inline-block; margin-top: 8px; padding: 5px 10px; font-size: 12px; font-weight: 600;
+                         color: #fff; background: #9B59B6; border-radius: 6px; text-decoration: none; }
+        .lora-download:hover { background: #8E44AD; }
         .meta-item.seed { color: #3498DB; font-family: monospace; }
         .meta-item.time { color: #95A5A6; }
         .no-images { grid-column: 1 / -1; text-align: center; padding: 60px 20px; color: #95A5A6; }
@@ -5589,7 +5603,10 @@ class LoRATrainerGUI:
         }
 
         function parseFilename(filename) {
-            const match = filename.match(/^(.+)_e(\\d{6})_(\\d{2})_(\\d{14})_(\\d+)\\.png$/i);
+            // Seed segment is OPTIONAL: samples generated with a random/unspecified seed are named
+            // without a trailing _<seed> (the trainer omits it when seed is None). Requiring it made
+            // those files fall back to epoch 0 / no timestamp — breaking order + epoch labels.
+            const match = filename.match(/^(.+)_e(\\d{6})_(\\d{2})_(\\d{14})(?:_(\\d+))?\\.png$/i);
             if (match) {
                 const ts = match[4];
                 return {
@@ -5598,7 +5615,7 @@ class LoRATrainerGUI:
                     epoch: parseInt(match[2]),
                     idx: parseInt(match[3]),
                     timestamp: ts,
-                    seed: match[5],
+                    seed: match[5] || '',
                     time: `${ts.slice(8,10)}:${ts.slice(10,12)}:${ts.slice(12,14)}`
                 };
             }
@@ -5614,6 +5631,15 @@ class LoRATrainerGUI:
                 if (resp.ok) {
                     const files = await resp.json();
                     images = files.map(f => parseFilename(f));
+                    // Attach a per-epoch LoRA download link where a checkpoint exists (loras.json
+                    // is an epoch -> filename map written by the trainer; served via /loras/).
+                    try {
+                        const lr = await fetch('loras.json?t=' + Date.now());
+                        if (lr.ok) {
+                            const lm = await lr.json();
+                            images.forEach(im => { const ck = lm[String(im.epoch)]; if (ck) im.lora = 'loras/' + encodeURIComponent(ck); });
+                        }
+                    } catch (e) {}
                     renderGallery();
                     document.getElementById('stats').textContent = `${images.length} image${images.length !== 1 ? 's' : ''}`;
                     document.getElementById('status').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
@@ -5664,9 +5690,10 @@ class LoRATrainerGUI:
                     <div class="image-info">
                         <div class="lora-name">${img.loraName}</div>
                         <div class="meta-row">
-                            <span class="meta-item seed">Seed: ${img.seed}</span>
+                            <span class="meta-item seed">Seed: ${img.seed || '—'}</span>
                             <span class="meta-item time">${img.time}</span>
                         </div>
+                        ${img.lora ? `<a class="lora-download" href="${img.lora}" download onclick="event.stopPropagation()">⬇ Download LoRA (epoch ${img.epoch})</a>` : ''}
                     </div>
                 </div>`).join('');
         }
@@ -5735,6 +5762,24 @@ class LoRATrainerGUI:
         try:
             with open(files_json_path, 'w', encoding='utf-8') as f:
                 json.dump(images, f)
+        except Exception:
+            pass
+
+        # Map epoch -> checkpoint filename so each gallery entry can offer a "Download LoRA" link.
+        # Computed here (Python knows the exact {name}-{epoch:06d}.safetensors naming) rather than
+        # guessed in JS. Only epochs with a saved checkpoint appear — matches save_every_n_epochs.
+        output_dir = self.settings.get("LORA_OUTPUT_DIR", "") or os.path.dirname(samples_dir)
+        lora_map = {}
+        try:
+            if output_dir and os.path.isdir(output_dir):
+                import re as _re_ck
+                for f in os.listdir(output_dir):
+                    if f.endswith(".safetensors"):
+                        m = _re_ck.search(r'-(\d{6})\.safetensors$', f)
+                        if m:
+                            lora_map[str(int(m.group(1)))] = f
+            with open(os.path.join(samples_dir, "loras.json"), 'w', encoding='utf-8') as f:
+                json.dump(lora_map, f)
         except Exception:
             pass
 

@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://youtu.be/sH-kGR8yzBU"><img src="https://img.youtube.com/vi/sH-kGR8yzBU/maxresdefault.jpg" alt="Watch the walkthrough" width="600"></a><br>
+  <a href="https://youtu.be/sH-kGR8yzBU"><img src="assets/hero.png" alt="Fizgig LoRA Studio — now with Krea 2 support" width="600"></a><br>
   <em>Watch the full walkthrough on YouTube</em>
 </p>
 

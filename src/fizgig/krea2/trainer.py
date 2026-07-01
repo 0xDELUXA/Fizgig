@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import random
 import sys
 from multiprocessing import Value
 
@@ -736,6 +737,11 @@ def train_krea2(
                     prev_w, prev_h, prev_seed = ov["width"], ov["height"], ov["seed"]
                 else:
                     prev_enc, prev_w, prev_h, prev_seed = encoded_prompts, sample_width, sample_height, sample_seed
+                # Seed 0 means "random": pick a fresh seed for this preview so 0 isn't a fixed seed
+                # (each epoch's sample differs). Covers the Samples-tab field and a 0 in the override.
+                if prev_seed == 0:
+                    prev_seed = random.randint(1, 2**31 - 1)
+                    logger.info(f"[sample] seed 0 -> random {prev_seed}")
                 sample_previews(turbo_path, sample_ae, prev_enc, load_file(tmp), sample_dir, epoch + 1,
                                 output_name=output_name, steps=sample_steps, width=prev_w,
                                 height=prev_h, seed=prev_seed,

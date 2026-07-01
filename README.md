@@ -148,7 +148,9 @@ Three small models auto-download on first use: InsightFace `buffalo_l` (~300 MB,
 
 ## Model downloads (you provide)
 
-Fizgig doesn't bundle weights — they're ~40 GB combined and licensing varies. Each row in the **Preferences** tab has a **Download** link to the right HuggingFace page.
+Fizgig doesn't bundle weights — they're large and licensing varies. Each row in the **Preferences** tab has a **Download** link to the right HuggingFace page. You only need the family you're using.
+
+### Klein 9B
 
 | Model | File | Size | Source |
 |---|---|---|---|
@@ -163,6 +165,19 @@ Training runs on the **Base DiT**, and the **fp8 version is recommended on every
 The VRAM savings and quality are the same across all supported cards (RTX 30 / 40 / 50-series) — fp8 Base is worth it on every GPU.
 
 It's all automatic — Fizgig detects pre-quantised files and the right path for your GPU, so you never need to touch the "FP8 Base" checkbox (the bf16 version works too if you prefer). The **Distilled DiT** powers the fast 4-step previews — on by default during training, and always used in the Profiler, Repair Studio, and Explorer — so grab both if you'll use the workbench.
+
+### Krea 2
+
+All four files live in the one [**Comfy-Org/Krea-2**](https://huggingface.co/Comfy-Org/Krea-2) repo.
+
+| Model | File | Size | Source |
+|---|---|---|---|
+| **RAW DiT (bf16) — training** | `krea2_raw_bf16.safetensors` | ~26 GB bf16 | [Comfy-Org/Krea-2 → diffusion_models](https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_raw_bf16.safetensors) |
+| **Turbo DiT (fp8) — previews / workbench** | `krea2_turbo_fp8_scaled.safetensors` | ~13 GB fp8 | [Comfy-Org/Krea-2 → diffusion_models](https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors) |
+| Qwen-Image VAE | `qwen_image_vae.safetensors` | ~250 MB | [Comfy-Org/Krea-2 → vae](https://huggingface.co/Comfy-Org/Krea-2/blob/main/vae/qwen_image_vae.safetensors) |
+| Text Encoder (bf16) | `qwen3vl_4b_bf16.safetensors` | ~8 GB bf16 | [Comfy-Org/Krea-2 → text_encoders](https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors) |
+
+Training runs on the **RAW DiT**; previews and the whole workbench run on the **fp8 Turbo** — grab both if you'll train *and* use the tools. The text encoder must be the **bf16** Qwen3-VL-4B (the fp8 ComfyUI variant can't run the vision path used for reference images, or training). On smaller cards, the **4-bit (NF4)** toggle shrinks the RAW base to ~5.6 GB so it fits 10–12 GB GPUs.
 
 ---
 

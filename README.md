@@ -14,6 +14,12 @@
   <em>Watch the full walkthrough on YouTube</em>
 </p>
 
+<p align="center">
+  <img src="https://img.shields.io/badge/Krea%202-experimental-orange?style=for-the-badge" alt="Krea 2 — experimental">
+</p>
+
+> **🧪 New — Krea 2 (experimental).** Fizgig now has a **second, fully native model family**: **Krea 2 (12.9B)**, on the `experiment/krea2-training` branch. The whole workbench is ported — Repair Studio, Explorer, Royale, Profiler, Extract — plus Context LoRA, Adaptive LR, Pause/Resume, and the live sample override. It's freshly stabilised and **not yet merged**; Klein 9B remains the stable, recommended path. [Details below ↓](#krea-2--second-model-family-experimental)
+
 ---
 
 ## What Fizgig is
@@ -37,7 +43,7 @@ Under that workbench sits a fast, light trainer tuned for a single model. Becaus
 The reason to use Fizgig. Each tool works on a trained run's output **or any Klein LoRA you've downloaded** — and they hand off to each other.
 
 ### Repair Studio
-Thirty-two live sliders — one per transformer block — with a side-by-side Distilled preview that updates instantly. **Turbo Preview** caches activations and prompt encodings for up to **97% faster** late-block edits. Quick-set buttons on every slider (`[0]` `[1]` `[±]` `[⚖]`); **Balance** holds the combined primary + donor weight at 1.0 per block, ideal for cross-fading two LoRAs. Optional donor-LoRA blending mixes blocks from a second LoRA via rank concatenation. Previews can be conditioned on a **reference image** (Klein is an edit model), so you see how your LoRA edits a real photo. Click a preview to pop it into a resizable window. Browse a new LoRA and it auto-swaps — no manual reset. Saves a baked `.safetensors` that works in ComfyUI at strength 1.0.
+Thirty-two live sliders — one per transformer block — with a side-by-side Distilled preview that updates instantly. **Turbo Preview** — activation caching for a live LoRA-tweaking UI, which no other LoRA tool does — caches per-block outputs and prompt encodings across the denoising steps, so late-block edits redraw up to **97% faster**; the baked save is always exact, Turbo or not. Quick-set buttons on every slider (`[0]` `[1]` `[±]` `[⚖]`); **Balance** holds the combined primary + donor weight at 1.0 per block, ideal for cross-fading two LoRAs. Optional donor-LoRA blending mixes blocks from a second LoRA via rank concatenation. Previews can be conditioned on a **reference image** (Klein is an edit model), so you see how your LoRA edits a real photo. Click a preview to pop it into a resizable window. Browse a new LoRA and it auto-swaps — no manual reset. Saves a baked `.safetensors` that works in ComfyUI at strength 1.0.
 
 ### LoRA the Explorer
 Evolutionary discovery. The app mutates blocks and shows four variants — pick a favourite and it becomes the new baseline. **Freeze Tweaked Blocks** locks what you like so future mutations only touch the rest. A **Structure** slider sets how far the composition anchor drifts each round; seed cycling checks variants across seeds. Found a direction you love? **Refine this baseline in Repair Studio** sends all 32 slider values straight over — and Repair Studio sends state back the same way. Discover → refine → discover, in a loop.
@@ -52,6 +58,18 @@ A per-block activation profile with a colour-coded, five-bucket HTML report — 
 
 ### Extract
 Distil any Klein LoRA to a lower rank with block and timestep targeting. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
+
+---
+
+## Krea 2 — second model family (experimental)
+
+*Branch: `experiment/krea2-training` · not yet merged · interface may still change.*
+
+Krea 2 is a from-scratch **native** port — no external tooling at runtime: a 12.9B single-stream MMDiT, the Qwen-Image VAE, and a Qwen3-VL-4B text encoder. **Train on the RAW model** (fp8, ~14 GB resident) and **preview on the fp8 Turbo** (8-step, CFG-free) with your live LoRA applied. Pick it from the **Base Model selector** at the top of the Training tab.
+
+Already working on Krea 2: **all five workbench tools** (Profiler, Extract, Repair Studio, Explorer, Royale), plus **Pause/Resume** (full state), **Context LoRA**, **Adaptive LR**, **reference images** (through the text encoder's vision path — "prompt from a picture"), and the live sample override. Still deferred (hidden in the GUI, not removed): per-block Model-Area targeting (no Krea 2 block map yet), the Optimizer and Timestep sections, and a few memory toggles.
+
+**Status: experimental.** It trains real, ComfyUI-compatible LoRAs and its training recipe is verified against the reference implementation — but it hasn't had Klein's mileage. For production work, use Klein 9B.
 
 ---
 
@@ -80,11 +98,11 @@ Beside it sits a **live sample override** — tick it to set a prompt, seed, wid
 
 ### Dataset prep
 - **Florence-2 AI captioning** — bulk-generate detailed captions in one click.
-- **Bilingual captions** — optionally append Chinese via Helsinki-NLP. Klein's Qwen3 text encoder has deep Chinese training, so bilingual captions act as text-level data augmentation, improving visual quality without changing loss.
+- **Bilingual captions** — optionally append Chinese via Helsinki-NLP. Klein's Qwen3 text encoder has deep Chinese training, so bilingual captions act as text-level data augmentation, improving visual quality without changing loss. In a controlled A/B (same data, seed, and hyperparameters — captions the only change) the loss curves stayed within ±0.001/epoch, yet the bilingual run produced visibly more skin detail and faster visual convergence.
 - **Image Prep** — batch resize, PNG conversion, and InsightFace face-crop derivatives, with optional **gender targeting** (largest male/female face) so it locks onto your subject in group shots. Pairing a tight crop with a full shot adds a lot to a character dataset. Training defaults to ~512² (0.25 MP) and resizes in-cache, so any resolution or aspect ratio just works — nothing has to be square or pre-sized.
 
 ### Compatibility
-Loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / LoHa) — all auto-converted on load. LyCORIS files work for preview, profiling, and extraction; **bake** materialises them to a standard LoRA via GPU-accelerated SVD. Output is kohya-style `.safetensors` that drop straight into ComfyUI Klein nodes. Every tab links to the relevant section of the walkthrough video.
+Loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / LoHa) — all auto-converted on load. LoKR and LoHa run **natively at inference** — no pre-conversion — anywhere in the app: as a primary or donor in Repair Studio, in the Profiler, in Extract, even as a Context LoRA. **Bake** materialises them to a standard LoRA via GPU-accelerated SVD. Output is kohya-style `.safetensors` that drop straight into ComfyUI Klein nodes. Every tab links to the relevant section of the walkthrough video.
 
 ---
 
@@ -187,7 +205,7 @@ If Fizgig saves you time or helps you make better LoRAs, consider supporting dev
 
 ## License
 
-Fizgig is open source under the **[Apache License 2.0](LICENSE)** — free to use, modify, and redistribute, including commercially, with attribution and no warranty. Every component is written from scratch for Klein 9B.
+Fizgig is open source under the **[Apache License 2.0](LICENSE)** — free to use, modify, and redistribute, including commercially, with attribution and no warranty. It includes third-party components under compatible permissive licenses (musubi-tuner — Apache-2.0; ai-toolkit — MIT; Diffusers / FLUX — Apache-2.0); see **[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)**.
 
 Copyright © 2026 Peter Neill.
 

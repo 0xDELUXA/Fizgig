@@ -183,6 +183,8 @@ Training runs on the **RAW DiT**; previews and the whole workbench run on the **
 
 ## VRAM guidance
 
+### Klein 9B
+
 **Inference tools** (Profiler / Repair Studio / Explorer / Extract) on Distilled 4-step:
 
 | Block Swap | Min VRAM | Notes |
@@ -198,6 +200,13 @@ Training runs on the **RAW DiT**; previews and the whole workbench run on the **
 **Smaller cards — 4-bit (NF4) base.** fp8 training needs ~14 GB: it fits a 16 GB card with no swap, but a **10–12 GB card has to block-swap**, paying a PCIe-transfer penalty every step. The opt-in **4-bit (NF4) base** mode (the *4-bit Base* toggle in Memory & FP8 / FP4) quantizes the frozen base to 4-bit — halving DiT VRAM to ~5.6 GB so a full 9B LoRA trains in **~7.5 GB**, which fits 10–12 GB cards with **no swap at all** (and so beats fp8-with-swap on those cards). The LoRA still trains in bf16 on top, QLoRA-style, and the base loads layer-by-layer so the card never holds the whole model. It's a lower-precision base, so it's a slight quality trade — always check the output in ComfyUI — and **16 GB+ cards should stick with fp8** (same quality, no swap).
 
 **DiT Block Swap (inference)** in Preferences applies only to the workbench tools. Training has its own separate block-swap setting, and its Distilled samples auto-swap by VRAM — so this preference never touches a training run. On first launch Fizgig auto-detects your VRAM and picks a sensible default; once you choose a value, your choice sticks.
+
+### Krea 2
+
+Krea 2 is a bigger model, so the numbers differ — but Fizgig **auto-sizes block swap to your card** for both training and the workbench, so there's nothing to tune:
+
+- **Training** runs on the RAW fp8 base (~14 GB resident); block swap auto-detects from VRAM (32 GB → none, scaling up to maximum on sub-16 GB cards). The **4-bit (NF4)** toggle drops the base to ~5.6 GB (base + LoRA ~8.3 GB), fitting a **10–12 GB card with no swap**.
+- **Previews & workbench** (Repair Studio / Explorer / Royale / in-training previews) run on the fp8 Turbo, which peaks ~22.6 GB unswapped — heavier than Klein's Distilled, so Fizgig auto-swaps it to fit your GPU (≈17 GB at swap 12; 16 GB cards swap enough to fit). If a preview still can't fit, it **auto-disables and training keeps running and saving** — evaluate the LoRA in ComfyUI. With 4-bit, the base even parks off the GPU during each preview so the two coexist.
 
 ---
 

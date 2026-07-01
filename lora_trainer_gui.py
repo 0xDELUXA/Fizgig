@@ -5521,6 +5521,9 @@ class LoRATrainerGUI:
         .lora-download { display: inline-block; margin-top: 8px; padding: 5px 10px; font-size: 12px; font-weight: 600;
                          color: #fff; background: #9B59B6; border-radius: 6px; text-decoration: none; }
         .lora-download:hover { background: #8E44AD; }
+        .final-lora-btn { padding: 6px 12px; font-size: 13px; font-weight: 600; color: #fff; background: #27AE60;
+                          border-radius: 6px; text-decoration: none; }
+        .final-lora-btn:hover { background: #219150; }
         .meta-item.seed { color: #3498DB; font-family: monospace; }
         .meta-item.time { color: #95A5A6; }
         .no-images { grid-column: 1 / -1; text-align: center; padding: 60px 20px; color: #95A5A6; }
@@ -5558,6 +5561,7 @@ class LoRATrainerGUI:
                 <option value="0">Off</option>
             </select></label>
             <button onclick="loadImages()">Refresh Now</button>
+            <a id="final-lora-btn" class="final-lora-btn" href="#" download style="display:none">⬇ Download Final LoRA</a>
             <span class="stats" id="stats">0 images</span>
             <span class="status" id="status">Ready</span>
         </div>
@@ -5648,6 +5652,12 @@ class LoRATrainerGUI:
                         if (lr.ok) {
                             const lm = await lr.json();
                             images.forEach(im => { const ck = lm[String(im.epoch)]; if (ck) im.lora = 'loras/' + encodeURIComponent(ck); });
+                            // Final LoRA ({name}.safetensors) -> header button (reserved "final" key).
+                            const fb = document.getElementById('final-lora-btn');
+                            if (fb) {
+                                if (lm.final) { fb.href = 'loras/' + encodeURIComponent(lm.final); fb.style.display = 'inline-block'; }
+                                else { fb.style.display = 'none'; }
+                            }
                         }
                     } catch (e) {}
                     renderGallery();
@@ -5788,6 +5798,11 @@ class LoRATrainerGUI:
                         m = _re_ck.search(r'-(\d{6})\.safetensors$', f)
                         if m:
                             lora_map[str(int(m.group(1)))] = f
+                # The final LoRA is {LORA_NAME}.safetensors (no epoch suffix) — surface it as a
+                # header button under the reserved "final" key (epoch keys are numeric, so no clash).
+                final_name = str(self.settings.get("LORA_NAME", "") or "").strip()
+                if final_name and os.path.exists(os.path.join(output_dir, final_name + ".safetensors")):
+                    lora_map["final"] = final_name + ".safetensors"
             with open(os.path.join(samples_dir, "loras.json"), 'w', encoding='utf-8') as f:
                 json.dump(lora_map, f)
         except Exception:

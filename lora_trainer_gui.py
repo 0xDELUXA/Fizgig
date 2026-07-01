@@ -3466,7 +3466,6 @@ class LoRATrainerGUI:
           • Model Area to Train (dropdown + desc + Custom panel) — no Krea 2 block map yet
           • Optimizer section                                   — krea2 hardcodes AdamW8bit
           • Timestep & Noise section                            — krea2 uses a fixed shift schedule
-          • 4-bit NF4 base (in Memory & FP8)                    — krea2_train has no --quant_4bit
           • FP8 Scaled (in Memory & FP8)                        — krea2's fp8 path is always scaled
           • FP8 Text Encoder (in Memory & FP8)                  — krea2 caches the TE in bf16
           • Gradient Checkpointing (in Memory & FP8)            — krea2_train hardcodes it ON
@@ -3480,9 +3479,10 @@ class LoRATrainerGUI:
             return
         # Per-widget groups across the Training Parameters + Memory & FP8 sections. FP8 Base
         # stays visible (wired -> --no_fp8); only the unwired Memory controls are hidden.
+        # NOTE: the 4-bit NF4 base toggle (_quant_4bit_*) is NOT hidden — it's wired into krea2_train
+        # (--quantize_4bit) as the low-VRAM path for 10-12 GB cards.
         widgets = [
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
-            self._quant_4bit_label, self.quant_4bit_check, self._quant_4bit_hint,
             self.scaled_check,                                   # FP8 Scaled
             self.fp8_text_encoder_label, self.fp8_text_encoder_check,
             self._grad_checkpoint_label, self.grad_checkpoint_check, self._grad_checkpoint_hint,
@@ -13814,18 +13814,32 @@ class LoRATrainerGUI:
             self.console_output.see(tk.END)
         self.console_output.configure(state="disabled")
 
-        # Detect CUDA OOM and suggest increasing block swap
+        # Detect CUDA OOM. A Krea 2 training-step OOM is best fixed by the 4-bit (NF4) base (it
+        # frees far more than swap); otherwise suggest more block swap. (Preview OOMs are caught in
+        # the trainer, auto-disable previews, and don't print this literal — so this only fires on a
+        # genuine training-step OOM.)
         if "CUDA out of memory" in line or "OutOfMemoryError" in line:
             if not getattr(self, "_oom_warning_shown", False):
                 self._oom_warning_shown = True
                 current_swap = self._parse_blocks_swap()
-                messagebox.showwarning("Out of Memory",
-                    f"CUDA ran out of memory during training.\n\n"
-                    f"Current Block Swap: {current_swap}\n\n"
-                    f"Try increasing Block Swap on the Training tab "
-                    f"(Memory & FP8 section) to move more blocks to CPU. "
-                    f"If set to Auto, switch to a manual value like "
-                    f"{min(current_swap + 4, 16)}.")
+                nf4_on = getattr(self, "quant_4bit_var", None) and self.quant_4bit_var.get()
+                if self._is_krea2_arch() and not nf4_on:
+                    messagebox.showwarning("Out of Memory",
+                        "CUDA ran out of memory during Krea 2 training.\n\n"
+                        "The biggest win on a smaller card is the 4-bit (NF4) Base toggle in the "
+                        "Memory & FP8 section: it shrinks the frozen base from ~14 GB to ~5.6 GB, so a "
+                        "full LoRA trains on a 10-12 GB card with no block swap.\n\n"
+                        "(Block swap helps too, but 4-bit frees far more. In-training previews on the "
+                        "Turbo need a bigger card — if they can't fit they auto-disable and training "
+                        "continues; evaluate the saved LoRA in ComfyUI.)")
+                else:
+                    messagebox.showwarning("Out of Memory",
+                        f"CUDA ran out of memory during training.\n\n"
+                        f"Current Block Swap: {current_swap}\n\n"
+                        f"Try increasing Block Swap on the Training tab "
+                        f"(Memory & FP8 section) to move more blocks to CPU. "
+                        f"If set to Auto, switch to a manual value like "
+                        f"{min(current_swap + 4, 16)}.")
 
     def _browse_context_lora(self):
         """File picker for the Context LoRA, filtered to .safetensors."""
@@ -14706,9 +14720,13 @@ class LoRATrainerGUI:
             min_lr = str(self.settings.get("ADAPTIVE_LR_MIN", "1e-5")).split(" ")[0]
             max_lr = str(self.settings.get("ADAPTIVE_LR_MAX", "4e-4")).split(" ")[0]
             cmd += ["--adaptive_lr", "--adaptive_lr_min", min_lr, "--adaptive_lr_max", max_lr]
-        # FP8 base (dynamic-quantize the RAW model) is the default — fits lower-VRAM cards.
-        # Unchecking "FP8 Base" trains the base in bf16 (26 GB, big-card / heavy-swap only).
-        if not self.settings.get("FP8", True):
+        # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
+        # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
+        # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the
+        # user unchecked it (bf16, 26 GB — big-card / heavy-swap only).
+        if self.settings.get("QUANT_4BIT", False):
+            cmd.append("--quantize_4bit")
+        elif not self.settings.get("FP8", True):
             cmd.append("--no_fp8")
 
         # In-training previews: render the fp8 Turbo with the live LoRA. Resolution +

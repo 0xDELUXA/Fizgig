@@ -61,6 +61,7 @@ def load_dit_for_training(
     network_dim: int = 32,
     network_alpha: float = 32,
     fp8_scaled: bool = True,
+    quant_4bit: bool = False,
     blocks_to_swap: int = 0,
     gradient_checkpointing: bool = True,
     context_lora_path: str = None,
@@ -70,11 +71,35 @@ def load_dit_for_training(
 ):
     """Load the RAW DiT (frozen base, optionally fp8) and apply a trainable full-model LoRA.
     An optional frozen Context LoRA is applied to the base first, so the new LoRA learns to
-    coexist with it (the context stays active during previews too)."""
-    loading_device = "cpu" if blocks_to_swap > 0 else device
+    coexist with it (the context stays active during previews too).
+
+    quant_4bit: QLoRA-style 4-bit (NF4) frozen base — halves DiT residency (~14 GB fp8 → ~5.6 GB)
+    so a full LoRA trains on a 10-12 GB card with no block swap. Mutually exclusive with block
+    swap (weights live in _nf4_packed, not .weight). Loads the base bf16 on CPU and NF4-quantizes
+    the block Linears onto the GPU layer-by-layer (peak VRAM never holds the whole bf16 model).
+    Reuses the same target/exclude keys as the fp8 path (`blocks.` minus mod./norm/txtfusion)."""
+    if quant_4bit:
+        # NF4 quantizes from bf16 (cleaner than fp8->NF4 double-quant), staged on CPU, and can't
+        # coexist with block swap — force both here so callers can't misconfigure it.
+        fp8_scaled = False
+        blocks_to_swap = 0
+        loading_device = "cpu"
+    else:
+        loading_device = "cpu" if blocks_to_swap > 0 else device
     dit = load_krea2_dit(raw_path, device=device, dtype=dtype, fp8_scaled=fp8_scaled,
                          loading_device=loading_device)
     dit.requires_grad_(False)  # frozen base (QLoRA-style)
+    if quant_4bit:
+        from fizgig.krea2.utils import KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS
+        from fizgig.modules.nf4 import apply_nf4_quantization
+        n_q = apply_nf4_quantization(
+            dit, target_keys=KREA2_FP8_OPTIMIZATION_TARGET_KEYS,
+            exclude_keys=KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS, compute_device=torch.device(device))
+        dit.to(device)  # move the remaining (non-quantized) bf16 modules to the GPU
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info(f"NF4 4-bit base active: {n_q} Linears quantized; DiT resident on {device}.")
     if gradient_checkpointing:
         dit.enable_gradient_checkpointing()
 
@@ -525,6 +550,7 @@ def train_krea2(
     max_train_epochs: int = 10,
     save_every_n_epochs: int = 0,
     fp8_scaled: bool = True,
+    quant_4bit: bool = False,
     blocks_to_swap: int = 0,
     shift: float = 2.5,
     max_grad_norm: float = 1.0,
@@ -577,12 +603,16 @@ def train_krea2(
         sample_ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
         sample_dir = os.path.join(output_dir, "sample")
 
+    if quant_4bit and blocks_to_swap > 0:
+        logger.info("[nf4] 4-bit base is incompatible with block swap (weights live in _nf4_packed) "
+                    "— forcing blocks_to_swap=0.")
+        blocks_to_swap = 0
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
-        fp8_scaled=fp8_scaled, blocks_to_swap=blocks_to_swap,
+        fp8_scaled=fp8_scaled, quant_4bit=quant_4bit, blocks_to_swap=blocks_to_swap,
         context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
         device=device, dtype=dtype)
-    if blocks_to_swap > 0:
+    if blocks_to_swap > 0 and not quant_4bit:
         from fizgig.krea2.offloading import BlockSwapConfig
         dit.enable_block_swap(blocks_to_swap, BlockSwapConfig(torch.device(device), supports_backward=True))
         dit.move_to_device_except_swap_blocks(torch.device(device))

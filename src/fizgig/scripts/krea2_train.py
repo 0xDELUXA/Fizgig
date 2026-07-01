@@ -41,6 +41,7 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample_every_n_epochs", type=int, default=0)
     p.add_argument("--sample_width", type=int, default=512)
     p.add_argument("--sample_height", type=int, default=512)
+    p.add_argument("--sample_seed", type=int, default=42, help="Seed for in-training preview samples")
     p.add_argument("--sample_ref_image", default=None, help="Reference image (Qwen3-VL vision path)")
     p.add_argument("--preview_blocks_to_swap", type=int, default=0,
                    help="Forward-only block swap on the preview Turbo (fits smaller cards)")
@@ -76,6 +77,7 @@ def main():
         sample_prompts=prompts, turbo_path=args.turbo_dit, vae_path=args.vae, te_path=args.text_encoder,
         sample_every_n_epochs=args.sample_every_n_epochs,
         sample_width=args.sample_width, sample_height=args.sample_height,
+        sample_seed=args.sample_seed,
         sample_ref_image=args.sample_ref_image,
         preview_blocks_to_swap=args.preview_blocks_to_swap,
         preview_int8=args.preview_int8,

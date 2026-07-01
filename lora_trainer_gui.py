@@ -14848,10 +14848,17 @@ class LoRATrainerGUI:
             if (prompt_file or ref_img) and every_n > 0:
                 width = (self.sample_width_var.get().strip() or "1024")
                 height = (self.sample_height_var.get().strip() or "1024")
+                # Sample seed from the Samples tab (0 is a valid seed — don't let it fall through to
+                # the trainer's default). Non-numeric/empty -> the SAMPLE_SEED default.
+                try:
+                    sample_seed = str(int(self.sample_seed_var.get().strip()))
+                except (ValueError, AttributeError):
+                    sample_seed = str(self.settings.get("SAMPLE_SEED", 1234))
                 cmd += [
                     "--sample_every_n_epochs", str(every_n),
                     "--sample_width", width,
                     "--sample_height", height,
+                    "--sample_seed", sample_seed,
                     "--turbo_dit", self._krea2_pref("krea2_turbo_dit"),
                     "--vae", self._krea2_pref("krea2_vae"),
                     "--text_encoder", self._krea2_pref("krea2_text_encoder"),

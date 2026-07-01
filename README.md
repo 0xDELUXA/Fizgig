@@ -32,7 +32,13 @@ Every trainer makes LoRAs. Fizgig is built around what you do with them **afterw
 - **Share** what you made — LoRA Royale exports the epoch morph, or travels a single LoRA through seeds, prompts, or strength, as a looping MP4/GIF made to share.
 - **Profile** exactly which blocks carry identity, style, and detail — so you know what to touch before you touch it.
 
-Under that workbench sits a fast, light trainer tuned for its models. Because everything is built natively for Klein 9B and Krea 2 instead of bolted on to a dozen models, the whole thing can do things the generalists can't: a full 9B LoRA trains comfortably on a **16 GB card**, and the post-training tools all read each other's output.
+Under that workbench sits a fast, light trainer tuned for its models — and tuned to **fit your GPU**, not a datacenter's. Because everything is built natively for Klein 9B and Krea 2 instead of bolted onto a dozen models, Fizgig can do things the generalists can't:
+
+- **Big models on modest cards.** A full **Klein 9B** LoRA trains on a **16 GB card** — and the 12.9B **Krea 2** trains on a **10–12 GB card** thanks to the 4-bit (NF4) base (~8 GB resident, QLoRA-style: the base is 4-bit, your LoRA still trains in bf16 on top). Block swap and previews **size themselves to your VRAM automatically** — nothing to configure — and if a preview can't fit, it steps aside so **training keeps running and saving**. You don't need a 4090 to train on the newest 12.9B model.
+- **A workbench nobody else has.** Repair broken LoRAs block-by-block, evolve new ones like a game, and crossfade every epoch of a run to find the sweet spot — then the tools **read each other's output** (profile → repair → explore → compare, one closed loop).
+- **It just works on your files.** Loads kohya / PEFT / OneTrainer / AI-Toolkit / LyCORIS, auto-converted; saves kohya `.safetensors` that drop straight into ComfyUI.
+
+**📣 Help map Krea 2 — [open an issue](https://github.com/shootthesound/Fizgig/issues).** Krea 2's per-block roles — which blocks carry **identity, style, and detail** — aren't charted yet, which is why the colour-coded sliders and layer-targeting presets are Klein-only for now. The **Profiler** is the instrument for finding them: spot a pattern, share it in **[GitHub Issues](https://github.com/shootthesound/Fizgig/issues)**, and it directly drives the colour-coding and finer layer targeting coming to Krea 2's presets and Repair Studio.
 
 **Free and open source.** A good first run is the **✨ Old Reliable** preset on the Training tab — then try **✨ Old Reliable · Flavour 8** (rank 8). Much of the old rank-16 instinct predates models this size; on Klein 9B, rank 8 is often plenty.
 

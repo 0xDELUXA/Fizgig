@@ -2562,8 +2562,8 @@ class LoRATrainerGUI:
                   text="Tracks each image's loss (normalized for the random noise level) across epochs. Detection "
                        "flags images that stay hard without improving — usually mislabeled/off-concept data — in the "
                        "console, the Problem Images window, and loss_log/problem_images.json. Per-image LR also "
-                       "halves the learning step for stuck images and gently eases off already-learned ones (needs "
-                       "a few epochs of warmup; batch size 1).",
+                       "throttles them (suspects ×0.7 from ~epoch 3, confirmed stuck ×0.5 from ~epoch 5), eases off "
+                       "mined-out images (improved then plateaued, ×0.6) and learned ones (×0.9). Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._krea2_losswatch_hint.grid(row=22, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3676,7 +3676,8 @@ class LoRATrainerGUI:
 
         images = data["images"]
         stuck_n = sum(1 for s in images.values() if s.get("verdict") == "stuck")
-        mode = "per-image LR active (stuck ×0.5, learned ×0.9)" if data.get("apply_lr") else "detection only"
+        mode = ("per-image LR active (stuck ×0.5, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
+                if data.get("apply_lr") else "detection only")
         self._problem_status.config(
             text=f"Epoch {data.get('epoch', '?')}  ·  {len(images)} images tracked  ·  "
                  f"{stuck_n} stuck  ·  {mode}\n"
@@ -3707,11 +3708,12 @@ class LoRATrainerGUI:
             "stuck":    ("#E74C3C", "STUCK — persistently hard, not improving. Review this image/caption."),
             "suspect":  ("#D35400", "Suspect — extremely hard from the start; provisionally slowed while the trend confirms. Worth a caption check now."),
             "watch":    ("#E67E22", "Watching — looked stuck this epoch; needs more epochs to confirm."),
+            "exhausted": ("#16A085", "Fully mined — improved a lot, then plateaued. Caption is fine; LR eased to prevent overbake."),
             "learning": ("#5B9BD5", "Learning — hard but improving. Leave it alone."),
             "mid":      ("#95A5A6", "Normal."),
             "easy":     ("#70AD47", "Learned — consistently easy."),
         }
-        order = {"stuck": 0, "suspect": 1, "watch": 2, "learning": 3, "mid": 4, "easy": 5}
+        order = {"stuck": 0, "suspect": 1, "watch": 2, "exhausted": 3, "learning": 4, "mid": 5, "easy": 6}
         items = sorted(images.items(),
                        key=lambda kv: (order.get(kv[1].get("verdict", "mid"), 2),
                                        -float(kv[1].get("mean_residual", 0.0))))
@@ -3757,11 +3759,21 @@ class LoRATrainerGUI:
             ttk.Button(name_row, text="✏ Edit Caption", width=14,
                        command=lambda k=key: self._open_caption_editor(k)).pack(side=tk.RIGHT, padx=(8, 0))
 
+            # Trend shows the DECISION metric (the half-window drop test the verdicts actually
+            # use), not the raw slope — the old slope arrow could say "improving" while the
+            # decision bar said otherwise, which read as a contradiction next to a stuck badge.
             slope = float(s.get("slope", 0.0))
-            trend = "↓ improving" if slope < -1e-4 else ("↑ worsening" if slope > 1e-4 else "→ flat")
+            if "improving" in s:
+                trend = "↓ improving" if s["improving"] else ("↑ worsening" if slope > 1e-4 else "→ plateau")
+            else:
+                trend = "↓ improving" if slope < -1e-4 else ("↑ worsening" if slope > 1e-4 else "→ flat")
+            # Stuck + improving = release countdown; make the state legible instead of confusing.
+            rv = int(s.get("release_votes", 0))
+            if verdict == "stuck" and s.get("improving"):
+                trend += f" — releasing ({rv}/3 clean epochs)"
             mult = s.get("multiplier", 1.0)
-            stats_txt = (f"difficulty {float(s.get('mean_residual', 0.0)):+.4f}   ·   trend {trend} "
-                         f"({slope:+.5f}/epoch)   ·   mean loss {float(s.get('mean_loss', 0.0)):.4f}   ·   "
+            stats_txt = (f"difficulty {float(s.get('mean_residual', 0.0)):+.4f}   ·   trend {trend}   ·   "
+                         f"mean loss {float(s.get('mean_loss', 0.0)):.4f}   ·   "
                          f"{int(s.get('epochs', 0))} epochs tracked"
                          + (f"   ·   LR ×{mult:g}" if data.get("apply_lr") and mult != 1.0 else ""))
             tk.Label(info, text=stats_txt, font=(FONT_FAMILY, 9),

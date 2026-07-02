@@ -908,16 +908,13 @@ def train_krea2(
                 os.replace(_jsonl, _jsonl + "." + _time.strftime("%Y%m%d%H%M%S") + ".bak")
             except OSError:
                 pass
-    loss_watch = None
-    if log_per_image_loss or per_image_lr or _loss_log_env():
-        loss_watch = PerImageLossWatch(output_dir, apply_lr=per_image_lr,
-                                       write_jsonl=log_per_image_loss)
-        logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
-    # Auto-recaption needs the source images + caption extension — pull them from the dataset
-    # TOML (recursive: the keys live under [general] / [[datasets]] depending on the config).
+    # The watch + auto-recaption need the source images + caption extension — pull them from the
+    # dataset TOML (recursive: the keys live under [general] / [[datasets]] depending on config).
+    # Also used to load/store <image_dir>/fizgig_excluded.json (exclusions travel with the dataset).
     recaptioned = {}   # key -> AI recaption attempts used (max 2; 2nd is the detailed pass)
     ar_image_dir, ar_caption_ext = None, ".txt"
-    if auto_recaption:
+    watch_enabled = log_per_image_loss or per_image_lr or auto_recaption or _loss_log_env()
+    if watch_enabled:
         def _find_toml_key(d, key):
             if isinstance(d, dict):
                 if key in d:
@@ -934,13 +931,22 @@ def train_krea2(
             return None
         ar_image_dir = _find_toml_key(user_config, "image_directory")
         ar_caption_ext = _find_toml_key(user_config, "caption_extension") or ".txt"
-        if ar_image_dir and os.path.isdir(ar_image_dir):
+        if not (ar_image_dir and os.path.isdir(ar_image_dir)):
+            ar_image_dir = None
+    if auto_recaption:
+        if ar_image_dir:
             logger.info(f"[auto-recaption] ON — stuck images re-captioned by Qwen3-VL from "
                         f"{ar_image_dir}" + (f" (trigger: '{trigger_word}')" if trigger_word else ""))
         else:
-            logger.warning(f"[auto-recaption] image_directory not found in the dataset config "
-                           f"({ar_image_dir!r}) — auto-recaption disabled")
+            logger.warning("[auto-recaption] image_directory not found in the dataset config "
+                           "— auto-recaption disabled")
             auto_recaption = False
+    loss_watch = None
+    if watch_enabled:
+        loss_watch = PerImageLossWatch(output_dir, apply_lr=per_image_lr,
+                                       write_jsonl=log_per_image_loss,
+                                       dataset_dir=ar_image_dir, caption_ext=ar_caption_ext)
+        logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
     for epoch in range(start_epoch, max_train_epochs):

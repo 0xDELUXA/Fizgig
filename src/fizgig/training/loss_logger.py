@@ -134,7 +134,8 @@ class PerImageLossWatch:
                  improve_frac: float = 0.12, improve_floor: float = 0.02,
                  suspect_mult: float = 0.7, easy_from_epoch: int = 3,
                  exhausted_mult: float = 0.6, exhaust_drop_frac: float = 0.3, exhaust_on: int = 2,
-                 stuck_floor: float = 0.1, escalate_every: int = 2):
+                 stuck_floor: float = 0.1, escalate_every: int = 2,
+                 dataset_dir: str = None, caption_ext: str = ".txt"):
         self.apply_lr = apply_lr
         self.warmup_epochs = warmup_epochs
         self.window = window
@@ -202,9 +203,84 @@ class PerImageLossWatch:
         self._incorrigible: set[str] = set()
         self._excluded: set[str] = set()
 
+        # Persistent exclusions: fizgig_excluded.json lives IN the dataset folder (exclusions are
+        # dataset knowledge — they travel with the images, across runs). Each entry snapshots the
+        # caption at exclusion time; if a later run finds the .txt changed (user fixed it offline),
+        # the entry auto-prunes and the image is re-admitted. Mid-run caption edits un-exclude via
+        # reset_key, which also removes the entry.
+        self.dataset_dir = dataset_dir
+        self.caption_ext = caption_ext
+        self._excl_file = (os.path.join(dataset_dir, "fizgig_excluded.json")
+                           if dataset_dir and os.path.isdir(dataset_dir) else None)
+        self._excl_data: dict[str, dict] = {}
+        self._load_persistent_exclusions()
+
         # The JSONL logger stays the offline source of truth; force it on when the detection
         # toggle asks for it (env var still works on its own).
         self._jsonl = PerImageLossLogger(output_dir, force=write_jsonl)
+
+    # ---- persistent exclusions -------------------------------------------------
+
+    def _current_caption(self, key: str):
+        if not self.dataset_dir:
+            return None
+        p = os.path.join(self.dataset_dir, os.path.basename(key) + self.caption_ext)
+        try:
+            with open(p, encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception:
+            return None
+
+    def _load_persistent_exclusions(self) -> None:
+        if not self._excl_file or not os.path.exists(self._excl_file):
+            return
+        try:
+            with open(self._excl_file, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            logger.warning("[loss-watch] could not read fizgig_excluded.json — ignoring")
+            return
+        pruned = []
+        for key, entry in dict(data).items():
+            cur = self._current_caption(key)
+            if cur is not None and entry.get("caption") is not None and cur != entry["caption"]:
+                # Caption changed since exclusion (fixed offline) — re-admit.
+                pruned.append(key)
+                del data[key]
+            else:
+                self._excluded.add(str(key))
+                self._incorrigible.add(str(key))
+        self._excl_data = data
+        if pruned:
+            self._write_persistent_exclusions()
+            logger.info(f"[loss-watch] re-admitted {len(pruned)} previously-excluded image(s) "
+                        f"whose captions changed: " + ", ".join(os.path.basename(k) for k in pruned))
+        if self._excluded:
+            logger.warning(f"[loss-watch] {len(self._excluded)} image(s) excluded by a previous run "
+                           f"(fizgig_excluded.json) — they will be skipped. Edit their captions or "
+                           f"delete the file to re-admit them: "
+                           + ", ".join(sorted(os.path.basename(k) for k in self._excluded)))
+
+    def _write_persistent_exclusions(self) -> None:
+        if not self._excl_file:
+            return
+        try:
+            tmp = self._excl_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._excl_data, f, indent=2)
+            os.replace(tmp, self._excl_file)
+        except Exception:
+            logger.warning("[loss-watch] could not write fizgig_excluded.json", exc_info=True)
+
+    def _record_exclusion(self, key: str, epoch: int) -> None:
+        if not self._excl_file:
+            return
+        import time
+        self._excl_data[key] = {"epoch": int(epoch),
+                                "date": time.strftime("%Y-%m-%d %H:%M"),
+                                "reason": "still stuck after two AI recaptions",
+                                "caption": self._current_caption(key)}
+        self._write_persistent_exclusions()
 
     # ---- per-step ------------------------------------------------------------
 
@@ -400,6 +476,7 @@ class PerImageLossWatch:
                     self._excluded.add(key)
                     self._confirmed_stuck.discard(key)
                     self._last_reported_stuck.discard(key)
+                    self._record_exclusion(key, epoch)   # persists to <dataset>/fizgig_excluded.json
                     logger.warning(f"[loss-watch] epoch {epoch}: {os.path.basename(key)} EXCLUDED "
                                    f"from training — two AI captions couldn't fix it. Edit its "
                                    f"caption to re-admit it, or remove it from the dataset.")
@@ -429,6 +506,16 @@ class PerImageLossWatch:
                 new_mult[key] = mult
             self._mult = new_mult
             self.verdicts = {k: s["verdict"] for k, s in stats.items()}
+
+            # Excluded images loaded from fizgig_excluded.json are skipped from step 1 — they have
+            # no records, so give them stub report rows or they'd be invisible in the popup.
+            for k in self._excluded:
+                if k not in stats:
+                    stats[k] = {"verdict": "excluded", "multiplier": 0.0, "mean_residual": 0.0,
+                                "slope": 0.0, "first": 0.0, "last": 0.0, "se": 0.0,
+                                "trend_epochs": 0, "baseline": 0.0, "total_drop": 0.0,
+                                "mean_loss": 0.0, "epochs": 0, "improving": False}
+                    self.verdicts[k] = "excluded"
 
             # Warn only when the CONFIRMED set changes — not every epoch.
             if self._confirmed_stuck != self._last_reported_stuck:
@@ -479,6 +566,9 @@ class PerImageLossWatch:
         self._last_reported_stuck.discard(key)
         self._incorrigible.discard(key)
         self._excluded.discard(key)   # a manual caption edit re-admits an excluded image
+        if key in self._excl_data:    # ...including from the persistent dataset-folder record
+            del self._excl_data[key]
+            self._write_persistent_exclusions()
         self.verdicts.pop(key, None)
 
     def close(self) -> None:

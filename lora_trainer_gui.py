@@ -15253,9 +15253,11 @@ class LoRATrainerGUI:
         if self.krea2_auto_recaption_var.get():
             cmd.append("--auto_recaption")
             # Trigger word from the Captions tab — appended (', <trigger>') to AI captions if set.
+            # The field DEFAULTS to the literal placeholder "trigger_word"; an untouched box must
+            # count as empty or AI captions end with ", trigger_word" (found the fun way).
             trig = (self.caption_text_var.get().strip()
                     if hasattr(self, "caption_text_var") else "")
-            if trig:
+            if trig and trig.lower() != "trigger_word":
                 cmd += ["--trigger_word", trig]
 
         # In-training previews: render the fp8 Turbo with the live LoRA. Resolution +

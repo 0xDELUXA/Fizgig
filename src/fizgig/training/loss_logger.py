@@ -35,10 +35,10 @@ def is_enabled() -> bool:
 
 
 class PerImageLossLogger:
-    """Append-only per-image loss recorder. No-op unless the env flag is set."""
+    """Append-only per-image loss recorder. No-op unless the env flag is set (or force=True)."""
 
-    def __init__(self, output_dir: str, ema_beta: float = 0.9):
-        self.enabled = is_enabled()
+    def __init__(self, output_dir: str, ema_beta: float = 0.9, force: bool = False):
+        self.enabled = force or is_enabled()
         self.ema_beta = ema_beta
         self._f = None
         self._ema: dict[str, float] = {}          # item_key -> EMA of raw loss
@@ -103,3 +103,244 @@ class PerImageLossLogger:
             except Exception:
                 pass
             self._f = None
+
+
+class PerImageLossWatch:
+    """Online per-image difficulty watcher — the actionable layer on top of the passive logger.
+
+    Two GUI-toggleable behaviours share this one class:
+      * problem-image detection (`write_jsonl` / always-on analytics): at each epoch boundary,
+        classifies every image as STUCK (high residual, not descending — likely outlier/mislabel),
+        LEARNING (high but descending — hard-but-good), or easy, logs stuck images to the console,
+        and writes <output_dir>/loss_log/problem_images.json.
+      * per-image adaptive LR (`apply_lr=True`): additionally emits a per-image loss multiplier —
+        throttle STUCK images (default x0.5) so one bad image can't keep yanking the weights, gently
+        ease off easy/learned ones (default x0.9), leave hard-but-learning alone. At batch size 1,
+        scaling the step's loss IS a per-image LR. Guardrails: no action during the warmup epochs
+        (the trend needs data), multipliers only ever reduce (never boost), and batch size > 1
+        disables scaling entirely (a batch mean isn't a per-image signal).
+
+    Normalization matches the validated offline analyzer: residuals are recomputed at every epoch
+    boundary against the CURRENT per-timestep-bucket means over the whole run so far — never the
+    order-dependent live running mean (first sample per bucket would always read as residual 0).
+    Raw records are kept in memory; a few thousand (key, epoch, bucket, loss) tuples is trivial.
+    """
+
+    def __init__(self, output_dir: str, *, apply_lr: bool = False, write_jsonl: bool = False,
+                 warmup_epochs: int = 4, window: int = 5,
+                 throttle_mult: float = 0.5, easy_mult: float = 0.9,
+                 hi_q: float = 0.66, lo_q: float = 0.33,
+                 persist_on: int = 3, persist_off: int = 3,
+                 improve_frac: float = 0.12, improve_floor: float = 0.02):
+        self.apply_lr = apply_lr
+        self.warmup_epochs = warmup_epochs
+        self.window = window
+        self.throttle_mult = throttle_mult
+        self.easy_mult = easy_mult
+        self.hi_q = hi_q
+        self.lo_q = lo_q
+        self.persist_on = persist_on      # consecutive stuck votes to CONFIRM stuck
+        self.persist_off = persist_off    # consecutive clear votes to RELEASE stuck
+        # "Improving" test: split the last trend_window epochs into two halves and require the
+        # recent half's mean residual to sit below the older half's by BOTH a fraction of the
+        # excess AND ~1 standard error (estimated from that image's own residual scatter). With
+        # one loss sample per image per epoch, slope signs and point-to-point drops both flap
+        # inside the noise (validated on synthetic runs) — half-window means with a data-driven
+        # noise bar is what actually separates a learner from a stuck outlier.
+        self.improve_frac = improve_frac
+        self.improve_floor = improve_floor
+        self.trend_window = 8             # epochs; halves of 4 vs 4
+        self.output_dir = output_dir
+
+        self._records: list[tuple[str, int, int, float]] = []   # (key, epoch, bucket, loss)
+        self._bsum = [0.0] * _N_BUCKETS
+        self._bcnt = [0] * _N_BUCKETS
+        self._mult: dict[str, float] = {}
+        self.verdicts: dict[str, str] = {}
+        self._epochs_seen: set[int] = set()
+        self._batched_warned = False
+        self._batched = False
+        # Persistence state: a single noisy epoch must not flip a verdict. Per-key counters of
+        # consecutive stuck / clear votes, plus the confirmed set (drives warnings + throttling).
+        self._stuck_votes: dict[str, int] = {}
+        self._clear_votes: dict[str, int] = {}
+        self._confirmed_stuck: set[str] = set()
+        self._last_reported_stuck: set[str] = set()
+
+        # The JSONL logger stays the offline source of truth; force it on when the detection
+        # toggle asks for it (env var still works on its own).
+        self._jsonl = PerImageLossLogger(output_dir, force=write_jsonl)
+
+    # ---- per-step ------------------------------------------------------------
+
+    @staticmethod
+    def _key_of(item_keys) -> str:
+        keys = item_keys if isinstance(item_keys, (list, tuple)) else [item_keys]
+        keys = [str(k) for k in keys] if keys else ["<unknown>"]
+        return keys[0] if len(keys) == 1 else "|".join(keys)
+
+    def multiplier(self, item_keys) -> float:
+        """Loss multiplier for the CURRENT step (looked up before observe; updates at epoch ends)."""
+        if not self.apply_lr or self._batched:
+            return 1.0
+        return self._mult.get(self._key_of(item_keys), 1.0)
+
+    def observe(self, *, epoch: int, step: int, item_keys, timestep: float, loss: float) -> None:
+        """Record one step's RAW (unscaled) loss. Never raises into the training loop."""
+        try:
+            keys = item_keys if isinstance(item_keys, (list, tuple)) else [item_keys]
+            if keys is not None and len(keys) > 1:
+                self._batched = True
+                if self.apply_lr and not self._batched_warned:
+                    self._batched_warned = True
+                    logger.warning("[loss-watch] batch size > 1 — per-image LR disabled "
+                                   "(a batch-mean loss isn't a per-image signal)")
+            t = float(timestep)
+            b = min(int(min(max(t, 0.0), 0.999999) * _N_BUCKETS), _N_BUCKETS - 1)
+            loss = float(loss)
+            key = self._key_of(item_keys)
+            self._records.append((key, int(epoch), b, loss))
+            self._bsum[b] += loss
+            self._bcnt[b] += 1
+            self._epochs_seen.add(int(epoch))
+            self._jsonl.record(epoch=epoch, step=step, item_keys=item_keys, timestep=t, loss=loss)
+        except Exception as e:
+            logger.warning(f"[loss-watch] observe failed ({e})")
+
+    # ---- per-epoch -----------------------------------------------------------
+
+    @staticmethod
+    def _slope(xs, ys) -> float:
+        n = len(xs)
+        if n < 2:
+            return 0.0
+        mx = sum(xs) / n
+        my = sum(ys) / n
+        denom = sum((x - mx) ** 2 for x in xs)
+        if denom == 0:
+            return 0.0
+        return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom
+
+    def epoch_boundary(self, epoch: int) -> dict:
+        """Reclassify every image and refresh multipliers. Returns {key: verdict} (empty pre-warmup)."""
+        try:
+            if not self._records or len(self._epochs_seen) < self.warmup_epochs:
+                return {}
+            bucket_mean = [(self._bsum[i] / self._bcnt[i]) if self._bcnt[i] else 0.0
+                           for i in range(_N_BUCKETS)]
+            per_epoch: dict[str, dict[int, list[float]]] = {}
+            raw_sum: dict[str, float] = {}
+            raw_cnt: dict[str, int] = {}
+            for key, ep, b, loss in self._records:
+                per_epoch.setdefault(key, {}).setdefault(ep, []).append(loss - bucket_mean[b])
+                raw_sum[key] = raw_sum.get(key, 0.0) + loss
+                raw_cnt[key] = raw_cnt.get(key, 0) + 1
+
+            stats = {}
+            for key, ep_map in per_epoch.items():
+                all_eps = sorted(ep_map)
+                series = [sum(ep_map[e]) / len(ep_map[e]) for e in all_eps]  # raw per-epoch residual
+
+                # Trend: compare the two halves of the last trend_window epochs. Half-means average
+                # away the single-sample-per-epoch noise; the standard error of their difference
+                # (from this image's own scatter) gives the noise bar the improve test must beat.
+                tw = min(self.trend_window, len(series) - len(series) % 2)
+                old_mean = new_mean = se = 0.0
+                if tw >= 4:
+                    win = series[-tw:]
+                    half = tw // 2
+                    old_half, new_half = win[:half], win[half:]
+                    old_mean = sum(old_half) / half
+                    new_mean = sum(new_half) / half
+                    var = (sum((v - old_mean) ** 2 for v in old_half)
+                           + sum((v - new_mean) ** 2 for v in new_half)) / max(tw - 2, 1)
+                    se = (2.0 * var / half) ** 0.5
+
+                res = series[-self.window:]
+                eps = all_eps[-self.window:]
+                stats[key] = {"mean_residual": sum(res) / len(res),
+                              "slope": self._slope([float(e) for e in eps], res),
+                              "first": old_mean, "last": new_mean, "se": se,
+                              "trend_epochs": tw,
+                              "mean_loss": raw_sum[key] / raw_cnt[key],
+                              "epochs": len(all_eps)}
+
+            ordered = sorted(s["mean_residual"] for s in stats.values())
+            hi = ordered[int(self.hi_q * (len(ordered) - 1))]
+            lo = ordered[int(self.lo_q * (len(ordered) - 1))]
+
+            # Per-epoch RAW votes -> persistence state machine. One noisy epoch can't flip a
+            # verdict: stuck is CONFIRMED only after persist_on consecutive stuck votes, and
+            # RELEASED only after persist_off consecutive clear votes.
+            new_mult = {}
+            for key, s in stats.items():
+                # Improving = recent half-mean below older half-mean by a real margin (fraction of
+                # the excess AND ~1 SE). Too little history -> not improving is unknowable; the
+                # persistence gate + warmup keep that from mattering.
+                drop = s["first"] - s["last"]
+                improving = (s["trend_epochs"] >= 4
+                             and drop >= max(self.improve_frac * max(s["first"], 0.0),
+                                             self.improve_floor, s["se"]))
+                # An image whose recent residual is <= 0 is no harder than average at the same
+                # noise level — by definition not an outlier, whatever its trend.
+                votes_stuck = s["mean_residual"] >= hi and s["last"] > 0.0 and not improving
+                if key in self._confirmed_stuck:
+                    self._clear_votes[key] = 0 if votes_stuck else self._clear_votes.get(key, 0) + 1
+                    if self._clear_votes[key] >= self.persist_off:
+                        self._confirmed_stuck.discard(key)
+                        self._clear_votes[key] = 0
+                        self._stuck_votes[key] = 0
+                else:
+                    self._stuck_votes[key] = self._stuck_votes.get(key, 0) + 1 if votes_stuck else 0
+                    if self._stuck_votes[key] >= self.persist_on:
+                        self._confirmed_stuck.add(key)
+                        self._clear_votes[key] = 0
+
+                if key in self._confirmed_stuck:
+                    verdict, mult = "stuck", self.throttle_mult
+                elif votes_stuck:
+                    verdict, mult = "watch", 1.0          # suspicious this epoch, not yet confirmed
+                elif s["mean_residual"] >= hi:
+                    verdict, mult = "learning", 1.0
+                elif s["mean_residual"] <= lo:
+                    verdict, mult = "easy", self.easy_mult
+                else:
+                    verdict, mult = "mid", 1.0
+                s["verdict"] = verdict
+                s["multiplier"] = mult if self.apply_lr else 1.0
+                new_mult[key] = mult
+            self._mult = new_mult
+            self.verdicts = {k: s["verdict"] for k, s in stats.items()}
+
+            # Warn only when the CONFIRMED set changes — not every epoch.
+            if self._confirmed_stuck != self._last_reported_stuck:
+                added = self._confirmed_stuck - self._last_reported_stuck
+                removed = self._last_reported_stuck - self._confirmed_stuck
+                action = f" — throttling LR x{self.throttle_mult}" if (self.apply_lr and not self._batched) else ""
+                if added:
+                    names = ", ".join(os.path.basename(k) for k in sorted(added))
+                    logger.warning(f"[loss-watch] epoch {epoch}: image(s) confirmed STUCK "
+                                   f"(persistently hard, not improving — check for bad/mislabeled "
+                                   f"data): {names}{action}")
+                if removed:
+                    names = ", ".join(os.path.basename(k) for k in sorted(removed))
+                    logger.info(f"[loss-watch] epoch {epoch}: no longer stuck: {names}")
+                self._last_reported_stuck = set(self._confirmed_stuck)
+
+            try:
+                d = os.path.join(self.output_dir, "loss_log")
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, "problem_images.json"), "w", encoding="utf-8") as f:
+                    json.dump({"epoch": epoch, "apply_lr": self.apply_lr,
+                               "images": {k: {kk: (round(vv, 6) if isinstance(vv, float) else vv)
+                                              for kk, vv in s.items()} for k, s in stats.items()}},
+                              f, indent=2)
+            except Exception:
+                pass
+            return self.verdicts
+        except Exception as e:
+            logger.warning(f"[loss-watch] epoch_boundary failed ({e})")
+            return {}
+
+    def close(self) -> None:
+        self._jsonl.close()

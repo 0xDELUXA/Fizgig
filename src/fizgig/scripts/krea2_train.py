@@ -53,6 +53,10 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--adaptive_lr", action="store_true", help="Bi-directional plateau LR tracker")
     p.add_argument("--adaptive_lr_min", type=float, default=1e-5)
     p.add_argument("--adaptive_lr_max", type=float, default=4e-4)
+    p.add_argument("--log_per_image_loss", action="store_true",
+                   help="Per-image loss tracking + stuck-image detection (loss_log/problem_images.json)")
+    p.add_argument("--per_image_lr", action="store_true",
+                   help="Per-image adaptive LR: throttle stuck images, ease off learned (experimental)")
     return p
 
 
@@ -85,6 +89,8 @@ def main():
         context_lora_path=args.context_lora_path, context_lora_strength=args.context_lora_strength,
         adaptive_lr=args.adaptive_lr,
         adaptive_lr_min=args.adaptive_lr_min, adaptive_lr_max=args.adaptive_lr_max,
+        log_per_image_loss=args.log_per_image_loss,
+        per_image_lr=args.per_image_lr,
     )
 
 

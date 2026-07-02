@@ -583,6 +583,8 @@ def train_krea2(
     sample_ref_image: str = None,
     preview_blocks_to_swap: int = 0,
     preview_int8: bool = False,
+    log_per_image_loss: bool = False,
+    per_image_lr: bool = False,
     resume_state_dir: str = None,
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
@@ -676,10 +678,17 @@ def train_krea2(
     # a smoothed avr_loss in the postfix (the raw per-step loss is very noisy — batch size 1
     # plus a random flow-matching timestep each step — so the moving average is the signal).
     loss_recorder = LossRecorder()
-    # Passive per-image loss logger (experiment) — off unless FIZGIG_PERIMAGE_LOSS_LOG=1. Records
-    # (image, timestep, loss) per step for offline study of per-image difficulty. No training effect.
-    from fizgig.training.loss_logger import PerImageLossLogger
-    perimg_loss_log = PerImageLossLogger(output_dir)
+    # Per-image loss watcher (experiment). Three tiers, all sharing one class:
+    #   env FIZGIG_PERIMAGE_LOSS_LOG=1  -> passive JSONL log only (offline study)
+    #   log_per_image_loss (GUI toggle) -> JSONL + per-epoch stuck-image detection report
+    #   per_image_lr (GUI toggle)       -> detection + per-image loss multiplier (throttle stuck,
+    #                                      ease off learned; safe per-image LR at batch size 1)
+    from fizgig.training.loss_logger import PerImageLossWatch, is_enabled as _loss_log_env
+    loss_watch = None
+    if log_per_image_loss or per_image_lr or _loss_log_env():
+        loss_watch = PerImageLossWatch(output_dir, apply_lr=per_image_lr,
+                                       write_jsonl=log_per_image_loss)
+        logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
     for epoch in range(start_epoch, max_train_epochs):
@@ -687,7 +696,11 @@ def train_krea2(
         for i, batch in enumerate(loader):
             loss, t_used = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
                                         shift=shift, dtype=dtype)
-            loss.backward()
+            # Per-image LR: scale THIS step's gradient by the image's multiplier (throttle stuck
+            # images, ease off learned ones). Raw loss is still what gets recorded/averaged below,
+            # so avr_loss and the global adaptive-LR watcher see unscaled numbers.
+            step_mult = loss_watch.multiplier(batch.get("item_keys")) if loss_watch is not None else 1.0
+            (loss * step_mult if step_mult != 1.0 else loss).backward()
             # Gradient clipping to match the musubi reference (max_grad_norm default 1.0). 0 disables.
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
@@ -695,7 +708,8 @@ def train_krea2(
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
-            perimg_loss_log.record(epoch=epoch + 1, step=global_step,
+            if loss_watch is not None:
+                loss_watch.observe(epoch=epoch + 1, step=global_step,
                                    item_keys=batch.get("item_keys"), timestep=t_used, loss=loss.item())
             # refresh=False so only update(1) draws the bar — otherwise set_postfix AND update each
             # force a refresh, which a captured (non-tty) stderr logs as two lines per step (the
@@ -708,6 +722,11 @@ def train_krea2(
         # post-adjustment state). Uses the smoothed avr_loss as the signal, like Klein.
         if adaptive:
             adaptive.epoch_boundary(epoch, loss_recorder.moving_average, network, optimizer)
+
+        # Per-image loss watch: reclassify images (stuck/learning/easy), refresh next epoch's
+        # multipliers, write loss_log/problem_images.json (the GUI's Problem Images popup reads it).
+        if loss_watch is not None:
+            loss_watch.epoch_boundary(epoch + 1)
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),
@@ -803,7 +822,8 @@ def train_krea2(
             sys.exit(0)
 
     progress_bar.close()
-    perimg_loss_log.close()
+    if loss_watch is not None:
+        loss_watch.close()
     out = os.path.join(output_dir, f"{output_name}.safetensors")
     # Record the context LoRA in metadata so users know to pair it at the same strength at
     # inference (the trained LoRA is context-dependent — same contract as Klein).

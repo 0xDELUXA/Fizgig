@@ -845,6 +845,8 @@ class LoRATrainerGUI:
             "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
             "GRADIENT_CHECKPOINTING": True,  # ON by default — recompute activations to fit 9B on most cards
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
+            "KREA2_LOSS_WATCH": False,   # per-image loss tracking + stuck-image detection (krea2)
+            "KREA2_PER_IMAGE_LR": False,  # per-image adaptive LR (throttle stuck images) — experimental
             # Sample generation settings
             "SAMPLE_ENABLED": True,
             "SAMPLE_PROMPT": "A high quality photo",
@@ -2524,6 +2526,35 @@ class LoRATrainerGUI:
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720).grid(
             row=17, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
+        # --- Per-image loss watch (Krea 2 only for now — hidden under Klein via
+        # _apply_training_arch_visibility). Two tiers sharing one watcher in the trainer:
+        # detection reports stuck images; per-image LR additionally throttles them.
+        self.krea2_loss_watch_var = tk.BooleanVar(value=bool(self.settings.get("KREA2_LOSS_WATCH", False)))
+        self._krea2_losswatch_frame = ttk.Frame(training_content)
+        self._krea2_losswatch_frame.grid(row=20, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
+        ttk.Checkbutton(
+            self._krea2_losswatch_frame,
+            text="Detect problem images (per-image loss tracking)",
+            variable=self.krea2_loss_watch_var,
+        ).pack(side=tk.LEFT)
+        ttk.Button(self._krea2_losswatch_frame, text="👁 View Problem Images",
+                   command=self._open_problem_images_window).pack(side=tk.LEFT, padx=(12, 0))
+        self.krea2_per_image_lr_var = tk.BooleanVar(value=bool(self.settings.get("KREA2_PER_IMAGE_LR", False)))
+        self._krea2_perimglr_cb = ttk.Checkbutton(
+            training_content,
+            text="Per-image adaptive LR (throttle stuck images, ease off learned ones) — experimental",
+            variable=self.krea2_per_image_lr_var,
+        )
+        self._krea2_perimglr_cb.grid(row=21, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(2, 0))
+        self._krea2_losswatch_hint = ttk.Label(training_content,
+                  text="Tracks each image's loss (normalized for the random noise level) across epochs. Detection "
+                       "flags images that stay hard without improving — usually mislabeled/off-concept data — in the "
+                       "console, the Problem Images window, and loss_log/problem_images.json. Per-image LR also "
+                       "halves the learning step for stuck images and gently eases off already-learned ones (needs "
+                       "a few epochs of warmup; batch size 1).",
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._krea2_losswatch_hint.grid(row=22, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
         optimizer_section.pack(fill=tk.X, padx=36, pady=(0, 16))
@@ -3059,6 +3090,12 @@ class LoRATrainerGUI:
             if hasattr(self, '_on_quant_4bit_toggle'):
                 self._on_quant_4bit_toggle()
 
+        # Per-image loss watch toggles (krea2) — dedicated vars, same not-in-self.entries situation.
+        if "KREA2_LOSS_WATCH" in preset and hasattr(self, 'krea2_loss_watch_var'):
+            self.krea2_loss_watch_var.set(bool(preset["KREA2_LOSS_WATCH"]))
+        if "KREA2_PER_IMAGE_LR" in preset and hasattr(self, 'krea2_per_image_lr_var'):
+            self.krea2_per_image_lr_var.set(bool(preset["KREA2_PER_IMAGE_LR"]))
+
         # Adaptive LR checkbox + sync enabled state of Min/Max LR dropdowns
         if "ADAPTIVE_LR" in preset and hasattr(self, 'adaptive_lr_var'):
             self.adaptive_lr_var.set(bool(preset["ADAPTIVE_LR"]))
@@ -3176,6 +3213,8 @@ class LoRATrainerGUI:
         _grab("fp8_var", "FP8")
         _grab("scaled_var", "SCALED")
         _grab("quant_4bit_var", "QUANT_4BIT")
+        _grab("krea2_loss_watch_var", "KREA2_LOSS_WATCH")
+        _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
         _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
@@ -3502,6 +3541,11 @@ class LoRATrainerGUI:
         for w in widgets:
             self._set_widget_visible(w, not is_krea2)
 
+        # Krea 2-ONLY controls (inverse of the above): the per-image loss watch toggles are only
+        # wired into krea2_train for now — hide them under Klein.
+        for w in (self._krea2_losswatch_frame, self._krea2_perimglr_cb, self._krea2_losswatch_hint):
+            self._set_widget_visible(w, is_krea2)
+
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
         # dropdown decide (only shown when the preset is "Custom").
         try:
@@ -3516,6 +3560,171 @@ class LoRATrainerGUI:
         # Optimizer before Other Options) — show Optimizer first so Timestep's anchor is packed.
         self._set_training_section_visible("optimizer", "scheduler", not is_krea2)
         self._set_training_section_visible("timestep", "optimizer", not is_krea2)
+
+    # ── Problem Images window (per-image loss watch) ────────────────────
+
+    def _problem_images_json_path(self) -> str:
+        out = self.settings.get("LORA_OUTPUT_DIR", "") or ""
+        return os.path.join(out, "loss_log", "problem_images.json") if out else ""
+
+    def _find_dataset_image(self, key: str):
+        """Resolve a loss-watch item key (image basename, no extension) to a file in the training
+        image folder. Returns a path or None."""
+        folder = self.image_folder_var.get().strip() if hasattr(self, "image_folder_var") else ""
+        if not folder or not os.path.isdir(folder):
+            return None
+        base = os.path.basename(key)
+        for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            p = os.path.join(folder, base + ext)
+            if os.path.exists(p):
+                return p
+        return None
+
+    def _open_problem_images_window(self):
+        """Live viewer for the per-image loss watch — thumbnails + verdicts, auto-refreshing
+        during training from <output_dir>/loss_log/problem_images.json."""
+        win = getattr(self, "_problem_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            self._refresh_problem_images(force=True)
+            return
+        win = tk.Toplevel(self.master)
+        win.title("Problem Images — per-image loss watch")
+        win.geometry("760x640")
+        win.configure(bg=COLORS["bg_deep"])
+        self._problem_win = win
+        self._problem_mtime = None
+        self._problem_thumbs = []  # keep PhotoImage refs alive
+
+        head = tk.Frame(win, bg=COLORS["bg_deep"])
+        head.pack(fill=tk.X, padx=14, pady=(12, 6))
+        tk.Label(head, text="Problem Images", font=(FONT_FAMILY, 15, "bold"),
+                 fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(side=tk.LEFT)
+        ttk.Button(head, text="Refresh", command=lambda: self._refresh_problem_images(force=True)).pack(side=tk.RIGHT)
+        self._problem_status = tk.Label(win, text="", font=(FONT_FAMILY, 9),
+                                        fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
+                                        justify=tk.LEFT, anchor="w")
+        self._problem_status.pack(fill=tk.X, padx=14)
+
+        holder = tk.Frame(win, bg=COLORS["bg_deep"])
+        holder.pack(fill=tk.BOTH, expand=True, padx=14, pady=(6, 12))
+        canvas = tk.Canvas(holder, bg=COLORS["bg_deep"], highlightthickness=0)
+        vbar = ttk.Scrollbar(holder, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rows = tk.Frame(canvas, bg=COLORS["bg_deep"])
+        rows_id = canvas.create_window((0, 0), window=rows, anchor="nw")
+        rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(rows_id, width=e.width))
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
+        self._problem_rows = rows
+
+        self._refresh_problem_images(force=True)
+
+        def _tick():
+            w = getattr(self, "_problem_win", None)
+            if w is None or not w.winfo_exists():
+                return
+            self._refresh_problem_images()
+            w.after(4000, _tick)
+        win.after(4000, _tick)
+
+    def _refresh_problem_images(self, force: bool = False):
+        """Re-read problem_images.json (only rebuilds when the file changed, unless forced)."""
+        win = getattr(self, "_problem_win", None)
+        if win is None or not win.winfo_exists():
+            return
+        path = self._problem_images_json_path()
+        data = None
+        if path and os.path.exists(path):
+            try:
+                mtime = os.path.getmtime(path)
+                if not force and mtime == self._problem_mtime:
+                    return  # unchanged
+                self._problem_mtime = mtime
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = None
+        elif not force and self._problem_mtime is None:
+            return  # still no file; nothing to redraw
+
+        for w in self._problem_rows.winfo_children():
+            w.destroy()
+        self._problem_thumbs.clear()
+
+        if not data or not data.get("images"):
+            self._problem_status.config(text="No data yet. Enable “Detect problem images” on the Training tab, "
+                                             "start a Krea 2 run, and give it 3+ epochs of warmup.")
+            return
+
+        images = data["images"]
+        stuck_n = sum(1 for s in images.values() if s.get("verdict") == "stuck")
+        mode = "per-image LR active (stuck ×0.5, learned ×0.9)" if data.get("apply_lr") else "detection only"
+        self._problem_status.config(
+            text=f"Epoch {data.get('epoch', '?')}  ·  {len(images)} images tracked  ·  "
+                 f"{stuck_n} stuck  ·  {mode}\n"
+                 f"Residual = loss vs. the average at the same noise level (higher = harder than typical). "
+                 f"Stuck = hard AND not improving → check the image + caption.")
+
+        style = {
+            "stuck":    ("#E74C3C", "STUCK — persistently hard, not improving. Review this image/caption."),
+            "watch":    ("#E67E22", "Watching — looked stuck this epoch; needs more epochs to confirm."),
+            "learning": ("#5B9BD5", "Learning — hard but improving. Leave it alone."),
+            "mid":      ("#95A5A6", "Normal."),
+            "easy":     ("#70AD47", "Learned — consistently easy."),
+        }
+        order = {"stuck": 0, "watch": 1, "learning": 2, "mid": 3, "easy": 4}
+        items = sorted(images.items(),
+                       key=lambda kv: (order.get(kv[1].get("verdict", "mid"), 2),
+                                       -float(kv[1].get("mean_residual", 0.0))))
+
+        for key, s in items:
+            verdict = s.get("verdict", "mid")
+            color, blurb = style.get(verdict, style["mid"])
+            row = tk.Frame(self._problem_rows, bg=COLORS["bg_surface"],
+                           highlightbackground=color, highlightthickness=2)
+            row.pack(fill=tk.X, pady=4)
+
+            img_path = self._find_dataset_image(key)
+            thumb_holder = tk.Frame(row, width=100, height=100, bg=COLORS["bg_surface"])
+            thumb_holder.pack_propagate(False)
+            thumb_holder.pack(side=tk.LEFT, padx=8, pady=8)
+            if img_path:
+                try:
+                    im = Image.open(img_path)
+                    im.thumbnail((96, 96), Image.LANCZOS)
+                    ph = ImageTk.PhotoImage(im)
+                    self._problem_thumbs.append(ph)
+                    tk.Label(thumb_holder, image=ph, bg=COLORS["bg_surface"]).pack(expand=True)
+                except Exception:
+                    img_path = None
+            if not img_path:
+                tk.Label(thumb_holder, text="no\npreview", font=(FONT_FAMILY, 8),
+                         fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(expand=True)
+
+            info = tk.Frame(row, bg=COLORS["bg_surface"])
+            info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
+            name_row = tk.Frame(info, bg=COLORS["bg_surface"])
+            name_row.pack(fill=tk.X, anchor="w")
+            tk.Label(name_row, text=os.path.basename(key), font=(FONT_FAMILY, 10, "bold"),
+                     fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            tk.Label(name_row, text=f"  {verdict.upper()}", font=(FONT_FAMILY, 9, "bold"),
+                     fg=color, bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+
+            slope = float(s.get("slope", 0.0))
+            trend = "↓ improving" if slope < -1e-4 else ("↑ worsening" if slope > 1e-4 else "→ flat")
+            mult = s.get("multiplier", 1.0)
+            stats_txt = (f"difficulty {float(s.get('mean_residual', 0.0)):+.4f}   ·   trend {trend} "
+                         f"({slope:+.5f}/epoch)   ·   mean loss {float(s.get('mean_loss', 0.0)):.4f}   ·   "
+                         f"{int(s.get('epochs', 0))} epochs tracked"
+                         + (f"   ·   LR ×{mult:g}" if data.get("apply_lr") and mult != 1.0 else ""))
+            tk.Label(info, text=stats_txt, font=(FONT_FAMILY, 9),
+                     fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
+            tk.Label(info, text=blurb, font=(FONT_FAMILY, 8, "italic"),
+                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
 
     # ── Timestep section helpers ────────────────────────────────────────
 
@@ -14832,6 +15041,13 @@ class LoRATrainerGUI:
             cmd.append("--quantize_4bit")
         elif not self.settings.get("FP8", True):
             cmd.append("--no_fp8")
+
+        # Per-image loss watch: detection logs/reports stuck images (Problem Images window);
+        # per-image LR also throttles them (the trainer runs detection when either flag is on).
+        if self.krea2_loss_watch_var.get():
+            cmd.append("--log_per_image_loss")
+        if self.krea2_per_image_lr_var.get():
+            cmd.append("--per_image_lr")
 
         # In-training previews: render the fp8 Turbo with the live LoRA. Resolution +
         # frequency come from the Samples tab; previews land in <output_dir>/sample, which

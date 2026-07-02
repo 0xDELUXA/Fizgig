@@ -3806,9 +3806,20 @@ class LoRATrainerGUI:
 
         win = tk.Toplevel(self.master)
         win.title(f"Edit Caption — {os.path.basename(key)}")
-        win.geometry("560x480")
+        win.geometry("560x680")
+        win.minsize(520, 560)
         win.configure(bg=COLORS["bg_deep"])
         editors[key] = win
+
+        # Bottom bar FIRST with side=BOTTOM so the buttons can never be clipped off the window,
+        # whatever the thumbnail aspect/caption length pushes the middle content to.
+        btns = tk.Frame(win, bg=COLORS["bg_deep"])
+        btns.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(6, 12))
+        status = tk.Label(win, text="Tip: caption what the image actually shows — viewpoint "
+                                    "(“from behind”, “side profile”), pose, occlusions.",
+                          font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
+                          wraplength=520, justify=tk.LEFT)
+        status.pack(side=tk.BOTTOM, fill=tk.X, padx=14)
 
         img_path = self._find_dataset_image(key)
         if img_path:
@@ -3841,12 +3852,6 @@ class LoRATrainerGUI:
         txt.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
         txt.insert("1.0", caption)
 
-        status = tk.Label(win, text="Tip: caption what the image actually shows — viewpoint "
-                                    "(“from behind”, “side profile”), pose, occlusions.",
-                          font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
-                          wraplength=520, justify=tk.LEFT)
-        status.pack(fill=tk.X, padx=14)
-
         def _save():
             new_cap = txt.get("1.0", tk.END).strip()
             if not new_cap:
@@ -3871,8 +3876,6 @@ class LoRATrainerGUI:
                 status.config(fg="#E74C3C", text="Could not queue the update (no output directory?). "
                               + ("The .txt was updated for future runs." if wrote_txt else ""))
 
-        btns = tk.Frame(win, bg=COLORS["bg_deep"])
-        btns.pack(fill=tk.X, padx=14, pady=(6, 12))
         ttk.Button(btns, text="Save & Queue for Re-encode", command=_save).pack(side=tk.LEFT)
         ttk.Button(btns, text="Close", command=win.destroy).pack(side=tk.RIGHT)
 

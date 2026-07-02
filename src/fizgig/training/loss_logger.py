@@ -127,11 +127,12 @@ class PerImageLossWatch:
     """
 
     def __init__(self, output_dir: str, *, apply_lr: bool = False, write_jsonl: bool = False,
-                 warmup_epochs: int = 4, window: int = 5,
+                 warmup_epochs: int = 2, window: int = 5,
                  throttle_mult: float = 0.5, easy_mult: float = 0.9,
                  hi_q: float = 0.66, lo_q: float = 0.33,
-                 persist_on: int = 3, persist_off: int = 3,
-                 improve_frac: float = 0.12, improve_floor: float = 0.02):
+                 persist_on: int = 2, persist_off: int = 3,
+                 improve_frac: float = 0.12, improve_floor: float = 0.02,
+                 suspect_mult: float = 0.7, easy_from_epoch: int = 3):
         self.apply_lr = apply_lr
         self.warmup_epochs = warmup_epochs
         self.window = window
@@ -150,6 +151,14 @@ class PerImageLossWatch:
         self.improve_frac = improve_frac
         self.improve_floor = improve_floor
         self.trend_window = 8             # epochs; halves of 4 vs 4
+        # Early-suspicion tier: caption-contradiction images are separable by MAGNITUDE from the
+        # first epochs (extreme residual, not merely high), long before a trend exists. A robust
+        # outlier (median + 1.5*IQR) for 2 consecutive boundaries — or a wild one (3*IQR) once —
+        # gets a provisional, mild suspect_mult while the trend machinery gathers evidence.
+        # Rationale: modern runs form identity in epochs 1-6 (real likeness by epoch 3 on clean
+        # data), so waiting for trend confirmation acts after the damage window has closed.
+        self.suspect_mult = suspect_mult
+        self.easy_from_epoch = easy_from_epoch  # easy ease-off needs a slightly steadier baseline
         self.output_dir = output_dir
 
         self._records: list[tuple[str, int, int, float]] = []   # (key, epoch, bucket, loss)
@@ -164,6 +173,7 @@ class PerImageLossWatch:
         # consecutive stuck / clear votes, plus the confirmed set (drives warnings + throttling).
         self._stuck_votes: dict[str, int] = {}
         self._clear_votes: dict[str, int] = {}
+        self._suspect_votes: dict[str, int] = {}
         self._confirmed_stuck: set[str] = set()
         self._last_reported_stuck: set[str] = set()
 
@@ -268,10 +278,19 @@ class PerImageLossWatch:
             ordered = sorted(s["mean_residual"] for s in stats.values())
             hi = ordered[int(self.hi_q * (len(ordered) - 1))]
             lo = ordered[int(self.lo_q * (len(ordered) - 1))]
+            # Robust outlier thresholds for the early-suspicion tier (floored at hi so the tier
+            # never fires on merely-top-third images even when the IQR is degenerate/tiny).
+            n = len(ordered)
+            med = ordered[n // 2]
+            iqr = ordered[int(0.75 * (n - 1))] - ordered[int(0.25 * (n - 1))]
+            ext_hi = max(med + 1.5 * iqr, hi)
+            ext_vhi = max(med + 3.0 * iqr, hi)
+            n_ep = len(self._epochs_seen)
 
             # Per-epoch RAW votes -> persistence state machine. One noisy epoch can't flip a
             # verdict: stuck is CONFIRMED only after persist_on consecutive stuck votes, and
-            # RELEASED only after persist_off consecutive clear votes.
+            # RELEASED only after persist_off consecutive clear votes. The suspect tier acts
+            # earlier on MAGNITUDE alone (mild suspect_mult) while the trend evidence accrues.
             new_mult = {}
             for key, s in stats.items():
                 # Improving = recent half-mean below older half-mean by a real margin (fraction of
@@ -299,13 +318,24 @@ class PerImageLossWatch:
                         self._confirmed_stuck.add(key)
                         self._clear_votes[key] = 0
 
+                # Early-suspicion votes: extreme magnitude, not yet improving. (With <4 trend
+                # epochs `improving` is always False, which is exactly right here — magnitude is
+                # the only early signal, and release comes via the improve test once a trend forms.)
+                extreme = s["mean_residual"] >= ext_hi and not improving
+                self._suspect_votes[key] = self._suspect_votes.get(key, 0) + 1 if extreme else 0
+                suspect = (key not in self._confirmed_stuck
+                           and (self._suspect_votes[key] >= 2
+                                or (self._suspect_votes[key] >= 1 and s["mean_residual"] >= ext_vhi)))
+
                 if key in self._confirmed_stuck:
                     verdict, mult = "stuck", self.throttle_mult
+                elif suspect:
+                    verdict, mult = "suspect", self.suspect_mult   # provisional early throttle
                 elif votes_stuck:
                     verdict, mult = "watch", 1.0          # suspicious this epoch, not yet confirmed
                 elif s["mean_residual"] >= hi:
                     verdict, mult = "learning", 1.0
-                elif s["mean_residual"] <= lo:
+                elif s["mean_residual"] <= lo and n_ep >= self.easy_from_epoch:
                     verdict, mult = "easy", self.easy_mult
                 else:
                     verdict, mult = "mid", 1.0
@@ -351,7 +381,7 @@ class PerImageLossWatch:
         vote stuck again) and its multiplier returns to 1.0 immediately."""
         key = str(key)
         self._records = [r for r in self._records if r[0] != key]
-        for d in (self._stuck_votes, self._clear_votes, self._mult):
+        for d in (self._stuck_votes, self._clear_votes, self._suspect_votes, self._mult):
             d.pop(key, None)
         self._confirmed_stuck.discard(key)
         self._last_reported_stuck.discard(key)

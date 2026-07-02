@@ -3705,12 +3705,13 @@ class LoRATrainerGUI:
 
         style = {
             "stuck":    ("#E74C3C", "STUCK — persistently hard, not improving. Review this image/caption."),
+            "suspect":  ("#D35400", "Suspect — extremely hard from the start; provisionally slowed while the trend confirms. Worth a caption check now."),
             "watch":    ("#E67E22", "Watching — looked stuck this epoch; needs more epochs to confirm."),
             "learning": ("#5B9BD5", "Learning — hard but improving. Leave it alone."),
             "mid":      ("#95A5A6", "Normal."),
             "easy":     ("#70AD47", "Learned — consistently easy."),
         }
-        order = {"stuck": 0, "watch": 1, "learning": 2, "mid": 3, "easy": 4}
+        order = {"stuck": 0, "suspect": 1, "watch": 2, "learning": 3, "mid": 4, "easy": 5}
         items = sorted(images.items(),
                        key=lambda kv: (order.get(kv[1].get("verdict", "mid"), 2),
                                        -float(kv[1].get("mean_residual", 0.0))))

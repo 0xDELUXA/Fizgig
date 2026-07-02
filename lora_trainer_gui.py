@@ -607,9 +607,19 @@ def load_prefs() -> dict:
     return prefs
 
 
+def _persist_disabled() -> bool:
+    """True when FIZGIG_NO_PERSIST is set — headless test harnesses set it so instantiating the
+    GUI and poking vars can NEVER overwrite the user's real prefs.json / last_used.json /
+    settings / Fizgig_train.toml (traced vars auto-save on write, so a test setting
+    image_folder_var would otherwise clobber the remembered training folder)."""
+    return bool(os.environ.get("FIZGIG_NO_PERSIST"))
+
+
 def save_prefs(prefs: dict) -> None:
     """Save preferences to prefs.json. Portable-dir paths inside the repo are
     stored as relative strings so a cloned/moved repo finds its own defaults."""
+    if _persist_disabled():
+        return
     to_save = {}
     for key, value in prefs.items():
         if key in _PORTABLE_DIR_KEYS and isinstance(value, str):
@@ -1214,6 +1224,8 @@ class LoRATrainerGUI:
 
     def _save_last_used_paths(self, *args):
         """Save last-used folder paths and settings to config file"""
+        if _persist_disabled():
+            return
         data = {
             "prep_mode": self.prep_mode_var.get(),
             "image_folder": self.image_folder_var.get(),
@@ -14132,6 +14144,8 @@ class LoRATrainerGUI:
 
     def auto_save_dataset_config_silent(self):
         """Silently auto-save dataset config on startup if all required fields are valid"""
+        if _persist_disabled():
+            return
         try:
             dataset_name = self.dataset_name_var.get().strip()
             dataset_type = self.dataset_type_var.get()
@@ -15451,6 +15465,8 @@ class LoRATrainerGUI:
 
     def save_settings(self):
         """Save all settings, including conversion settings, to a JSON file"""
+        if _persist_disabled():
+            return
         current_settings = {}
         for key, entry in self.entries.items():
             if isinstance(entry, ttk.Combobox):

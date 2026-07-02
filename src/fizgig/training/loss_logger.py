@@ -135,7 +135,7 @@ class PerImageLossWatch:
                  suspect_mult: float = 0.7, easy_from_epoch: int = 3,
                  exhausted_mult: float = 0.6, exhaust_drop_frac: float = 0.3, exhaust_on: int = 2,
                  stuck_floor: float = 0.1, escalate_every: int = 2,
-                 dataset_dir: str = None, caption_ext: str = ".txt"):
+                 dataset_dir: str = None, caption_ext: str = ".txt", healthy_min: int = 3):
         self.apply_lr = apply_lr
         self.warmup_epochs = warmup_epochs
         self.window = window
@@ -202,6 +202,14 @@ class PerImageLossWatch:
         # error term). One-way, except reset_key (a manual caption edit re-admits the image).
         self._incorrigible: set[str] = set()
         self._excluded: set[str] = set()
+        # Health record: epochs a key spent comfortably OUT of the hard zone (or in a proven good
+        # run). An ever-healthy image (>= healthy_min epochs) has PROVEN learnability — its later
+        # souring is the mined-out/drift pattern, not caption poison — so at the exclusion
+        # decision it's RETIRED as permanent exhausted (x exhausted_mult) instead of excluded.
+        # Health survives reset_key on purpose: it's evidence about the image, not the caption.
+        self.healthy_min = healthy_min
+        self._healthy_epochs: dict[str, int] = {}
+        self._retired: set[str] = set()
 
         # Persistent exclusions: fizgig_excluded.json lives IN the dataset folder (exclusions are
         # dataset knowledge — they travel with the images, across runs). Each entry snapshots the
@@ -412,6 +420,13 @@ class PerImageLossWatch:
                     s["multiplier"] = 0.0
                     new_mult[key] = 0.0
                     continue
+                # Retired (ever-healthy image that would otherwise have been excluded): permanent
+                # exhausted — still trains, gently. Only a manual caption edit un-retires it.
+                if key in self._retired:
+                    s["verdict"] = "exhausted"
+                    s["multiplier"] = self.exhausted_mult if self.apply_lr else 1.0
+                    new_mult[key] = self.exhausted_mult
+                    continue
                 # Improving = recent half-mean below older half-mean by a real margin (fraction of
                 # the excess AND ~1 SE). Too little history -> not improving is unknowable; the
                 # persistence gate + warmup keep that from mattering.
@@ -426,6 +441,10 @@ class PerImageLossWatch:
                 good_run = (s["trend_epochs"] >= 4 and s["baseline"] > 0.0
                             and s["total_drop"] >= max(self.exhaust_drop_frac * s["baseline"],
                                                        2.0 * self.improve_floor))
+                # Health record: comfortably out of the hard zone, or a proven good run — either
+                # is evidence the image IS learnable (protects it from exclusion later).
+                if s["mean_residual"] < hi or good_run:
+                    self._healthy_epochs[key] = self._healthy_epochs.get(key, 0) + 1
                 # An image whose recent residual is <= 0 is no harder than average at the same
                 # noise level — by definition not an outlier, whatever its trend. And with under
                 # 4 epochs of history (fresh run, or history reset after a caption fix) there is
@@ -469,18 +488,29 @@ class PerImageLossWatch:
                 s["release_votes"] = self._clear_votes.get(key, 0) if key in self._confirmed_stuck else 0
 
                 if key in self._confirmed_stuck and key in self._incorrigible:
-                    # Benefit of the doubt spent (two failed AI recaptions) AND stuck again:
-                    # excluded from training for the rest of the run. The trainer skips its steps
-                    # — no gradient, no loss recorded — so avr_loss stops carrying its permanent
-                    # error term. Only a manual caption edit (reset_key) re-admits it.
-                    self._excluded.add(key)
                     self._confirmed_stuck.discard(key)
                     self._last_reported_stuck.discard(key)
-                    self._record_exclusion(key, epoch)   # persists to <dataset>/fizgig_excluded.json
-                    logger.warning(f"[loss-watch] epoch {epoch}: {os.path.basename(key)} EXCLUDED "
-                                   f"from training — two AI captions couldn't fix it. Edit its "
-                                   f"caption to re-admit it, or remove it from the dataset.")
-                    verdict, mult = "excluded", 0.0
+                    if self._healthy_epochs.get(key, 0) >= self.healthy_min:
+                        # Ever-healthy images have PROVEN learnability — a later souring is the
+                        # mined-out/drift pattern, not caption poison. Retire as permanent
+                        # exhausted instead of excluding; it keeps training, gently.
+                        self._retired.add(key)
+                        logger.warning(f"[loss-watch] epoch {epoch}: {os.path.basename(key)} was "
+                                       f"healthy for {self._healthy_epochs[key]} epoch(s) earlier — "
+                                       f"retiring as exhausted (x{self.exhausted_mult}) instead of "
+                                       f"excluding.")
+                        verdict, mult = "exhausted", self.exhausted_mult
+                    else:
+                        # Benefit of the doubt spent (two failed AI recaptions), stuck again, and
+                        # NEVER healthy: excluded for the rest of the run. The trainer skips its
+                        # steps — no gradient, no loss recorded — so avr_loss stops carrying its
+                        # permanent error term. Only a manual caption edit (reset_key) re-admits it.
+                        self._excluded.add(key)
+                        self._record_exclusion(key, epoch)   # persists to <dataset>/fizgig_excluded.json
+                        logger.warning(f"[loss-watch] epoch {epoch}: {os.path.basename(key)} EXCLUDED "
+                                       f"from training — two AI captions couldn't fix it. Edit its "
+                                       f"caption to re-admit it, or remove it from the dataset.")
+                        verdict, mult = "excluded", 0.0
                 elif key in self._confirmed_stuck:
                     # Escalate with tenure: x0.5 -> x0.25 -> x0.125 -> floor. Staying confirmed is
                     # accumulating evidence; the leak shrinks as certainty grows.
@@ -566,9 +596,12 @@ class PerImageLossWatch:
         self._last_reported_stuck.discard(key)
         self._incorrigible.discard(key)
         self._excluded.discard(key)   # a manual caption edit re-admits an excluded image
+        self._retired.discard(key)    # ...and un-retires a retired one
         if key in self._excl_data:    # ...including from the persistent dataset-folder record
             del self._excl_data[key]
             self._write_persistent_exclusions()
+        # NOTE: _healthy_epochs deliberately survives — it's evidence about the IMAGE's
+        # learnability, independent of which caption it carried.
         self.verdicts.pop(key, None)
 
     def close(self) -> None:

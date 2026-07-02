@@ -133,7 +133,8 @@ class PerImageLossWatch:
                  persist_on: int = 2, persist_off: int = 3,
                  improve_frac: float = 0.12, improve_floor: float = 0.02,
                  suspect_mult: float = 0.7, easy_from_epoch: int = 3,
-                 exhausted_mult: float = 0.6, exhaust_drop_frac: float = 0.3, exhaust_on: int = 2):
+                 exhausted_mult: float = 0.6, exhaust_drop_frac: float = 0.3, exhaust_on: int = 2,
+                 stuck_floor: float = 0.1, escalate_every: int = 2):
         self.apply_lr = apply_lr
         self.warmup_epochs = warmup_epochs
         self.window = window
@@ -168,6 +169,13 @@ class PerImageLossWatch:
         self.exhausted_mult = exhausted_mult
         self.exhaust_drop_frac = exhaust_drop_frac
         self.exhaust_on = exhaust_on
+        # Escalating stuck throttle: staying confirmed IS accumulating evidence, so the penalty
+        # deepens — throttle_mult on confirmation, halved every escalate_every further confirmed
+        # epochs, floored at stuck_floor. A flat x0.5 forever still leaks half-strength poison all
+        # run; near-zero from day one would deny a false conviction the gradient it needs to prove
+        # itself and win release. Caption fixes reset history -> straight back to x1.0.
+        self.stuck_floor = stuck_floor
+        self.escalate_every = escalate_every
         self.output_dir = output_dir
 
         self._records: list[tuple[str, int, int, float]] = []   # (key, epoch, bucket, loss)
@@ -184,6 +192,7 @@ class PerImageLossWatch:
         self._clear_votes: dict[str, int] = {}
         self._suspect_votes: dict[str, int] = {}
         self._exhaust_votes: dict[str, int] = {}
+        self._stuck_epochs: dict[str, int] = {}   # consecutive epochs confirmed (drives escalation)
         self._confirmed_stuck: set[str] = set()
         self._last_reported_stuck: set[str] = set()
 
@@ -330,16 +339,21 @@ class PerImageLossWatch:
                 votes_stuck = (s["trend_epochs"] >= 4 and s["mean_residual"] >= hi
                                and s["last"] > 0.0 and not improving and not good_run)
                 if key in self._confirmed_stuck:
+                    self._stuck_epochs[key] = self._stuck_epochs.get(key, 0) + 1
                     self._clear_votes[key] = 0 if votes_stuck else self._clear_votes.get(key, 0) + 1
                     if self._clear_votes[key] >= self.persist_off:
                         self._confirmed_stuck.discard(key)
                         self._clear_votes[key] = 0
                         self._stuck_votes[key] = 0
+                        # Tenure survives release ON PURPOSE: a noisy 1-2 epoch release must not
+                        # reset the escalation ladder — re-confirmation resumes at depth. A real
+                        # rehabilitation never re-confirms, and a caption fix wipes it (reset_key).
                 else:
                     self._stuck_votes[key] = self._stuck_votes.get(key, 0) + 1 if votes_stuck else 0
                     if self._stuck_votes[key] >= self.persist_on:
                         self._confirmed_stuck.add(key)
                         self._clear_votes[key] = 0
+                        self._stuck_epochs[key] = self._stuck_epochs.get(key, 0) + 1
 
                 # Early-suspicion votes: extreme magnitude, not yet improving. (With <4 trend
                 # epochs `improving` is always False, which is exactly right here — magnitude is
@@ -361,7 +375,13 @@ class PerImageLossWatch:
                 s["release_votes"] = self._clear_votes.get(key, 0) if key in self._confirmed_stuck else 0
 
                 if key in self._confirmed_stuck:
-                    verdict, mult = "stuck", self.throttle_mult
+                    # Escalate with tenure: x0.5 -> x0.25 -> x0.125 -> floor. Staying confirmed is
+                    # accumulating evidence; the leak shrinks as certainty grows.
+                    tenure = self._stuck_epochs.get(key, 1)
+                    mult = max(self.stuck_floor,
+                               self.throttle_mult * (0.5 ** ((tenure - 1) // self.escalate_every)))
+                    verdict = "stuck"
+                    s["stuck_epochs"] = tenure
                 elif suspect:
                     verdict, mult = "suspect", self.suspect_mult   # provisional early throttle
                 elif exhausted:
@@ -417,7 +437,7 @@ class PerImageLossWatch:
         key = str(key)
         self._records = [r for r in self._records if r[0] != key]
         for d in (self._stuck_votes, self._clear_votes, self._suspect_votes,
-                  self._exhaust_votes, self._mult):
+                  self._exhaust_votes, self._stuck_epochs, self._mult):
             d.pop(key, None)
         self._confirmed_stuck.discard(key)
         self._last_reported_stuck.discard(key)

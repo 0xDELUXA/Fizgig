@@ -3676,7 +3676,7 @@ class LoRATrainerGUI:
 
         images = data["images"]
         stuck_n = sum(1 for s in images.values() if s.get("verdict") == "stuck")
-        mode = ("per-image LR active (stuck ×0.5, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
+        mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
                 if data.get("apply_lr") else "detection only")
         self._problem_status.config(
             text=f"Epoch {data.get('epoch', '?')}  ·  {len(images)} images tracked  ·  "
@@ -3771,6 +3771,8 @@ class LoRATrainerGUI:
             rv = int(s.get("release_votes", 0))
             if verdict == "stuck" and s.get("improving"):
                 trend += f" — releasing ({rv}/3 clean epochs)"
+            elif verdict == "stuck" and s.get("stuck_epochs"):
+                trend += f" — stuck {int(s['stuck_epochs'])} epochs"
             mult = s.get("multiplier", 1.0)
             stats_txt = (f"difficulty {float(s.get('mean_residual', 0.0)):+.4f}   ·   trend {trend}   ·   "
                          f"mean loss {float(s.get('mean_loss', 0.0)):.4f}   ·   "

@@ -3770,8 +3770,14 @@ class LoRATrainerGUI:
                          fg="#F1C40F", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
             elif key in applied_info:
                 _ai = applied_info[key].get("auto")
-                _txt = (f"  🤖 AI re-captioned @ epoch {applied_info[key].get('epoch', '?')}" if _ai
-                        else f"  ✓ caption re-encoded @ epoch {applied_info[key].get('epoch', '?')}")
+                _att = int(applied_info[key].get("attempt", 1) or 1)
+                _ep = applied_info[key].get("epoch", "?")
+                if _ai and _att >= 2:
+                    _txt = f"  🤖 AI re-captioned ×2 (detailed) @ epoch {_ep} — last chance"
+                elif _ai:
+                    _txt = f"  🤖 AI re-captioned @ epoch {_ep}"
+                else:
+                    _txt = f"  ✓ caption re-encoded @ epoch {_ep}"
                 tk.Label(name_row, text=_txt, font=(FONT_FAMILY, 9),
                          fg="#2ECC71", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
             ttk.Button(name_row, text="✏ Edit Caption", width=14,

@@ -195,6 +195,10 @@ class PerImageLossWatch:
         self._stuck_epochs: dict[str, int] = {}   # consecutive epochs confirmed (drives escalation)
         self._confirmed_stuck: set[str] = set()
         self._last_reported_stuck: set[str] = set()
+        # Keys whose benefit of the doubt is spent (e.g. two failed AI recaptions): re-confirming
+        # stuck skips the escalation ladder and goes straight to the stuck_floor. Cleared by
+        # reset_key, so a manual caption edit restores the normal ladder.
+        self._incorrigible: set[str] = set()
 
         # The JSONL logger stays the offline source of truth; force it on when the detection
         # toggle asks for it (env var still works on its own).
@@ -376,10 +380,14 @@ class PerImageLossWatch:
 
                 if key in self._confirmed_stuck:
                     # Escalate with tenure: x0.5 -> x0.25 -> x0.125 -> floor. Staying confirmed is
-                    # accumulating evidence; the leak shrinks as certainty grows.
+                    # accumulating evidence; the leak shrinks as certainty grows. Incorrigible keys
+                    # (benefit of the doubt spent — e.g. two failed AI recaptions) skip the ladder.
                     tenure = self._stuck_epochs.get(key, 1)
-                    mult = max(self.stuck_floor,
-                               self.throttle_mult * (0.5 ** ((tenure - 1) // self.escalate_every)))
+                    if key in self._incorrigible:
+                        mult = self.stuck_floor
+                    else:
+                        mult = max(self.stuck_floor,
+                                   self.throttle_mult * (0.5 ** ((tenure - 1) // self.escalate_every)))
                     verdict = "stuck"
                     s["stuck_epochs"] = tenure
                 elif suspect:
@@ -430,6 +438,12 @@ class PerImageLossWatch:
             logger.warning(f"[loss-watch] epoch_boundary failed ({e})")
             return {}
 
+    def mark_incorrigible(self, key: str) -> None:
+        """Spend a key's benefit of the doubt: if it re-confirms stuck, it goes straight to the
+        stuck_floor (no escalation ladder). Called after the 2nd failed AI recaption; a manual
+        caption edit (reset_key) clears it."""
+        self._incorrigible.add(str(key))
+
     def reset_key(self, key: str) -> None:
         """Forget one image's history — used after a live caption fix, since its stuck record
         reflects the OLD caption. It re-enters fresh (needs 4 epochs of new trend before it can
@@ -441,6 +455,7 @@ class PerImageLossWatch:
             d.pop(key, None)
         self._confirmed_stuck.discard(key)
         self._last_reported_stuck.discard(key)
+        self._incorrigible.discard(key)
         self.verdicts.pop(key, None)
 
     def close(self) -> None:

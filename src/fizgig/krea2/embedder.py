@@ -177,9 +177,22 @@ CAPTION_INSTRUCTION = (
     "speculation, no names, no style commentary."
 )
 
+# Second-attempt instruction: if the standard caption didn't unstick the image, the miss is
+# probably something salient the short caption skipped — go exhaustive so every visible element
+# that could contradict the conditioning gets named.
+DETAILED_CAPTION_INSTRUCTION = (
+    "Write a detailed factual training caption for this image, 2-4 sentences. Cover: the subject "
+    "and exactly how much of them is visible (state the camera viewpoint and explicitly whether "
+    "the face is visible or hidden), their pose and body position, every visible clothing item "
+    "with colors, hair style and color, any objects they hold or touch, anything partially "
+    "blocking or cropping the subject, the lighting, and the background/setting with its main "
+    "objects. State only what is visible — no speculation, no names, no style commentary."
+)
+
 
 def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
-                     max_new_tokens: int = 120, megapixels: float = 1.0) -> str:
+                     max_new_tokens: int = 120, megapixels: float = 1.0,
+                     detailed: bool = False) -> str:
     """Caption an image with the SAME Qwen3-VL the trainer conditions on (its LM head is
     legitimately tied to the embeddings — unlike Klein's stripped Qwen3-8B — so generation is
     real). Used by auto-recaption to rewrite a stuck image's caption from what's actually in it,
@@ -188,8 +201,11 @@ def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
 
     proc = conditioner._get_image_processor()
     im = conditioner._cap_image(Image.open(image_path), megapixels)
+    instruction = DETAILED_CAPTION_INSTRUCTION if detailed else CAPTION_INSTRUCTION
+    if detailed:
+        max_new_tokens = max(max_new_tokens, 240)
     messages = [{"role": "user", "content": [{"type": "image"},
-                                             {"type": "text", "text": CAPTION_INSTRUCTION}]}]
+                                             {"type": "text", "text": instruction}]}]
     prompt = proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     inputs = proc(text=[prompt], images=[im], return_tensors="pt").to(conditioner.qwen.device)
     with torch.no_grad():

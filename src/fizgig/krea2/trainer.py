@@ -495,8 +495,11 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
 
     auto_recaption: additionally re-caption CONFIRMED-STUCK images with the same Qwen3-VL (it's a
     full VLM with a real LM head — the captioner ships inside the training stack), appending
-    ", <trigger_word>" when one is set. Once per image per run (`recaptioned` set); a manual edit
-    already queued for a key always wins over the auto path. Both jobs share one DiT park + one
+    ", <trigger_word>" when one is set. Max TWO attempts per image per run (`recaptioned` is a
+    {key: attempts} dict): attempt 1 = standard caption; if the image re-confirms stuck after its
+    history reset (~5-6 epochs later, i.e. the first caption demonstrably failed), attempt 2 =
+    exhaustive-detail caption; after that it's permanently human-review. A manual edit already
+    queued for a key always wins over the auto path. Both jobs share one DiT park + one
     text-encoder load.
 
     The GUI separately rewrites the .txt for manual edits; the auto path writes the .txt itself
@@ -521,12 +524,13 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
     if auto_recaption and loss_watch is not None and image_dir and os.path.isdir(image_dir):
         confirmed = {k for k, v in loss_watch.verdicts.items() if v == "stuck"}
         for k in sorted(confirmed):
-            if k in updates or (recaptioned is not None and k in recaptioned):
+            attempts = recaptioned.get(k, 0) if recaptioned is not None else 0
+            if k in updates or attempts >= 2:
                 continue
             for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
                 p = os.path.join(image_dir, os.path.basename(k) + ext)
                 if os.path.exists(p):
-                    auto_todo.append((k, p))
+                    auto_todo.append((k, p, attempts + 1))
                     break
 
     if not updates and not auto_todo:
@@ -555,11 +559,12 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
         for bucket in bm.buckets.values():
             for it in bucket:
                 items[str(it.item_key)] = it
-    todo = [(k, items[k], cap, False) for k, cap in updates.items() if k in items]
+    # todo entries: (key, ItemInfo, caption, attempt) — attempt 0 = manual edit, 1/2 = auto.
+    todo = [(k, items[k], cap, 0) for k, cap in updates.items() if k in items]
     for k in updates:
         if k not in items:
             logger.warning(f"[caption-fix] '{k}' not found in the training set — skipped")
-    auto_todo = [(k, p) for k, p in auto_todo if k in items]
+    auto_todo = [(k, p, a) for k, p, a in auto_todo if k in items]
     if not todo and not auto_todo:
         if os.path.exists(processing):
             os.remove(processing)
@@ -582,10 +587,11 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
 
         # Auto-recaption: the SAME loaded VLM describes what's actually in the stuck image;
         # trigger word (if any) is appended at the END — per the conditional-trigger doctrine,
-        # a trailing token is a far weaker identity claim than a leading one.
-        for k, img_path in auto_todo:
+        # a trailing token is a far weaker identity claim than a leading one. Attempt 2 (the
+        # first caption demonstrably failed) goes exhaustive-detail.
+        for k, img_path, attempt in auto_todo:
             try:
-                cap = generate_caption(encoder, img_path)
+                cap = generate_caption(encoder, img_path, detailed=(attempt >= 2))
                 if trigger_word:
                     cap = f"{cap}, {trigger_word}"
                 cap_path = os.path.join(image_dir, os.path.basename(k) + caption_ext)
@@ -595,8 +601,9 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
                 except Exception:
                     logger.warning(f"[auto-recaption] could not write {cap_path} — the live run is "
                                    f"fixed but a future re-cache will use the old caption")
-                todo.append((k, items[k], cap, True))
-                logger.info(f"[auto-recaption] {os.path.basename(k)}: \"{cap[:110]}"
+                todo.append((k, items[k], cap, attempt))
+                logger.info(f"[auto-recaption] {os.path.basename(k)} (attempt {attempt}/2"
+                            f"{', detailed' if attempt >= 2 else ''}): \"{cap[:110]}"
                             f"{'…' if len(cap) > 110 else ''}\"")
             except Exception:
                 logger.warning(f"[auto-recaption] captioning failed for {os.path.basename(k)} — "
@@ -616,12 +623,18 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
         # Mark auto-recaptioned keys only AFTER a successful encode — a failed boundary must be
         # allowed to retry them (their captions are re-queued in the failure path below).
         if recaptioned is not None:
-            for k, _, _, is_auto in todo:
-                if is_auto:
-                    recaptioned.add(k)
+            for k, _, _, attempt in todo:
+                if attempt > 0:
+                    recaptioned[k] = max(recaptioned.get(k, 0), attempt)
         if loss_watch is not None:
             for k, _, _, _ in todo:
                 loss_watch.reset_key(k)
+            # After the 2nd (detailed) AI caption, the benefit of the doubt is spent: if the
+            # image re-confirms stuck, it goes STRAIGHT to the LR floor — no escalation ladder.
+            # reset_key cleared any prior mark, so a manual human edit (attempt 0) restores hope.
+            for k, _, _, attempt in todo:
+                if attempt >= 2:
+                    loss_watch.mark_incorrigible(k)
         # Ack for the GUI (row badge "caption re-encoded @ epoch N" / "AI re-captioned").
         applied_path = os.path.join(output_dir, "loss_log", "caption_updates_applied.json")
         applied = {}
@@ -631,8 +644,8 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
                     applied = json.load(f)
         except Exception:
             applied = {}
-        for k, _, cap, is_auto in todo:
-            applied[k] = {"epoch": epoch, "caption": cap, "auto": is_auto}
+        for k, _, cap, attempt in todo:
+            applied[k] = {"epoch": epoch, "caption": cap, "auto": attempt > 0, "attempt": attempt}
         with open(applied_path, "w", encoding="utf-8") as f:
             json.dump(applied, f, indent=2)
         if os.path.exists(processing):
@@ -650,7 +663,7 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
             if os.path.exists(path):
                 with open(path, encoding="utf-8") as f:
                     newer = json.load(f)
-            auto_caps = {k: cap for k, _, cap, is_auto in todo if is_auto}
+            auto_caps = {k: cap for k, _, cap, attempt in todo if attempt > 0}
             merged = {**updates, **auto_caps, **newer}  # newer GUI edits win
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(merged, f, indent=2)
@@ -902,7 +915,7 @@ def train_krea2(
         logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
     # Auto-recaption needs the source images + caption extension — pull them from the dataset
     # TOML (recursive: the keys live under [general] / [[datasets]] depending on the config).
-    recaptioned = set()
+    recaptioned = {}   # key -> AI recaption attempts used (max 2; 2nd is the detailed pass)
     ar_image_dir, ar_caption_ext = None, ".txt"
     if auto_recaption:
         def _find_toml_key(d, key):

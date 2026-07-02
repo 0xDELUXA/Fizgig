@@ -200,8 +200,10 @@ def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
 
     Decoding is SAMPLED with a random seed (seed=None) so repeated attempts on the same image get
     fresh phrasings instead of the identical greedy caption — attempt 2 varies by wording as well
-    as by instruction. Sampling uses the global torch RNG, so the state is saved and restored
-    around the call: caption generation must never perturb the training noise stream."""
+    as by instruction. (A seed does NOTHING under greedy decode — sampling is what makes it
+    matter; temperature is kept LOW at 0.5 so the variation stays in phrasing, not in factual
+    confidence.) Sampling uses the global torch RNG, so the state is saved and restored around
+    the call: caption generation must never perturb the training noise stream."""
     import random as _random
     from PIL import Image
 
@@ -221,7 +223,7 @@ def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
         torch.manual_seed(seed if seed is not None else _random.randint(1, 2**31 - 1))
         with torch.no_grad():
             out = conditioner.qwen.generate(**inputs, max_new_tokens=max_new_tokens,
-                                            do_sample=True, temperature=0.7, top_p=0.9)
+                                            do_sample=True, temperature=0.5, top_p=0.9)
     finally:
         torch.random.set_rng_state(cpu_state)
         if cuda_states is not None:

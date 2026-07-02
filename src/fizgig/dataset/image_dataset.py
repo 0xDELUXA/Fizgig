@@ -435,6 +435,10 @@ class BucketBatchManager:
         else:
             stacked["timesteps"] = None
 
+        # Per-image identity for the (passive) per-image loss logger. Harmless list of strings that
+        # trainers ignore unless logging is enabled.
+        stacked["item_keys"] = [item_info.item_key for item_info in bucket[start:end]]
+
         return stacked
 
 

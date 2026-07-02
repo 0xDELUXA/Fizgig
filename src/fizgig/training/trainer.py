@@ -2364,6 +2364,16 @@ class KleinTrainer:
         # the first stability-triggered rollback (training is now in a delicate regime).
         if args.adaptive_lr:
             _initial_lr = optimizer.param_groups[0]["lr"]
+            # The Min LR floor is authoritative over the LR box: starting below the declared
+            # floor is contradictory, so the start is clamped UP to the floor.
+            if _initial_lr < args.adaptive_lr_min:
+                accelerator.print(
+                    f"[adaptive_lr] starting LR {_initial_lr:.3e} is below the Min LR floor — "
+                    f"raising start to {args.adaptive_lr_min:.3e} (the floor overrides the LR box)"
+                )
+                for _g in optimizer.param_groups:
+                    _g["lr"] = args.adaptive_lr_min
+                _initial_lr = args.adaptive_lr_min
             accelerator.print(
                 f"[adaptive_lr] ENABLED — starting_lr={_initial_lr:.3e} "
                 f"min_lr={args.adaptive_lr_min:.3e} max_lr={args.adaptive_lr_max:.3e} "

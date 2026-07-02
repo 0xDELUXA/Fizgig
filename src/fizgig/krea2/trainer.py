@@ -799,6 +799,26 @@ def train_krea2(
     #   per_image_lr (GUI toggle)       -> detection + per-image loss multiplier (throttle stuck,
     #                                      ease off learned; safe per-image LR at batch size 1)
     from fizgig.training.loss_logger import PerImageLossWatch, is_enabled as _loss_log_env
+    # Fresh (non-resume) run: clear the previous run's loss-log artifacts so the GUI's Problem
+    # Images window never shows stale verdicts (problem_images.json only gets rewritten after the
+    # new run's warmup — or never, if the toggles are off this run). The pending caption queue is
+    # stale too (the .txt fixes are already applied by the startup text re-cache). The research
+    # JSONL is rotated, not deleted — appending would mix runs and corrupt offline analysis.
+    if not (resume_state_dir and os.path.isdir(resume_state_dir)):
+        _ll = os.path.join(output_dir, "loss_log")
+        for _f in ("problem_images.json", "caption_updates_applied.json", "caption_updates.json",
+                   "caption_updates.json.processing"):
+            try:
+                os.remove(os.path.join(_ll, _f))
+            except OSError:
+                pass
+        _jsonl = os.path.join(_ll, "per_image_loss.jsonl")
+        if os.path.exists(_jsonl):
+            import time as _time
+            try:
+                os.replace(_jsonl, _jsonl + "." + _time.strftime("%Y%m%d%H%M%S") + ".bak")
+            except OSError:
+                pass
     loss_watch = None
     if log_per_image_loss or per_image_lr or _loss_log_env():
         loss_watch = PerImageLossWatch(output_dir, apply_lr=per_image_lr,

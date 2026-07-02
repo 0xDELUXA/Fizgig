@@ -3660,7 +3660,9 @@ class LoRATrainerGUI:
                     data = json.load(f)
             except Exception:
                 data = None
-        elif not force and self._problem_mtime is None:
+        elif self._problem_mtime is not None:
+            self._problem_mtime = None  # file removed (fresh run wiped it) — fall through to clear the rows
+        elif not force:
             return  # still no file; nothing to redraw
 
         for w in self._problem_rows.winfo_children():

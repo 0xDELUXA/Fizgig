@@ -857,6 +857,7 @@ class LoRATrainerGUI:
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
             "KREA2_LOSS_WATCH": False,   # per-image loss tracking + stuck-image detection (krea2)
             "KREA2_PER_IMAGE_LR": False,  # per-image adaptive LR (throttle stuck images) — experimental
+            "KREA2_AUTO_RECAPTION": False,  # Qwen3-VL rewrites stuck images' captions mid-run — experimental
             # Sample generation settings
             "SAMPLE_ENABLED": True,
             "SAMPLE_PROMPT": "A high quality photo",
@@ -2558,14 +2559,24 @@ class LoRATrainerGUI:
             variable=self.krea2_per_image_lr_var,
         )
         self._krea2_perimglr_cb.grid(row=21, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(2, 0))
+        self.krea2_auto_recaption_var = tk.BooleanVar(value=bool(self.settings.get("KREA2_AUTO_RECAPTION", False)))
+        self._krea2_autorecap_cb = ttk.Checkbutton(
+            training_content,
+            text="Auto-recaption stuck images (Qwen3-VL rewrites the caption between epochs) — experimental",
+            variable=self.krea2_auto_recaption_var,
+        )
+        self._krea2_autorecap_cb.grid(row=22, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(2, 0))
         self._krea2_losswatch_hint = ttk.Label(training_content,
                   text="Tracks each image's loss (normalized for the random noise level) across epochs. Detection "
                        "flags images that stay hard without improving — usually mislabeled/off-concept data — in the "
                        "console, the Problem Images window, and loss_log/problem_images.json. Per-image LR also "
-                       "throttles them (suspects ×0.7 from ~epoch 3, confirmed stuck ×0.5 from ~epoch 5), eases off "
-                       "mined-out images (improved then plateaued, ×0.6) and learned ones (×0.9). Batch size 1.",
+                       "throttles them (suspects ×0.7 from ~epoch 3, confirmed stuck ×0.5 from ~epoch 5 escalating "
+                       "to ×0.1), eases off mined-out images (×0.6) and learned ones (×0.9). Auto-recaption goes "
+                       "further: when an image is confirmed stuck, the Qwen3-VL text encoder looks at it and rewrites "
+                       "its caption from what's actually visible (appending your Captions-tab trigger word, if set), "
+                       "re-encodes it, and gives the image a fresh start. Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._krea2_losswatch_hint.grid(row=22, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        self._krea2_losswatch_hint.grid(row=23, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -3107,6 +3118,8 @@ class LoRATrainerGUI:
             self.krea2_loss_watch_var.set(bool(preset["KREA2_LOSS_WATCH"]))
         if "KREA2_PER_IMAGE_LR" in preset and hasattr(self, 'krea2_per_image_lr_var'):
             self.krea2_per_image_lr_var.set(bool(preset["KREA2_PER_IMAGE_LR"]))
+        if "KREA2_AUTO_RECAPTION" in preset and hasattr(self, 'krea2_auto_recaption_var'):
+            self.krea2_auto_recaption_var.set(bool(preset["KREA2_AUTO_RECAPTION"]))
 
         # Adaptive LR checkbox + sync enabled state of Min/Max LR dropdowns
         if "ADAPTIVE_LR" in preset and hasattr(self, 'adaptive_lr_var'):
@@ -3227,6 +3240,7 @@ class LoRATrainerGUI:
         _grab("quant_4bit_var", "QUANT_4BIT")
         _grab("krea2_loss_watch_var", "KREA2_LOSS_WATCH")
         _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
+        _grab("krea2_auto_recaption_var", "KREA2_AUTO_RECAPTION")
         _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
@@ -3555,7 +3569,8 @@ class LoRATrainerGUI:
 
         # Krea 2-ONLY controls (inverse of the above): the per-image loss watch toggles are only
         # wired into krea2_train for now — hide them under Klein.
-        for w in (self._krea2_losswatch_frame, self._krea2_perimglr_cb, self._krea2_losswatch_hint):
+        for w in (self._krea2_losswatch_frame, self._krea2_perimglr_cb,
+                  self._krea2_autorecap_cb, self._krea2_losswatch_hint):
             self._set_widget_visible(w, is_krea2)
 
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
@@ -3754,8 +3769,11 @@ class LoRATrainerGUI:
                 tk.Label(name_row, text="  ✏ fix queued", font=(FONT_FAMILY, 9),
                          fg="#F1C40F", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
             elif key in applied_info:
-                tk.Label(name_row, text=f"  ✓ caption re-encoded @ epoch {applied_info[key].get('epoch', '?')}",
-                         font=(FONT_FAMILY, 9), fg="#2ECC71", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+                _ai = applied_info[key].get("auto")
+                _txt = (f"  🤖 AI re-captioned @ epoch {applied_info[key].get('epoch', '?')}" if _ai
+                        else f"  ✓ caption re-encoded @ epoch {applied_info[key].get('epoch', '?')}")
+                tk.Label(name_row, text=_txt, font=(FONT_FAMILY, 9),
+                         fg="#2ECC71", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
             ttk.Button(name_row, text="✏ Edit Caption", width=14,
                        command=lambda k=key: self._open_caption_editor(k)).pack(side=tk.RIGHT, padx=(8, 0))
 
@@ -15232,6 +15250,13 @@ class LoRATrainerGUI:
             cmd.append("--log_per_image_loss")
         if self.krea2_per_image_lr_var.get():
             cmd.append("--per_image_lr")
+        if self.krea2_auto_recaption_var.get():
+            cmd.append("--auto_recaption")
+            # Trigger word from the Captions tab — appended (', <trigger>') to AI captions if set.
+            trig = (self.caption_text_var.get().strip()
+                    if hasattr(self, "caption_text_var") else "")
+            if trig:
+                cmd += ["--trigger_word", trig]
 
         # In-training previews: render the fp8 Turbo with the live LoRA. Resolution +
         # frequency come from the Samples tab; previews land in <output_dir>/sample, which

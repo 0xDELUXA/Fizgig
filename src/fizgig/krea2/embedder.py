@@ -170,6 +170,34 @@ def load_qwen3_vl_conditioner(
     return conditioner.eval().requires_grad_(False)
 
 
+CAPTION_INSTRUCTION = (
+    "Write one factual training caption for this image as a single sentence. Describe the subject, "
+    "their pose and clothing, the camera viewpoint (e.g. 'viewed from behind', 'side profile', "
+    "'close-up'), whether the face is visible, and the setting. State only what is visible — no "
+    "speculation, no names, no style commentary."
+)
+
+
+def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
+                     max_new_tokens: int = 120, megapixels: float = 1.0) -> str:
+    """Caption an image with the SAME Qwen3-VL the trainer conditions on (its LM head is
+    legitimately tied to the embeddings — unlike Klein's stripped Qwen3-8B — so generation is
+    real). Used by auto-recaption to rewrite a stuck image's caption from what's actually in it,
+    with an instruction tuned to Peter's captioning doctrine: name the viewpoint / visibility."""
+    from PIL import Image
+
+    proc = conditioner._get_image_processor()
+    im = conditioner._cap_image(Image.open(image_path), megapixels)
+    messages = [{"role": "user", "content": [{"type": "image"},
+                                             {"type": "text", "text": CAPTION_INSTRUCTION}]}]
+    prompt = proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    inputs = proc(text=[prompt], images=[im], return_tensors="pt").to(conditioner.qwen.device)
+    with torch.no_grad():
+        out = conditioner.qwen.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+    text = proc.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
+    return " ".join(text.split()).strip()
+
+
 class Qwen3VLConditioner(torch.nn.Module):
     def __init__(
         self,

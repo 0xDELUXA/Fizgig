@@ -484,33 +484,65 @@ def _read_sample_override(output_dir):
     return None
 
 
-def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_swap, loss_watch, epoch):
+def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_swap, loss_watch, epoch,
+                           *, auto_recaption=False, trigger_word=None, recaptioned=None,
+                           image_dir=None, caption_ext=".txt"):
     """Live caption repair (Problem Images window). Consume <output_dir>/loss_log/caption_updates.json
     ({item_key: new_caption}), re-encode each caption with Qwen3-VL, and OVERWRITE the item's
     text-embedding cache file — the collate re-reads that file from disk every step, so the very
     next epoch trains on the corrected caption. Also resets the image's loss-watch history (its
     stuck record reflects the old caption). Never raises into the training loop.
 
-    The GUI separately rewrites the .txt so the fix survives future re-caches; this function only
-    needs the new caption text. The 8 GB text encoder won't co-fit with the resident training DiT
-    on smaller cards, so the DiT is parked on CPU around the encode (same dance as previews)."""
+    auto_recaption: additionally re-caption CONFIRMED-STUCK images with the same Qwen3-VL (it's a
+    full VLM with a real LM head — the captioner ships inside the training stack), appending
+    ", <trigger_word>" when one is set. Once per image per run (`recaptioned` set); a manual edit
+    already queued for a key always wins over the auto path. Both jobs share one DiT park + one
+    text-encoder load.
+
+    The GUI separately rewrites the .txt for manual edits; the auto path writes the .txt itself
+    (image_dir + caption_ext from the dataset TOML) so fixes survive future re-caches. The 8 GB
+    text encoder won't co-fit with the resident training DiT on smaller cards, so the DiT is
+    parked on CPU around the encode (same dance as previews)."""
     path = os.path.join(output_dir, "loss_log", "caption_updates.json")
-    if not os.path.exists(path):
+    updates = {}
+    processing = path + ".processing"
+    if os.path.exists(path):
+        try:
+            os.replace(path, processing)  # atomic claim — GUI edits during processing land in a fresh file
+            with open(processing, encoding="utf-8") as f:
+                updates = {str(k): str(v).strip() for k, v in json.load(f).items() if str(v).strip()}
+        except Exception:
+            logger.warning("[caption-fix] could not read caption_updates.json — skipping", exc_info=True)
+            return
+
+    # Auto-recaption candidates: confirmed stuck, not already handled this run, not manually
+    # queued (the human's edit wins), and the source image must be findable on disk.
+    auto_todo = []
+    if auto_recaption and loss_watch is not None and image_dir and os.path.isdir(image_dir):
+        confirmed = {k for k, v in loss_watch.verdicts.items() if v == "stuck"}
+        for k in sorted(confirmed):
+            if k in updates or (recaptioned is not None and k in recaptioned):
+                continue
+            for ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+                p = os.path.join(image_dir, os.path.basename(k) + ext)
+                if os.path.exists(p):
+                    auto_todo.append((k, p))
+                    break
+
+    if not updates and not auto_todo:
+        if os.path.exists(processing):
+            os.remove(processing)
         return
     if not te_path:
-        logger.warning("[caption-fix] caption edits are queued but no text encoder path was passed "
+        logger.warning("[caption-fix] caption work is pending but no text encoder path was passed "
                        "(--text_encoder). Leaving the queue for a run with previews configured.")
-        return
-    processing = path + ".processing"
-    try:
-        os.replace(path, processing)  # atomic claim — GUI edits during processing land in a fresh file
-        with open(processing, encoding="utf-8") as f:
-            updates = {str(k): str(v).strip() for k, v in json.load(f).items() if str(v).strip()}
-    except Exception:
-        logger.warning("[caption-fix] could not read caption_updates.json — skipping", exc_info=True)
-        return
-    if not updates:
-        os.remove(processing)
+        if updates:  # put the claim back
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(updates, f, indent=2)
+                os.remove(processing)
+            except Exception:
+                pass
         return
 
     # item_key -> ItemInfo (training items come from the cache-driven path, so item_key is the
@@ -523,15 +555,18 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
         for bucket in bm.buckets.values():
             for it in bucket:
                 items[str(it.item_key)] = it
-    todo = [(k, items[k], cap) for k, cap in updates.items() if k in items]
+    todo = [(k, items[k], cap, False) for k, cap in updates.items() if k in items]
     for k in updates:
         if k not in items:
             logger.warning(f"[caption-fix] '{k}' not found in the training set — skipped")
-    if not todo:
-        os.remove(processing)
+    auto_todo = [(k, p) for k, p in auto_todo if k in items]
+    if not todo and not auto_todo:
+        if os.path.exists(processing):
+            os.remove(processing)
         return
 
-    logger.info(f"[caption-fix] re-encoding {len(todo)} edited caption(s) at epoch boundary {epoch}...")
+    logger.info(f"[caption-fix] epoch boundary {epoch}: {len(todo)} manual edit(s), "
+                f"{len(auto_todo)} stuck image(s) to auto-recaption...")
     dit.to("cpu")
     if getattr(dit, "_nf4_quantized", False):
         from fizgig.modules.nf4 import move_nf4_to_device
@@ -542,17 +577,52 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
     try:
         from fizgig.krea2.utils import load_krea2_text_encoder
         from fizgig.krea2.caching import encode_and_save_text
+        from fizgig.krea2.embedder import generate_caption
         encoder = load_krea2_text_encoder(te_path, dtype=torch.bfloat16, device=device)
-        for _, item, cap in todo:
+
+        # Auto-recaption: the SAME loaded VLM describes what's actually in the stuck image;
+        # trigger word (if any) is appended at the END — per the conditional-trigger doctrine,
+        # a trailing token is a far weaker identity claim than a leading one.
+        for k, img_path in auto_todo:
+            try:
+                cap = generate_caption(encoder, img_path)
+                if trigger_word:
+                    cap = f"{cap}, {trigger_word}"
+                cap_path = os.path.join(image_dir, os.path.basename(k) + caption_ext)
+                try:
+                    with open(cap_path, "w", encoding="utf-8") as f:
+                        f.write(cap)
+                except Exception:
+                    logger.warning(f"[auto-recaption] could not write {cap_path} — the live run is "
+                                   f"fixed but a future re-cache will use the old caption")
+                todo.append((k, items[k], cap, True))
+                logger.info(f"[auto-recaption] {os.path.basename(k)}: \"{cap[:110]}"
+                            f"{'…' if len(cap) > 110 else ''}\"")
+            except Exception:
+                logger.warning(f"[auto-recaption] captioning failed for {os.path.basename(k)} — "
+                               f"skipped (will retry next boundary)", exc_info=True)
+
+        if not todo:
+            del encoder
+            if os.path.exists(processing):
+                os.remove(processing)
+            return
+        for _, item, cap, _auto in todo:
             item.caption = cap
         for i in range(0, len(todo), 4):  # small chunks — captions pad to the longest in the batch
-            encode_and_save_text(encoder, [item for _, item, _ in todo[i:i + 4]])
+            encode_and_save_text(encoder, [item for _, item, _, _ in todo[i:i + 4]])
         del encoder
         ok = True
+        # Mark auto-recaptioned keys only AFTER a successful encode — a failed boundary must be
+        # allowed to retry them (their captions are re-queued in the failure path below).
+        if recaptioned is not None:
+            for k, _, _, is_auto in todo:
+                if is_auto:
+                    recaptioned.add(k)
         if loss_watch is not None:
-            for k, _, _ in todo:
+            for k, _, _, _ in todo:
                 loss_watch.reset_key(k)
-        # Ack for the GUI (row badge "caption re-encoded @ epoch N").
+        # Ack for the GUI (row badge "caption re-encoded @ epoch N" / "AI re-captioned").
         applied_path = os.path.join(output_dir, "loss_log", "caption_updates_applied.json")
         applied = {}
         try:
@@ -561,27 +631,31 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
                     applied = json.load(f)
         except Exception:
             applied = {}
-        for k, _, cap in todo:
-            applied[k] = {"epoch": epoch, "caption": cap}
+        for k, _, cap, is_auto in todo:
+            applied[k] = {"epoch": epoch, "caption": cap, "auto": is_auto}
         with open(applied_path, "w", encoding="utf-8") as f:
             json.dump(applied, f, indent=2)
-        os.remove(processing)
+        if os.path.exists(processing):
+            os.remove(processing)
         logger.info(f"[caption-fix] {len(todo)} caption(s) re-encoded — next epoch trains on the "
                     f"fixed text. Loss-watch history reset for: "
-                    + ", ".join(os.path.basename(k) for k, _, _ in todo))
+                    + ", ".join(os.path.basename(k) for k, _, _, _ in todo))
     except Exception:
         logger.warning("[caption-fix] re-encode failed — training continues on the old captions; "
                        "the edits stay queued and will be retried next epoch.", exc_info=True)
-        # Put the claim back, merging any edits the GUI queued while we were processing.
+        # Put the claim back, merging any edits the GUI queued while we were processing. The
+        # already-generated auto captions re-queue as if manual — no need to regenerate them.
         try:
             newer = {}
             if os.path.exists(path):
                 with open(path, encoding="utf-8") as f:
                     newer = json.load(f)
-            merged = {**updates, **newer}  # newer GUI edits win
+            auto_caps = {k: cap for k, _, cap, is_auto in todo if is_auto}
+            merged = {**updates, **auto_caps, **newer}  # newer GUI edits win
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(merged, f, indent=2)
-            os.remove(processing)
+            if os.path.exists(processing):
+                os.remove(processing)
         except Exception:
             pass
     finally:
@@ -700,6 +774,8 @@ def train_krea2(
     preview_int8: bool = False,
     log_per_image_loss: bool = False,
     per_image_lr: bool = False,
+    auto_recaption: bool = False,
+    trigger_word: str = None,
     resume_state_dir: str = None,
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
@@ -824,6 +900,34 @@ def train_krea2(
         loss_watch = PerImageLossWatch(output_dir, apply_lr=per_image_lr,
                                        write_jsonl=log_per_image_loss)
         logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
+    # Auto-recaption needs the source images + caption extension — pull them from the dataset
+    # TOML (recursive: the keys live under [general] / [[datasets]] depending on the config).
+    recaptioned = set()
+    ar_image_dir, ar_caption_ext = None, ".txt"
+    if auto_recaption:
+        def _find_toml_key(d, key):
+            if isinstance(d, dict):
+                if key in d:
+                    return d[key]
+                for v in d.values():
+                    r = _find_toml_key(v, key)
+                    if r is not None:
+                        return r
+            elif isinstance(d, list):
+                for v in d:
+                    r = _find_toml_key(v, key)
+                    if r is not None:
+                        return r
+            return None
+        ar_image_dir = _find_toml_key(user_config, "image_directory")
+        ar_caption_ext = _find_toml_key(user_config, "caption_extension") or ".txt"
+        if ar_image_dir and os.path.isdir(ar_image_dir):
+            logger.info(f"[auto-recaption] ON — stuck images re-captioned by Qwen3-VL from "
+                        f"{ar_image_dir}" + (f" (trigger: '{trigger_word}')" if trigger_word else ""))
+        else:
+            logger.warning(f"[auto-recaption] image_directory not found in the dataset config "
+                           f"({ar_image_dir!r}) — auto-recaption disabled")
+            auto_recaption = False
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
     for epoch in range(start_epoch, max_train_epochs):
@@ -863,10 +967,14 @@ def train_krea2(
         if loss_watch is not None:
             loss_watch.epoch_boundary(epoch + 1)
 
-        # Live caption repair: apply caption edits queued from the Problem Images window —
-        # re-encode their text embeddings in place so the next epoch trains on the fixed captions.
+        # Live caption repair: apply caption edits queued from the Problem Images window, and
+        # (when enabled) auto-recaption confirmed-stuck images with the same Qwen3-VL — both
+        # re-encode in place so the next epoch trains on the fixed captions.
         _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_swap,
-                               loss_watch, epoch + 1)
+                               loss_watch, epoch + 1,
+                               auto_recaption=auto_recaption, trigger_word=trigger_word,
+                               recaptioned=recaptioned, image_dir=ar_image_dir,
+                               caption_ext=ar_caption_ext)
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),

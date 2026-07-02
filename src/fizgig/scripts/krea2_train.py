@@ -57,6 +57,10 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Per-image loss tracking + stuck-image detection (loss_log/problem_images.json)")
     p.add_argument("--per_image_lr", action="store_true",
                    help="Per-image adaptive LR: throttle stuck images, ease off learned (experimental)")
+    p.add_argument("--auto_recaption", action="store_true",
+                   help="Auto-recaption confirmed-stuck images with Qwen3-VL between epochs (experimental)")
+    p.add_argument("--trigger_word", default=None,
+                   help="Trigger word appended (', <trigger>') to auto-generated captions")
     return p
 
 
@@ -91,6 +95,8 @@ def main():
         adaptive_lr_min=args.adaptive_lr_min, adaptive_lr_max=args.adaptive_lr_max,
         log_per_image_loss=args.log_per_image_loss,
         per_image_lr=args.per_image_lr,
+        auto_recaption=args.auto_recaption,
+        trigger_word=args.trigger_word,
     )
 
 

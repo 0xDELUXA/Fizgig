@@ -192,11 +192,17 @@ DETAILED_CAPTION_INSTRUCTION = (
 
 def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
                      max_new_tokens: int = 120, megapixels: float = 1.0,
-                     detailed: bool = False) -> str:
+                     detailed: bool = False, seed: int = None) -> str:
     """Caption an image with the SAME Qwen3-VL the trainer conditions on (its LM head is
     legitimately tied to the embeddings — unlike Klein's stripped Qwen3-8B — so generation is
     real). Used by auto-recaption to rewrite a stuck image's caption from what's actually in it,
-    with an instruction tuned to Peter's captioning doctrine: name the viewpoint / visibility."""
+    with an instruction tuned to Peter's captioning doctrine: name the viewpoint / visibility.
+
+    Decoding is SAMPLED with a random seed (seed=None) so repeated attempts on the same image get
+    fresh phrasings instead of the identical greedy caption — attempt 2 varies by wording as well
+    as by instruction. Sampling uses the global torch RNG, so the state is saved and restored
+    around the call: caption generation must never perturb the training noise stream."""
+    import random as _random
     from PIL import Image
 
     proc = conditioner._get_image_processor()
@@ -208,8 +214,18 @@ def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
                                              {"type": "text", "text": instruction}]}]
     prompt = proc.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     inputs = proc(text=[prompt], images=[im], return_tensors="pt").to(conditioner.qwen.device)
-    with torch.no_grad():
-        out = conditioner.qwen.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+
+    cpu_state = torch.random.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        torch.manual_seed(seed if seed is not None else _random.randint(1, 2**31 - 1))
+        with torch.no_grad():
+            out = conditioner.qwen.generate(**inputs, max_new_tokens=max_new_tokens,
+                                            do_sample=True, temperature=0.7, top_p=0.9)
+    finally:
+        torch.random.set_rng_state(cpu_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
     text = proc.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
     return " ".join(text.split()).strip()
 

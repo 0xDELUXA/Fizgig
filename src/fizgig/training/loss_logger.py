@@ -196,9 +196,11 @@ class PerImageLossWatch:
         self._confirmed_stuck: set[str] = set()
         self._last_reported_stuck: set[str] = set()
         # Keys whose benefit of the doubt is spent (e.g. two failed AI recaptions): re-confirming
-        # stuck skips the escalation ladder and goes straight to the stuck_floor. Cleared by
-        # reset_key, so a manual caption edit restores the normal ladder.
+        # stuck EXCLUDES them from training entirely for the rest of the run — the trainer skips
+        # their steps (no gradient, no loss recorded, so avr_loss stops carrying their permanent
+        # error term). One-way, except reset_key (a manual caption edit re-admits the image).
         self._incorrigible: set[str] = set()
+        self._excluded: set[str] = set()
 
         # The JSONL logger stays the offline source of truth; force it on when the detection
         # toggle asks for it (env var still works on its own).
@@ -217,6 +219,12 @@ class PerImageLossWatch:
         if not self.apply_lr or self._batched:
             return 1.0
         return self._mult.get(self._key_of(item_keys), 1.0)
+
+    def is_excluded(self, item_keys) -> bool:
+        """True when this step's image is excluded from training (skip the step entirely)."""
+        if self._batched:
+            return False
+        return self._key_of(item_keys) in self._excluded
 
     def observe(self, *, epoch: int, step: int, item_keys, timestep: float, loss: float) -> None:
         """Record one step's RAW (unscaled) loss. Never raises into the training loop."""
@@ -322,6 +330,12 @@ class PerImageLossWatch:
             # earlier on MAGNITUDE alone (mild suspect_mult) while the trend evidence accrues.
             new_mult = {}
             for key, s in stats.items():
+                # Already excluded: frozen state — no votes, no releases, skipped by the trainer.
+                if key in self._excluded:
+                    s["verdict"] = "excluded"
+                    s["multiplier"] = 0.0
+                    new_mult[key] = 0.0
+                    continue
                 # Improving = recent half-mean below older half-mean by a real margin (fraction of
                 # the excess AND ~1 SE). Too little history -> not improving is unknowable; the
                 # persistence gate + warmup keep that from mattering.
@@ -378,16 +392,24 @@ class PerImageLossWatch:
                 # Release progress for the popup (stuck badge + improving trend = counting down).
                 s["release_votes"] = self._clear_votes.get(key, 0) if key in self._confirmed_stuck else 0
 
-                if key in self._confirmed_stuck:
+                if key in self._confirmed_stuck and key in self._incorrigible:
+                    # Benefit of the doubt spent (two failed AI recaptions) AND stuck again:
+                    # excluded from training for the rest of the run. The trainer skips its steps
+                    # — no gradient, no loss recorded — so avr_loss stops carrying its permanent
+                    # error term. Only a manual caption edit (reset_key) re-admits it.
+                    self._excluded.add(key)
+                    self._confirmed_stuck.discard(key)
+                    self._last_reported_stuck.discard(key)
+                    logger.warning(f"[loss-watch] epoch {epoch}: {os.path.basename(key)} EXCLUDED "
+                                   f"from training — two AI captions couldn't fix it. Edit its "
+                                   f"caption to re-admit it, or remove it from the dataset.")
+                    verdict, mult = "excluded", 0.0
+                elif key in self._confirmed_stuck:
                     # Escalate with tenure: x0.5 -> x0.25 -> x0.125 -> floor. Staying confirmed is
-                    # accumulating evidence; the leak shrinks as certainty grows. Incorrigible keys
-                    # (benefit of the doubt spent — e.g. two failed AI recaptions) skip the ladder.
+                    # accumulating evidence; the leak shrinks as certainty grows.
                     tenure = self._stuck_epochs.get(key, 1)
-                    if key in self._incorrigible:
-                        mult = self.stuck_floor
-                    else:
-                        mult = max(self.stuck_floor,
-                                   self.throttle_mult * (0.5 ** ((tenure - 1) // self.escalate_every)))
+                    mult = max(self.stuck_floor,
+                               self.throttle_mult * (0.5 ** ((tenure - 1) // self.escalate_every)))
                     verdict = "stuck"
                     s["stuck_epochs"] = tenure
                 elif suspect:
@@ -456,6 +478,7 @@ class PerImageLossWatch:
         self._confirmed_stuck.discard(key)
         self._last_reported_stuck.discard(key)
         self._incorrigible.discard(key)
+        self._excluded.discard(key)   # a manual caption edit re-admits an excluded image
         self.verdicts.pop(key, None)
 
     def close(self) -> None:

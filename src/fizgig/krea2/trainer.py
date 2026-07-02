@@ -946,6 +946,13 @@ def train_krea2(
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         for i, batch in enumerate(loader):
+            # Excluded images (two failed AI recaptions, still stuck) are skipped ENTIRELY: no
+            # forward, no gradient, and no loss recorded — avr_loss stops carrying their permanent
+            # error term. Step accounting (bar + global_step) stays consistent for resume math.
+            if loss_watch is not None and loss_watch.is_excluded(batch.get("item_keys")):
+                global_step += 1
+                progress_bar.update(1)
+                continue
             loss, t_used = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
                                         shift=shift, dtype=dtype)
             # Per-image LR: scale THIS step's gradient by the image's multiplier (throttle stuck

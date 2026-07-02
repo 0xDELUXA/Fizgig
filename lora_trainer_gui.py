@@ -2574,7 +2574,9 @@ class LoRATrainerGUI:
                        "to ×0.1), eases off mined-out images (×0.6) and learned ones (×0.9). Auto-recaption goes "
                        "further: when an image is confirmed stuck, the Qwen3-VL text encoder looks at it and rewrites "
                        "its caption from what's actually visible (appending your Captions-tab trigger word, if set), "
-                       "re-encodes it, and gives the image a fresh start. Batch size 1.",
+                       "re-encodes it, and gives the image a fresh start (a 2nd attempt goes extra-detailed; still "
+                       "stuck after that = excluded from training entirely — edit its caption to re-admit it). "
+                       "Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._krea2_losswatch_hint.grid(row=23, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3720,6 +3722,7 @@ class LoRATrainerGUI:
             pass
 
         style = {
+            "excluded": ("#7F8C8D", "EXCLUDED from training — two AI captions couldn't fix it. Edit the caption to re-admit it, or remove it from the dataset."),
             "stuck":    ("#E74C3C", "STUCK — persistently hard, not improving. Review this image/caption."),
             "suspect":  ("#D35400", "Suspect — extremely hard from the start; provisionally slowed while the trend confirms. Worth a caption check now."),
             "watch":    ("#E67E22", "Watching — looked stuck this epoch; needs more epochs to confirm."),
@@ -3728,7 +3731,8 @@ class LoRATrainerGUI:
             "mid":      ("#95A5A6", "Normal."),
             "easy":     ("#70AD47", "Learned — consistently easy."),
         }
-        order = {"stuck": 0, "suspect": 1, "watch": 2, "exhausted": 3, "learning": 4, "mid": 5, "easy": 6}
+        order = {"excluded": 0, "stuck": 1, "suspect": 2, "watch": 3, "exhausted": 4,
+                 "learning": 5, "mid": 6, "easy": 7}
         items = sorted(images.items(),
                        key=lambda kv: (order.get(kv[1].get("verdict", "mid"), 2),
                                        -float(kv[1].get("mean_residual", 0.0))))

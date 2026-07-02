@@ -26,7 +26,11 @@ import os
 logger = logging.getLogger(__name__)
 
 _ENV_FLAG = "FIZGIG_PERIMAGE_LOSS_LOG"
-_N_BUCKETS = 20  # timestep buckets over [0, 1] for the running-mean normalization
+_N_BUCKETS = 40  # timestep buckets over [0, 1] for the running-mean normalization. Finer buckets
+                 # shrink the within-bucket loss spread that dominates per-sample residual noise —
+                 # at 20 buckets that spread produced autocorrelated spurious improve-passes that
+                 # inflated finish stamps and stalled plateau detection. krea2's logit-normal
+                 # timestep sampling concentrates draws mid-range, so central buckets fill fast.
 
 
 def is_enabled() -> bool:
@@ -135,7 +139,8 @@ class PerImageLossWatch:
                  suspect_mult: float = 0.7, easy_from_epoch: int = 3,
                  exhausted_mult: float = 0.6, exhaust_drop_frac: float = 0.3, exhaust_on: int = 2,
                  stuck_floor: float = 0.1, escalate_every: int = 2,
-                 dataset_dir: str = None, caption_ext: str = ".txt", healthy_min: int = 3):
+                 dataset_dir: str = None, caption_ext: str = ".txt", healthy_min: int = 3,
+                 plateau_patience: int = 2, plateau_min_epochs: int = 8):
         self.apply_lr = apply_lr
         self.warmup_epochs = warmup_epochs
         self.window = window
@@ -210,6 +215,22 @@ class PerImageLossWatch:
         self.healthy_min = healthy_min
         self._healthy_epochs: dict[str, int] = {}
         self._retired: set[str] = set()
+
+        # Best-epoch estimate: every image has a knowable FINISH epoch (the last boundary it
+        # passed the improve test). When no image is improving for plateau_patience consecutive
+        # boundaries, training is done extracting signal — the recommended checkpoint is the
+        # ~75th percentile of per-image finish epochs (excluded images don't vote). This detects
+        # "learning finished" (the honest stop anchor), NOT a certified quality peak — the GUI
+        # frames it as a window to scrub in LoRA Royale. Note: late adaptive-LR reductions shrink
+        # per-epoch drops below the improve floor, which can trip this slightly early.
+        self.plateau_patience = plateau_patience
+        self.plateau_min_epochs = plateau_min_epochs
+        self._last_improving_epoch: dict[str, int] = {}
+        self._improving_streak: dict[str, int] = {}   # consecutive improve-passes per key
+        self._no_improve_streak = 0
+        self._plateau_reported = False
+        self.plateaued = False
+        self.best_epoch_estimate = None
 
         # Persistent exclusions: fizgig_excluded.json lives IN the dataset folder (exclusions are
         # dataset knowledge — they travel with the images, across runs). Each entry snapshots the
@@ -413,6 +434,7 @@ class PerImageLossWatch:
             # RELEASED only after persist_off consecutive clear votes. The suspect tier acts
             # earlier on MAGNITUDE alone (mild suspect_mult) while the trend evidence accrues.
             new_mult = {}
+            improving_count = 0
             for key, s in stats.items():
                 # Already excluded: frozen state — no votes, no releases, skipped by the trainer.
                 if key in self._excluded:
@@ -435,6 +457,16 @@ class PerImageLossWatch:
                              and drop >= max(self.improve_frac * max(s["first"], 0.0),
                                              self.improve_floor, s["se"]))
                 s["improving"] = improving
+                # A flat image passes the improve test spuriously ~10% of boundaries (noise beats
+                # the floor), which inflates finish stamps and delays plateau detection — so an
+                # image only COUNTS as improving after two consecutive passes (same persistence
+                # principle as every other verdict here). The finish is stamped at the CENTER of
+                # the detected drop window: a pass at epoch e reflects improvement around
+                # e - trend_window/2; stamping e itself biases the estimate late by half a window.
+                self._improving_streak[key] = self._improving_streak.get(key, 0) + 1 if improving else 0
+                if self._improving_streak[key] >= 2:
+                    improving_count += 1
+                    self._last_improving_epoch[key] = max(1, epoch - self.trend_window // 2)
                 # "Good run": this image's residual has dropped substantially from its early
                 # baseline — proof the caption works and the model CAN learn it. A plateaued
                 # good-runner is mined out, not stuck: its history suppresses the outlier paths.
@@ -547,6 +579,34 @@ class PerImageLossWatch:
                                 "mean_loss": 0.0, "epochs": 0, "improving": False}
                     self.verdicts[k] = "excluded"
 
+            # Plateau detection + best-epoch estimate (see __init__ docs). The streak resets if
+            # anything starts improving again (e.g. a mid-run caption fix revives an image), and
+            # the report flag resets with it so a later re-plateau announces its updated estimate.
+            # Tolerance: up to ~5% of images may read as "improving" from autocorrelated residual
+            # noise at any boundary — demanding absolute zero never declares. Real revivals (e.g.
+            # a caption fix) blow well past the tolerance.
+            n_tracked = sum(1 for k in stats if k not in self._excluded)
+            tol = max(1, round(0.05 * n_tracked))
+            if n_ep >= self.plateau_min_epochs and improving_count <= tol:
+                self._no_improve_streak += 1
+            else:
+                self._no_improve_streak = 0
+            self.plateaued = self._no_improve_streak >= self.plateau_patience
+            finishes = sorted(e for k, e in self._last_improving_epoch.items()
+                              if k not in self._excluded)
+            if finishes:
+                self.best_epoch_estimate = int(finishes[int(0.75 * (len(finishes) - 1))])
+            if self.plateaued and not self._plateau_reported and self.best_epoch_estimate:
+                be = self.best_epoch_estimate
+                logger.info(f"[loss-watch] epoch {epoch}: training has PLATEAUED — no image has "
+                            f"improved for {self.plateau_patience} epochs. Estimated best "
+                            f"checkpoint ≈ epoch {be} (75th percentile of per-image finish "
+                            f"epochs). Scrub epochs {max(1, be - 2)}–{be + 2} in LoRA Royale to "
+                            f"pick by eye — later epochs mainly add overbake risk.")
+                self._plateau_reported = True
+            elif not self.plateaued:
+                self._plateau_reported = False
+
             # Warn only when the CONFIRMED set changes — not every epoch.
             if self._confirmed_stuck != self._last_reported_stuck:
                 added = self._confirmed_stuck - self._last_reported_stuck
@@ -567,6 +627,9 @@ class PerImageLossWatch:
                 os.makedirs(d, exist_ok=True)
                 with open(os.path.join(d, "problem_images.json"), "w", encoding="utf-8") as f:
                     json.dump({"epoch": epoch, "apply_lr": self.apply_lr,
+                               "improving_count": improving_count,
+                               "plateaued": self.plateaued,
+                               "best_epoch_estimate": self.best_epoch_estimate,
                                "images": {k: {kk: (round(vv, 6) if isinstance(vv, float) else vv)
                                               for kk, vv in s.items()} for k, s in stats.items()}},
                               f, indent=2)
@@ -600,6 +663,8 @@ class PerImageLossWatch:
         if key in self._excl_data:    # ...including from the persistent dataset-folder record
             del self._excl_data[key]
             self._write_persistent_exclusions()
+        self._last_improving_epoch.pop(key, None)
+        self._improving_streak.pop(key, None)
         # NOTE: _healthy_epochs deliberately survives — it's evidence about the IMAGE's
         # learnability, independent of which caption it carried.
         self.verdicts.pop(key, None)

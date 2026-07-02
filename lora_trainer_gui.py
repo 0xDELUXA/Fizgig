@@ -3701,9 +3701,21 @@ class LoRATrainerGUI:
                               "learning", "mid", "easy"))
         mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
                 if data.get("apply_lr") else "detection only")
+        imp = data.get("improving_count")
+        if data.get("plateaued") and data.get("best_epoch_estimate"):
+            be = int(data["best_epoch_estimate"])
+            progress = (f"📍 TRAINING PLATEAUED — best checkpoint ≈ epoch {be}. "
+                        f"Scrub epochs {max(1, be - 2)}–{be + 2} in LoRA Royale to pick by eye; "
+                        f"later epochs mainly add overbake risk.")
+        elif imp is not None:
+            progress = f"{imp} image(s) still improving" + (
+                f"  ·  best checkpoint so far ≈ epoch {int(data['best_epoch_estimate'])}"
+                if data.get("best_epoch_estimate") else "")
+        else:
+            progress = ""
         self._problem_status.config(
             text=f"Epoch {data.get('epoch', '?')}  ·  {len(images)} images tracked  ·  {mode}\n"
-                 f"{tally}\n"
+                 f"{tally}" + (f"\n{progress}" if progress else "") + "\n"
                  f"Residual = loss vs. the average at the same noise level (higher = harder than typical). "
                  f"Stuck = hard AND not improving → check the image + caption.")
 

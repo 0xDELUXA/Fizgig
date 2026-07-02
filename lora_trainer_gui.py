@@ -3692,12 +3692,18 @@ class LoRATrainerGUI:
             return
 
         images = data["images"]
-        stuck_n = sum(1 for s in images.values() if s.get("verdict") == "stuck")
+        counts = {}
+        for s in images.values():
+            v = s.get("verdict", "mid")
+            counts[v] = counts.get(v, 0) + 1
+        tally = "  ·  ".join(f"{counts.get(v, 0)} {v}" for v in
+                             ("excluded", "stuck", "suspect", "watch", "exhausted",
+                              "learning", "mid", "easy"))
         mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
                 if data.get("apply_lr") else "detection only")
         self._problem_status.config(
-            text=f"Epoch {data.get('epoch', '?')}  ·  {len(images)} images tracked  ·  "
-                 f"{stuck_n} stuck  ·  {mode}\n"
+            text=f"Epoch {data.get('epoch', '?')}  ·  {len(images)} images tracked  ·  {mode}\n"
+                 f"{tally}\n"
                  f"Residual = loss vs. the average at the same noise level (higher = harder than typical). "
                  f"Stuck = hard AND not improving → check the image + caption.")
 

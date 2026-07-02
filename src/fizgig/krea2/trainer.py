@@ -484,6 +484,121 @@ def _read_sample_override(output_dir):
     return None
 
 
+def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_swap, loss_watch, epoch):
+    """Live caption repair (Problem Images window). Consume <output_dir>/loss_log/caption_updates.json
+    ({item_key: new_caption}), re-encode each caption with Qwen3-VL, and OVERWRITE the item's
+    text-embedding cache file — the collate re-reads that file from disk every step, so the very
+    next epoch trains on the corrected caption. Also resets the image's loss-watch history (its
+    stuck record reflects the old caption). Never raises into the training loop.
+
+    The GUI separately rewrites the .txt so the fix survives future re-caches; this function only
+    needs the new caption text. The 8 GB text encoder won't co-fit with the resident training DiT
+    on smaller cards, so the DiT is parked on CPU around the encode (same dance as previews)."""
+    path = os.path.join(output_dir, "loss_log", "caption_updates.json")
+    if not os.path.exists(path):
+        return
+    if not te_path:
+        logger.warning("[caption-fix] caption edits are queued but no text encoder path was passed "
+                       "(--text_encoder). Leaving the queue for a run with previews configured.")
+        return
+    processing = path + ".processing"
+    try:
+        os.replace(path, processing)  # atomic claim — GUI edits during processing land in a fresh file
+        with open(processing, encoding="utf-8") as f:
+            updates = {str(k): str(v).strip() for k, v in json.load(f).items() if str(v).strip()}
+    except Exception:
+        logger.warning("[caption-fix] could not read caption_updates.json — skipping", exc_info=True)
+        return
+    if not updates:
+        os.remove(processing)
+        return
+
+    # item_key -> ItemInfo (training items come from the cache-driven path, so item_key is the
+    # image basename without extension — same key the loss watch and the GUI use).
+    items = {}
+    for ds in group.datasets:
+        bm = getattr(ds, "batch_manager", None)
+        if bm is None:
+            continue
+        for bucket in bm.buckets.values():
+            for it in bucket:
+                items[str(it.item_key)] = it
+    todo = [(k, items[k], cap) for k, cap in updates.items() if k in items]
+    for k in updates:
+        if k not in items:
+            logger.warning(f"[caption-fix] '{k}' not found in the training set — skipped")
+    if not todo:
+        os.remove(processing)
+        return
+
+    logger.info(f"[caption-fix] re-encoding {len(todo)} edited caption(s) at epoch boundary {epoch}...")
+    dit.to("cpu")
+    if getattr(dit, "_nf4_quantized", False):
+        from fizgig.modules.nf4 import move_nf4_to_device
+        move_nf4_to_device(dit, "cpu")
+    gc.collect()
+    torch.cuda.empty_cache()
+    ok = False
+    try:
+        from fizgig.krea2.utils import load_krea2_text_encoder
+        from fizgig.krea2.caching import encode_and_save_text
+        encoder = load_krea2_text_encoder(te_path, dtype=torch.bfloat16, device=device)
+        for _, item, cap in todo:
+            item.caption = cap
+        for i in range(0, len(todo), 4):  # small chunks — captions pad to the longest in the batch
+            encode_and_save_text(encoder, [item for _, item, _ in todo[i:i + 4]])
+        del encoder
+        ok = True
+        if loss_watch is not None:
+            for k, _, _ in todo:
+                loss_watch.reset_key(k)
+        # Ack for the GUI (row badge "caption re-encoded @ epoch N").
+        applied_path = os.path.join(output_dir, "loss_log", "caption_updates_applied.json")
+        applied = {}
+        try:
+            if os.path.exists(applied_path):
+                with open(applied_path, encoding="utf-8") as f:
+                    applied = json.load(f)
+        except Exception:
+            applied = {}
+        for k, _, cap in todo:
+            applied[k] = {"epoch": epoch, "caption": cap}
+        with open(applied_path, "w", encoding="utf-8") as f:
+            json.dump(applied, f, indent=2)
+        os.remove(processing)
+        logger.info(f"[caption-fix] {len(todo)} caption(s) re-encoded — next epoch trains on the "
+                    f"fixed text. Loss-watch history reset for: "
+                    + ", ".join(os.path.basename(k) for k, _, _ in todo))
+    except Exception:
+        logger.warning("[caption-fix] re-encode failed — training continues on the old captions; "
+                       "the edits stay queued and will be retried next epoch.", exc_info=True)
+        # Put the claim back, merging any edits the GUI queued while we were processing.
+        try:
+            newer = {}
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    newer = json.load(f)
+            merged = {**updates, **newer}  # newer GUI edits win
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(merged, f, indent=2)
+            os.remove(processing)
+        except Exception:
+            pass
+    finally:
+        gc.collect()
+        torch.cuda.empty_cache()
+        if blocks_to_swap > 0:
+            dit.move_to_device_except_swap_blocks(torch.device(device))
+            dit.switch_block_swap_for_training()
+        else:
+            dit.to(device)
+        if getattr(dit, "_nf4_quantized", False):
+            from fizgig.modules.nf4 import move_nf4_to_device
+            move_nf4_to_device(dit, device)
+        dit.train()
+    return ok
+
+
 def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
                     output_name="krea2", steps=8, cfg_scale=1.0, width=512, height=512,
                     seed=42, context_lora_path=None, context_lora_strength=1.0,
@@ -727,6 +842,11 @@ def train_krea2(
         # multipliers, write loss_log/problem_images.json (the GUI's Problem Images popup reads it).
         if loss_watch is not None:
             loss_watch.epoch_boundary(epoch + 1)
+
+        # Live caption repair: apply caption edits queued from the Problem Images window —
+        # re-encode their text embeddings in place so the next epoch trains on the fixed captions.
+        _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_swap,
+                               loss_watch, epoch + 1)
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),

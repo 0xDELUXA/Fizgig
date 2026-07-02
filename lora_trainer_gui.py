@@ -3669,6 +3669,26 @@ class LoRATrainerGUI:
                  f"Residual = loss vs. the average at the same noise level (higher = harder than typical). "
                  f"Stuck = hard AND not improving → check the image + caption.")
 
+        # Caption-fix queue/ack state for the row badges: queued = edit waiting for the next epoch
+        # boundary (or mid-re-encode), applied = trainer re-encoded it (with the epoch number).
+        loss_log_dir = os.path.dirname(path) if path else ""
+        queued_keys, applied_info = set(), {}
+        for qname in ("caption_updates.json", "caption_updates.json.processing"):
+            try:
+                qp = os.path.join(loss_log_dir, qname)
+                if os.path.exists(qp):
+                    with open(qp, encoding="utf-8") as f:
+                        queued_keys.update(json.load(f).keys())
+            except Exception:
+                pass
+        try:
+            ap = os.path.join(loss_log_dir, "caption_updates_applied.json")
+            if os.path.exists(ap):
+                with open(ap, encoding="utf-8") as f:
+                    applied_info = json.load(f)
+        except Exception:
+            pass
+
         style = {
             "stuck":    ("#E74C3C", "STUCK — persistently hard, not improving. Review this image/caption."),
             "watch":    ("#E67E22", "Watching — looked stuck this epoch; needs more epochs to confirm."),
@@ -3713,6 +3733,14 @@ class LoRATrainerGUI:
                      fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
             tk.Label(name_row, text=f"  {verdict.upper()}", font=(FONT_FAMILY, 9, "bold"),
                      fg=color, bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            if key in queued_keys:
+                tk.Label(name_row, text="  ✏ fix queued", font=(FONT_FAMILY, 9),
+                         fg="#F1C40F", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            elif key in applied_info:
+                tk.Label(name_row, text=f"  ✓ caption re-encoded @ epoch {applied_info[key].get('epoch', '?')}",
+                         font=(FONT_FAMILY, 9), fg="#2ECC71", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            ttk.Button(name_row, text="✏ Edit Caption", width=14,
+                       command=lambda k=key: self._open_caption_editor(k)).pack(side=tk.RIGHT, padx=(8, 0))
 
             slope = float(s.get("slope", 0.0))
             trend = "↓ improving" if slope < -1e-4 else ("↑ worsening" if slope > 1e-4 else "→ flat")
@@ -3725,6 +3753,128 @@ class LoRATrainerGUI:
                      fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
             tk.Label(info, text=blurb, font=(FONT_FAMILY, 8, "italic"),
                      fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
+
+    def _find_dataset_caption(self, key: str):
+        """Caption file for a loss-watch item key: <image_folder>/<basename><caption_ext>."""
+        folder = self.image_folder_var.get().strip() if hasattr(self, "image_folder_var") else ""
+        if not folder or not os.path.isdir(folder):
+            return None
+        ext = ".txt"
+        try:
+            ext = self.dataset_caption_ext_var.get().strip() or ".txt"
+        except Exception:
+            pass
+        return os.path.join(folder, os.path.basename(key) + ext)
+
+    def _queue_caption_update(self, key: str, caption: str) -> bool:
+        """Merge one caption edit into <output_dir>/loss_log/caption_updates.json (atomic write).
+        The trainer consumes it at the next epoch boundary and re-encodes the embedding."""
+        out = self.settings.get("LORA_OUTPUT_DIR", "") or ""
+        if not out:
+            return False
+        try:
+            d = os.path.join(out, "loss_log")
+            os.makedirs(d, exist_ok=True)
+            qp = os.path.join(d, "caption_updates.json")
+            updates = {}
+            if os.path.exists(qp):
+                try:
+                    with open(qp, encoding="utf-8") as f:
+                        updates = json.load(f)
+                except Exception:
+                    updates = {}
+            updates[str(key)] = caption
+            tmp = qp + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(updates, f, indent=2)
+            os.replace(tmp, qp)  # atomic — the trainer never sees a half-written file
+            return True
+        except Exception as e:
+            print(f"[caption-fix] queue failed: {e}")
+            return False
+
+    def _open_caption_editor(self, key: str):
+        """Standalone caption editor for one problem image. Deliberately a SEPARATE Toplevel from
+        the auto-refreshing list, so rows can rebuild/reorder underneath without eating your edit."""
+        editors = getattr(self, "_caption_editors", None)
+        if editors is None:
+            editors = self._caption_editors = {}
+        existing = editors.get(key)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+
+        win = tk.Toplevel(self.master)
+        win.title(f"Edit Caption — {os.path.basename(key)}")
+        win.geometry("560x480")
+        win.configure(bg=COLORS["bg_deep"])
+        editors[key] = win
+
+        img_path = self._find_dataset_image(key)
+        if img_path:
+            try:
+                im = Image.open(img_path)
+                im.thumbnail((280, 280), Image.LANCZOS)
+                ph = ImageTk.PhotoImage(im)
+                win._thumb_ref = ph  # keep alive
+                tk.Label(win, image=ph, bg=COLORS["bg_deep"]).pack(pady=(14, 6))
+            except Exception:
+                img_path = None
+        if not img_path:
+            tk.Label(win, text="(image preview unavailable)", font=(FONT_FAMILY, 9),
+                     fg=COLORS["text_muted"], bg=COLORS["bg_deep"]).pack(pady=(14, 6))
+
+        cap_path = self._find_dataset_caption(key)
+        caption = ""
+        if cap_path and os.path.exists(cap_path):
+            try:
+                with open(cap_path, encoding="utf-8") as f:
+                    caption = f.read().strip()
+            except Exception:
+                pass
+
+        tk.Label(win, text=os.path.basename(key), font=(FONT_FAMILY, 11, "bold"),
+                 fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack()
+        txt = tk.Text(win, height=6, wrap=tk.WORD, font=(FONT_FAMILY, 10),
+                      bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+                      insertbackground=COLORS["text_primary"], relief=tk.FLAT, padx=8, pady=8)
+        txt.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
+        txt.insert("1.0", caption)
+
+        status = tk.Label(win, text="Tip: caption what the image actually shows — viewpoint "
+                                    "(“from behind”, “side profile”), pose, occlusions.",
+                          font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
+                          wraplength=520, justify=tk.LEFT)
+        status.pack(fill=tk.X, padx=14)
+
+        def _save():
+            new_cap = txt.get("1.0", tk.END).strip()
+            if not new_cap:
+                status.config(text="Caption is empty — not saved.", fg="#E74C3C")
+                return
+            wrote_txt = False
+            if cap_path:
+                try:
+                    with open(cap_path, "w", encoding="utf-8") as f:
+                        f.write(new_cap)
+                    wrote_txt = True
+                except Exception as e:
+                    print(f"[caption-fix] .txt write failed: {e}")
+            queued = self._queue_caption_update(key, new_cap)
+            if queued:
+                status.config(fg="#2ECC71", text="Saved & queued ✓ — the trainer re-encodes it at the next "
+                              "epoch boundary; this image's history resets and it should turn blue "
+                              "(learning) if the fix worked."
+                              + ("" if wrote_txt else "  (Note: couldn't write the .txt — the live run is "
+                                 "fixed, but re-caching later will use the old caption.)"))
+            else:
+                status.config(fg="#E74C3C", text="Could not queue the update (no output directory?). "
+                              + ("The .txt was updated for future runs." if wrote_txt else ""))
+
+        btns = tk.Frame(win, bg=COLORS["bg_deep"])
+        btns.pack(fill=tk.X, padx=14, pady=(6, 12))
+        ttk.Button(btns, text="Save & Queue for Re-encode", command=_save).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Close", command=win.destroy).pack(side=tk.RIGHT)
 
     # ── Timestep section helpers ────────────────────────────────────────
 

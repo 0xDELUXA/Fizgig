@@ -282,8 +282,11 @@ class PerImageLossWatch:
                              and drop >= max(self.improve_frac * max(s["first"], 0.0),
                                              self.improve_floor, s["se"]))
                 # An image whose recent residual is <= 0 is no harder than average at the same
-                # noise level — by definition not an outlier, whatever its trend.
-                votes_stuck = s["mean_residual"] >= hi and s["last"] > 0.0 and not improving
+                # noise level — by definition not an outlier, whatever its trend. And with under
+                # 4 epochs of history (fresh run, or history reset after a caption fix) there is
+                # no trend to judge — it can't vote stuck yet.
+                votes_stuck = (s["trend_epochs"] >= 4 and s["mean_residual"] >= hi
+                               and s["last"] > 0.0 and not improving)
                 if key in self._confirmed_stuck:
                     self._clear_votes[key] = 0 if votes_stuck else self._clear_votes.get(key, 0) + 1
                     if self._clear_votes[key] >= self.persist_off:
@@ -341,6 +344,18 @@ class PerImageLossWatch:
         except Exception as e:
             logger.warning(f"[loss-watch] epoch_boundary failed ({e})")
             return {}
+
+    def reset_key(self, key: str) -> None:
+        """Forget one image's history — used after a live caption fix, since its stuck record
+        reflects the OLD caption. It re-enters fresh (needs 4 epochs of new trend before it can
+        vote stuck again) and its multiplier returns to 1.0 immediately."""
+        key = str(key)
+        self._records = [r for r in self._records if r[0] != key]
+        for d in (self._stuck_votes, self._clear_votes, self._mult):
+            d.pop(key, None)
+        self._confirmed_stuck.discard(key)
+        self._last_reported_stuck.discard(key)
+        self.verdicts.pop(key, None)
 
     def close(self) -> None:
         self._jsonl.close()

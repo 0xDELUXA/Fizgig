@@ -3075,7 +3075,19 @@ class LoRATrainerGUI:
             if key in self.entries:
                 entry = self.entries[key]
                 if isinstance(entry, ttk.Combobox):
-                    entry.set(str(value))
+                    value = str(value)
+                    try:
+                        # A saved plain value (e.g. "2e-4") should select its labeled combobox
+                        # entry ("2e-4 - likely too high") so the warning suffix still shows.
+                        opts = entry.cget("values") or ()
+                        if value not in opts:
+                            for opt in opts:
+                                if str(opt).split(" ")[0] == value.split(" ")[0]:
+                                    value = str(opt)
+                                    break
+                    except tk.TclError:
+                        pass
+                    entry.set(value)
                 elif isinstance(entry, tk.BooleanVar):
                     # Some boolean settings (e.g. IMG_IN_TXT_IN_OFFLOADING, PRESERVE_DISTRIBUTION)
                     # are stored in self.entries as BooleanVars — they don't support .delete/.insert.
@@ -3592,9 +3604,21 @@ class LoRATrainerGUI:
 
     # ── Problem Images window (per-image loss watch) ────────────────────
 
+    def _loss_log_dir(self) -> str:
+        """<output_dir>/loss_log from the LIVE Output Directory field (settings only refresh at
+        start_training, so a user who edits the field pre-launch would otherwise see stale data)."""
+        out = ""
+        try:
+            if hasattr(self, "entries") and "LORA_OUTPUT_DIR" in self.entries:
+                out = self.entries["LORA_OUTPUT_DIR"].get().strip()
+        except Exception:
+            out = ""
+        out = out or (self.settings.get("LORA_OUTPUT_DIR", "") or "")
+        return os.path.join(out, "loss_log") if out else ""
+
     def _problem_images_json_path(self) -> str:
-        out = self.settings.get("LORA_OUTPUT_DIR", "") or ""
-        return os.path.join(out, "loss_log", "problem_images.json") if out else ""
+        d = self._loss_log_dir()
+        return os.path.join(d, "problem_images.json") if d else ""
 
     def _find_dataset_image(self, key: str):
         """Resolve a loss-watch item key (image basename, no extension) to a file in the training
@@ -3623,7 +3647,7 @@ class LoRATrainerGUI:
         win.configure(bg=COLORS["bg_deep"])
         self._problem_win = win
         self._problem_mtime = None
-        self._problem_thumbs = []  # keep PhotoImage refs alive
+        self._problem_thumbs = {}  # path -> PhotoImage, cached across refreshes (and kept alive)
 
         head = tk.Frame(win, bg=COLORS["bg_deep"])
         head.pack(fill=tk.X, padx=14, pady=(12, 6))
@@ -3646,18 +3670,26 @@ class LoRATrainerGUI:
         rows_id = canvas.create_window((0, 0), window=rows, anchor="nw")
         rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(rows_id, width=e.width))
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units"))
+        # Enter/Leave bind_all swapping (the app-wide pattern): a lifetime bind_all would be
+        # silently clobbered the moment the mouse crosses any main-window scrollable frame.
+        _pw_wheel = lambda e: canvas.yview_scroll(-1 * int(e.delta / 120), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _pw_wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
         win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
         self._problem_rows = rows
 
         self._refresh_problem_images(force=True)
 
         def _tick():
-            w = getattr(self, "_problem_win", None)
-            if w is None or not w.winfo_exists():
+            # Close over THIS window: an orphaned timer from a closed popup must never latch
+            # onto a reopened one (each reopen starts its own loop — they'd multiply).
+            if not win.winfo_exists() or getattr(self, "_problem_win", None) is not win:
                 return
-            self._refresh_problem_images()
-            w.after(4000, _tick)
+            try:
+                self._refresh_problem_images()
+            except Exception:
+                pass  # one bad refresh (e.g. odd JSON shape) must not kill the auto-refresh loop
+            win.after(4000, _tick)
         win.after(4000, _tick)
 
     def _refresh_problem_images(self, force: bool = False):
@@ -3672,9 +3704,11 @@ class LoRATrainerGUI:
                 mtime = os.path.getmtime(path)
                 if not force and mtime == self._problem_mtime:
                     return  # unchanged
-                self._problem_mtime = mtime
                 with open(path, encoding="utf-8") as f:
                     data = json.load(f)
+                if not isinstance(data, dict) or not isinstance(data.get("images"), dict):
+                    data = None
+                self._problem_mtime = mtime  # only after a good parse — a bad read must retry next tick
             except Exception:
                 data = None
         elif self._problem_mtime is not None:
@@ -3684,7 +3718,6 @@ class LoRATrainerGUI:
 
         for w in self._problem_rows.winfo_children():
             w.destroy()
-        self._problem_thumbs.clear()
 
         if not data or not data.get("images"):
             self._problem_status.config(text="No data yet. Enable “Detect problem images” on the Training tab, "
@@ -3696,9 +3729,9 @@ class LoRATrainerGUI:
         for s in images.values():
             v = s.get("verdict", "mid")
             counts[v] = counts.get(v, 0) + 1
-        tally = "  ·  ".join(f"{counts.get(v, 0)} {v}" for v in
-                             ("excluded", "stuck", "suspect", "watch", "exhausted",
-                              "learning", "mid", "easy"))
+        _known = ("excluded", "stuck", "suspect", "watch", "exhausted", "learning", "mid", "easy")
+        tally = "  ·  ".join([f"{counts.get(v, 0)} {v}" for v in _known]
+                             + [f"{n} {v}" for v, n in sorted(counts.items()) if v not in _known])
         mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
                 if data.get("apply_lr") else "detection only")
         imp = data.get("improving_count")
@@ -3707,6 +3740,8 @@ class LoRATrainerGUI:
             progress = (f"📍 TRAINING PLATEAUED — best checkpoint ≈ epoch {be}. "
                         f"Scrub epochs {max(1, be - 2)}–{be + 2} in LoRA Royale to pick by eye; "
                         f"later epochs mainly add overbake risk.")
+        elif data.get("plateaued"):
+            progress = "📍 TRAINING PLATEAUED — no image is still improving."
         elif imp is not None:
             progress = f"{imp} image(s) still improving" + (
                 f"  ·  best checkpoint so far ≈ epoch {int(data['best_epoch_estimate'])}"
@@ -3768,10 +3803,14 @@ class LoRATrainerGUI:
             thumb_holder.pack(side=tk.LEFT, padx=8, pady=8)
             if img_path:
                 try:
-                    im = Image.open(img_path)
-                    im.thumbnail((96, 96), Image.LANCZOS)
-                    ph = ImageTk.PhotoImage(im)
-                    self._problem_thumbs.append(ph)
+                    # Cache by path: the popup refreshes every epoch boundary, and re-decoding a
+                    # whole dataset of thumbnails on the Tk main thread visibly stalls the GUI.
+                    ph = self._problem_thumbs.get(img_path)
+                    if ph is None:
+                        im = Image.open(img_path)
+                        im.thumbnail((96, 96), Image.LANCZOS)
+                        ph = ImageTk.PhotoImage(im)
+                        self._problem_thumbs[img_path] = ph
                     tk.Label(thumb_holder, image=ph, bg=COLORS["bg_surface"]).pack(expand=True)
                 except Exception:
                     img_path = None
@@ -3844,11 +3883,10 @@ class LoRATrainerGUI:
     def _queue_caption_update(self, key: str, caption: str) -> bool:
         """Merge one caption edit into <output_dir>/loss_log/caption_updates.json (atomic write).
         The trainer consumes it at the next epoch boundary and re-encodes the embedding."""
-        out = self.settings.get("LORA_OUTPUT_DIR", "") or ""
-        if not out:
+        d = self._loss_log_dir()
+        if not d:
             return False
         try:
-            d = os.path.join(out, "loss_log")
             os.makedirs(d, exist_ok=True)
             qp = os.path.join(d, "caption_updates.json")
             updates = {}
@@ -3856,8 +3894,13 @@ class LoRATrainerGUI:
                 try:
                     with open(qp, encoding="utf-8") as f:
                         updates = json.load(f)
+                    if not isinstance(updates, dict):
+                        updates = {}
                 except Exception:
-                    updates = {}
+                    # An unreadable EXISTING queue means other pending edits we can't see —
+                    # writing just this key would silently discard them. Fail instead.
+                    print("[caption-fix] queue exists but could not be read — not overwriting it")
+                    return False
             updates[str(key)] = caption
             tmp = qp + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
@@ -3885,6 +3928,7 @@ class LoRATrainerGUI:
         win.minsize(520, 560)
         win.configure(bg=COLORS["bg_deep"])
         editors[key] = win
+        win.bind("<Destroy>", lambda e: editors.pop(key, None) if e.widget is win else None)
 
         # Bottom bar FIRST with side=BOTTOM so the buttons can never be clipped off the window,
         # whatever the thumbnail aspect/caption length pushes the middle content to.
@@ -3912,12 +3956,15 @@ class LoRATrainerGUI:
 
         cap_path = self._find_dataset_caption(key)
         caption = ""
+        cap_read_failed = False
         if cap_path and os.path.exists(cap_path):
             try:
-                with open(cap_path, encoding="utf-8") as f:
+                # utf-8-sig strips a BOM (which would otherwise ride into the embedding);
+                # errors="replace" keeps a legacy-ANSI caption editable instead of blank.
+                with open(cap_path, encoding="utf-8-sig", errors="replace") as f:
                     caption = f.read().strip()
             except Exception:
-                pass
+                cap_read_failed = True
 
         tk.Label(win, text=os.path.basename(key), font=(FONT_FAMILY, 11, "bold"),
                  fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack()
@@ -3926,6 +3973,9 @@ class LoRATrainerGUI:
                       insertbackground=COLORS["text_primary"], relief=tk.FLAT, padx=8, pady=8)
         txt.pack(fill=tk.BOTH, expand=True, padx=14, pady=8)
         txt.insert("1.0", caption)
+        if cap_read_failed:
+            status.config(fg="#E74C3C", text="Couldn't read the existing caption file — the box "
+                          "starts empty. Saving will OVERWRITE the .txt with what you type.")
 
         def _save():
             new_cap = txt.get("1.0", tk.END).strip()

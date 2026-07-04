@@ -3028,8 +3028,9 @@ def setup_parser() -> argparse.ArgumentParser:
                              "reduce DOWN (when loss plateaus).")
     parser.add_argument("--adaptive_lr_min", type=float, default=1e-5,
                         help="Floor for adaptive LR reductions (below 1e-5 is effectively paused; use earlier-epoch checkpoints for recovery instead).")
-    parser.add_argument("--adaptive_lr_max", type=float, default=2e-3,
-                        help="Ceiling for adaptive LR increases.")
+    parser.add_argument("--adaptive_lr_max", type=float, default=4e-4,
+                        help="Ceiling for adaptive LR increases (4e-4 is the empirical ceiling "
+                             "for rank 4:4 Klein 9B LoRAs; the GUI always passes an explicit value).")
 
     # ---- Context LoRA (train new LoRA with existing one frozen + active) ----
     parser.add_argument("--context_lora_path", type=str, default=None,

@@ -540,10 +540,16 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
     if not te_path:
         logger.warning("[caption-fix] caption work is pending but no text encoder path was passed "
                        "(--text_encoder). Leaving the queue for a run with previews configured.")
-        if updates:  # put the claim back
+        if updates:  # put the claim back (atomic + merged — the GUI may have queued more edits)
             try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(updates, f, indent=2)
+                newer = {}
+                if os.path.exists(path):
+                    with open(path, encoding="utf-8") as f:
+                        newer = json.load(f)
+                merged = {**updates, **newer}  # newer GUI edits win
+                with open(path + ".tmp", "w", encoding="utf-8") as f:
+                    json.dump(merged, f, indent=2)
+                os.replace(path + ".tmp", path)
                 os.remove(processing)
             except Exception:
                 pass
@@ -646,8 +652,10 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
             applied = {}
         for k, _, cap, attempt in todo:
             applied[k] = {"epoch": epoch, "caption": cap, "auto": attempt > 0, "attempt": attempt}
-        with open(applied_path, "w", encoding="utf-8") as f:
+        # Atomic write — the GUI polls this file for the row badges.
+        with open(applied_path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(applied, f, indent=2)
+        os.replace(applied_path + ".tmp", applied_path)
         if os.path.exists(processing):
             os.remove(processing)
         logger.info(f"[caption-fix] {len(todo)} caption(s) re-encoded — next epoch trains on the "
@@ -665,8 +673,9 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
                     newer = json.load(f)
             auto_caps = {k: cap for k, _, cap, attempt in todo if attempt > 0}
             merged = {**updates, **auto_caps, **newer}  # newer GUI edits win
-            with open(path, "w", encoding="utf-8") as f:
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(merged, f, indent=2)
+            os.replace(path + ".tmp", path)
             if os.path.exists(processing):
                 os.remove(processing)
         except Exception:
@@ -677,6 +686,11 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
         if blocks_to_swap > 0:
             dit.move_to_device_except_swap_blocks(torch.device(device))
             dit.switch_block_swap_for_training()
+        else:
+            dit.to(device)
+        if getattr(dit, "_nf4_quantized", False):
+            from fizgig.modules.nf4 import move_nf4_to_device
+            move_nf4_to_device(dit, device)
         else:
             dit.to(device)
         if getattr(dit, "_nf4_quantized", False):
@@ -903,8 +917,9 @@ def train_krea2(
     # JSONL is rotated, not deleted — appending would mix runs and corrupt offline analysis.
     if not (resume_state_dir and os.path.isdir(resume_state_dir)):
         _ll = os.path.join(output_dir, "loss_log")
-        for _f in ("problem_images.json", "caption_updates_applied.json", "caption_updates.json",
-                   "caption_updates.json.processing"):
+        for _f in ("problem_images.json", "problem_images.json.tmp",
+                   "caption_updates_applied.json", "caption_updates_applied.json.tmp",
+                   "caption_updates.json", "caption_updates.json.processing"):
             try:
                 os.remove(os.path.join(_ll, _f))
             except OSError:
@@ -954,6 +969,13 @@ def train_krea2(
         loss_watch = PerImageLossWatch(output_dir, apply_lr=per_image_lr,
                                        write_jsonl=log_per_image_loss,
                                        dataset_dir=ar_image_dir, caption_ext=ar_caption_ext)
+        # Reconcile persisted exclusions against the actual training set (prune entries for
+        # images that left the dataset; refuse a file that would exclude everything).
+        loss_watch.preflight(str(it.item_key)
+                             for ds in group.datasets
+                             if getattr(ds, "batch_manager", None) is not None
+                             for bucket in ds.batch_manager.buckets.values()
+                             for it in bucket)
         logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
@@ -964,6 +986,7 @@ def train_krea2(
             # forward, no gradient, and no loss recorded — avr_loss stops carrying their permanent
             # error term. Step accounting (bar + global_step) stays consistent for resume math.
             if loss_watch is not None and loss_watch.is_excluded(batch.get("item_keys")):
+                loss_recorder.drop(step=i)  # the slot leaves avr_loss — no stale/zero padding
                 global_step += 1
                 progress_bar.update(1)
                 continue

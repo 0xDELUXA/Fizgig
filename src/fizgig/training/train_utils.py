@@ -20,27 +20,45 @@ STEP_FILE_NAME = "{}-step{:08d}"
 
 
 class LossRecorder:
-    """Track per-step losses with a running moving average."""
+    """Track per-step losses with a running moving average over the last epoch's worth of steps.
+
+    Slots are indexed by the in-epoch step. A step that records no loss — e.g. an image the
+    loss watch excluded from training — must be drop()ed so its slot leaves the average;
+    otherwise skipped slots hold stale (or zero-padded) values that bias avr_loss, which the
+    adaptive-LR watcher reads as a real signal."""
 
     def __init__(self):
         self.loss_list: list[float] = []
         self.loss_total: float = 0.0
+        self._empty: set[int] = set()  # slots not currently holding a live loss
+
+    def _grow(self, step: int) -> None:
+        while len(self.loss_list) <= step:
+            self._empty.add(len(self.loss_list))
+            self.loss_list.append(0.0)
 
     def add(self, *, epoch: int, step: int, loss: float) -> None:
-        if epoch == 0:
-            self.loss_list.append(loss)
-        else:
-            while len(self.loss_list) <= step:
-                self.loss_list.append(0.0)
+        self._grow(step)
+        if step not in self._empty:
             self.loss_total -= self.loss_list[step]
-            self.loss_list[step] = loss
+        self._empty.discard(step)
+        self.loss_list[step] = loss
         self.loss_total += loss
+
+    def drop(self, *, step: int) -> None:
+        """Mark an in-epoch step as not-trained (skipped/excluded): its slot leaves the average."""
+        self._grow(step)
+        if step not in self._empty:
+            self.loss_total -= self.loss_list[step]
+            self.loss_list[step] = 0.0
+            self._empty.add(step)
 
     @property
     def moving_average(self) -> float:
-        if not self.loss_list:
+        n = len(self.loss_list) - len(self._empty)
+        if n <= 0:
             return 0.0
-        return self.loss_total / len(self.loss_list)
+        return self.loss_total / n
 
 
 def get_epoch_ckpt_name(model_name: str, epoch_no: int) -> str:

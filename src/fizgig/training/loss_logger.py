@@ -255,7 +255,9 @@ class PerImageLossWatch:
             return None
         p = os.path.join(self.dataset_dir, os.path.basename(key) + self.caption_ext)
         try:
-            with open(p, encoding="utf-8") as f:
+            # utf-8-sig + replace: a BOM or stray legacy byte must not make the caption-changed
+            # comparison (the exclusion pardon) read as "unreadable" and keep an image excluded.
+            with open(p, encoding="utf-8-sig", errors="replace") as f:
                 return f.read().strip()
         except Exception:
             return None
@@ -310,6 +312,38 @@ class PerImageLossWatch:
                                 "reason": "still stuck after two AI recaptions",
                                 "caption": self._current_caption(key)}
         self._write_persistent_exclusions()
+
+    def preflight(self, dataset_keys) -> None:
+        """Reconcile persisted exclusion state with the actual training set (trainer calls this
+        once, after the dataloader is built). Prunes exclusion entries whose images have left
+        the dataset (they'd show as ghost rows in the popup and pad the file forever), and
+        refuses a state that excludes EVERY image — a run that trains on nothing is never what
+        anyone wants, whatever the file says."""
+        try:
+            keys = {str(k) for k in dataset_keys}
+            if not keys:
+                return
+            ghosts = {k for k in self._excluded if k not in keys}
+            if ghosts:
+                self._excluded -= ghosts
+                self._incorrigible -= ghosts
+                changed = False
+                for g in ghosts:
+                    if g in self._excl_data:
+                        del self._excl_data[g]
+                        changed = True
+                if changed:
+                    self._write_persistent_exclusions()
+                logger.info(f"[loss-watch] pruned {len(ghosts)} stale exclusion entries for "
+                            f"images no longer in the dataset")
+            if self._excluded and len(self._excluded) >= len(keys):
+                logger.warning("[loss-watch] fizgig_excluded.json excludes EVERY image in the "
+                               "dataset — ignoring it for this run so training can happen at all. "
+                               "Delete the file (or fix captions) to clear the exclusions properly.")
+                self._excluded.clear()
+                self._incorrigible.clear()
+        except Exception:
+            logger.warning("[loss-watch] preflight failed", exc_info=True)
 
     # ---- per-step ------------------------------------------------------------
 
@@ -428,6 +462,11 @@ class PerImageLossWatch:
             ext_hi = max(med + 1.5 * iqr, hi)
             ext_vhi = max(med + 3.0 * iqr, hi)
             n_ep = len(self._epochs_seen)
+            # Exclusion cap: never exclude past half the dataset. Beyond that the flags are
+            # relative rankings within a shrinking pool, not evidence of poison — over-cap
+            # candidates retire as exhausted (still train, gently) instead.
+            total_imgs = len(stats) + sum(1 for k in self._excluded if k not in stats)
+            excl_cap = max(1, total_imgs // 2)
 
             # Per-epoch RAW votes -> persistence state machine. One noisy epoch can't flip a
             # verdict: stuck is CONFIRMED only after persist_on consecutive stuck votes, and
@@ -522,7 +561,14 @@ class PerImageLossWatch:
                 if key in self._confirmed_stuck and key in self._incorrigible:
                     self._confirmed_stuck.discard(key)
                     self._last_reported_stuck.discard(key)
-                    if self._healthy_epochs.get(key, 0) >= self.healthy_min:
+                    if len(self._excluded) >= excl_cap:
+                        self._retired.add(key)
+                        logger.warning(f"[loss-watch] epoch {epoch}: {os.path.basename(key)} "
+                                       f"qualifies for exclusion but the cap "
+                                       f"({excl_cap}/{total_imgs} images) is reached — retiring "
+                                       f"as exhausted (x{self.exhausted_mult}) instead.")
+                        verdict, mult = "exhausted", self.exhausted_mult
+                    elif self._healthy_epochs.get(key, 0) >= self.healthy_min:
                         # Ever-healthy images have PROVEN learnability — a later souring is the
                         # mined-out/drift pattern, not caption poison. Retire as permanent
                         # exhausted instead of excluding; it keeps training, gently.
@@ -625,7 +671,9 @@ class PerImageLossWatch:
             try:
                 d = os.path.join(self.output_dir, "loss_log")
                 os.makedirs(d, exist_ok=True)
-                with open(os.path.join(d, "problem_images.json"), "w", encoding="utf-8") as f:
+                report = os.path.join(d, "problem_images.json")
+                # Atomic write — the GUI polls this file and must never read a half-written dump.
+                with open(report + ".tmp", "w", encoding="utf-8") as f:
                     json.dump({"epoch": epoch, "apply_lr": self.apply_lr,
                                "improving_count": improving_count,
                                "plateaued": self.plateaued,
@@ -633,6 +681,7 @@ class PerImageLossWatch:
                                "images": {k: {kk: (round(vv, 6) if isinstance(vv, float) else vv)
                                               for kk, vv in s.items()} for k, s in stats.items()}},
                               f, indent=2)
+                os.replace(report + ".tmp", report)
             except Exception:
                 pass
             return self.verdicts

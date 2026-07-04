@@ -520,7 +520,14 @@ class PerImageLossWatch:
                 # noise level — by definition not an outlier, whatever its trend. And with under
                 # 4 epochs of history (fresh run, or history reset after a caption fix) there is
                 # no trend to judge — it can't vote stuck yet.
+                # Wobble bar (mean_residual > se): "hard" must be a real magnitude, not a rank.
+                # The top third of a SPOTLESS dataset is still occupied by someone — without this,
+                # the hardest clean images get convicted by percentile alone. An image only votes
+                # stuck when it sits above average by more than its own epoch-to-epoch noise
+                # (real caption poison clears this bar by an order of magnitude; validated by
+                # replaying the 2026-07 real-run logs through both detector versions).
                 votes_stuck = (s["trend_epochs"] >= 4 and s["mean_residual"] >= hi
+                               and s["mean_residual"] > s["se"]
                                and s["last"] > 0.0 and not improving and not good_run)
                 if key in self._confirmed_stuck:
                     self._stuck_epochs[key] = self._stuck_epochs.get(key, 0) + 1
@@ -542,7 +549,10 @@ class PerImageLossWatch:
                 # Early-suspicion votes: extreme magnitude, not yet improving. (With <4 trend
                 # epochs `improving` is always False, which is exactly right here — magnitude is
                 # the only early signal, and release comes via the improve test once a trend forms.)
-                extreme = s["mean_residual"] >= ext_hi and not improving and not good_run
+                # Same wobble bar once a trend exists; pre-trend (se unknowable) stays
+                # magnitude-only — early suspicion is deliberately fast and mild.
+                extreme = (s["mean_residual"] >= ext_hi and not improving and not good_run
+                           and (s["trend_epochs"] < 4 or s["mean_residual"] > s["se"]))
                 self._suspect_votes[key] = self._suspect_votes.get(key, 0) + 1 if extreme else 0
                 suspect = (key not in self._confirmed_stuck
                            and (self._suspect_votes[key] >= 2

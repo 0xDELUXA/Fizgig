@@ -83,6 +83,16 @@ Everything works on Krea 2: **all five workbench tools** (Profiler, Extract, Rep
 
 Krea 2 trains real, ComfyUI-compatible LoRAs, and its training recipe is verified against the reference implementation — same noised/target flow-matching, `krea2_shift` timestep sampling, and gradient clipping.
 
+### The trainer curates your dataset while it trains (Krea 2, experimental)
+
+Three Training-tab toggles turn a run into a live dataset curator — no other trainer does any of this:
+
+- **Detect problem images** — every image's loss is tracked across epochs, normalized for the random noise level each step draws (raw per-step loss mostly ranks the dice roll, not the image). Images that stay hard **without improving** get flagged in the console and in the live **Problem Images window** (thumbnails, verdicts, per-image trends, auto-refreshing every epoch). In real runs the top flags were all caption/image mismatches — e.g. from-behind shots whose captions never said so. The detector finds them from the loss trajectory alone.
+- **Per-image adaptive LR** — flagged images are throttled (suspects ×0.7 from ~epoch 3, confirmed-stuck ×0.5 escalating toward ×0.1) so one bad caption can't keep yanking the weights all run, while fully-mined images ease off to prevent overbake. In matched-epoch A/Bs this gave faster likeness *and* a higher final ceiling — with real skin texture where the untreated run went plastic.
+- **Auto-recaption stuck images** — the same Qwen3-VL that conditions training *looks at* each confirmed-stuck image between epochs, rewrites its caption from what's actually visible (appending your trigger word if set), re-encodes it, and gives the image a fresh start. A second attempt goes exhaustive-detail; still stuck after two means the image is **excluded** for the rest of the run — so the loss average stops carrying its permanent error term — and the exclusion is remembered per-dataset (`fizgig_excluded.json`, travels with your images). Fix the caption and it's automatically re-admitted.
+
+You can also edit any caption yourself mid-run from the Problem Images window — the trainer re-encodes it at the next epoch boundary, no restart. And once nothing is improving any more, the watch tells you you're **done**: a plateau banner with a best-checkpoint estimate and a suggested epoch window to scrub in LoRA Royale.
+
 ---
 
 ## Training

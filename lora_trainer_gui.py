@@ -3735,13 +3735,23 @@ class LoRATrainerGUI:
         mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
                 if data.get("apply_lr") else "detection only")
         imp = data.get("improving_count")
+        pend = int(data.get("pending_count") or 0)
         if data.get("plateaued") and data.get("best_epoch_estimate"):
             be = int(data["best_epoch_estimate"])
-            progress = (f"📍 TRAINING PLATEAUED — best checkpoint ≈ epoch {be}. "
-                        f"Scrub epochs {max(1, be - 2)}–{be + 2} in LoRA Royale to pick by eye; "
-                        f"later epochs mainly add overbake risk.")
+            if pend:
+                progress = (f"⏳ Plateau (provisional) — the settled images finished ≈ epoch {be}, "
+                            f"but {pend} image(s) are still being adjudicated (throttled or freshly "
+                            f"recaptioned). If they resolve, training may get a second wind and a "
+                            f"LATER epoch may be the better checkpoint — wait for the confirmed "
+                            f"plateau (0 pending) before stopping.")
+            else:
+                progress = (f"📍 TRAINING PLATEAUED — best checkpoint ≈ epoch {be}. "
+                            f"Scrub epochs {max(1, be - 2)}–{be + 2} in LoRA Royale to pick by eye; "
+                            f"later epochs mainly add overbake risk.")
         elif data.get("plateaued"):
-            progress = "📍 TRAINING PLATEAUED — no image is still improving."
+            progress = ("⏳ Plateau (provisional) — nothing improving, but "
+                        f"{pend} image(s) still being adjudicated." if pend else
+                        "📍 TRAINING PLATEAUED — no image is still improving.")
         elif imp is not None:
             progress = f"{imp} image(s) still improving" + (
                 f"  ·  best checkpoint so far ≈ epoch {int(data['best_epoch_estimate'])}"

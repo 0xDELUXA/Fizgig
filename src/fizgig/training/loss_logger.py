@@ -229,7 +229,9 @@ class PerImageLossWatch:
         self._improving_streak: dict[str, int] = {}   # consecutive improve-passes per key
         self._no_improve_streak = 0
         self._plateau_reported = False
+        self._plateau_was_provisional = False
         self.plateaued = False
+        self.plateau_pending = 0
         self.best_epoch_estimate = None
 
         # Persistent exclusions: fizgig_excluded.json lives IN the dataset folder (exclusions are
@@ -648,17 +650,43 @@ class PerImageLossWatch:
             else:
                 self._no_improve_streak = 0
             self.plateaued = self._no_improve_streak >= self.plateau_patience
+            # Pending adjudication: images whose fate is still open — throttled awaiting release/
+            # exclusion, or freshly reset (a recaption wiped their history, so their trend is
+            # INVISIBLE to improving_count for ~4 epochs). A plateau declared while these exist is
+            # PROVISIONAL: resolving them (exclusion cleans the gradient; a caption fix revives
+            # learning) routinely gives the run a second wind, so the estimate can move later.
+            # Real-run validated 2026-07-05: plateau fired at epoch 13 with 8 images mid-ladder.
+            self.plateau_pending = sum(
+                1 for k, s in stats.items()
+                if k not in self._excluded
+                and (s.get("verdict") in ("stuck", "suspect", "watch")
+                     or s.get("trend_epochs", 0) < 4))
             finishes = sorted(e for k, e in self._last_improving_epoch.items()
                               if k not in self._excluded)
             if finishes:
                 self.best_epoch_estimate = int(finishes[int(0.75 * (len(finishes) - 1))])
+            # A provisional plateau upgrades to a confirmed one the moment the pending set
+            # resolves — re-announce then, even if the plateau flag never broke in between.
+            if self._plateau_reported and self._plateau_was_provisional and not self.plateau_pending:
+                self._plateau_reported = False
             if self.plateaued and not self._plateau_reported and self.best_epoch_estimate:
                 be = self.best_epoch_estimate
-                logger.info(f"[loss-watch] epoch {epoch}: training has PLATEAUED — no image has "
-                            f"improved for {self.plateau_patience} epochs. Estimated best "
-                            f"checkpoint ≈ epoch {be} (75th percentile of per-image finish "
-                            f"epochs). Scrub epochs {max(1, be - 2)}–{be + 2} in LoRA Royale to "
-                            f"pick by eye — later epochs mainly add overbake risk.")
+                self._plateau_was_provisional = bool(self.plateau_pending)
+                if self.plateau_pending:
+                    logger.info(f"[loss-watch] epoch {epoch}: training looks plateaued for the "
+                                f"settled images (best so far ≈ epoch {be}), but "
+                                f"{self.plateau_pending} image(s) are still being adjudicated "
+                                f"(throttled or freshly recaptioned). If they resolve, training "
+                                f"may get a second wind and a LATER epoch may become the better "
+                                f"checkpoint — trust the plateau once it re-declares with none "
+                                f"pending.")
+                else:
+                    logger.info(f"[loss-watch] epoch {epoch}: training has PLATEAUED — no image "
+                                f"has improved for {self.plateau_patience} epochs and nothing is "
+                                f"pending adjudication. Estimated best checkpoint ≈ epoch {be} "
+                                f"(75th percentile of per-image finish epochs). Scrub epochs "
+                                f"{max(1, be - 2)}–{be + 2} in LoRA Royale to pick by eye — "
+                                f"later epochs mainly add overbake risk.")
                 self._plateau_reported = True
             elif not self.plateaued:
                 self._plateau_reported = False
@@ -687,6 +715,7 @@ class PerImageLossWatch:
                     json.dump({"epoch": epoch, "apply_lr": self.apply_lr,
                                "improving_count": improving_count,
                                "plateaued": self.plateaued,
+                               "pending_count": self.plateau_pending,
                                "best_epoch_estimate": self.best_epoch_estimate,
                                "images": {k: {kk: (round(vv, 6) if isinstance(vv, float) else vv)
                                               for kk, vv in s.items()} for k, s in stats.items()}},

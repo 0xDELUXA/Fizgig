@@ -3645,7 +3645,7 @@ class LoRATrainerGUI:
             return
         win = tk.Toplevel(self.master)
         win.title("Problem Images — per-image loss watch")
-        win.geometry("760x640")
+        win.geometry("1010x640")
         win.configure(bg=COLORS["bg_deep"])
         self._problem_win = win
         self._problem_mtime = None

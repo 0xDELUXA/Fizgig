@@ -17,11 +17,13 @@ from PIL import Image, ImageTk
 
 # Face detection imports (optional - graceful fallback if not installed)
 try:
-    from face_utils import FaceDetector, crop_to_face, draw_face_boxes, is_face_detection_available
+    from face_utils import (FaceDetector, FaceEmbedder, crop_to_face, draw_face_boxes,
+                            is_face_detection_available)
     FACE_DETECTION_AVAILABLE = is_face_detection_available()
 except ImportError:
     FACE_DETECTION_AVAILABLE = False
     FaceDetector = None
+    FaceEmbedder = None
 
 # Refined Color Palette (Fizgig Visual Style Guide)
 COLORS = {
@@ -6741,6 +6743,27 @@ class LoRATrainerGUI:
         )
         self.convert_log.pack(fill=tk.BOTH, expand=True)
 
+        # Card 6: Look Consistency Filter — deliberately the LAST card: it scores the images as
+        # they'll actually be trained, so it only makes sense after resize/crop/captioning is done.
+        filter_card = self._start_section_card(
+            outer, "Final Step: Look Consistency Filter (faces)",
+            "Run this LAST, after every other prep stage — it scores the finished training folder. "
+            "Pick one baseline image that nails the look you want, and every image's face is scored "
+            "against it (ArcFace embedding similarity). Great for weeding out synthetic images that "
+            "drifted off-look — the subtle near-misses a loss curve can never see. Click images to "
+            "mark them, or let Auto-Suggest flag the statistical outliers, then move the marked "
+            "ones out of the dataset in one go (they go to an 'excluded_by_look' subfolder — "
+            "nothing is deleted).",
+        )
+        self._face_filter_btn = ttk.Button(
+            filter_card, text="🔍 Open Look Filter…", command=self._open_face_filter_window,
+            state="normal" if FACE_DETECTION_AVAILABLE else "disabled",
+        )
+        self._face_filter_btn.pack(anchor=tk.W)
+        if not FACE_DETECTION_AVAILABLE:
+            ttk.Label(filter_card, text="(Run install_fizgig.py to enable face tools)",
+                      foreground=COLORS["warning"]).pack(anchor=tk.W, pady=(4, 0))
+
         self._add_youtube_help_button(outer, "image_prep")
 
     def browse_convert_output(self):
@@ -6908,6 +6931,345 @@ class LoRATrainerGUI:
 
         # Close button
         ttk.Button(preview_window, text="Close", command=preview_window.destroy).pack(pady=10)
+
+    # region Look Consistency Filter (face-embedding drift)
+
+    _FF_EXTS = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+
+    def _ff_verdict(self, sim):
+        """(label, color, blurb) for a similarity score. Thresholds are ArcFace cosine-sim
+        conventions: same person across varied photos usually lands 0.30-0.70 vs a single
+        baseline; a different person rarely clears 0.25."""
+        if sim is None:
+            return ("no face", "#7F8C8D",
+                    "No face detected — can't be scored. Back shots are fine; judge by eye.")
+        if sim >= 0.45:
+            return ("match", "#70AD47", "Solid match to the baseline look.")
+        if sim >= 0.30:
+            return ("borderline", "#E67E22",
+                    "Same person territory, but drifting — worth an eyeball.")
+        return ("drift", "#E74C3C",
+                "Weak match — likely off-look (synthetic drift or a different subject).")
+
+    def _open_face_filter_window(self):
+        """Look Consistency Filter — score every training image's face against a chosen baseline
+        (ArcFace embeddings, CPU), mark drifters by click or auto-suggest, and move the marked
+        ones to <folder>/excluded_by_look/. The Image Prep card places this LAST on purpose:
+        it scores the finished dataset, so run it after resize/crop/captioning."""
+        win = getattr(self, "_ff_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            return
+        win = tk.Toplevel(self.master)
+        win.title("Look Consistency Filter — face embedding drift")
+        win.geometry("860x720")
+        win.configure(bg=COLORS["bg_deep"])
+        self._ff_win = win
+        self._ff_thumbs = {}          # path -> PhotoImage (kept alive)
+        self._ff_scores = {}          # path -> float similarity or None (no face)
+        self._ff_marked = set()       # paths marked for exclusion
+        self._ff_baseline = None
+        self._ff_baseline_emb = None
+        self._ff_busy = False
+        if not hasattr(self, "_ff_embed_cache"):
+            self._ff_embed_cache = {}     # (path, mtime) -> embedding or None; survives reopens
+        if not hasattr(self, "_ff_embedder"):
+            self._ff_embedder = None      # lazy FaceEmbedder; model load is the slow part
+
+        head = tk.Frame(win, bg=COLORS["bg_deep"])
+        head.pack(fill=tk.X, padx=14, pady=(12, 6))
+        tk.Label(head, text="Look Consistency Filter", font=(FONT_FAMILY, 15, "bold"),
+                 fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(side=tk.LEFT)
+        self._ff_apply_btn = ttk.Button(head, text="Move Marked Out of Dataset",
+                                        command=self._ff_apply_moves, state="disabled")
+        self._ff_apply_btn.pack(side=tk.RIGHT)
+        self._ff_suggest_btn = ttk.Button(head, text="Auto-Suggest Drift",
+                                          command=self._ff_auto_suggest, state="disabled")
+        self._ff_suggest_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+        base_row = tk.Frame(win, bg=COLORS["bg_deep"])
+        base_row.pack(fill=tk.X, padx=14, pady=(0, 4))
+        self._ff_base_thumb_holder = tk.Frame(base_row, width=72, height=72, bg=COLORS["bg_surface"],
+                                              highlightbackground=COLORS["border"], highlightthickness=1)
+        self._ff_base_thumb_holder.pack_propagate(False)
+        self._ff_base_thumb_holder.pack(side=tk.LEFT)
+        self._ff_base_thumb_label = tk.Label(self._ff_base_thumb_holder, text="no\nbaseline",
+                                             font=(FONT_FAMILY, 8), fg=COLORS["text_muted"],
+                                             bg=COLORS["bg_surface"])
+        self._ff_base_thumb_label.pack(expand=True)
+        base_btns = tk.Frame(base_row, bg=COLORS["bg_deep"])
+        base_btns.pack(side=tk.LEFT, padx=(10, 0))
+        self._ff_base_name = tk.Label(base_btns, text="Pick the image that best nails the look you want.",
+                                      font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"],
+                                      bg=COLORS["bg_deep"], anchor="w")
+        self._ff_base_name.pack(anchor="w")
+        btns = tk.Frame(base_btns, bg=COLORS["bg_deep"])
+        btns.pack(anchor="w", pady=(6, 0))
+        ttk.Button(btns, text="Choose Baseline…", command=self._ff_choose_baseline).pack(side=tk.LEFT)
+        self._ff_scan_btn = ttk.Button(btns, text="Scan Folder", command=self._ff_scan, state="disabled")
+        self._ff_scan_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self._ff_status = tk.Label(win, text="Scores are ArcFace cosine similarity to the baseline. "
+                                             "Same person typically lands 30–70% against a single photo — "
+                                             "only the baseline itself scores near 100%.",
+                                   font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
+                                   justify=tk.LEFT, anchor="w", wraplength=820)
+        self._ff_status.pack(fill=tk.X, padx=14)
+
+        holder = tk.Frame(win, bg=COLORS["bg_deep"])
+        holder.pack(fill=tk.BOTH, expand=True, padx=14, pady=(6, 12))
+        canvas = tk.Canvas(holder, bg=COLORS["bg_deep"], highlightthickness=0)
+        vbar = ttk.Scrollbar(holder, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vbar.set)
+        vbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rows = tk.Frame(canvas, bg=COLORS["bg_deep"])
+        rows_id = canvas.create_window((0, 0), window=rows, anchor="nw")
+        rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(rows_id, width=e.width))
+        # Enter/Leave bind_all swapping (the app-wide pattern — see Problem Images window).
+        _ff_wheel = lambda e: canvas.yview_scroll(-1 * int(e.delta / 120), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _ff_wheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
+        self._ff_rows = rows
+
+    def _ff_set_status(self, text):
+        win = getattr(self, "_ff_win", None)
+        if win is not None and win.winfo_exists():
+            self._ff_status.config(text=text)
+
+    def _ff_choose_baseline(self):
+        folder = self.image_folder_var.get().strip()
+        path = filedialog.askopenfilename(
+            title="Choose baseline image (the look you want)",
+            initialdir=folder if folder and os.path.isdir(folder) else None,
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")])
+        if not path:
+            return
+        self._ff_baseline = path
+        self._ff_baseline_emb = None   # re-embedded on next scan (cache makes this cheap)
+        try:
+            im = Image.open(path)
+            im.thumbnail((68, 68), Image.LANCZOS)
+            ph = ImageTk.PhotoImage(im)
+            self._ff_thumbs["__baseline__"] = ph
+            self._ff_base_thumb_label.config(image=ph, text="")
+        except Exception:
+            self._ff_base_thumb_label.config(image="", text="no\npreview")
+        self._ff_base_name.config(text=f"Baseline: {os.path.basename(path)}")
+        self._ff_scan_btn.config(state="normal")
+        if self._ff_scores:
+            self._ff_set_status("Baseline changed — click Scan Folder to re-score "
+                                "(cached embeddings make this fast).")
+
+    def _ff_embed_cached(self, path):
+        """Embedding via the (path, mtime) cache — model load + detection is the slow part,
+        so re-scans and baseline swaps cost almost nothing."""
+        try:
+            key = (path, os.path.getmtime(path))
+        except OSError:
+            return None
+        if key not in self._ff_embed_cache:
+            if self._ff_embedder is None:
+                self._ff_embedder = FaceEmbedder()
+            try:
+                self._ff_embed_cache[key] = self._ff_embedder.embed(path)
+            except Exception:
+                self._ff_embed_cache[key] = None
+        return self._ff_embed_cache[key]
+
+    def _ff_scan(self):
+        if self._ff_busy:
+            return
+        folder = self.image_folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning("Look Filter", "Set your training image folder on the Start tab first.")
+            return
+        if not self._ff_baseline or not os.path.exists(self._ff_baseline):
+            messagebox.showwarning("Look Filter", "Choose a baseline image first.")
+            return
+        files = sorted(
+            os.path.join(folder, f) for f in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, f))
+            and os.path.splitext(f)[1].lower() in self._FF_EXTS)
+        if not files:
+            messagebox.showinfo("Look Filter", "No images found in the training folder.")
+            return
+        self._ff_busy = True
+        self._ff_scan_btn.config(state="disabled")
+        self._ff_suggest_btn.config(state="disabled")
+        self._ff_apply_btn.config(state="disabled")
+        self._ff_set_status("Loading face model (first run downloads ~300 MB)…")
+        win = self._ff_win
+
+        def work():
+            import numpy as np
+            try:
+                base_emb = self._ff_embed_cached(self._ff_baseline)
+                if base_emb is None:
+                    self.master.after(0, lambda: self._ff_scan_done(None, "No face found in the "
+                                      "baseline image — pick one with a clear face."))
+                    return
+                scores = {}
+                for i, p in enumerate(files, 1):
+                    if not win.winfo_exists():
+                        return   # window closed mid-scan — drop the work silently
+                    emb = self._ff_embed_cached(p)
+                    scores[p] = None if emb is None else float(np.dot(base_emb, emb))
+                    if i % 3 == 0 or i == len(files):
+                        done, total = i, len(files)
+                        self.master.after(0, lambda d=done, t=total:
+                                          self._ff_set_status(f"Scoring faces… {d}/{t}"))
+                self.master.after(0, lambda: self._ff_scan_done(scores, None))
+            except Exception as e:
+                self.master.after(0, lambda err=str(e): self._ff_scan_done(None, f"Scan failed: {err}"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ff_scan_done(self, scores, error):
+        self._ff_busy = False
+        win = getattr(self, "_ff_win", None)
+        if win is None or not win.winfo_exists():
+            return
+        self._ff_scan_btn.config(state="normal")
+        if error:
+            self._ff_set_status(error)
+            return
+        self._ff_scores = scores
+        self._ff_marked &= set(scores)   # drop marks for files that vanished
+        self._ff_suggest_btn.config(state="normal")
+        scored = [s for s in scores.values() if s is not None]
+        nf = sum(1 for s in scores.values() if s is None)
+        self._ff_set_status(f"{len(scores)} image(s) scored — {len(scored)} with faces, {nf} without. "
+                            "Worst matches first. Click a row (or its button) to mark it, or use "
+                            "Auto-Suggest.")
+        self._ff_build_rows()
+
+    def _ff_toggle(self, path):
+        if path in self._ff_marked:
+            self._ff_marked.discard(path)
+        else:
+            self._ff_marked.add(path)
+        self._ff_build_rows()
+
+    def _ff_auto_suggest(self):
+        """Mark statistical drift: below the dataset's own low outlier fence (median − 1.5·IQR)
+        or below the 0.25 different-person floor. No-face rows are never suggested — unscoreable
+        isn't the same as bad (think from-behind shots)."""
+        scored = sorted(s for s in self._ff_scores.values() if s is not None)
+        if len(scored) < 4:
+            messagebox.showinfo("Look Filter", "Not enough scored faces for statistics — mark by eye.")
+            return
+        n = len(scored)
+        med = scored[n // 2]
+        q1, q3 = scored[n // 4], scored[(3 * n) // 4]
+        cutoff = max(med - 1.5 * (q3 - q1), 0.25)   # dataset's low outlier fence, floored at the
+        newly = {p for p, s in self._ff_scores.items()   # ~different-person similarity level
+                 if s is not None and s < cutoff and p != self._ff_baseline}
+        self._ff_marked |= newly
+        self._ff_set_status(f"Auto-suggest marked {len(newly)} image(s) "
+                            f"(dataset median {med * 100:.0f}%, cutoff {cutoff * 100:.0f}%). "
+                            "Review before moving — it flags statistical drift, not certainty.")
+        self._ff_build_rows()
+
+    def _ff_build_rows(self):
+        win = getattr(self, "_ff_win", None)
+        if win is None or not win.winfo_exists():
+            return
+        for w in self._ff_rows.winfo_children():
+            w.destroy()
+        # Worst match first; unscoreable (no face) at the bottom — they're a judgement call.
+        items = sorted(self._ff_scores.items(),
+                       key=lambda kv: (kv[1] is None, kv[1] if kv[1] is not None else 0.0))
+        for path, sim in items:
+            label, color, blurb = self._ff_verdict(sim)
+            marked = path in self._ff_marked
+            row = tk.Frame(self._ff_rows, bg=COLORS["bg_surface"],
+                           highlightbackground="#C0392B" if marked else color,
+                           highlightthickness=3 if marked else 2)
+            row.pack(fill=tk.X, pady=4)
+
+            thumb_holder = tk.Frame(row, width=100, height=100, bg=COLORS["bg_surface"])
+            thumb_holder.pack_propagate(False)
+            thumb_holder.pack(side=tk.LEFT, padx=8, pady=8)
+            try:
+                ph = self._ff_thumbs.get(path)
+                if ph is None:
+                    im = Image.open(path)
+                    im.thumbnail((96, 96), Image.LANCZOS)
+                    ph = ImageTk.PhotoImage(im)
+                    self._ff_thumbs[path] = ph
+                tl = tk.Label(thumb_holder, image=ph, bg=COLORS["bg_surface"], cursor="hand2")
+                tl.pack(expand=True)
+                tl.bind("<Button-1>", lambda e, p=path: self._ff_toggle(p))
+            except Exception:
+                tk.Label(thumb_holder, text="no\npreview", font=(FONT_FAMILY, 8),
+                         fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(expand=True)
+
+            info = tk.Frame(row, bg=COLORS["bg_surface"])
+            info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
+            name_row = tk.Frame(info, bg=COLORS["bg_surface"])
+            name_row.pack(fill=tk.X, anchor="w")
+            tk.Label(name_row, text=os.path.basename(path), font=(FONT_FAMILY, 10, "bold"),
+                     fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            tk.Label(name_row, text=f"  {label.upper()}", font=(FONT_FAMILY, 9, "bold"),
+                     fg=color, bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            if path == self._ff_baseline:
+                tk.Label(name_row, text="  ★ baseline", font=(FONT_FAMILY, 9),
+                         fg="#F1C40F", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            if marked:
+                tk.Label(name_row, text="  ❌ marked for exclusion", font=(FONT_FAMILY, 9, "bold"),
+                         fg="#C0392B", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+            ttk.Button(name_row, text="Keep" if marked else "Mark", width=8,
+                       command=lambda p=path: self._ff_toggle(p)).pack(side=tk.RIGHT, padx=(8, 0))
+
+            sim_txt = f"match {sim * 100:.0f}%" if sim is not None else "no face to score"
+            tk.Label(info, text=sim_txt, font=(FONT_FAMILY, 9),
+                     fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
+            tk.Label(info, text=blurb, font=(FONT_FAMILY, 8, "italic"),
+                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
+        self._ff_apply_btn.config(state="normal" if self._ff_marked else "disabled")
+
+    def _ff_apply_moves(self):
+        """Move marked images (+ their caption .txt) to <folder>/excluded_by_look/. Never deletes."""
+        marked = [p for p in self._ff_marked if os.path.exists(p)]
+        if not marked:
+            return
+        folder = self.image_folder_var.get().strip()
+        dest_dir = os.path.join(folder, "excluded_by_look")
+        if not messagebox.askyesno(
+                "Move marked images",
+                f"Move {len(marked)} image(s) (plus matching captions) out of the dataset "
+                f"to:\n\n{dest_dir}\n\nNothing is deleted — move them back to re-admit them."):
+            return
+        import shutil
+        os.makedirs(dest_dir, exist_ok=True)
+        moved = 0
+        for p in marked:
+            try:
+                base = os.path.basename(p)
+                target = os.path.join(dest_dir, base)
+                n = 2
+                while os.path.exists(target):
+                    stem, ext = os.path.splitext(base)
+                    target = os.path.join(dest_dir, f"{stem}_{n}{ext}")
+                    n += 1
+                shutil.move(p, target)
+                cap = os.path.splitext(p)[0] + ".txt"
+                if os.path.exists(cap):
+                    cap_target = os.path.splitext(target)[0] + ".txt"
+                    shutil.move(cap, cap_target)
+                moved += 1
+                self._ff_scores.pop(p, None)
+                self._ff_marked.discard(p)
+            except Exception as e:
+                self._ff_set_status(f"Could not move {os.path.basename(p)}: {e}")
+        self._ff_build_rows()
+        self._ff_set_status(f"Moved {moved} image(s) to {dest_dir}. "
+                            f"{len(self._ff_scores)} image(s) remain in the dataset.")
+
+    # endregion
 
     # region Image Prep Helpers
 

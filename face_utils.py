@@ -341,6 +341,70 @@ def draw_face_boxes(
     return preview
 
 
+class FaceEmbedder:
+    """
+    Face-embedding extractor (ArcFace via InsightFace) for look-consistency scoring.
+
+    Separate from FaceDetector because it loads the recognition module (detection +
+    recognition) — FaceDetector only loads detection + genderage. Same lazy-loading,
+    CPU-only pattern. Embeddings are 512-dim and L2-normalized (`normed_embedding`),
+    so cosine similarity between two faces is a plain dot product.
+
+    Usage:
+        embedder = FaceEmbedder()
+        emb = embedder.embed("image.png")     # largest face's embedding, or None
+        sim = float(np.dot(emb_a, emb_b))     # cosine similarity
+    """
+
+    def __init__(self):
+        self._app = None
+        self._available = None
+
+    @property
+    def available(self) -> bool:
+        if self._available is None:
+            try:
+                import insightface  # noqa: F401
+                self._available = True
+            except ImportError:
+                self._available = False
+        return self._available
+
+    def _ensure_loaded(self):
+        if self._app is not None:
+            return
+        if not self.available:
+            raise ImportError(
+                "InsightFace is not installed. "
+                "Run install_fizgig.py to set up face detection."
+            )
+        from insightface.app import FaceAnalysis
+        self._app = FaceAnalysis(
+            name='buffalo_l',
+            allowed_modules=['detection', 'recognition'],
+            providers=['CPUExecutionProvider']
+        )
+        self._app.prepare(ctx_id=-1)
+
+    def embed(self, image_path: str) -> Optional[np.ndarray]:
+        """
+        Embedding of the LARGEST detected face in the image, or None if no face.
+
+        Loads via PIL (handles unicode paths on Windows, unlike cv2.imread) and
+        converts to the BGR array InsightFace expects.
+        """
+        self._ensure_loaded()
+        import cv2
+        pil = Image.open(image_path).convert("RGB")
+        img_bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
+        faces = self._app.get(img_bgr)
+        if not faces:
+            return None
+        largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))
+        emb = getattr(largest, "normed_embedding", None)
+        return None if emb is None else np.asarray(emb, dtype=np.float32)
+
+
 # Convenience function for checking availability
 def is_face_detection_available() -> bool:
     """Check if face detection dependencies are installed"""

@@ -386,6 +386,30 @@ class FaceEmbedder:
         )
         self._app.prepare(ctx_id=-1)
 
+    def _detect_with_pad_retry(self, img_bgr):
+        """Detect faces, retrying with a padded border if none are found.
+
+        RetinaFace (buffalo_l) fails on faces that FILL the frame — a close-up
+        headshot is too large for its anchor scales, so it returns nothing.
+        Padding a border around the image shrinks the face's fraction of the
+        frame, bringing it back into the detector's working range; it shifts
+        coordinates but not the face content, so the embedding is unchanged.
+        Only pads when the unpadded pass fails (no regression for normal
+        framing). Same fix as src/fizgig/lora_royale/likeness.py.
+        """
+        import cv2
+        faces = self._app.get(img_bgr)
+        if faces:
+            return faces
+        for pad in (0.25, 0.5):
+            h, w = img_bgr.shape[:2]
+            py, px = int(h * pad), int(w * pad)
+            padded = cv2.copyMakeBorder(img_bgr, py, py, px, px, cv2.BORDER_REPLICATE)
+            faces = self._app.get(padded)
+            if faces:
+                return faces
+        return []
+
     def embed(self, image_path: str) -> Optional[np.ndarray]:
         """
         Embedding of the LARGEST detected face in the image, or None if no face.
@@ -397,7 +421,7 @@ class FaceEmbedder:
         import cv2
         pil = Image.open(image_path).convert("RGB")
         img_bgr = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
-        faces = self._app.get(img_bgr)
+        faces = self._detect_with_pad_retry(img_bgr)
         if not faces:
             return None
         largest = max(faces, key=lambda f: (f.bbox[2] - f.bbox[0]) * (f.bbox[3] - f.bbox[1]))

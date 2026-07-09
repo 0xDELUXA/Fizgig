@@ -56,7 +56,7 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--log_per_image_loss", action="store_true",
                    help="Per-image loss tracking + stuck-image detection (loss_log/problem_images.json)")
     p.add_argument("--per_image_lr", action="store_true",
-                   help="Per-image adaptive LR: throttle stuck images, ease off learned (experimental)")
+                   help="Per-image adaptive LR: throttle stuck images, boost healthy learned ones (experimental)")
     p.add_argument("--auto_recaption", action="store_true",
                    help="Auto-recaption confirmed-stuck images with Qwen3-VL between epochs (experimental)")
     p.add_argument("--trigger_word", default=None,

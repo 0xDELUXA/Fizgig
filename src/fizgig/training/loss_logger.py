@@ -118,11 +118,12 @@ class PerImageLossWatch:
         LEARNING (high but descending — hard-but-good), or easy, logs stuck images to the console,
         and writes <output_dir>/loss_log/problem_images.json.
       * per-image adaptive LR (`apply_lr=True`): additionally emits a per-image loss multiplier —
-        throttle STUCK images (default x0.5) so one bad image can't keep yanking the weights, gently
-        ease off easy/learned ones (default x0.9), leave hard-but-learning alone. At batch size 1,
-        scaling the step's loss IS a per-image LR. Guardrails: no action during the warmup epochs
-        (the trend needs data), multipliers only ever reduce (never boost), and batch size > 1
-        disables scaling entirely (a batch mean isn't a per-image signal).
+        throttle STUCK images (default x0.5) so one bad image can't keep yanking the weights, give
+        healthy/learned ones a gentle boost (default x1.1), leave hard-but-learning alone. At batch
+        size 1, scaling the step's loss IS a per-image LR. Guardrails: no action during the warmup
+        epochs (the trend needs data), the healthy x1.1 is the ONLY boost (every problem verdict
+        reduces), and batch size > 1 disables scaling entirely (a batch mean isn't a per-image
+        signal).
 
     Normalization matches the validated offline analyzer: residuals are recomputed at every epoch
     boundary against the CURRENT per-timestep-bucket means over the whole run so far — never the
@@ -132,7 +133,7 @@ class PerImageLossWatch:
 
     def __init__(self, output_dir: str, *, apply_lr: bool = False, write_jsonl: bool = False,
                  warmup_epochs: int = 2, window: int = 5,
-                 throttle_mult: float = 0.5, easy_mult: float = 0.9,
+                 throttle_mult: float = 0.5, easy_mult: float = 1.1,
                  hi_q: float = 0.66, lo_q: float = 0.33,
                  persist_on: int = 2, persist_off: int = 3,
                  improve_frac: float = 0.12, improve_floor: float = 0.02,
@@ -166,7 +167,7 @@ class PerImageLossWatch:
         # Rationale: modern runs form identity in epochs 1-6 (real likeness by epoch 3 on clean
         # data), so waiting for trend confirmation acts after the damage window has closed.
         self.suspect_mult = suspect_mult
-        self.easy_from_epoch = easy_from_epoch  # easy ease-off needs a slightly steadier baseline
+        self.easy_from_epoch = easy_from_epoch  # healthy boost needs a slightly steadier baseline
         # "Exhausted" tier: an image that PROVED a good run (residual dropped >= exhaust_drop_frac
         # of its early baseline) and then plateaued while still above-average difficulty. Its
         # caption is fine — the model has mined what it can — so further full-LR passes are mostly

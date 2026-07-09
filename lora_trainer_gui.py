@@ -2555,7 +2555,7 @@ class LoRATrainerGUI:
         self.krea2_per_image_lr_var = tk.BooleanVar(value=bool(self.settings.get("KREA2_PER_IMAGE_LR", False)))
         self._krea2_perimglr_cb = ttk.Checkbutton(
             training_content,
-            text="Per-image adaptive LR (throttle stuck images, ease off learned ones) — experimental",
+            text="Per-image adaptive LR (throttle stuck images, boost healthy learned ones) — experimental",
             variable=self.krea2_per_image_lr_var,
         )
         self._krea2_perimglr_cb.grid(row=21, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(2, 0))
@@ -2571,7 +2571,7 @@ class LoRATrainerGUI:
                        "flags images that stay hard without improving — usually mislabeled/off-concept data — in the "
                        "console, the Problem Images window, and loss_log/problem_images.json. Per-image LR also "
                        "throttles them (suspects ×0.7 from ~epoch 3, confirmed stuck ×0.5 from ~epoch 5 escalating "
-                       "to ×0.1), eases off mined-out images (×0.6) and learned ones (×0.9). Auto-recaption goes "
+                       "to ×0.1), eases off mined-out images (×0.6) and gives healthy learned ones a gentle boost (×1.1). Auto-recaption goes "
                        "further: when an image is confirmed stuck, the Qwen3-VL text encoder looks at it and rewrites "
                        "its caption from what's actually visible (appending your Captions-tab trigger word, if set), "
                        "re-encodes it, and gives the image a fresh start (a 2nd attempt goes extra-detailed; still "
@@ -3732,7 +3732,7 @@ class LoRATrainerGUI:
         _known = ("excluded", "stuck", "suspect", "watch", "exhausted", "learning", "mid", "easy")
         tally = "  ·  ".join([f"{counts.get(v, 0)} {v}" for v in _known]
                              + [f"{n} {v}" for v, n in sorted(counts.items()) if v not in _known])
-        mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×0.9)"
+        mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×1.1 boost)"
                 if data.get("apply_lr") else "detection only")
         imp = data.get("improving_count")
         pend = int(data.get("pending_count") or 0)
@@ -3792,7 +3792,7 @@ class LoRATrainerGUI:
             "exhausted": ("#16A085", "Fully mined — improved a lot, then plateaued. Caption is fine; LR eased to prevent overbake."),
             "learning": ("#5B9BD5", "Learning — hard but improving. Leave it alone."),
             "mid":      ("#95A5A6", "Normal."),
-            "easy":     ("#70AD47", "Learned — consistently easy."),
+            "easy":     ("#70AD47", "Learned — consistently easy. Gets a gentle ×1.1 boost to keep the healthy signal strong."),
         }
         order = {"excluded": 0, "stuck": 1, "suspect": 2, "watch": 3, "exhausted": 4,
                  "learning": 5, "mid": 6, "easy": 7}

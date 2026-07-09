@@ -908,7 +908,7 @@ def train_krea2(
     #   env FIZGIG_PERIMAGE_LOSS_LOG=1  -> passive JSONL log only (offline study)
     #   log_per_image_loss (GUI toggle) -> JSONL + per-epoch stuck-image detection report
     #   per_image_lr (GUI toggle)       -> detection + per-image loss multiplier (throttle stuck,
-    #                                      ease off learned; safe per-image LR at batch size 1)
+    #                                      boost healthy learned; safe per-image LR at batch size 1)
     from fizgig.training.loss_logger import PerImageLossWatch, is_enabled as _loss_log_env
     # Fresh (non-resume) run: clear the previous run's loss-log artifacts so the GUI's Problem
     # Images window never shows stale verdicts (problem_images.json only gets rewritten after the
@@ -993,7 +993,7 @@ def train_krea2(
             loss, t_used = compute_loss(dit, batch["latents"], batch["hidden_states"], batch["attention_mask"],
                                         shift=shift, dtype=dtype)
             # Per-image LR: scale THIS step's gradient by the image's multiplier (throttle stuck
-            # images, ease off learned ones). Raw loss is still what gets recorded/averaged below,
+            # images, boost healthy learned ones). Raw loss is still what gets recorded/averaged below,
             # so avr_loss and the global adaptive-LR watcher see unscaled numbers.
             step_mult = loss_watch.multiplier(batch.get("item_keys")) if loss_watch is not None else 1.0
             (loss * step_mult if step_mult != 1.0 else loss).backward()

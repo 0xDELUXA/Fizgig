@@ -3635,6 +3635,48 @@ class LoRATrainerGUI:
                 return p
         return None
 
+    def _load_thumbs_async(self, jobs, cache):
+        """Decode row thumbnails OFF the Tk main thread. Decoding a whole dataset of
+        full-resolution PNGs inline froze the Problem Images / Look Filter windows for
+        seconds; rows now show a placeholder and fill in as each decode completes.
+        jobs: [(image_path, placeholder_label)]; cache: path -> PhotoImage (holds refs)."""
+        def work():
+            done = []
+            for p, lbl in jobs:
+                try:
+                    # with-block: PIL otherwise keeps the file handle open until GC, and an
+                    # open handle makes Windows fail a later move of that image (Look Filter's
+                    # "Move Marked" raced this and left a copy behind). thumbnail() forces a
+                    # full decode, so the raster stays usable after close.
+                    with Image.open(p) as im:
+                        im.thumbnail((96, 96), Image.LANCZOS)
+                        done.append((p, im, lbl))
+                except Exception:
+                    done.append((p, None, lbl))
+            def apply():
+                for p, im, lbl in done:
+                    ph = cache.get(p)
+                    if ph is None and im is not None:
+                        try:
+                            ph = ImageTk.PhotoImage(im)
+                            cache[p] = ph
+                        except Exception:
+                            ph = None
+                    try:
+                        if not lbl.winfo_exists():
+                            continue
+                        if ph is not None:
+                            lbl.config(image=ph, text="")
+                        else:
+                            lbl.config(text="no\npreview")
+                    except Exception:
+                        pass
+            try:
+                self.master.after(0, apply)
+            except Exception:
+                pass   # GUI torn down mid-decode
+        threading.Thread(target=work, daemon=True).start()
+
     def _open_problem_images_window(self):
         """Live viewer for the per-image loss watch — thumbnails + verdicts, auto-refreshing
         during training from <output_dir>/loss_log/problem_images.json."""
@@ -3679,6 +3721,7 @@ class LoRATrainerGUI:
         canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
         win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
         self._problem_rows = rows
+        self._problem_canvas = canvas
 
         self._refresh_problem_images(force=True)
 
@@ -3718,6 +3761,12 @@ class LoRATrainerGUI:
         elif not force:
             return  # still no file; nothing to redraw
 
+        # Rebuilding scrolls the canvas back to the top — restore the reading position after,
+        # or every epoch-boundary refresh yanks the user away from the row they were studying.
+        try:
+            scroll_pos = self._problem_canvas.yview()[0]
+        except Exception:
+            scroll_pos = 0.0
         for w in self._problem_rows.winfo_children():
             w.destroy()
 
@@ -3802,6 +3851,7 @@ class LoRATrainerGUI:
                        key=lambda kv: (order.get(kv[1].get("verdict", "mid"), 2),
                                        -float(kv[1].get("mean_residual", 0.0))))
 
+        thumb_jobs = []
         for key, s in items:
             verdict = s.get("verdict", "mid")
             color, blurb = style.get(verdict, style["mid"])
@@ -3814,19 +3864,17 @@ class LoRATrainerGUI:
             thumb_holder.pack_propagate(False)
             thumb_holder.pack(side=tk.LEFT, padx=8, pady=8)
             if img_path:
-                try:
-                    # Cache by path: the popup refreshes every epoch boundary, and re-decoding a
-                    # whole dataset of thumbnails on the Tk main thread visibly stalls the GUI.
-                    ph = self._problem_thumbs.get(img_path)
-                    if ph is None:
-                        im = Image.open(img_path)
-                        im.thumbnail((96, 96), Image.LANCZOS)
-                        ph = ImageTk.PhotoImage(im)
-                        self._problem_thumbs[img_path] = ph
+                # Cached thumbs render immediately; the rest decode on a background thread
+                # (_load_thumbs_async) — decoding full-res PNGs inline froze the window.
+                ph = self._problem_thumbs.get(img_path)
+                if ph is not None:
                     tk.Label(thumb_holder, image=ph, bg=COLORS["bg_surface"]).pack(expand=True)
-                except Exception:
-                    img_path = None
-            if not img_path:
+                else:
+                    lbl = tk.Label(thumb_holder, text="…", font=(FONT_FAMILY, 8),
+                                   fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+                    lbl.pack(expand=True)
+                    thumb_jobs.append((img_path, lbl))
+            else:
                 tk.Label(thumb_holder, text="no\npreview", font=(FONT_FAMILY, 8),
                          fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(expand=True)
 
@@ -3879,6 +3927,14 @@ class LoRATrainerGUI:
                      fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
             tk.Label(info, text=blurb, font=(FONT_FAMILY, 8, "italic"),
                      fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
+
+        if thumb_jobs:
+            self._load_thumbs_async(thumb_jobs, self._problem_thumbs)
+        try:
+            self._problem_rows.update_idletasks()
+            self._problem_canvas.yview_moveto(scroll_pos)
+        except Exception:
+            pass
 
     def _find_dataset_caption(self, key: str):
         """Caption file for a loss-watch item key: <image_folder>/<basename><caption_ext>."""
@@ -6968,6 +7024,7 @@ class LoRATrainerGUI:
         self._ff_thumbs = {}          # path -> PhotoImage (kept alive)
         self._ff_scores = {}          # path -> float similarity or None (no face)
         self._ff_marked = set()       # paths marked for exclusion
+        self._ff_row_ui = {}          # path -> row widgets (in-place repaints)
         self._ff_baseline = None
         self._ff_baseline_emb = None
         self._ff_busy = False
@@ -7050,9 +7107,9 @@ class LoRATrainerGUI:
         self._ff_baseline = path
         self._ff_baseline_emb = None   # re-embedded on next scan (cache makes this cheap)
         try:
-            im = Image.open(path)
-            im.thumbnail((68, 68), Image.LANCZOS)
-            ph = ImageTk.PhotoImage(im)
+            with Image.open(path) as im:
+                im.thumbnail((68, 68), Image.LANCZOS)
+                ph = ImageTk.PhotoImage(im)
             self._ff_thumbs["__baseline__"] = ph
             self._ff_base_thumb_label.config(image=ph, text="")
         except Exception:
@@ -7151,7 +7208,26 @@ class LoRATrainerGUI:
             self._ff_marked.discard(path)
         else:
             self._ff_marked.add(path)
-        self._ff_build_rows()
+        # In-place row update — a full rebuild on every click froze the window for a beat
+        # and yanked the scroll position back to the top.
+        self._ff_update_row(path)
+        self._ff_apply_btn.config(state="normal" if self._ff_marked else "disabled")
+
+    def _ff_update_row(self, path):
+        """Repaint one row's marked/unmarked state without rebuilding the list."""
+        ui = getattr(self, "_ff_row_ui", {}).get(path)
+        if ui is None:
+            return
+        try:
+            if not ui["frame"].winfo_exists():
+                return
+            marked = path in self._ff_marked
+            ui["frame"].config(highlightbackground="#C0392B" if marked else ui["color"],
+                               highlightthickness=3 if marked else 2)
+            ui["mark"].config(text="  ❌ marked for exclusion" if marked else "")
+            ui["btn"].config(text="Keep" if marked else "Mark")
+        except Exception:
+            pass
 
     def _ff_auto_suggest(self):
         """Mark statistical drift: below the dataset's own low outlier fence (median − 1.5·IQR)
@@ -7171,7 +7247,9 @@ class LoRATrainerGUI:
         self._ff_set_status(f"Auto-suggest marked {len(newly)} image(s) "
                             f"(dataset median {med * 100:.0f}%, cutoff {cutoff * 100:.0f}%). "
                             "Review before moving — it flags statistical drift, not certainty.")
-        self._ff_build_rows()
+        for p in newly:
+            self._ff_update_row(p)
+        self._ff_apply_btn.config(state="normal" if self._ff_marked else "disabled")
 
     def _ff_build_rows(self):
         win = getattr(self, "_ff_win", None)
@@ -7179,6 +7257,8 @@ class LoRATrainerGUI:
             return
         for w in self._ff_rows.winfo_children():
             w.destroy()
+        self._ff_row_ui = {}   # path -> widgets for in-place mark/unmark repaints
+        thumb_jobs = []
         # Worst match first; unscoreable (no face) at the bottom — they're a judgement call.
         items = sorted(self._ff_scores.items(),
                        key=lambda kv: (kv[1] is None, kv[1] if kv[1] is not None else 0.0))
@@ -7193,19 +7273,15 @@ class LoRATrainerGUI:
             thumb_holder = tk.Frame(row, width=100, height=100, bg=COLORS["bg_surface"])
             thumb_holder.pack_propagate(False)
             thumb_holder.pack(side=tk.LEFT, padx=8, pady=8)
-            try:
-                ph = self._ff_thumbs.get(path)
-                if ph is None:
-                    im = Image.open(path)
-                    im.thumbnail((96, 96), Image.LANCZOS)
-                    ph = ImageTk.PhotoImage(im)
-                    self._ff_thumbs[path] = ph
-                tl = tk.Label(thumb_holder, image=ph, bg=COLORS["bg_surface"], cursor="hand2")
-                tl.pack(expand=True)
-                tl.bind("<Button-1>", lambda e, p=path: self._ff_toggle(p))
-            except Exception:
-                tk.Label(thumb_holder, text="no\npreview", font=(FONT_FAMILY, 8),
-                         fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(expand=True)
+            ph = self._ff_thumbs.get(path)
+            tl = tk.Label(thumb_holder, bg=COLORS["bg_surface"], cursor="hand2")
+            if ph is not None:
+                tl.config(image=ph)
+            else:
+                tl.config(text="…", font=(FONT_FAMILY, 8), fg=COLORS["text_muted"])
+                thumb_jobs.append((path, tl))
+            tl.pack(expand=True)
+            tl.bind("<Button-1>", lambda e, p=path: self._ff_toggle(p))
 
             info = tk.Frame(row, bg=COLORS["bg_surface"])
             info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
@@ -7218,17 +7294,22 @@ class LoRATrainerGUI:
             if path == self._ff_baseline:
                 tk.Label(name_row, text="  ★ baseline", font=(FONT_FAMILY, 9),
                          fg="#F1C40F", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
-            if marked:
-                tk.Label(name_row, text="  ❌ marked for exclusion", font=(FONT_FAMILY, 9, "bold"),
-                         fg="#C0392B", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
-            ttk.Button(name_row, text="Keep" if marked else "Mark", width=8,
-                       command=lambda p=path: self._ff_toggle(p)).pack(side=tk.RIGHT, padx=(8, 0))
+            mark_lbl = tk.Label(name_row, text="  ❌ marked for exclusion" if marked else "",
+                                font=(FONT_FAMILY, 9, "bold"),
+                                fg="#C0392B", bg=COLORS["bg_surface"])
+            mark_lbl.pack(side=tk.LEFT)
+            btn = ttk.Button(name_row, text="Keep" if marked else "Mark", width=8,
+                             command=lambda p=path: self._ff_toggle(p))
+            btn.pack(side=tk.RIGHT, padx=(8, 0))
+            self._ff_row_ui[path] = {"frame": row, "mark": mark_lbl, "btn": btn, "color": color}
 
             sim_txt = f"match {sim * 100:.0f}%" if sim is not None else "no face to score"
             tk.Label(info, text=sim_txt, font=(FONT_FAMILY, 9),
                      fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
             tk.Label(info, text=blurb, font=(FONT_FAMILY, 8, "italic"),
                      fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
+        if thumb_jobs:
+            self._load_thumbs_async(thumb_jobs, self._ff_thumbs)
         self._ff_apply_btn.config(state="normal" if self._ff_marked else "disabled")
 
     def _ff_apply_moves(self):
@@ -7247,6 +7328,7 @@ class LoRATrainerGUI:
         os.makedirs(dest_dir, exist_ok=True)
         moved = 0
         for p in marked:
+            target = None
             try:
                 base = os.path.basename(p)
                 target = os.path.join(dest_dir, base)
@@ -7263,9 +7345,25 @@ class LoRATrainerGUI:
                 moved += 1
                 self._ff_scores.pop(p, None)
                 self._ff_marked.discard(p)
+                # Drop just this row — rebuilding the whole list is slow and loses scroll position.
+                ui = self._ff_row_ui.pop(p, None)
+                if ui is not None:
+                    try:
+                        ui["frame"].destroy()
+                    except Exception:
+                        pass
             except Exception as e:
+                # A failed move can leave a half-state behind (shutil.move falls back to
+                # copy+delete when the source is briefly locked, e.g. mid thumbnail decode;
+                # the copy lands, the delete fails). Remove the orphan copy so the image
+                # isn't duplicated in and out of the dataset.
+                try:
+                    if target and os.path.exists(p) and os.path.exists(target):
+                        os.remove(target)
+                except Exception:
+                    pass
                 self._ff_set_status(f"Could not move {os.path.basename(p)}: {e}")
-        self._ff_build_rows()
+        self._ff_apply_btn.config(state="normal" if self._ff_marked else "disabled")
         self._ff_set_status(f"Moved {moved} image(s) to {dest_dir}. "
                             f"{len(self._ff_scores)} image(s) remain in the dataset.")
 

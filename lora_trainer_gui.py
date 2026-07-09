@@ -5966,18 +5966,45 @@ class LoRATrainerGUI:
         self.gallery_server_port = self.find_free_port()
 
         # Create handler that serves images from samples/ and checkpoints from /loras/ (output dir).
+        app = self   # for the likeness endpoints (never touch Tk vars from handler threads)
+
         class SamplesHandler(SimpleHTTPRequestHandler):
             def __init__(handler_self, *args, **kwargs):
                 super().__init__(*args, directory=samples_dir, **kwargs)
 
             def translate_path(handler_self, path):
                 # /loras/<file> -> the checkpoint in the output dir (basename-only, no traversal).
+                # /dataset/<file> -> a training image (for the likeness baseline picker).
                 clean = path.split('?', 1)[0].split('#', 1)[0]
                 if clean.startswith('/loras/'):
                     import posixpath, urllib.parse
                     fname = posixpath.basename(urllib.parse.unquote(clean[len('/loras/'):]))
                     return os.path.join(output_dir, fname)
+                if clean.startswith('/dataset/'):
+                    import posixpath, urllib.parse
+                    fname = posixpath.basename(urllib.parse.unquote(clean[len('/dataset/'):]))
+                    return os.path.join(getattr(app, "_gal_dataset_dir", "") or "", fname)
                 return super().translate_path(path)
+
+            def do_POST(handler_self):
+                # /set_baselines {"baselines": [3 names]} -> start CPU likeness scoring;
+                # empty list clears it. Everything else is a 404.
+                clean = handler_self.path.split('?', 1)[0].split('#', 1)[0]
+                if clean != '/set_baselines':
+                    handler_self.send_error(404)
+                    return
+                try:
+                    ln = int(handler_self.headers.get('Content-Length') or 0)
+                    data = json.loads(handler_self.rfile.read(ln) or b'{}')
+                    ok, msg = app._gallery_set_baselines(data.get('baselines') or [])
+                except Exception as e:
+                    ok, msg = False, str(e)
+                body = json.dumps({"ok": ok, "msg": msg}).encode("utf-8")
+                handler_self.send_response(200 if ok else 400)
+                handler_self.send_header('Content-Type', 'application/json')
+                handler_self.send_header('Content-Length', str(len(body)))
+                handler_self.end_headers()
+                handler_self.wfile.write(body)
 
             def log_message(handler_self, format, *args):
                 pass  # Suppress logging
@@ -6011,6 +6038,11 @@ class LoRATrainerGUI:
 
         gallery_path = os.path.join(samples_dir, "gallery.html")
 
+        # Snapshot the dataset folder for the likeness picker/scorer — the HTTP handler and
+        # the scoring worker run on background threads and must never touch Tk variables.
+        self._gal_dataset_dir = (self.image_folder_var.get().strip()
+                                 if hasattr(self, "image_folder_var") else "")
+
         # Always regenerate the template so template changes (e.g. the per-epoch download link) are
         # picked up — otherwise a stale gallery.html from an earlier run keeps the old JS forever.
         # The file is purely generated (static template + embedded data filled by update_gallery_html),
@@ -6019,6 +6051,9 @@ class LoRATrainerGUI:
 
         # Generate/update the gallery HTML with current files
         self.update_gallery_html()
+
+        # If a previous session picked likeness baselines, resume scoring automatically.
+        self._gallery_resume_likeness()
 
         # Start HTTP server if not running
         self.start_gallery_server()
@@ -6096,6 +6131,29 @@ class LoRATrainerGUI:
         #lightbox .image-details { margin-top: 15px; text-align: center; }
         #lightbox .image-name { color: #ECF0F1; font-size: 16px; }
         #lightbox .image-meta { color: #95A5A6; font-size: 14px; margin-top: 5px; }
+        .lik-badge { position: absolute; bottom: 10px; left: 10px; padding: 4px 10px; border-radius: 4px;
+                     font-weight: bold; font-size: 13px; color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
+        .lik-good { background-color: #27AE60; } .lik-mid { background-color: #E67E22; }
+        .lik-bad { background-color: #C0392B; } .lik-na { background-color: #5D6D7E; }
+        #likeness-panel { display: none; background-color: #22303F; border-bottom: 1px solid #2C3E50; padding: 12px 20px; }
+        #likeness-panel h3 { font-size: 15px; margin-bottom: 8px; color: #ECF0F1; }
+        #lik-chart { background-color: #1B2A38; border-radius: 6px; width: 100%; max-width: 940px; height: 150px; display: block; }
+        #likeness-panel .lik-note { color: #95A5A6; font-size: 12px; margin-top: 6px; }
+        #basepicker { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                      background-color: rgba(0,0,0,0.93); z-index: 1100; overflow-y: auto; padding: 24px 30px; }
+        #basepicker.active { display: block; }
+        #bp-bar { position: sticky; top: -24px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+                  background-color: rgba(0,0,0,0.93); padding: 12px 0; z-index: 1; }
+        #bp-bar h2 { font-size: 20px; margin-right: 8px; }
+        #bp-bar button { padding: 8px 16px; background-color: #2980B9; color: #ECF0F1; border: none; border-radius: 4px; cursor: pointer; }
+        #bp-bar button:disabled { background-color: #5D6D7E; cursor: default; }
+        .bp-sub { color: #95A5A6; margin: 6px 0 14px 0; font-size: 13px; }
+        #bp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+        .bp-item { border-radius: 6px; overflow: hidden; cursor: pointer; outline: 3px solid transparent; position: relative; }
+        .bp-item img { width: 100%; height: 140px; object-fit: cover; display: block; background-color: #1B2A38; }
+        .bp-item.selected { outline-color: #27AE60; }
+        .bp-item .bp-num { position: absolute; top: 6px; left: 6px; background-color: #27AE60; color: #fff; font-weight: bold;
+                           border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; }
     </style>
 </head>
 <body>
@@ -6116,11 +6174,20 @@ class LoRATrainerGUI:
                 <option value="0">Off</option>
             </select></label>
             <button onclick="loadImages()">Refresh Now</button>
+            <button onclick="openBaselinePicker()">🎯 Likeness scoring…</button>
             <a id="final-lora-btn" class="final-lora-btn" href="#" download style="display:none">⬇ Download Final LoRA</a>
             <span class="stats" id="stats">0 images</span>
             <span class="status" id="status">Ready</span>
+            <span class="status" id="lik-status"></span>
         </div>
     </header>
+    <div id="likeness-panel">
+        <h3>Likeness vs baselines — <span id="lik-run"></span></h3>
+        <canvas id="lik-chart" width="940" height="150"></canvas>
+        <div class="lik-note">Average ArcFace similarity of each epoch's samples to your 3 baseline photos
+            (scoreable faces only — no-face samples are skipped). Same person typically lands 30–70%.
+            This measures identity likeness ONLY: overbake / plastic skin still needs your eyes.</div>
+    </div>
     <main>
         <div id="gallery">
             <div class="no-images">
@@ -6138,6 +6205,19 @@ class LoRATrainerGUI:
             <div class="image-meta" id="lightbox-meta"></div>
         </div>
     </div>
+    <div id="basepicker">
+        <div id="bp-bar">
+            <h2>🎯 Pick 3 baseline images</h2>
+            <button id="bp-start" onclick="submitBaselines()" disabled>Start scoring</button>
+            <button onclick="clearBaselines()">Clear scoring</button>
+            <button onclick="closeBaselinePicker()">Cancel</button>
+            <span class="status" id="bp-status"></span>
+        </div>
+        <div class="bp-sub">Choose the 3 training images that best nail the look you want — every sample is scored
+            against all three and averaged, so no single photo's angle/lighting biases the result.
+            Scoring runs on CPU with zero impact on training speed.</div>
+        <div id="bp-grid"></div>
+    </div>
     <!-- EMBEDDED_FILES_START -->
     <script id="files-data" type="application/json">[]</script>
     <!-- EMBEDDED_FILES_END -->
@@ -6145,6 +6225,8 @@ class LoRATrainerGUI:
         let images = [];
         let currentLightboxIndex = 0;
         let refreshTimer = null;
+        let likeness = null;      // {baselines, status, scores} from likeness.json
+        let bpSelected = [];      // baseline picker selection (max 3)
 
         document.getElementById('sort-select').value = localStorage.getItem('fizgig-sort') || 'newest';
         document.getElementById('refresh-select').value = localStorage.getItem('fizgig-refresh') || '10';
@@ -6215,7 +6297,9 @@ class LoRATrainerGUI:
                             }
                         }
                     } catch (e) {}
+                    await loadLikeness();
                     renderGallery();
+                    renderLikenessChart();
                     document.getElementById('stats').textContent = `${images.length} image${images.length !== 1 ? 's' : ''}`;
                     document.getElementById('status').textContent = `Updated: ${new Date().toLocaleTimeString()}`;
                     return;
@@ -6261,6 +6345,7 @@ class LoRATrainerGUI:
                     <div class="image-container">
                         <img src="${img.filename}" alt="${img.filename}" loading="lazy">
                         <span class="badge epoch-badge">Epoch ${img.epoch}</span>
+                        ${likBadge(img)}
                     </div>
                     <div class="image-info">
                         <div class="lora-name">${img.loraName}</div>
@@ -6272,6 +6357,160 @@ class LoRATrainerGUI:
                     </div>
                 </div>`).join('');
         }
+
+        // ---------- Likeness scoring (CPU ArcFace vs 3 baselines, scored by Fizgig) ----------
+
+        async function loadLikeness() {
+            try {
+                const r = await fetch('likeness.json?t=' + Date.now());
+                if (r.ok) likeness = await r.json();
+            } catch (e) {}
+            const active = likeness && likeness.baselines && likeness.baselines.length === 3;
+            document.getElementById('lik-status').textContent = active ? ('🎯 ' + (likeness.status || '')) : '';
+        }
+
+        function likBadge(img) {
+            if (!likeness || !likeness.baselines || likeness.baselines.length !== 3) return '';
+            const s = likeness.scores ? likeness.scores[img.filename] : undefined;
+            if (s === undefined) return `<span class="lik-badge lik-na">…</span>`;
+            if (s === null) return `<span class="lik-badge lik-na">no face</span>`;
+            const cls = s >= 0.45 ? 'lik-good' : (s >= 0.30 ? 'lik-mid' : 'lik-bad');
+            return `<span class="lik-badge ${cls}">${Math.round(s * 100)}%</span>`;
+        }
+
+        function renderLikenessChart() {
+            const panel = document.getElementById('likeness-panel');
+            const active = likeness && likeness.baselines && likeness.baselines.length === 3 && likeness.scores;
+            if (!active || images.length === 0) { panel.style.display = 'none'; return; }
+            // Current run = the LoRA name of the newest sample (old runs' samples share the
+            // folder but must not pollute the trend).
+            let newest = null;
+            images.forEach(im => { if (!newest || im.timestamp > newest.timestamp) newest = im; });
+            const byEpoch = {};
+            images.forEach(im => {
+                if (im.loraName !== newest.loraName) return;
+                const s = likeness.scores[im.filename];
+                if (typeof s === 'number') (byEpoch[im.epoch] = byEpoch[im.epoch] || []).push(s);
+            });
+            const epochs = Object.keys(byEpoch).map(Number).sort((a, b) => a - b);
+            if (!epochs.length) { panel.style.display = 'none'; return; }
+            const avgs = epochs.map(e => byEpoch[e].reduce((a, b) => a + b, 0) / byEpoch[e].length);
+            let bestI = 0;
+            avgs.forEach((v, i) => { if (v > avgs[bestI]) bestI = i; });
+            document.getElementById('lik-run').textContent =
+                `${newest.loraName} — best so far: epoch ${epochs[bestI]} (${Math.round(avgs[bestI] * 100)}%)`;
+            panel.style.display = 'block';
+            const cv = document.getElementById('lik-chart');
+            const ctx = cv.getContext('2d');
+            const W = cv.width, H = cv.height, padL = 42, padR = 12, padT = 12, padB = 22;
+            ctx.clearRect(0, 0, W, H);
+            const ymax = Math.max(0.7, Math.max(...avgs) + 0.05);
+            const x = i => epochs.length === 1 ? (padL + (W - padL - padR) / 2)
+                                               : padL + (W - padL - padR) * i / (epochs.length - 1);
+            const y = v => padT + (H - padT - padB) * (1 - v / ymax);
+            ctx.font = '11px Segoe UI';
+            ctx.lineWidth = 1;
+            [0.30, 0.45].forEach(g => {   // the badge colour bands, for orientation
+                ctx.strokeStyle = '#34495E'; ctx.fillStyle = '#7F8C8D';
+                ctx.beginPath(); ctx.moveTo(padL, y(g)); ctx.lineTo(W - padR, y(g)); ctx.stroke();
+                ctx.fillText(Math.round(g * 100) + '%', 8, y(g) + 4);
+            });
+            ctx.strokeStyle = '#3498DB'; ctx.lineWidth = 2; ctx.beginPath();
+            avgs.forEach((v, i) => { i ? ctx.lineTo(x(i), y(v)) : ctx.moveTo(x(i), y(v)); });
+            ctx.stroke();
+            const labelEvery = Math.max(1, Math.ceil(epochs.length / 40));
+            avgs.forEach((v, i) => {
+                ctx.fillStyle = i === bestI ? '#27AE60' : '#3498DB';
+                ctx.beginPath(); ctx.arc(x(i), y(v), i === bestI ? 5 : 3.5, 0, Math.PI * 2); ctx.fill();
+                if (i % labelEvery === 0 || i === bestI) {
+                    ctx.fillStyle = '#95A5A6';
+                    ctx.fillText(epochs[i], x(i) - 6, H - 6);
+                }
+            });
+        }
+
+        async function openBaselinePicker() {
+            const bp = document.getElementById('basepicker');
+            bp.classList.add('active');
+            document.body.style.overflow = 'hidden';
+            const grid = document.getElementById('bp-grid');
+            grid.innerHTML = '<div style="color:#95A5A6">Loading dataset…</div>';
+            let names = [];
+            try {
+                const r = await fetch('dataset.json?t=' + Date.now());
+                if (r.ok) names = await r.json();
+            } catch (e) {}
+            if (!names.length) {
+                grid.innerHTML = '<div style="color:#E74C3C">No dataset images found — set the training ' +
+                                 'image folder on the Start tab, then reopen the gallery from Fizgig.</div>';
+                return;
+            }
+            bpSelected = (likeness && likeness.baselines && likeness.baselines.length === 3)
+                         ? [...likeness.baselines] : [];
+            grid.innerHTML = names.map(n => `
+                <div class="bp-item" data-name="${n}" onclick="toggleBaseline(this)">
+                    <img src="dataset/${encodeURIComponent(n)}" loading="lazy">
+                </div>`).join('');
+            refreshBpMarks();
+        }
+
+        function toggleBaseline(el) {
+            const n = el.dataset.name;
+            const i = bpSelected.indexOf(n);
+            if (i >= 0) bpSelected.splice(i, 1);
+            else { if (bpSelected.length >= 3) bpSelected.shift(); bpSelected.push(n); }
+            refreshBpMarks();
+        }
+
+        function refreshBpMarks() {
+            document.querySelectorAll('.bp-item').forEach(el => {
+                const i = bpSelected.indexOf(el.dataset.name);
+                el.classList.toggle('selected', i >= 0);
+                let num = el.querySelector('.bp-num');
+                if (i >= 0) {
+                    if (!num) { num = document.createElement('div'); num.className = 'bp-num'; el.appendChild(num); }
+                    num.textContent = i + 1;
+                } else if (num) num.remove();
+            });
+            document.getElementById('bp-start').disabled = bpSelected.length !== 3;
+            document.getElementById('bp-status').textContent = `${bpSelected.length}/3 selected`;
+        }
+
+        async function submitBaselines() {
+            await postBaselines(bpSelected, true);
+        }
+
+        async function clearBaselines() {
+            await postBaselines([], true);
+            likeness = null;
+            renderGallery();
+            renderLikenessChart();
+            document.getElementById('lik-status').textContent = '';
+        }
+
+        async function postBaselines(names, closeOnOk) {
+            const st = document.getElementById('bp-status');
+            st.textContent = 'Sending…';
+            try {
+                const r = await fetch('set_baselines', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ baselines: names })
+                });
+                const res = await r.json();
+                if (res.ok) { if (closeOnOk) closeBaselinePicker(); loadImages(); }
+                else st.textContent = '⚠ ' + res.msg;
+            } catch (e) {
+                st.textContent = '⚠ Fizgig not reachable — reopen the gallery from the app.';
+            }
+        }
+
+        function closeBaselinePicker() {
+            document.getElementById('basepicker').classList.remove('active');
+            document.body.style.overflow = '';
+        }
+
+        // ---------- Lightbox ----------
 
         function openLightbox(filename) {
             const idx = images.findIndex(img => img.filename === filename);
@@ -6298,6 +6537,10 @@ class LoRATrainerGUI:
         }
 
         document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && document.getElementById('basepicker').classList.contains('active')) {
+                closeBaselinePicker();
+                return;
+            }
             if (!document.getElementById('lightbox').classList.contains('active')) return;
             if (e.key === 'Escape') closeLightbox();
             if (e.key === 'ArrowLeft') navigateLightbox(-1);
@@ -6363,6 +6606,18 @@ class LoRATrainerGUI:
         except Exception:
             pass
 
+        # Dataset image list for the likeness baseline picker (images served via /dataset/).
+        try:
+            dfolder = getattr(self, "_gal_dataset_dir", "") or ""
+            dimgs = []
+            if dfolder and os.path.isdir(dfolder):
+                dimgs = sorted(f for f in os.listdir(dfolder)
+                               if os.path.splitext(f)[1].lower() in self._FF_EXTS)
+            with open(os.path.join(samples_dir, "dataset.json"), 'w', encoding='utf-8') as f:
+                json.dump(dimgs, f)
+        except Exception:
+            pass
+
         # Also update embedded data in gallery.html (for fallback)
         gallery_path = os.path.join(samples_dir, "gallery.html")
         if os.path.exists(gallery_path):
@@ -6383,6 +6638,117 @@ class LoRATrainerGUI:
                         f.write(new_html)
             except Exception:
                 pass  # Don't fail if gallery update fails
+
+    # region Gallery likeness scoring (CPU ArcFace vs 3 baselines)
+
+    def _gallery_set_baselines(self, names):
+        """Start (or clear, with an empty list) likeness scoring of the sample gallery.
+        Called from the gallery HTTP server thread — plain attributes only, no Tk. Returns
+        (ok, message) for the JSON response."""
+        self._gal_gen = getattr(self, "_gal_gen", 0) + 1   # invalidates any running worker
+        samples_dir = self.get_samples_dir()
+        if not names:
+            self._gal_baselines = []
+            self._gallery_write_likeness(samples_dir, [], "cleared", {})
+            return True, "cleared"
+        if not FACE_DETECTION_AVAILABLE or FaceEmbedder is None:
+            return False, "Face tools not installed — run install_fizgig.py."
+        folder = getattr(self, "_gal_dataset_dir", "") or ""
+        if not folder or not os.path.isdir(folder):
+            return False, "Training image folder not set — set it on the Start tab, then reopen the gallery."
+        if len(names) != 3:
+            return False, f"Pick exactly 3 baseline images (got {len(names)})."
+        paths = [os.path.join(folder, os.path.basename(n)) for n in names]
+        missing = [os.path.basename(p) for p in paths if not os.path.exists(p)]
+        if missing:
+            return False, "Not in the dataset folder: " + ", ".join(missing)
+        self._gal_baselines = paths
+        threading.Thread(target=self._gallery_likeness_worker,
+                         args=(self._gal_gen, paths, samples_dir), daemon=True).start()
+        return True, "scoring started"
+
+    def _gallery_resume_likeness(self):
+        """Resume scoring after a GUI restart — likeness.json persists the chosen baselines,
+        so reopening the gallery picks up where the last session left off."""
+        if getattr(self, "_gal_baselines", None):
+            return   # already active this session
+        try:
+            with open(os.path.join(self.get_samples_dir(), "likeness.json"), encoding="utf-8") as f:
+                names = json.load(f).get("baselines") or []
+        except Exception:
+            return
+        if len(names) == 3:
+            self._gallery_set_baselines(names)
+
+    @staticmethod
+    def _gallery_write_likeness(samples_dir, base_names, status, scores):
+        payload = {"baselines": base_names, "status": status, "scores": scores}
+        path = os.path.join(samples_dir, "likeness.json")
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+            os.replace(tmp, path)   # atomic — the gallery polls this file
+        except Exception:
+            pass
+
+    def _gallery_likeness_worker(self, gen, baselines, samples_dir):
+        """Score every sample image's face against the 3 baselines (averaged) on CPU — zero
+        GPU contention with training. Newest samples first, so the CURRENT run's epochs score
+        immediately even when the folder holds hundreds of old samples; then keeps watching
+        for new files as training produces them."""
+        import numpy as np
+        base_names = [os.path.basename(b) for b in baselines]
+        scores = {}
+        try:   # scores for the same baselines survive GUI restarts — no pointless rescoring
+            with open(os.path.join(samples_dir, "likeness.json"), encoding="utf-8") as f:
+                old = json.load(f)
+            if old.get("baselines") == base_names and isinstance(old.get("scores"), dict):
+                scores = old["scores"]
+        except Exception:
+            pass
+        self._gallery_write_likeness(samples_dir, base_names, "loading face model…", scores)
+        base_embs = [self._ff_embed_cached(b) for b in baselines]
+        missing = [n for n, e in zip(base_names, base_embs) if e is None]
+        if missing:
+            self._gallery_write_likeness(samples_dir, base_names,
+                                         "error: no face found in " + ", ".join(missing), scores)
+            return
+        last_status = None
+        while gen == getattr(self, "_gal_gen", 0):
+            try:
+                files = [f for f in os.listdir(samples_dir)
+                         if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]
+            except OSError:
+                files = []
+            scores = {k: v for k, v in scores.items() if k in set(files)}   # drop deleted samples
+            todo = [f for f in files if f not in scores]
+
+            def _mt(f):
+                try:
+                    return os.path.getmtime(os.path.join(samples_dir, f))
+                except OSError:
+                    return 0.0
+            todo.sort(key=_mt, reverse=True)   # current run scores first
+            for i, f in enumerate(todo, 1):
+                if gen != getattr(self, "_gal_gen", 0):
+                    return
+                emb = self._ff_embed_cached(os.path.join(samples_dir, f))
+                scores[f] = None if emb is None else round(
+                    float(np.mean([float(np.dot(be, emb)) for be in base_embs])), 4)
+                if i % 2 == 0 or i == len(todo):
+                    self._gallery_write_likeness(samples_dir, base_names,
+                                                 f"scoring… {len(scores)}/{len(files)}", scores)
+            status = f"live — {len(scores)} sample(s) scored"
+            if todo or status != last_status:
+                self._gallery_write_likeness(samples_dir, base_names, status, scores)
+                last_status = status
+            for _ in range(16):   # ~4 s between folder checks, responsive to clear/re-pick
+                if gen != getattr(self, "_gal_gen", 0):
+                    return
+                time.sleep(0.25)
+
+    # endregion
 
     def start_samples_watcher(self):
         """Start background thread to update files.json for live gallery"""
@@ -7136,20 +7502,27 @@ class LoRATrainerGUI:
             self._ff_set_status("Baselines changed — click Scan Folder to re-score "
                                 "(cached embeddings make this fast).")
 
+    _ff_lock = threading.Lock()   # one embed at a time: Look Filter scan + gallery scorer share the model
+
     def _ff_embed_cached(self, path):
         """Embedding via the (path, mtime) cache — model load + detection is the slow part,
-        so re-scans and baseline swaps cost almost nothing."""
+        so re-scans and baseline swaps cost almost nothing. Self-initializing and locked:
+        the Look Filter scan thread and the gallery likeness scorer share one embedder."""
         try:
             key = (path, os.path.getmtime(path))
         except OSError:
             return None
+        if not hasattr(self, "_ff_embed_cache"):
+            self._ff_embed_cache = {}
         if key not in self._ff_embed_cache:
-            if self._ff_embedder is None:
-                self._ff_embedder = FaceEmbedder()
-            try:
-                self._ff_embed_cache[key] = self._ff_embedder.embed(path)
-            except Exception:
-                self._ff_embed_cache[key] = None
+            with self._ff_lock:
+                if key not in self._ff_embed_cache:
+                    if getattr(self, "_ff_embedder", None) is None:
+                        self._ff_embedder = FaceEmbedder()
+                    try:
+                        self._ff_embed_cache[key] = self._ff_embedder.embed(path)
+                    except Exception:
+                        self._ff_embed_cache[key] = None
         return self._ff_embed_cache[key]
 
     def _ff_scan(self):

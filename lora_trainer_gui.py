@@ -6804,8 +6804,10 @@ class LoRATrainerGUI:
         filter_card = self._start_section_card(
             outer, "Final Step: Look Consistency Filter (faces)",
             "Run this LAST, after every other prep stage — it scores the finished training folder. "
-            "Pick one baseline image that nails the look you want, and every image's face is scored "
-            "against it (ArcFace embedding similarity). Great for weeding out synthetic images that "
+            "Pick THREE baseline images that nail the look you want; every image's face is scored "
+            "against all three and averaged (ArcFace embedding similarity) — one baseline photo "
+            "would bake its own angle/expression/lighting bias into every score, three cancel it "
+            "out. Great for weeding out synthetic images that "
             "drifted off-look — the subtle near-misses a loss curve can never see. Click images to "
             "mark them, or let Auto-Suggest flag the statistical outliers, then move the marked "
             "ones out of the dataset in one go (they go to an 'excluded_by_look' subfolder — "
@@ -7008,10 +7010,10 @@ class LoRATrainerGUI:
                 "Weak match — likely off-look (synthetic drift or a different subject).")
 
     def _open_face_filter_window(self):
-        """Look Consistency Filter — score every training image's face against a chosen baseline
-        (ArcFace embeddings, CPU), mark drifters by click or auto-suggest, and move the marked
-        ones to <folder>/excluded_by_look/. The Image Prep card places this LAST on purpose:
-        it scores the finished dataset, so run it after resize/crop/captioning."""
+        """Look Consistency Filter — score every training image's face against 3 chosen baselines
+        (ArcFace embeddings averaged, CPU), mark drifters by click or auto-suggest, and move the
+        marked ones to <folder>/excluded_by_look/. The Image Prep card places this LAST on
+        purpose: it scores the finished dataset, so run it after resize/crop/captioning."""
         win = getattr(self, "_ff_win", None)
         if win is not None and win.winfo_exists():
             win.lift()
@@ -7025,8 +7027,7 @@ class LoRATrainerGUI:
         self._ff_scores = {}          # path -> float similarity or None (no face)
         self._ff_marked = set()       # paths marked for exclusion
         self._ff_row_ui = {}          # path -> row widgets (in-place repaints)
-        self._ff_baseline = None
-        self._ff_baseline_emb = None
+        self._ff_baselines = []       # exactly 3 baseline image paths (scores are averaged)
         self._ff_busy = False
         if not hasattr(self, "_ff_embed_cache"):
             self._ff_embed_cache = {}     # (path, mtime) -> embedding or None; survives reopens
@@ -7046,29 +7047,34 @@ class LoRATrainerGUI:
 
         base_row = tk.Frame(win, bg=COLORS["bg_deep"])
         base_row.pack(fill=tk.X, padx=14, pady=(0, 4))
-        self._ff_base_thumb_holder = tk.Frame(base_row, width=72, height=72, bg=COLORS["bg_surface"],
-                                              highlightbackground=COLORS["border"], highlightthickness=1)
-        self._ff_base_thumb_holder.pack_propagate(False)
-        self._ff_base_thumb_holder.pack(side=tk.LEFT)
-        self._ff_base_thumb_label = tk.Label(self._ff_base_thumb_holder, text="no\nbaseline",
-                                             font=(FONT_FAMILY, 8), fg=COLORS["text_muted"],
-                                             bg=COLORS["bg_surface"])
-        self._ff_base_thumb_label.pack(expand=True)
+        self._ff_base_slots = []
+        for _ in range(3):
+            holder = tk.Frame(base_row, width=72, height=72, bg=COLORS["bg_surface"],
+                              highlightbackground=COLORS["border"], highlightthickness=1)
+            holder.pack_propagate(False)
+            holder.pack(side=tk.LEFT, padx=(0, 4))
+            lbl = tk.Label(holder, text="no\nbaseline", font=(FONT_FAMILY, 8),
+                           fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+            lbl.pack(expand=True)
+            self._ff_base_slots.append(lbl)
         base_btns = tk.Frame(base_row, bg=COLORS["bg_deep"])
         base_btns.pack(side=tk.LEFT, padx=(10, 0))
-        self._ff_base_name = tk.Label(base_btns, text="Pick the image that best nails the look you want.",
+        self._ff_base_name = tk.Label(base_btns, text="Pick the 3 images that best nail the look you "
+                                                      "want (Ctrl-click to select all three at once).",
                                       font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"],
                                       bg=COLORS["bg_deep"], anchor="w")
         self._ff_base_name.pack(anchor="w")
         btns = tk.Frame(base_btns, bg=COLORS["bg_deep"])
         btns.pack(anchor="w", pady=(6, 0))
-        ttk.Button(btns, text="Choose Baseline…", command=self._ff_choose_baseline).pack(side=tk.LEFT)
+        ttk.Button(btns, text="Choose 3 Baselines…", command=self._ff_choose_baselines).pack(side=tk.LEFT)
         self._ff_scan_btn = ttk.Button(btns, text="Scan Folder", command=self._ff_scan, state="disabled")
         self._ff_scan_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        self._ff_status = tk.Label(win, text="Scores are ArcFace cosine similarity to the baseline. "
-                                             "Same person typically lands 30–70% against a single photo — "
-                                             "only the baseline itself scores near 100%.",
+        self._ff_status = tk.Label(win, text="Each score is the AVERAGE ArcFace similarity to your 3 "
+                                             "baselines — averaging cancels the angle/expression/lighting "
+                                             "bias any single photo carries. Same person typically lands "
+                                             "30–70% (even the baselines themselves — each is scored "
+                                             "against the other two as well as itself).",
                                    font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
                                    justify=tk.LEFT, anchor="w", wraplength=820)
         self._ff_status.pack(fill=tk.X, padx=14)
@@ -7096,28 +7102,38 @@ class LoRATrainerGUI:
         if win is not None and win.winfo_exists():
             self._ff_status.config(text=text)
 
-    def _ff_choose_baseline(self):
+    def _ff_choose_baselines(self):
+        """Exactly 3 baselines, scored by averaging — one photo bakes its own angle/expression/
+        lighting bias into every score; three cancel it out."""
         folder = self.image_folder_var.get().strip()
-        path = filedialog.askopenfilename(
-            title="Choose baseline image (the look you want)",
+        paths = filedialog.askopenfilenames(
+            title="Choose 3 baseline images (the look you want)",
             initialdir=folder if folder and os.path.isdir(folder) else None,
             filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")])
-        if not path:
+        if not paths:
             return
-        self._ff_baseline = path
-        self._ff_baseline_emb = None   # re-embedded on next scan (cache makes this cheap)
-        try:
-            with Image.open(path) as im:
-                im.thumbnail((68, 68), Image.LANCZOS)
-                ph = ImageTk.PhotoImage(im)
-            self._ff_thumbs["__baseline__"] = ph
-            self._ff_base_thumb_label.config(image=ph, text="")
-        except Exception:
-            self._ff_base_thumb_label.config(image="", text="no\npreview")
-        self._ff_base_name.config(text=f"Baseline: {os.path.basename(path)}")
+        if len(paths) != 3:
+            messagebox.showwarning(
+                "Look Filter",
+                f"Pick exactly 3 baseline images (you picked {len(paths)}).\n\n"
+                "Ctrl-click in the file dialog to select three. Three baselines average out "
+                "the angle/expression/lighting bias any single photo carries.")
+            return
+        self._ff_baselines = list(paths)
+        for slot, p in zip(self._ff_base_slots, paths):
+            try:
+                with Image.open(p) as im:
+                    im.thumbnail((68, 68), Image.LANCZOS)
+                    ph = ImageTk.PhotoImage(im)
+                self._ff_thumbs[f"__baseline_{p}__"] = ph
+                slot.config(image=ph, text="")
+            except Exception:
+                slot.config(image="", text="no\npreview")
+        self._ff_base_name.config(
+            text="Baselines: " + ", ".join(os.path.basename(p) for p in paths))
         self._ff_scan_btn.config(state="normal")
         if self._ff_scores:
-            self._ff_set_status("Baseline changed — click Scan Folder to re-score "
+            self._ff_set_status("Baselines changed — click Scan Folder to re-score "
                                 "(cached embeddings make this fast).")
 
     def _ff_embed_cached(self, path):
@@ -7143,8 +7159,8 @@ class LoRATrainerGUI:
         if not folder or not os.path.isdir(folder):
             messagebox.showwarning("Look Filter", "Set your training image folder on the Start tab first.")
             return
-        if not self._ff_baseline or not os.path.exists(self._ff_baseline):
-            messagebox.showwarning("Look Filter", "Choose a baseline image first.")
+        if len(self._ff_baselines) != 3 or not all(os.path.exists(b) for b in self._ff_baselines):
+            messagebox.showwarning("Look Filter", "Choose 3 baseline images first.")
             return
         files = sorted(
             os.path.join(folder, f) for f in os.listdir(folder)
@@ -7163,17 +7179,23 @@ class LoRATrainerGUI:
         def work():
             import numpy as np
             try:
-                base_emb = self._ff_embed_cached(self._ff_baseline)
-                if base_emb is None:
-                    self.master.after(0, lambda: self._ff_scan_done(None, "No face found in the "
-                                      "baseline image — pick one with a clear face."))
+                base_embs = [self._ff_embed_cached(b) for b in self._ff_baselines]
+                missing = [os.path.basename(b) for b, e in zip(self._ff_baselines, base_embs)
+                           if e is None]
+                if missing:
+                    self.master.after(0, lambda: self._ff_scan_done(
+                        None, "No face found in baseline(s): " + ", ".join(missing) +
+                        " — pick images with a clear face."))
                     return
                 scores = {}
                 for i, p in enumerate(files, 1):
                     if not win.winfo_exists():
                         return   # window closed mid-scan — drop the work silently
                     emb = self._ff_embed_cached(p)
-                    scores[p] = None if emb is None else float(np.dot(base_emb, emb))
+                    # Average of the 3 similarities == similarity to the (unnormalized) centroid
+                    # of the baselines — one photo's framing bias can't dominate the score.
+                    scores[p] = None if emb is None else float(
+                        np.mean([np.dot(be, emb) for be in base_embs]))
                     if i % 3 == 0 or i == len(files):
                         done, total = i, len(files)
                         self.master.after(0, lambda d=done, t=total:
@@ -7242,7 +7264,7 @@ class LoRATrainerGUI:
         q1, q3 = scored[n // 4], scored[(3 * n) // 4]
         cutoff = max(med - 1.5 * (q3 - q1), 0.25)   # dataset's low outlier fence, floored at the
         newly = {p for p, s in self._ff_scores.items()   # ~different-person similarity level
-                 if s is not None and s < cutoff and p != self._ff_baseline}
+                 if s is not None and s < cutoff and p not in self._ff_baselines}
         self._ff_marked |= newly
         self._ff_set_status(f"Auto-suggest marked {len(newly)} image(s) "
                             f"(dataset median {med * 100:.0f}%, cutoff {cutoff * 100:.0f}%). "
@@ -7291,7 +7313,7 @@ class LoRATrainerGUI:
                      fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
             tk.Label(name_row, text=f"  {label.upper()}", font=(FONT_FAMILY, 9, "bold"),
                      fg=color, bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
-            if path == self._ff_baseline:
+            if path in self._ff_baselines:
                 tk.Label(name_row, text="  ★ baseline", font=(FONT_FAMILY, 9),
                          fg="#F1C40F", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
             mark_lbl = tk.Label(name_row, text="  ❌ marked for exclusion" if marked else "",

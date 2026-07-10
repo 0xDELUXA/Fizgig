@@ -15215,8 +15215,21 @@ class LoRATrainerGUI:
             toml_lines.append("")
             toml_lines.append("[[datasets]]")
 
-            # Cache directory is now sourced from Preferences (no longer a Dataset-tab field)
+            # Cache directory is now sourced from Preferences (no longer a Dataset-tab field).
+            # Each dataset gets its OWN subfolder: the trainer builds its item list by globbing
+            # the cache directory, so two datasets sharing one folder would train on each other's
+            # leftovers. <folder name>-<hash of full path> keeps it stable per dataset and unique
+            # across same-named folders; switching datasets keeps both caches warm.
             cache_dir = self.prefs_vars["cache_dir"].get().strip() if "cache_dir" in self.prefs_vars else ""
+            if cache_dir and not is_jsonl and not is_video:
+                _cache_img_dir = self.image_folder_var.get().strip()
+                if _cache_img_dir:
+                    import hashlib
+                    _h = hashlib.sha1(_cache_img_dir.lower().replace("\\", "/").rstrip("/")
+                                      .encode("utf-8")).hexdigest()[:8]
+                    _nm = "".join(c if (c.isalnum() or c in "-_") else "_"
+                                  for c in os.path.basename(_cache_img_dir.rstrip("/\\"))) or "dataset"
+                    cache_dir = os.path.join(cache_dir, f"{_nm}-{_h}")
 
             if is_jsonl:
                 jsonl_file = self.dataset_jsonl_file_var.get().strip().replace("\\", "/")

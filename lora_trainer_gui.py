@@ -6107,6 +6107,10 @@ class LoRATrainerGUI:
         self._gal_dataset_dir = (self.image_folder_var.get().strip()
                                  if hasattr(self, "image_folder_var") else "")
 
+        # Opening the gallery claims the samples dir for THIS session — any other running
+        # Fizgig instance's watcher/scorer stands down instead of fighting over the sidecars.
+        self._gallery_claim(samples_dir)
+
         # Always regenerate the template so template changes (e.g. the per-epoch download link) are
         # picked up — otherwise a stale gallery.html from an earlier run keeps the old JS forever.
         # The file is purely generated (static template + embedded data filled by update_gallery_html),
@@ -6894,6 +6898,9 @@ class LoRATrainerGUI:
         samples_dir = self.get_samples_dir()
         os.makedirs(samples_dir, exist_ok=True)
 
+        if not self._gallery_owns(samples_dir):
+            return   # another Fizgig session owns this gallery now — don't fight over sidecars
+
         # Find all images
         images = []
         if os.path.exists(samples_dir):
@@ -6972,6 +6979,34 @@ class LoRATrainerGUI:
 
     # region Gallery likeness scoring (CPU ArcFace vs 3 baselines)
 
+    def _gallery_claim(self, samples_dir):
+        """Claim gallery-sidecar ownership of this samples dir for THIS app session. Two Fizgig
+        instances pointed at one output folder otherwise fight over likeness.json / dataset.json
+        every 5s — caught live 2026-07-10: a stale instance's scorer (different baselines)
+        alternated everyone's likeness scores down to ~5% each time a new sample landed."""
+        if not getattr(self, "_gal_session_token", None):
+            self._gal_session_token = f"{os.getpid()}-{int(time.time() * 1000)}"
+        path = os.path.join(samples_dir, "gallery.owner")
+        try:
+            with open(path + ".tmp", "w", encoding="utf-8") as f:
+                json.dump({"token": self._gal_session_token}, f)
+            os.replace(path + ".tmp", path)
+        except Exception:
+            pass
+
+    def _gallery_owns(self, samples_dir):
+        """True while this session still owns the samples dir (an unclaimed dir is claimed).
+        The most recent session to open the gallery (or start scoring) wins; older sessions'
+        watchers and scorers stand down the moment they see a foreign token."""
+        path = os.path.join(samples_dir, "gallery.owner")
+        try:
+            with open(path, encoding="utf-8") as f:
+                tok = json.load(f).get("token")
+        except Exception:
+            self._gallery_claim(samples_dir)
+            return True
+        return tok == getattr(self, "_gal_session_token", None)
+
     def _gallery_set_baselines(self, names):
         """Start (or clear, with an empty list) likeness scoring of the sample gallery.
         Called from the gallery HTTP server thread — plain attributes only, no Tk. Returns
@@ -6994,6 +7029,7 @@ class LoRATrainerGUI:
         if missing:
             return False, "Not in the dataset folder: " + ", ".join(missing)
         self._gal_baselines = paths
+        self._gallery_claim(samples_dir)   # starting scoring (re)claims the dir for this session
         threading.Thread(target=self._gallery_likeness_worker,
                          args=(self._gal_gen, paths, samples_dir), daemon=True).start()
         return True, "scoring started"
@@ -7051,6 +7087,10 @@ class LoRATrainerGUI:
         last_status = None
         scored_mtimes = {}   # filename -> mtime at scoring time (rescore no-face on change)
         while gen == getattr(self, "_gal_gen", 0):
+            if not self._gallery_owns(samples_dir):
+                print("[likeness] another Fizgig session took over this samples folder — "
+                      "this scorer is standing down.")
+                return
             try:
                 files = [f for f in os.listdir(samples_dir)
                          if f.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))]

@@ -6752,7 +6752,10 @@ class LoRATrainerGUI:
         try:   # scores for the same baselines survive GUI restarts — no pointless rescoring
             with open(os.path.join(samples_dir, "likeness.json"), encoding="utf-8") as f:
                 old = json.load(f)
-            if old.get("baselines") == base_names and isinstance(old.get("scores"), dict):
+            # Order-insensitive: the picker records baselines in CLICK order, and re-picking
+            # the same 3 in a different order must not throw the whole score set away.
+            if (sorted(old.get("baselines") or []) == sorted(base_names)
+                    and isinstance(old.get("scores"), dict)):
                 scores = old["scores"]
         except Exception:
             pass
@@ -6764,6 +6767,7 @@ class LoRATrainerGUI:
                                          "error: no face found in " + ", ".join(missing), scores)
             return
         last_status = None
+        scored_mtimes = {}   # filename -> mtime at scoring time (rescore no-face on change)
         while gen == getattr(self, "_gal_gen", 0):
             try:
                 files = [f for f in os.listdir(samples_dir)
@@ -6771,17 +6775,26 @@ class LoRATrainerGUI:
             except OSError:
                 files = []
             scores = {k: v for k, v in scores.items() if k in set(files)}   # drop deleted samples
-            todo = [f for f in files if f not in scores]
 
             def _mt(f):
                 try:
                     return os.path.getmtime(os.path.join(samples_dir, f))
                 except OSError:
                     return 0.0
+            # Settle guard: a sample the trainer is STILL WRITING decodes as a truncated image
+            # and scores a spurious "no face" that then sticks. Skip anything modified in the
+            # last few seconds — the next pass (~4 s) picks it up complete. A null that slipped
+            # through anyway (e.g. scored by an older Fizgig) rescores when its mtime moves.
+            now = time.time()
+            todo = [f for f in files
+                    if (now - _mt(f)) > 5.0
+                    and (f not in scores
+                         or (scores[f] is None and scored_mtimes.get(f) != _mt(f)))]
             todo.sort(key=_mt, reverse=True)   # current run scores first
             for i, f in enumerate(todo, 1):
                 if gen != getattr(self, "_gal_gen", 0):
                     return
+                scored_mtimes[f] = _mt(f)
                 emb = self._ff_embed_cached(os.path.join(samples_dir, f))
                 scores[f] = None if emb is None else round(
                     float(np.mean([float(np.dot(be, emb)) for be in base_embs])), 4)

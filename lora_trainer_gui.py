@@ -3721,6 +3721,16 @@ class LoRATrainerGUI:
                                         justify=tk.LEFT, anchor="w")
         self._problem_status.pack(fill=tk.X, padx=14)
 
+        # Wrap the status text to the live window width — without a wraplength, long lines
+        # (plateau banners especially) clip off the right edge. The label is packed, so extra
+        # wrapped lines push the rows list down cleanly rather than overlapping it.
+        def _status_wrap(e):
+            wl = max(300, e.width - 32)
+            if getattr(self._problem_status, "_wl", None) != wl:
+                self._problem_status._wl = wl
+                self._problem_status.config(wraplength=wl)
+        win.bind("<Configure>", lambda e: _status_wrap(e) if e.widget is win else None, add="+")
+
         holder = tk.Frame(win, bg=COLORS["bg_deep"])
         holder.pack(fill=tk.BOTH, expand=True, padx=14, pady=(6, 12))
         canvas = tk.Canvas(holder, bg=COLORS["bg_deep"], highlightthickness=0)

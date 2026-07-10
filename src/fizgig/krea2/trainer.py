@@ -977,6 +977,25 @@ def train_krea2(
                              for bucket in ds.batch_manager.buckets.values()
                              for it in bucket)
         logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
+        if resume_state_dir and os.path.isdir(resume_state_dir) and start_epoch > 0:
+            # Resumed run: rebuild the watch's history by replaying its own JSONL (it appends
+            # across pause/resume). The applied-captions ledger supplies the reset/incorrigible
+            # timeline: recaptioned images re-enter with post-fix history only, and images whose
+            # 2 AI attempts are spent go back on the exclusion track instead of getting a free
+            # third life. Also restores `recaptioned` so the max-2 attempt cap survives resume.
+            _resets = {}
+            try:
+                with open(os.path.join(output_dir, "loss_log", "caption_updates_applied.json"),
+                          encoding="utf-8") as _f:
+                    for _k, _info in json.load(_f).items():
+                        _att = int(_info.get("attempt", 0) or 0)
+                        _auto = bool(_info.get("auto"))
+                        if _auto:
+                            recaptioned[_k] = max(recaptioned.get(_k, 0), _att)
+                        _resets[_k] = (int(_info.get("epoch", 0) or 0), _att, _auto)
+            except Exception:
+                pass
+            loss_watch.resume_from_jsonl(up_to_epoch=start_epoch, resets=_resets)
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
     for epoch in range(start_epoch, max_train_epochs):

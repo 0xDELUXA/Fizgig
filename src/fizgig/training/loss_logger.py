@@ -193,6 +193,7 @@ class PerImageLossWatch:
         self._epochs_seen: set[int] = set()
         self._batched_warned = False
         self._batched = False
+        self._replaying = False   # True while resume_from_jsonl rebuilds state (mutes side effects)
         # Persistence state: a single noisy epoch must not flip a verdict. Per-key counters of
         # consecutive stuck / clear votes, plus the confirmed set (drives warnings + throttling).
         self._stuck_votes: dict[str, int] = {}
@@ -386,7 +387,8 @@ class PerImageLossWatch:
             self._bsum[b] += loss
             self._bcnt[b] += 1
             self._epochs_seen.add(int(epoch))
-            self._jsonl.record(epoch=epoch, step=step, item_keys=item_keys, timestep=t, loss=loss)
+            if not self._replaying:   # replayed steps came FROM the jsonl — don't duplicate them
+                self._jsonl.record(epoch=epoch, step=step, item_keys=item_keys, timestep=t, loss=loss)
         except Exception as e:
             logger.warning(f"[loss-watch] observe failed ({e})")
 
@@ -571,7 +573,11 @@ class PerImageLossWatch:
                 # Release progress for the popup (stuck badge + improving trend = counting down).
                 s["release_votes"] = self._clear_votes.get(key, 0) if key in self._confirmed_stuck else 0
 
-                if key in self._confirmed_stuck and key in self._incorrigible:
+                if key in self._excluded:
+                    # Already excluded (this run, a previous run's persistent record, or replayed
+                    # resume history) — report it as such; never re-run the ladder on frozen stats.
+                    verdict, mult = "excluded", 0.0
+                elif key in self._confirmed_stuck and key in self._incorrigible:
                     self._confirmed_stuck.discard(key)
                     self._last_reported_stuck.discard(key)
                     if len(self._excluded) >= excl_cap:
@@ -670,7 +676,8 @@ class PerImageLossWatch:
             # resolves — re-announce then, even if the plateau flag never broke in between.
             if self._plateau_reported and self._plateau_was_provisional and not self.plateau_pending:
                 self._plateau_reported = False
-            if self.plateaued and not self._plateau_reported and self.best_epoch_estimate:
+            if self.plateaued and not self._plateau_reported and self.best_epoch_estimate \
+                    and not self._replaying:
                 be = self.best_epoch_estimate
                 self._plateau_was_provisional = bool(self.plateau_pending)
                 if self.plateau_pending:
@@ -692,8 +699,10 @@ class PerImageLossWatch:
             elif not self.plateaued:
                 self._plateau_reported = False
 
-            # Warn only when the CONFIRMED set changes — not every epoch.
-            if self._confirmed_stuck != self._last_reported_stuck:
+            # Warn only when the CONFIRMED set changes — not every epoch. During a resume replay
+            # the diff is left unsynced, so the FINAL replayed boundary announces the accumulated
+            # state once instead of narrating every historical flip.
+            if self._confirmed_stuck != self._last_reported_stuck and not self._replaying:
                 added = self._confirmed_stuck - self._last_reported_stuck
                 removed = self._last_reported_stuck - self._confirmed_stuck
                 action = f" — throttling LR x{self.throttle_mult}" if (self.apply_lr and not self._batched) else ""
@@ -707,6 +716,8 @@ class PerImageLossWatch:
                     logger.info(f"[loss-watch] epoch {epoch}: no longer stuck: {names}")
                 self._last_reported_stuck = set(self._confirmed_stuck)
 
+            if self._replaying:
+                return self.verdicts   # one report write at the end of the replay, not per epoch
             try:
                 d = os.path.join(self.output_dir, "loss_log")
                 os.makedirs(d, exist_ok=True)
@@ -728,6 +739,81 @@ class PerImageLossWatch:
         except Exception as e:
             logger.warning(f"[loss-watch] epoch_boundary failed ({e})")
             return {}
+
+    def resume_from_jsonl(self, up_to_epoch: int = None, resets: dict = None) -> int:
+        """Rebuild the watcher's in-memory history after --resume by replaying this run's own
+        per_image_loss.jsonl (resumed runs append to it, so it holds the full pre-pause record).
+
+        Without this a resumed run restarts the watch blind: trends, verdicts, healthy-epoch
+        credit and stuck tenure all re-warm from zero — only persistent exclusions survive —
+        and the Problem Images window loses everything except the excluded rows.
+
+        Replays observe() + epoch_boundary() exactly as the original run drove them (same
+        records, same order, same votes — the state machines are deterministic). `resets` is
+        {key: (epoch, attempt, is_auto)} from caption_updates_applied.json: the original run
+        reset those images' histories at those boundaries (recaption / manual edit), so the
+        replay must too, or an image would be judged on records its caption fix invalidated.
+        Console chatter and the report write are muted for all but the FINAL replayed epoch,
+        which announces the restored state once. Returns the number of replayed epochs."""
+        path = os.path.join(self.output_dir, "loss_log", "per_image_loss.jsonl")
+        if not os.path.exists(path):
+            return 0
+        resets = resets or {}
+        by_epoch: dict[int, list] = {}
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        r = json.loads(line)
+                        ep = int(r["epoch"])
+                        if up_to_epoch is not None and ep > up_to_epoch:
+                            continue   # beyond the restored state snapshot — don't replay ahead
+                        by_epoch.setdefault(ep, []).append(
+                            (int(r.get("step", 0)), str(r["key"]), float(r["t"]), float(r["loss"])))
+                    except Exception:
+                        continue   # one mangled line must not kill the resume
+        except Exception as e:
+            logger.warning(f"[loss-watch] resume replay: could not read {path} ({e})")
+            return 0
+        if not by_epoch:
+            return 0
+        epochs = sorted(by_epoch)
+        n_steps = sum(len(v) for v in by_epoch.values())
+        logger.info(f"[loss-watch] resume: replaying {n_steps} logged steps "
+                    f"(epochs {epochs[0]}–{epochs[-1]}) to restore verdict history…")
+        # reset_key also pardons exclusions (that's right for LIVE caption edits) — but these
+        # are HISTORICAL resets, and some of those images were excluded later in the original
+        # timeline. Their exclusions are the more recent fact; never let a replayed reset undo
+        # one (or rewrite fizgig_excluded.json). Their verdicts are forced to "excluded" anyway.
+        preserved = set(self._excluded)
+        self._replaying = True
+        try:
+            for ep in epochs:
+                for _, key, t, loss in sorted(by_epoch[ep]):
+                    self.observe(epoch=ep, step=0, item_keys=key, timestep=t, loss=loss)
+                if ep == epochs[-1]:
+                    self._replaying = False   # final BOUNDARY logs + writes the report once —
+                    #                            flipped after the observes, which must stay muted
+                    #                            or the last epoch's steps duplicate into the jsonl
+                self.epoch_boundary(ep)
+                # Reproduce the caption fixes the original run applied at this boundary — the
+                # records before a fix describe the OLD caption and must not convict the new one.
+                for k, (r_ep, _att, _auto) in resets.items():
+                    if r_ep == ep and k not in preserved:
+                        self.reset_key(k)
+        finally:
+            self._replaying = False
+        # Benefit-of-the-doubt state: images whose 2nd (detailed) AI recaption was already spent
+        # go back on the exclusion track. A manual edit AFTER the AI attempts (is_auto False,
+        # last-writer-wins in the applied ledger) restores hope, exactly like in-run.
+        for k, (_r_ep, att, is_auto) in resets.items():
+            if is_auto and att >= 2:
+                self.mark_incorrigible(k)
+        logger.info(f"[loss-watch] resume: verdict history restored through epoch {epochs[-1]}.")
+        return len(epochs)
 
     def mark_incorrigible(self, key: str) -> None:
         """Spend a key's benefit of the doubt: if it re-confirms stuck, it goes straight to the

@@ -2568,6 +2568,13 @@ class LoRATrainerGUI:
             variable=self.krea2_auto_recaption_var,
         )
         self._krea2_autorecap_cb.grid(row=22, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(2, 0))
+        self.krea2_warmup_look_var = tk.BooleanVar(value=bool(self.settings.get("KREA2_WARMUP_LOOK", False)))
+        self._krea2_warmuplook_cb = ttk.Checkbutton(
+            training_content,
+            text="Warm up look outliers (unusual angles ease in at low LR — needs a Look Filter scan) — experimental",
+            variable=self.krea2_warmup_look_var,
+        )
+        self._krea2_warmuplook_cb.grid(row=23, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(2, 0))
         self._krea2_losswatch_hint = ttk.Label(training_content,
                   text="Tracks each image's loss (normalized for the random noise level) across epochs. Detection "
                        "flags images that stay hard without improving — usually mislabeled/off-concept data — in the "
@@ -2578,9 +2585,13 @@ class LoRATrainerGUI:
                        "its caption from what's actually visible (appending your Captions-tab trigger word, if set), "
                        "re-encodes it, and gives the image a fresh start (a 2nd attempt goes extra-detailed; still "
                        "stuck after that = excluded from training entirely — edit its caption to re-admit it). "
-                       "Batch size 1.",
+                       "Warm-up: images the Image Prep Look Filter scored as look-outliers (tight angles, "
+                       "profiles — real but unusual) start at ×0.4 LR and ramp to ×1.0 over the first ~4 epochs, "
+                       "so they refine the identity instead of fighting it while it forms; released early the "
+                       "moment they start improving. Run the Look Filter (scan with 3 baselines) first — it saves "
+                       "the scores with your dataset. Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._krea2_losswatch_hint.grid(row=23, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        self._krea2_losswatch_hint.grid(row=24, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -3136,6 +3147,8 @@ class LoRATrainerGUI:
             self.krea2_per_image_lr_var.set(bool(preset["KREA2_PER_IMAGE_LR"]))
         if "KREA2_AUTO_RECAPTION" in preset and hasattr(self, 'krea2_auto_recaption_var'):
             self.krea2_auto_recaption_var.set(bool(preset["KREA2_AUTO_RECAPTION"]))
+        if "KREA2_WARMUP_LOOK" in preset and hasattr(self, 'krea2_warmup_look_var'):
+            self.krea2_warmup_look_var.set(bool(preset["KREA2_WARMUP_LOOK"]))
 
         # Adaptive LR checkbox + sync enabled state of Min/Max LR dropdowns
         if "ADAPTIVE_LR" in preset and hasattr(self, 'adaptive_lr_var'):
@@ -3257,6 +3270,7 @@ class LoRATrainerGUI:
         _grab("krea2_loss_watch_var", "KREA2_LOSS_WATCH")
         _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
         _grab("krea2_auto_recaption_var", "KREA2_AUTO_RECAPTION")
+        _grab("krea2_warmup_look_var", "KREA2_WARMUP_LOOK")
         _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
@@ -3586,7 +3600,8 @@ class LoRATrainerGUI:
         # Krea 2-ONLY controls (inverse of the above): the per-image loss watch toggles are only
         # wired into krea2_train for now — hide them under Klein.
         for w in (self._krea2_losswatch_frame, self._krea2_perimglr_cb,
-                  self._krea2_autorecap_cb, self._krea2_losswatch_hint):
+                  self._krea2_autorecap_cb, self._krea2_warmuplook_cb,
+                  self._krea2_losswatch_hint):
             self._set_widget_visible(w, is_krea2)
 
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
@@ -3780,7 +3795,7 @@ class LoRATrainerGUI:
         for s in images.values():
             v = s.get("verdict", "mid")
             counts[v] = counts.get(v, 0) + 1
-        _known = ("excluded", "stuck", "suspect", "watch", "exhausted", "learning", "mid", "easy")
+        _known = ("excluded", "stuck", "suspect", "watch", "warmup", "exhausted", "learning", "mid", "easy")
         tally = "  ·  ".join([f"{counts.get(v, 0)} {v}" for v in _known]
                              + [f"{n} {v}" for v, n in sorted(counts.items()) if v not in _known])
         mode = ("per-image LR active (stuck ×0.5→×0.1 escalating, suspect ×0.7, mined-out ×0.6, learned ×1.1 boost)"
@@ -3840,13 +3855,14 @@ class LoRATrainerGUI:
             "stuck":    ("#E74C3C", "STUCK — persistently hard, not improving. Review this image/caption."),
             "suspect":  ("#D35400", "Suspect — extremely hard from the start; provisionally slowed while the trend confirms. Worth a caption check now."),
             "watch":    ("#E67E22", "Watching — looked stuck this epoch; needs more epochs to confirm."),
+            "warmup":   ("#8E7CC3", "Look-filter outlier easing in — unusual view on an LR ramp toward ×1.0 while the identity core forms; releases early once it starts improving."),
             "exhausted": ("#16A085", "Fully mined — improved a lot, then plateaued. Caption is fine; LR eased to prevent overbake."),
             "learning": ("#5B9BD5", "Learning — hard but improving. Leave it alone."),
             "mid":      ("#95A5A6", "Normal."),
             "easy":     ("#70AD47", "Learned — consistently easy. Gets a gentle ×1.1 boost to keep the healthy signal strong."),
         }
-        order = {"excluded": 0, "stuck": 1, "suspect": 2, "watch": 3, "exhausted": 4,
-                 "learning": 5, "mid": 6, "easy": 7}
+        order = {"excluded": 0, "stuck": 1, "suspect": 2, "watch": 3, "warmup": 4, "exhausted": 5,
+                 "learning": 6, "mid": 7, "easy": 8}
         items = sorted(images.items(),
                        key=lambda kv: (order.get(kv[1].get("verdict", "mid"), 2),
                                        -float(kv[1].get("mean_residual", 0.0))))
@@ -7210,7 +7226,10 @@ class LoRATrainerGUI:
             "drifted off-look — the subtle near-misses a loss curve can never see. Click images to "
             "mark them, or let Auto-Suggest flag the statistical outliers, then move the marked "
             "ones out of the dataset in one go (they go to an 'excluded_by_look' subfolder — "
-            "nothing is deleted).",
+            "nothing is deleted). Real-but-unusual low scorers (tight angles, profiles) that you "
+            "KEEP can ease into training gently — the scan saves its scores with the dataset, and "
+            "the Training tab's 'Warm up look outliers' toggle (Krea 2) ramps their LR up over "
+            "the first few epochs instead of letting them fight the forming identity.",
         )
         self._face_filter_btn = ttk.Button(
             filter_card, text="🔍 Open Look Filter…", command=self._open_face_filter_window,
@@ -7626,9 +7645,28 @@ class LoRATrainerGUI:
         self._ff_suggest_btn.config(state="normal")
         scored = [s for s in scores.values() if s is not None]
         nf = sum(1 for s in scores.values() if s is None)
+        # Persist for the trainer's "Warm up look outliers" toggle — the scores travel with the
+        # dataset (same pattern as fizgig_excluded.json). Cutoff = the auto-suggest fence.
+        try:
+            folder = self.image_folder_var.get().strip()
+            ss = sorted(scored)
+            cutoff = None
+            if len(ss) >= 4:
+                n = len(ss)
+                med, q1, q3 = ss[n // 2], ss[n // 4], ss[(3 * n) // 4]
+                cutoff = max(med - 1.5 * (q3 - q1), 0.25)
+            payload = {"baselines": [os.path.basename(b) for b in self._ff_baselines],
+                       "cutoff": cutoff,
+                       "scores": {os.path.splitext(os.path.basename(p))[0]: s
+                                  for p, s in scores.items()}}
+            with open(os.path.join(folder, "fizgig_look_scores.json"), "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception:
+            pass
         self._ff_set_status(f"{len(scores)} image(s) scored — {len(scored)} with faces, {nf} without. "
                             "Worst matches first. Click a row (or its button) to mark it, or use "
-                            "Auto-Suggest.")
+                            "Auto-Suggest. Scores saved with the dataset — low scorers you KEEP can "
+                            "ease in gently: tick “Warm up look outliers” on the Training tab (Krea 2).")
         self._ff_build_rows()
 
     def _ff_toggle(self, path):
@@ -16239,6 +16277,8 @@ class LoRATrainerGUI:
             cmd.append("--log_per_image_loss")
         if self.krea2_per_image_lr_var.get():
             cmd.append("--per_image_lr")
+        if self.krea2_warmup_look_var.get():
+            cmd.append("--warmup_look_outliers")
         if self.krea2_auto_recaption_var.get():
             cmd.append("--auto_recaption")
             # Trigger word from the Captions tab — appended (', <trigger>') to AI captions if set.

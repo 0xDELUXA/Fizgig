@@ -59,6 +59,9 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Per-image adaptive LR: throttle stuck images, boost healthy learned ones (experimental)")
     p.add_argument("--auto_recaption", action="store_true",
                    help="Auto-recaption confirmed-stuck images with Qwen3-VL between epochs (experimental)")
+    p.add_argument("--warmup_look_outliers", action="store_true",
+                   help="LR warm-up (x0.4->x1.0 over first epochs) for Look Filter outlier images "
+                        "(reads <dataset>/fizgig_look_scores.json from the Image Prep Look Filter)")
     p.add_argument("--trigger_word", default=None,
                    help="Trigger word appended (', <trigger>') to auto-generated captions")
     return p
@@ -96,6 +99,7 @@ def main():
         log_per_image_loss=args.log_per_image_loss,
         per_image_lr=args.per_image_lr,
         auto_recaption=args.auto_recaption,
+        warmup_look_outliers=args.warmup_look_outliers,
         trigger_word=args.trigger_word,
     )
 

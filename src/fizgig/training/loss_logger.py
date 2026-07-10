@@ -194,6 +194,13 @@ class PerImageLossWatch:
         self._batched_warned = False
         self._batched = False
         self._replaying = False   # True while resume_from_jsonl rebuilds state (mutes side effects)
+        # Look-filter warm-up (curriculum): genuine-but-unusual images (tight angles, profiles)
+        # ramp from a muted LR to full over the first epochs — see set_warmup_keys().
+        self._warmup: set[str] = set()
+        self._warmup_released: dict[str, int] = {}   # key -> epoch its ramp ended (proof or timeout)
+        self._warmup_start = 0.4
+        self._warmup_ramp_epochs = 4
+        self._epoch_now = 1
         # Persistence state: a single noisy epoch must not flip a verdict. Per-key counters of
         # consecutive stuck / clear votes, plus the confirmed set (drives warnings + throttling).
         self._stuck_votes: dict[str, int] = {}
@@ -357,11 +364,36 @@ class PerImageLossWatch:
         keys = [str(k) for k in keys] if keys else ["<unknown>"]
         return keys[0] if len(keys) == 1 else "|".join(keys)
 
+    def set_warmup_keys(self, keys, *, start: float = 0.4, ramp_epochs: int = 4) -> None:
+        """Look Consistency Filter outliers: genuine but UNUSUAL images (tight angles, profiles,
+        occlusion) whose gradient fights the forming identity core in the first epochs — before
+        the watch has any trend to act on. Prior-then-evidence: the embedding score covers the
+        watch's warmup blindness (epochs 1-4), then normal verdicts take over. Each key starts
+        at `start` and ramps linearly to x1.0 over `ramp_epochs` epochs, released EARLY the
+        moment it proves it's improving. Stuck/suspect votes are held until 2 epochs after the
+        ramp ends — a muted image learns slowly BY DESIGN and must not be convicted for it."""
+        self._warmup = {str(k) for k in keys}
+        self._warmup_start = float(start)
+        self._warmup_ramp_epochs = max(1, int(ramp_epochs))
+
+    def _warmup_mult(self, key: str):
+        """Current ramp multiplier for an actively warming key, else None."""
+        if key not in self._warmup or key in self._warmup_released:
+            return None
+        frac = (self._epoch_now - 1) / self._warmup_ramp_epochs
+        if frac >= 1.0:
+            return None
+        return self._warmup_start + (1.0 - self._warmup_start) * frac
+
     def multiplier(self, item_keys) -> float:
-        """Loss multiplier for the CURRENT step (looked up before observe; updates at epoch ends)."""
-        if not self.apply_lr or self._batched:
+        """Loss multiplier for the CURRENT step (looked up before observe; updates at epoch ends).
+        Warm-up ramps apply even when per-image LR is off — they're their own toggle."""
+        if self._batched:
             return 1.0
-        return self._mult.get(self._key_of(item_keys), 1.0)
+        key = self._key_of(item_keys)
+        wm = self._warmup_mult(key)
+        base = self._mult.get(key, 1.0) if self.apply_lr else 1.0
+        return min(wm, base) if wm is not None else base
 
     def is_excluded(self, item_keys) -> bool:
         """True when this step's image is excluded from training (skip the step entirely)."""
@@ -383,6 +415,7 @@ class PerImageLossWatch:
             b = min(int(min(max(t, 0.0), 0.999999) * _N_BUCKETS), _N_BUCKETS - 1)
             loss = float(loss)
             key = self._key_of(item_keys)
+            self._epoch_now = max(self._epoch_now, int(epoch))   # drives the warm-up ramp
             self._records.append((key, int(epoch), b, loss))
             self._bsum[b] += loss
             self._bcnt[b] += 1
@@ -531,9 +564,19 @@ class PerImageLossWatch:
                 # stuck when it sits above average by more than its own epoch-to-epoch noise
                 # (real caption poison clears this bar by an order of magnitude; validated by
                 # replaying the 2026-07 real-run logs through both detector versions).
+                # Look-filter warm-up: release on proof of improvement or ramp completion, and
+                # hold stuck/suspect votes until 2 epochs after the ramp ends — a deliberately
+                # muted image reads as high-flat (the stuck signature) precisely BECAUSE it is
+                # being protected; convicting it would defeat the warm-up.
+                if key in self._warmup and key not in self._warmup_released:
+                    if improving or (epoch - 1) >= self._warmup_ramp_epochs:
+                        self._warmup_released[key] = epoch
+                warm_hold = key in self._warmup and (
+                    key not in self._warmup_released or epoch <= self._warmup_released[key] + 2)
                 votes_stuck = (s["trend_epochs"] >= 4 and s["mean_residual"] >= hi
                                and s["mean_residual"] > s["se"]
-                               and s["last"] > 0.0 and not improving and not good_run)
+                               and s["last"] > 0.0 and not improving and not good_run
+                               and not warm_hold)
                 if key in self._confirmed_stuck:
                     self._stuck_epochs[key] = self._stuck_epochs.get(key, 0) + 1
                     self._clear_votes[key] = 0 if votes_stuck else self._clear_votes.get(key, 0) + 1
@@ -557,7 +600,8 @@ class PerImageLossWatch:
                 # Same wobble bar once a trend exists; pre-trend (se unknowable) stays
                 # magnitude-only — early suspicion is deliberately fast and mild.
                 extreme = (s["mean_residual"] >= ext_hi and not improving and not good_run
-                           and (s["trend_epochs"] < 4 or s["mean_residual"] > s["se"]))
+                           and (s["trend_epochs"] < 4 or s["mean_residual"] > s["se"])
+                           and not warm_hold)
                 self._suspect_votes[key] = self._suspect_votes.get(key, 0) + 1 if extreme else 0
                 suspect = (key not in self._confirmed_stuck
                            and (self._suspect_votes[key] >= 2
@@ -628,8 +672,12 @@ class PerImageLossWatch:
                     verdict, mult = "easy", self.easy_mult
                 else:
                     verdict, mult = "mid", 1.0
+                # Active warm-up ramp overrides the display + multiplier (exclusion still wins).
+                wm = self._warmup_mult(key)
+                if wm is not None and verdict != "excluded":
+                    verdict, mult = "warmup", round(wm, 3)
                 s["verdict"] = verdict
-                s["multiplier"] = mult if self.apply_lr else 1.0
+                s["multiplier"] = mult if (self.apply_lr or verdict == "warmup") else 1.0
                 new_mult[key] = mult
             self._mult = new_mult
             self.verdicts = {k: s["verdict"] for k, s in stats.items()}

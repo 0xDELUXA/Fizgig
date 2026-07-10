@@ -802,6 +802,7 @@ def train_krea2(
     log_per_image_loss: bool = False,
     per_image_lr: bool = False,
     auto_recaption: bool = False,
+    warmup_look_outliers: bool = False,
     trigger_word: str = None,
     resume_state_dir: str = None,
     context_lora_path: str = None,
@@ -936,7 +937,8 @@ def train_krea2(
     # Also used to load/store <image_dir>/fizgig_excluded.json (exclusions travel with the dataset).
     recaptioned = {}   # key -> AI recaption attempts used (max 2; 2nd is the detailed pass)
     ar_image_dir, ar_caption_ext = None, ".txt"
-    watch_enabled = log_per_image_loss or per_image_lr or auto_recaption or _loss_log_env()
+    watch_enabled = (log_per_image_loss or per_image_lr or auto_recaption
+                     or warmup_look_outliers or _loss_log_env())
     if watch_enabled:
         def _find_toml_key(d, key):
             if isinstance(d, dict):
@@ -971,12 +973,55 @@ def train_krea2(
                                        dataset_dir=ar_image_dir, caption_ext=ar_caption_ext)
         # Reconcile persisted exclusions against the actual training set (prune entries for
         # images that left the dataset; refuse a file that would exclude everything).
-        loss_watch.preflight(str(it.item_key)
-                             for ds in group.datasets
-                             if getattr(ds, "batch_manager", None) is not None
-                             for bucket in ds.batch_manager.buckets.values()
-                             for it in bucket)
+        _dataset_keys = {str(it.item_key)
+                         for ds in group.datasets
+                         if getattr(ds, "batch_manager", None) is not None
+                         for bucket in ds.batch_manager.buckets.values()
+                         for it in bucket}
+        loss_watch.preflight(_dataset_keys)
         logger.info(f"[loss-watch] per-image loss watch ON (per_image_lr={per_image_lr})")
+        if warmup_look_outliers:
+            # LR warm-up for Look Consistency Filter outliers (tight angles, unusual views):
+            # they keep their unique information but ease in at x0.4 -> x1.0 over the first
+            # epochs instead of fighting the forming identity core at full strength. Scores are
+            # saved by the Image Prep tab's Look Filter into the dataset folder.
+            _look_path = os.path.join(ar_image_dir or "", "fizgig_look_scores.json")
+            try:
+                with open(_look_path, encoding="utf-8") as _f:
+                    _look = json.load(_f)
+                _cut = _look.get("cutoff")
+                _scores = _look.get("scores") or {}
+                if _cut is None:
+                    logger.warning("[look-warmup] no cutoff in fizgig_look_scores.json (too few "
+                                   "scored faces) — warm-up disabled this run")
+                else:
+                    _outliers = {k for k, v in _scores.items()
+                                 if isinstance(v, (int, float)) and v < float(_cut)}
+                    # Outliers no longer in the dataset were most likely marked + moved to
+                    # excluded_by_look/ in the Look Filter — that's the tool working, not an
+                    # error. Warm up only what is actually being trained.
+                    _gone = sorted(_outliers - _dataset_keys)
+                    _keys = _outliers & _dataset_keys
+                    if _gone:
+                        logger.info(f"[look-warmup] {len(_gone)} scored outlier(s) not in the "
+                                    f"dataset (moved/excluded via the Look Filter) — skipped: "
+                                    + ", ".join(_gone[:8]) + ("…" if len(_gone) > 8 else ""))
+                    if _keys:
+                        loss_watch.set_warmup_keys(_keys)
+                        logger.info(f"[look-warmup] {len(_keys)} look-outlier image(s) on LR "
+                                    f"warm-up ×0.4→×1.0 over the first epochs (released early "
+                                    f"on improvement): " + ", ".join(sorted(_keys)[:8])
+                                    + ("…" if len(_keys) > 8 else ""))
+                    else:
+                        logger.info("[look-warmup] no look-outliers present in the dataset — "
+                                    "nothing to warm up")
+            except FileNotFoundError:
+                logger.warning("[look-warmup] fizgig_look_scores.json not found in the dataset "
+                               "folder — run the Look Consistency Filter (Image Prep tab, scan "
+                               "with 3 baselines) first; warm-up disabled this run")
+            except Exception as _e:
+                logger.warning(f"[look-warmup] could not load look scores ({_e}) — warm-up "
+                               f"disabled this run")
         if resume_state_dir and os.path.isdir(resume_state_dir) and start_epoch > 0:
             # Resumed run: rebuild the watch's history by replaying its own JSONL (it appends
             # across pause/resume). The applied-captions ledger supplies the reset/incorrigible

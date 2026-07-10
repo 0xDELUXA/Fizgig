@@ -3707,6 +3707,9 @@ class LoRATrainerGUI:
         self._problem_win = win
         self._problem_mtime = None
         self._problem_thumbs = {}  # path -> PhotoImage, cached across refreshes (and kept alive)
+        self._problem_row_ui = {}  # key -> persistent row widgets (in-place refresh; new window = fresh)
+        self._problem_last_order = []
+        self._problem_img_paths = getattr(self, "_problem_img_paths", {})  # key -> resolved image path
 
         head = tk.Frame(win, bg=COLORS["bg_deep"])
         head.pack(fill=tk.X, padx=14, pady=(12, 6))
@@ -3776,16 +3779,11 @@ class LoRATrainerGUI:
         elif not force:
             return  # still no file; nothing to redraw
 
-        # Rebuilding scrolls the canvas back to the top — restore the reading position after,
-        # or every epoch-boundary refresh yanks the user away from the row they were studying.
-        try:
-            scroll_pos = self._problem_canvas.yview()[0]
-        except Exception:
-            scroll_pos = 0.0
-        for w in self._problem_rows.winfo_children():
-            w.destroy()
-
         if not data or not data.get("images"):
+            for w in self._problem_rows.winfo_children():
+                w.destroy()
+            self._problem_row_ui = {}
+            self._problem_last_order = []
             self._problem_status.config(text="No data yet. Enable “Detect problem images” on the Training tab, "
                                              "start a Krea 2 run, and give it 3+ epochs of warmup.")
             return
@@ -3867,44 +3865,104 @@ class LoRATrainerGUI:
                        key=lambda kv: (order.get(kv[1].get("verdict", "mid"), 2),
                                        -float(kv[1].get("mean_residual", 0.0))))
 
+        # Persistent rows: refreshes UPDATE existing rows in place instead of destroying and
+        # recreating hundreds of widgets on the main thread every epoch boundary — that rebuild
+        # was the window's remaining lag source. Only appearing/disappearing images create or
+        # destroy widgets, and the list only re-packs when the sort order actually changed.
+        new_keys = [key for key, _ in items]
+        key_set = set(new_keys)
+        for k in list(self._problem_row_ui):
+            if k not in key_set:
+                ui = self._problem_row_ui.pop(k)
+                try:
+                    ui["frame"].destroy()
+                except Exception:
+                    pass
         thumb_jobs = []
         for key, s in items:
-            verdict = s.get("verdict", "mid")
-            color, blurb = style.get(verdict, style["mid"])
-            row = tk.Frame(self._problem_rows, bg=COLORS["bg_surface"],
-                           highlightbackground=color, highlightthickness=2)
-            row.pack(fill=tk.X, pady=4)
+            ui = self._problem_row_ui.get(key)
+            if ui is None:
+                ui = self._problem_build_row(key, thumb_jobs)
+                self._problem_row_ui[key] = ui
+            self._problem_update_row(ui, key, s, data, queued_keys, applied_info, style)
+        if new_keys != self._problem_last_order:
+            try:
+                scroll_pos = self._problem_canvas.yview()[0]
+            except Exception:
+                scroll_pos = 0.0
+            for key in new_keys:
+                self._problem_row_ui[key]["frame"].pack_forget()
+            for key in new_keys:
+                self._problem_row_ui[key]["frame"].pack(fill=tk.X, pady=4)
+            self._problem_last_order = new_keys
+            try:
+                self._problem_rows.update_idletasks()
+                self._problem_canvas.yview_moveto(scroll_pos)
+            except Exception:
+                pass
+        if thumb_jobs:
+            self._load_thumbs_async(thumb_jobs, self._problem_thumbs)
 
+    def _problem_build_row(self, key, thumb_jobs):
+        """Create one persistent Problem Images row (static widgets only — per-refresh state is
+        painted by _problem_update_row)."""
+        row = tk.Frame(self._problem_rows, bg=COLORS["bg_surface"],
+                       highlightbackground=COLORS["border"], highlightthickness=2)
+        row.pack(fill=tk.X, pady=4)
+
+        thumb_holder = tk.Frame(row, width=100, height=100, bg=COLORS["bg_surface"])
+        thumb_holder.pack_propagate(False)
+        thumb_holder.pack(side=tk.LEFT, padx=8, pady=8)
+        thumb_lbl = tk.Label(thumb_holder, text="…", font=(FONT_FAMILY, 8),
+                             fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+        thumb_lbl.pack(expand=True)
+        # Path resolution cached per key — probing 5 extensions per image per refresh added
+        # hundreds of stat() calls against (often network/spinning) dataset drives.
+        img_path = self._problem_img_paths.get(key)
+        if img_path is None:
             img_path = self._find_dataset_image(key)
-            thumb_holder = tk.Frame(row, width=100, height=100, bg=COLORS["bg_surface"])
-            thumb_holder.pack_propagate(False)
-            thumb_holder.pack(side=tk.LEFT, padx=8, pady=8)
             if img_path:
-                # Cached thumbs render immediately; the rest decode on a background thread
-                # (_load_thumbs_async) — decoding full-res PNGs inline froze the window.
-                ph = self._problem_thumbs.get(img_path)
-                if ph is not None:
-                    tk.Label(thumb_holder, image=ph, bg=COLORS["bg_surface"]).pack(expand=True)
-                else:
-                    lbl = tk.Label(thumb_holder, text="…", font=(FONT_FAMILY, 8),
-                                   fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
-                    lbl.pack(expand=True)
-                    thumb_jobs.append((img_path, lbl))
+                self._problem_img_paths[key] = img_path
+        if img_path:
+            ph = self._problem_thumbs.get(img_path)
+            if ph is not None:
+                thumb_lbl.config(image=ph, text="")
             else:
-                tk.Label(thumb_holder, text="no\npreview", font=(FONT_FAMILY, 8),
-                         fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(expand=True)
+                thumb_jobs.append((img_path, thumb_lbl))
+        else:
+            thumb_lbl.config(text="no\npreview")
 
-            info = tk.Frame(row, bg=COLORS["bg_surface"])
-            info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
-            name_row = tk.Frame(info, bg=COLORS["bg_surface"])
-            name_row.pack(fill=tk.X, anchor="w")
-            tk.Label(name_row, text=os.path.basename(key), font=(FONT_FAMILY, 10, "bold"),
-                     fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
-            tk.Label(name_row, text=f"  {verdict.upper()}", font=(FONT_FAMILY, 9, "bold"),
-                     fg=color, bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+        info = tk.Frame(row, bg=COLORS["bg_surface"])
+        info.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=8)
+        name_row = tk.Frame(info, bg=COLORS["bg_surface"])
+        name_row.pack(fill=tk.X, anchor="w")
+        tk.Label(name_row, text=os.path.basename(key), font=(FONT_FAMILY, 10, "bold"),
+                 fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+        verdict_lbl = tk.Label(name_row, text="", font=(FONT_FAMILY, 9, "bold"),
+                               bg=COLORS["bg_surface"])
+        verdict_lbl.pack(side=tk.LEFT)
+        badge_lbl = tk.Label(name_row, text="", font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
+        badge_lbl.pack(side=tk.LEFT)
+        ttk.Button(name_row, text="✏ Edit Caption", width=14,
+                   command=lambda k=key: self._open_caption_editor(k)).pack(side=tk.RIGHT, padx=(8, 0))
+        stats_lbl = tk.Label(info, text="", font=(FONT_FAMILY, 9),
+                             fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
+        stats_lbl.pack(anchor="w", pady=(2, 0))
+        blurb_lbl = tk.Label(info, text="", font=(FONT_FAMILY, 8, "italic"),
+                             fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+        blurb_lbl.pack(anchor="w", pady=(2, 0))
+        return {"frame": row, "verdict": verdict_lbl, "badge": badge_lbl,
+                "stats": stats_lbl, "blurb": blurb_lbl}
+
+    def _problem_update_row(self, ui, key, s, data, queued_keys, applied_info, style):
+        """Paint one row's per-refresh state (verdict colour, badges, stats) in place."""
+        verdict = s.get("verdict", "mid")
+        color, blurb = style.get(verdict, style["mid"])
+        try:
+            ui["frame"].config(highlightbackground=color)
+            ui["verdict"].config(text=f"  {verdict.upper()}", fg=color)
             if key in queued_keys:
-                tk.Label(name_row, text="  ✏ fix queued", font=(FONT_FAMILY, 9),
-                         fg="#F1C40F", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+                ui["badge"].config(text="  ✏ fix queued", fg="#F1C40F")
             elif key in applied_info:
                 _ai = applied_info[key].get("auto")
                 _att = int(applied_info[key].get("attempt", 1) or 1)
@@ -3915,11 +3973,9 @@ class LoRATrainerGUI:
                     _txt = f"  🤖 AI re-captioned @ epoch {_ep}"
                 else:
                     _txt = f"  ✓ caption re-encoded @ epoch {_ep}"
-                tk.Label(name_row, text=_txt, font=(FONT_FAMILY, 9),
-                         fg="#2ECC71", bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
-            ttk.Button(name_row, text="✏ Edit Caption", width=14,
-                       command=lambda k=key: self._open_caption_editor(k)).pack(side=tk.RIGHT, padx=(8, 0))
-
+                ui["badge"].config(text=_txt, fg="#2ECC71")
+            else:
+                ui["badge"].config(text="")
             # Trend shows the DECISION metric (the half-window drop test the verdicts actually
             # use), not the raw slope — the old slope arrow could say "improving" while the
             # decision bar said otherwise, which read as a contradiction next to a stuck badge.
@@ -3935,22 +3991,14 @@ class LoRATrainerGUI:
             elif verdict == "stuck" and s.get("stuck_epochs"):
                 trend += f" — stuck {int(s['stuck_epochs'])} epochs"
             mult = s.get("multiplier", 1.0)
-            stats_txt = (f"difficulty {float(s.get('mean_residual', 0.0)):+.4f}   ·   trend {trend}   ·   "
-                         f"mean loss {float(s.get('mean_loss', 0.0)):.4f}   ·   "
-                         f"{int(s.get('epochs', 0))} epochs tracked"
-                         + (f"   ·   LR ×{mult:g}" if data.get("apply_lr") and mult != 1.0 else ""))
-            tk.Label(info, text=stats_txt, font=(FONT_FAMILY, 9),
-                     fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
-            tk.Label(info, text=blurb, font=(FONT_FAMILY, 8, "italic"),
-                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor="w", pady=(2, 0))
-
-        if thumb_jobs:
-            self._load_thumbs_async(thumb_jobs, self._problem_thumbs)
-        try:
-            self._problem_rows.update_idletasks()
-            self._problem_canvas.yview_moveto(scroll_pos)
+            ui["stats"].config(text=(
+                f"difficulty {float(s.get('mean_residual', 0.0)):+.4f}   ·   trend {trend}   ·   "
+                f"mean loss {float(s.get('mean_loss', 0.0)):.4f}   ·   "
+                f"{int(s.get('epochs', 0))} epochs tracked"
+                + (f"   ·   LR ×{mult:g}" if data.get("apply_lr") and mult != 1.0 else "")))
+            ui["blurb"].config(text=blurb, fg=COLORS["text_muted"])
         except Exception:
-            pass
+            pass   # a dying widget mid-refresh must not kill the loop
 
     def _find_dataset_caption(self, key: str):
         """Caption file for a loss-watch item key: <image_folder>/<basename><caption_ext>."""

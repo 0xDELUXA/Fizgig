@@ -6205,7 +6205,7 @@ class LoRATrainerGUI:
         .lik-bad { background-color: #C0392B; } .lik-na { background-color: #5D6D7E; }
         #likeness-panel { display: none; background-color: #22303F; border-bottom: 1px solid #2C3E50; padding: 12px 20px; }
         #likeness-panel h3 { font-size: 15px; margin-bottom: 8px; color: #ECF0F1; }
-        #lik-chart { background-color: #1B2A38; border-radius: 6px; width: 100%; max-width: 940px; height: 150px; display: block; }
+        #lik-chart { background-color: #1B2A38; border-radius: 6px; width: 100%; height: 150px; display: block; }
         #likeness-panel .lik-note { color: #95A5A6; font-size: 12px; margin-top: 6px; }
         #basepicker { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
                       background-color: rgba(0,0,0,0.93); z-index: 1100; overflow-y: auto; padding: 24px 30px; }
@@ -6542,6 +6542,10 @@ class LoRATrainerGUI:
                 `${newest.loraName} — best so far: epoch ${epochs[bestI]} (${Math.round(avgs[bestI] * 100)}%)`;
             panel.style.display = 'block';
             const cv = document.getElementById('lik-chart');
+            // Size the backing store to the rendered width so the chart spans the page like the
+            // thumbnail grid does (a fixed-width canvas stretched by CSS goes blurry instead).
+            const cssW = cv.clientWidth || 940;
+            if (cv.width !== cssW) cv.width = cssW;
             const ctx = cv.getContext('2d');
             const W = cv.width, H = cv.height, padL = 42, padR = 12, padT = 12, padB = 22;
             ctx.clearRect(0, 0, W, H);
@@ -6882,6 +6886,12 @@ class LoRATrainerGUI:
 
         document.getElementById('lightbox').addEventListener('click', (e) => {
             if (e.target.id === 'lightbox') closeLightbox();
+        });
+
+        let chartResizeTimer = null;
+        window.addEventListener('resize', () => {
+            if (chartResizeTimer) clearTimeout(chartResizeTimer);
+            chartResizeTimer = setTimeout(renderLikenessChart, 150);
         });
 
         setupTimer();

@@ -6170,6 +6170,22 @@ class LoRATrainerGUI:
         .bp-item.selected { outline-color: #27AE60; }
         .bp-item .bp-num { position: absolute; top: 6px; left: 6px; background-color: #27AE60; color: #fff; font-weight: bold;
                            border-radius: 50%; width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; }
+        #runviz { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                  background-color: rgba(0,0,0,0.95); z-index: 1150; overflow-y: auto; padding: 20px 30px; }
+        #runviz.active { display: flex; flex-direction: column; align-items: center; }
+        .rv-bar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; padding: 6px 0; }
+        .rv-bar h2 { font-size: 20px; }
+        #runviz button, #runviz select { padding: 6px 12px; background-color: #2980B9; color: #ECF0F1;
+                                         border: none; border-radius: 4px; cursor: pointer; }
+        #runviz select { background-color: #1B2A38; border: 1px solid #2980B9; }
+        #runviz label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+        #rv-stage { position: relative; margin: 10px 0; }
+        #rv-img { max-width: min(85vw, 900px); max-height: 62vh; display: block; background-color: #1B2A38; border-radius: 6px; }
+        #rv-epoch { position: absolute; bottom: 12px; left: 12px; background-color: rgba(0,0,0,0.65); color: #fff;
+                    padding: 5px 12px; border-radius: 4px; font-weight: bold; font-size: 15px; }
+        #rv-slider { width: min(85vw, 900px); }
+        #rv-note { color: #95A5A6; font-size: 12px; margin-top: 10px; max-width: 720px; text-align: center; }
+        #rv-status { color: #95A5A6; font-size: 13px; }
     </style>
 </head>
 <body>
@@ -6195,6 +6211,7 @@ class LoRATrainerGUI:
             </select></label>
             <button onclick="loadImages()">Refresh Now</button>
             <button onclick="openBaselinePicker()">🎯 Likeness scoring…</button>
+            <button onclick="openRunViz()">🎞 Training Run Visualiser</button>
             <a id="final-lora-btn" class="final-lora-btn" href="#" download style="display:none">⬇ Download Final LoRA</a>
             <span class="stats" id="stats">0 images</span>
             <span class="status" id="status">Ready</span>
@@ -6239,6 +6256,35 @@ class LoRATrainerGUI:
             Listing: <span id="bp-folder" style="color:#3498DB">…</span> (the Start-tab training folder,
             snapshotted when the gallery was opened — reopen the gallery after changing it)</div>
         <div id="bp-grid"></div>
+    </div>
+    <div id="runviz">
+        <div class="rv-bar">
+            <h2>🎞 Training Run Visualiser</h2>
+            <label>Sample slot: <select id="rv-slot" onchange="rvBuild()"></select></label>
+            <button id="rv-play" onclick="rvTogglePlay()">▶ Play</button>
+            <label>Speed: <select id="rv-speed">
+                <option value="600">Slow</option>
+                <option value="350" selected>Normal</option>
+                <option value="180">Fast</option>
+            </select></label>
+            <button onclick="closeRunViz()">✕ Close</button>
+        </div>
+        <div class="rv-bar">
+            <label><input type="checkbox" id="rv-pingpong" checked> Loop (ping-pong)</label>
+            <label><input type="checkbox" id="rv-ticker" checked> Epoch ticker</label>
+            <label><input type="checkbox" id="rv-tag" checked> Fizgig tag</label>
+            <button onclick="rvExport()">⬇ Export clip (WebM)</button>
+            <button onclick="rvSaveFrame()">⬇ Save frame (PNG)</button>
+            <span id="rv-status"></span>
+        </div>
+        <div id="rv-stage">
+            <img id="rv-img" src="" alt="">
+            <div id="rv-epoch"></div>
+        </div>
+        <input type="range" id="rv-slider" min="0" max="0" value="0" oninput="rvShow(parseInt(this.value))">
+        <div id="rv-note">Scrubbing this run's epochs, one sample slot at a time. Like it? The <b>LoRA Royale</b> tab
+            in Fizgig does much more — checkpoint-vs-checkpoint battles, seed &amp; prompt travel, likeness scoring,
+            and full MP4/GIF export with the same ticker and tag options.</div>
     </div>
     <!-- EMBEDDED_FILES_START -->
     <script id="files-data" type="application/json">[]</script>
@@ -6557,6 +6603,184 @@ class LoRATrainerGUI:
             document.body.style.overflow = '';
         }
 
+        // ---------- Training Run Visualiser (epoch carousel, Royale-style) ----------
+
+        let rvFrames = [];      // [{epoch, filename, sim}] ascending epochs, one sample slot
+        let rvIdx = 0;
+        let rvTimer = null;
+        let rvDir = 1;          // ping-pong direction while playing
+
+        function rvCurrentRunImages() {
+            const run = currentRunName();
+            return run ? images.filter(im => im.loraName === run) : [];
+        }
+
+        function openRunViz() {
+            const runImgs = rvCurrentRunImages();
+            if (!runImgs.length) { alert('No samples yet — start a run with previews enabled.'); return; }
+            const slots = [...new Set(runImgs.map(im => im.idx))].sort((a, b) => a - b);
+            const sel = document.getElementById('rv-slot');
+            const keep = sel.value;
+            sel.innerHTML = slots.map(s => `<option value="${s}">${s}</option>`).join('');
+            if (slots.map(String).includes(keep)) sel.value = keep;
+            document.getElementById('runviz').classList.add('active');
+            document.body.style.overflow = 'hidden';
+            rvBuild();
+        }
+
+        function rvBuild() {
+            const slot = parseInt(document.getElementById('rv-slot').value || '0');
+            const byEpoch = {};
+            rvCurrentRunImages().forEach(im => {
+                if (im.idx !== slot) return;
+                // Same epoch rendered twice (e.g. after a resume) -> keep the newest.
+                if (!byEpoch[im.epoch] || im.timestamp > byEpoch[im.epoch].timestamp) byEpoch[im.epoch] = im;
+            });
+            rvFrames = Object.keys(byEpoch).map(Number).sort((a, b) => a - b).map(e => ({
+                epoch: e,
+                filename: byEpoch[e].filename,
+                sim: (likeness && likeness.scores) ? likeness.scores[byEpoch[e].filename] : undefined,
+            }));
+            const slider = document.getElementById('rv-slider');
+            slider.max = Math.max(0, rvFrames.length - 1);
+            rvShow(rvFrames.length - 1);   // land on the newest epoch
+        }
+
+        function rvShow(i) {
+            if (!rvFrames.length) return;
+            rvIdx = Math.max(0, Math.min(i, rvFrames.length - 1));
+            const fr = rvFrames[rvIdx];
+            document.getElementById('rv-img').src = fr.filename;
+            document.getElementById('rv-slider').value = rvIdx;
+            let label = `Epoch ${fr.epoch}`;
+            if (typeof fr.sim === 'number') label += `  ·  likeness ${Math.round(fr.sim * 100)}%`;
+            document.getElementById('rv-epoch').textContent = label;
+        }
+
+        function rvTogglePlay() {
+            if (rvTimer) { rvStop(); return; }
+            if (rvFrames.length < 2) return;
+            rvDir = 1;
+            document.getElementById('rv-play').textContent = '⏸ Pause';
+            const tick = () => {
+                let next = rvIdx + rvDir;
+                if (document.getElementById('rv-pingpong').checked) {
+                    if (next >= rvFrames.length || next < 0) { rvDir = -rvDir; next = rvIdx + rvDir; }
+                } else if (next >= rvFrames.length) next = 0;
+                rvShow(next);
+                rvTimer = setTimeout(tick, parseInt(document.getElementById('rv-speed').value));
+            };
+            rvTimer = setTimeout(tick, parseInt(document.getElementById('rv-speed').value));
+        }
+
+        function rvStop() {
+            if (rvTimer) clearTimeout(rvTimer);
+            rvTimer = null;
+            document.getElementById('rv-play').textContent = '▶ Play';
+        }
+
+        function closeRunViz() {
+            rvStop();
+            document.getElementById('runviz').classList.remove('active');
+            document.body.style.overflow = '';
+        }
+
+        function rvDrawFrame(ctx, imgEl, fr, W, H) {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, W, H);
+            const sc = Math.min(W / imgEl.naturalWidth, H / imgEl.naturalHeight);
+            const dw = imgEl.naturalWidth * sc, dh = imgEl.naturalHeight * sc;
+            ctx.drawImage(imgEl, (W - dw) / 2, (H - dh) / 2, dw, dh);
+            if (document.getElementById('rv-ticker').checked) {
+                const label = 'Epoch ' + fr.epoch;
+                ctx.font = 'bold 26px Segoe UI';
+                const tw = ctx.measureText(label).width;
+                ctx.fillStyle = 'rgba(0,0,0,0.65)';
+                ctx.fillRect(16, H - 56, tw + 24, 40);
+                ctx.fillStyle = '#fff';
+                ctx.fillText(label, 28, H - 28);
+            }
+            if (document.getElementById('rv-tag').checked) {
+                ctx.font = 'bold 20px Segoe UI';
+                const tag = 'Fizgig';
+                const tw = ctx.measureText(tag).width;
+                ctx.fillStyle = 'rgba(255,255,255,0.55)';
+                ctx.fillText(tag, W - tw - 18, H - 18);
+            }
+        }
+
+        function rvPreload() {
+            return Promise.all(rvFrames.map(fr => new Promise(res => {
+                const im = new Image();
+                im.onload = () => res({ fr, im });
+                im.onerror = () => res(null);
+                im.src = fr.filename;
+            }))).then(list => list.filter(Boolean));
+        }
+
+        async function rvExport() {
+            if (rvFrames.length < 2) { alert('Need at least 2 epochs to export a clip.'); return; }
+            const st = document.getElementById('rv-status');
+            st.textContent = 'Preparing frames…';
+            rvStop();
+            const loaded = await rvPreload();
+            if (loaded.length < 2) { st.textContent = 'Could not load frames.'; return; }
+            let seq = [...loaded];
+            if (document.getElementById('rv-pingpong').checked) {
+                seq = seq.concat([...loaded].reverse().slice(1, -1));
+            }
+            const first = loaded[0].im;
+            const W = Math.min(1024, first.naturalWidth), H = Math.round(W * first.naturalHeight / first.naturalWidth);
+            const cv = document.createElement('canvas');
+            cv.width = W; cv.height = H;
+            const ctx = cv.getContext('2d');
+            const stream = cv.captureStream(30);
+            let mime = 'video/webm;codecs=vp9';
+            if (!MediaRecorder.isTypeSupported(mime)) mime = 'video/webm';
+            const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8_000_000 });
+            const chunks = [];
+            rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+            const doneRec = new Promise(res => { rec.onstop = res; });
+            const stepMs = parseInt(document.getElementById('rv-speed').value);
+            rec.start();
+            for (let i = 0; i < seq.length; i++) {
+                rvDrawFrame(ctx, seq[i].im, seq[i].fr, W, H);
+                st.textContent = `Recording… ${i + 1}/${seq.length}`;
+                await new Promise(r => setTimeout(r, stepMs));
+            }
+            await new Promise(r => setTimeout(r, 200));   // tail so the last frame lands
+            rec.stop();
+            await doneRec;
+            const blob = new Blob(chunks, { type: 'video/webm' });
+            const a = document.createElement('a');
+            const run = currentRunName() || 'run';
+            a.href = URL.createObjectURL(blob);
+            a.download = `${run}_training_run.webm`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+            st.textContent = `Saved ${a.download} (${seq.length} frames). MP4/GIF export lives in LoRA Royale.`;
+        }
+
+        function rvSaveFrame() {
+            if (!rvFrames.length) return;
+            const fr = rvFrames[rvIdx];
+            const im = new Image();
+            im.onload = () => {
+                const cv = document.createElement('canvas');
+                cv.width = im.naturalWidth; cv.height = im.naturalHeight;
+                rvDrawFrame(cv.getContext('2d'), im, fr, cv.width, cv.height);
+                cv.toBlob(blob => {
+                    const a = document.createElement('a');
+                    const run = currentRunName() || 'run';
+                    a.href = URL.createObjectURL(blob);
+                    a.download = `${run}_epoch${fr.epoch}.png`;
+                    a.click();
+                    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+                }, 'image/png');
+            };
+            im.src = fr.filename;
+        }
+
         // ---------- Lightbox ----------
 
         function openLightbox(filename) {
@@ -6584,6 +6808,13 @@ class LoRATrainerGUI:
         }
 
         document.addEventListener('keydown', (e) => {
+            if (document.getElementById('runviz').classList.contains('active')) {
+                if (e.key === 'Escape') closeRunViz();
+                if (e.key === 'ArrowLeft') { rvStop(); rvShow(rvIdx - 1); }
+                if (e.key === 'ArrowRight') { rvStop(); rvShow(rvIdx + 1); }
+                if (e.key === ' ') { e.preventDefault(); rvTogglePlay(); }
+                return;
+            }
             if (e.key === 'Escape' && document.getElementById('basepicker').classList.contains('active')) {
                 closeBaselinePicker();
                 return;

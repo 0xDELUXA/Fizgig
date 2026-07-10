@@ -6701,11 +6701,14 @@ class LoRATrainerGUI:
                 ctx.fillText(label, 28, H - 28);
             }
             if (document.getElementById('rv-tag').checked) {
-                ctx.font = 'bold 20px Segoe UI';
+                // Scale with the frame — a fixed small px size vanished next to the epoch ticker
+                // (and shrank to nothing on full-resolution saved frames).
+                const fs = Math.max(28, Math.round(H * 0.055));
+                ctx.font = `bold ${fs}px Segoe UI`;
                 const tag = 'Fizgig';
                 const tw = ctx.measureText(tag).width;
-                ctx.fillStyle = 'rgba(255,255,255,0.55)';
-                ctx.fillText(tag, W - tw - 18, H - 18);
+                ctx.fillStyle = 'rgba(255,255,255,0.7)';
+                ctx.fillText(tag, W - tw - 20, H - 20);
             }
         }
 

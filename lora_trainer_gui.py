@@ -6160,6 +6160,10 @@ class LoRATrainerGUI:
     <header>
         <h1><span class="live-indicator" id="live-dot"></span> Fizgig Sample Gallery</h1>
         <div class="controls">
+            <label>Show: <select id="run-select">
+                <option value="all">All samples</option>
+                <option value="current">Current run only</option>
+            </select></label>
             <label>Sort: <select id="sort-select">
                 <option value="newest">Newest First</option>
                 <option value="oldest">Oldest First</option>
@@ -6215,7 +6219,9 @@ class LoRATrainerGUI:
         </div>
         <div class="bp-sub">Choose the 3 training images that best nail the look you want — every sample is scored
             against all three and averaged, so no single photo's angle/lighting biases the result.
-            Scoring runs on CPU with zero impact on training speed.</div>
+            Scoring runs on CPU with zero impact on training speed.<br>
+            Listing: <span id="bp-folder" style="color:#3498DB">…</span> (the Start-tab training folder,
+            snapshotted when the gallery was opened — reopen the gallery after changing it)</div>
         <div id="bp-grid"></div>
     </div>
     <!-- EMBEDDED_FILES_START -->
@@ -6230,11 +6236,26 @@ class LoRATrainerGUI:
 
         document.getElementById('sort-select').value = localStorage.getItem('fizgig-sort') || 'newest';
         document.getElementById('refresh-select').value = localStorage.getItem('fizgig-refresh') || '10';
+        document.getElementById('run-select').value = localStorage.getItem('fizgig-run') || 'all';
 
         document.getElementById('sort-select').addEventListener('change', (e) => {
             localStorage.setItem('fizgig-sort', e.target.value);
             renderGallery();
         });
+
+        document.getElementById('run-select').addEventListener('change', (e) => {
+            localStorage.setItem('fizgig-run', e.target.value);
+            renderGallery();
+        });
+
+        function currentRunName() {
+            // Current run = the LoRA name of the newest sample. Output folders are commonly
+            // reused across trains, so old runs' samples share the folder — filter them out
+            // by default rather than mixing subjects in one grid.
+            let newest = null;
+            images.forEach(im => { if (!newest || im.timestamp > newest.timestamp) newest = im; });
+            return newest ? newest.loraName : null;
+        }
 
         document.getElementById('refresh-select').addEventListener('change', (e) => {
             localStorage.setItem('fizgig-refresh', e.target.value);
@@ -6332,7 +6353,13 @@ class LoRATrainerGUI:
                 return;
             }
 
+            // Optional opt-in filter — default shows everything (output folders are often
+            // shared across runs, and comparing runs side by side is a feature).
             let sorted = [...images];
+            if (document.getElementById('run-select').value === 'current') {
+                const run = currentRunName();
+                if (run) sorted = sorted.filter(im => im.loraName === run);
+            }
             switch (sortBy) {
                 case 'newest': sorted.sort((a, b) => b.timestamp.localeCompare(a.timestamp)); break;
                 case 'oldest': sorted.sort((a, b) => a.timestamp.localeCompare(b.timestamp)); break;
@@ -6438,7 +6465,11 @@ class LoRATrainerGUI:
             let names = [];
             try {
                 const r = await fetch('dataset.json?t=' + Date.now());
-                if (r.ok) names = await r.json();
+                if (r.ok) {
+                    const d = await r.json();
+                    names = Array.isArray(d) ? d : (d.images || []);
+                    document.getElementById('bp-folder').textContent = (d && d.folder) || 'unknown';
+                }
             } catch (e) {}
             if (!names.length) {
                 grid.innerHTML = '<div style="color:#E74C3C">No dataset images found — set the training ' +
@@ -6607,6 +6638,8 @@ class LoRATrainerGUI:
             pass
 
         # Dataset image list for the likeness baseline picker (images served via /dataset/).
+        # The folder path is included so the picker can SHOW which folder it's listing —
+        # "why is that image here?" is answered by looking at the folder, not guessing.
         try:
             dfolder = getattr(self, "_gal_dataset_dir", "") or ""
             dimgs = []
@@ -6614,7 +6647,7 @@ class LoRATrainerGUI:
                 dimgs = sorted(f for f in os.listdir(dfolder)
                                if os.path.splitext(f)[1].lower() in self._FF_EXTS)
             with open(os.path.join(samples_dir, "dataset.json"), 'w', encoding='utf-8') as f:
-                json.dump(dimgs, f)
+                json.dump({"folder": dfolder, "images": dimgs}, f)
         except Exception:
             pass
 

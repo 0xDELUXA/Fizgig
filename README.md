@@ -20,6 +20,8 @@
 
 > **🎉 New — Krea 2.** Fizgig now supports a **second, fully native model family**: **Krea 2 (12.9B)**. The whole workbench works with it — Repair Studio, Explorer, Royale, Profiler, Extract — plus Context LoRA, Adaptive LR, Pause/Resume, 4-bit (NF4) low-VRAM training, and the live sample override. [Details below ↓](#krea-2--second-model-family)
 
+> **🆕 Newest — the run that looks after itself.** The Krea 2 trainer now **curates your dataset live**: it detects problem images from their loss alone, throttles them, has the text encoder *look at* the stuck ones and rewrite their captions, warms in unusual angles gently, and **tells you the best epoch** when the run plateaus. [Details ↓](#the-trainer-curates-your-dataset-while-it-trains-krea-2-experimental) Around it, two new instruments for **both families**: the Image Prep tab's **Look Consistency Filter** pre-filters off-look images by face-embedding score, and the **sample gallery** now scores every sample's likeness against your own photos live during training — with a Royale-style **Training Run Visualiser** to scrub and export the run. [Details ↓](#the-sample-gallery-is-an-instrument-both-families)
+
 ---
 
 ## What Fizgig is
@@ -85,13 +87,14 @@ Krea 2 trains real, ComfyUI-compatible LoRAs, and its training recipe is verifie
 
 ### The trainer curates your dataset while it trains (Krea 2, experimental)
 
-Three Training-tab toggles turn a run into a live dataset curator — no other trainer does any of this:
+Four Training-tab toggles turn a run into a live dataset curator — no other trainer does any of this:
 
 - **Detect problem images** — every image's loss is tracked across epochs, normalized for the random noise level each step draws (raw per-step loss mostly ranks the dice roll, not the image). Images that stay hard **without improving** get flagged in the console and in the live **Problem Images window** (thumbnails, verdicts, per-image trends, auto-refreshing every epoch). In real runs the top flags were all caption/image mismatches — e.g. from-behind shots whose captions never said so. The detector finds them from the loss trajectory alone.
 - **Per-image adaptive LR** — flagged images are throttled (suspects ×0.7 from ~epoch 3, confirmed-stuck ×0.5 escalating toward ×0.1) so one bad caption can't keep yanking the weights all run, while fully-mined images ease off to prevent overbake and consistently-healthy learned images get a gentle ×1.1 boost. In matched-epoch A/Bs this gave faster likeness *and* a higher final ceiling — with real skin texture where the untreated run went plastic.
 - **Auto-recaption stuck images** — the same Qwen3-VL that conditions training *looks at* each confirmed-stuck image between epochs, rewrites its caption from what's actually visible (appending your trigger word if set), re-encodes it, and gives the image a fresh start. A second attempt goes exhaustive-detail; still stuck after two means the image is **excluded** for the rest of the run — so the loss average stops carrying its permanent error term — and the exclusion is remembered per-dataset (`fizgig_excluded.json`, travels with your images). Fix the caption and it's automatically re-admitted.
+- **Warm up look outliers** — real-but-unusual images (tight angles, profiles, occlusion) that the Look Consistency Filter scored as outliers keep their unique information but **ease in at ×0.4 LR**, ramping to full over the first ~4 epochs — refining the identity instead of fighting it while it forms — and release to full LR early the moment they start improving. Prior-then-evidence: the face-embedding score covers exactly the epochs before the loss watch has a trend to act on.
 
-You can also edit any caption yourself mid-run from the Problem Images window — the trainer re-encodes it at the next epoch boundary, no restart. And once nothing is improving any more, the watch tells you you're **done**: a plateau banner with a best-checkpoint estimate and a suggested epoch window to scrub in LoRA Royale.
+You can also edit any caption yourself mid-run from the Problem Images window — the trainer re-encodes it at the next epoch boundary, no restart. Once nothing is improving any more, the watch tells you you're **done**: a plateau banner with a best-checkpoint estimate and a suggested epoch window to scrub in LoRA Royale — and it's honest about certainty, distinguishing a *provisional* plateau (images still being adjudicated that may give the run a second wind) from a *confirmed* one. And pausing or restarting loses nothing: a **resumed run replays its own loss log** to restore every verdict, trend, and exclusion exactly where they were.
 
 ---
 
@@ -109,6 +112,7 @@ The foundation: fast, light, and tuned for one model.
 - **Pause / Resume** — graceful epoch-boundary pause that frees your GPU mid-run and resumes with full optimizer state and no quality regression. Fire up Rocket League, come back, carry on.
 - **Model Area targeting** — train only Identity, Style, or Detail blocks, or the full model.
 - **Auto VRAM management** — block swap auto-detects from GPU VRAM; OOM detection tells you exactly what to change. Supports bf16 and fp8 Base DiT, with block swap.
+- **Per-dataset caches, cross-checked** — every dataset gets its own cache folder, and the trainer verifies each cached item against the images actually in your folder before training. Deleted an image? It's gone from the run. Switched datasets? The old one can never leak in.
 - **Diffusers LoRA support** — OneTrainer LoRAs with split Q/K/V keys are auto-fused on load.
 
 > **A note on Base previews:** the default Distilled 4-step previews track ComfyUI closely, including with a Context LoRA active. Only **Base multi-step** previews (Distilled toggled off) can look softer than the deployed LoRA — they come from a mid-training fp8 checkpoint, so colours and detail can be slightly off even when the LoRA is excellent. Judging from Base previews? Confirm final quality in ComfyUI.
@@ -118,10 +122,18 @@ A bottom bar with stacked **VRAM and system-RAM gauges** (smooth gradient fills,
 
 Beside it sits a **live sample override** — tick it to set a prompt, seed, width/height, and optional reference image for the *next* samples, mid-run, no restart. The text encoder only re-runs when the prompt text changes, so seed / resolution / reference tweaks are instant.
 
+### The sample gallery is an instrument (both families)
+
+The browser gallery of training samples now *measures* the run instead of just showing it — on Klein and Krea 2 alike:
+
+- **Live likeness scoring** — pick the **3 dataset photos** that best nail the look, and every sample gets a colour-coded likeness badge (ArcFace face embeddings averaged across all three baselines — one photo would bias every score with its own angle and lighting). Scoring runs on **CPU with zero impact on training speed**, newest samples first, and keeps up live as each epoch's previews land. A **trend chart** plots per-epoch average likeness for the current run with the best epoch highlighted — an objective likeness-vs-epoch curve, *while the run is still going*. (It measures identity likeness only — overbake and skin texture still need your eyes.)
+- **Training Run Visualiser** — scrub the current run epoch by epoch, Royale-style: a slider carousel per sample prompt, play/pause with ping-pong looping, likeness score inline, and share-ready export — a WebM clip with the epoch ticker and Fizgig tag burned in, or full-res PNG frames. It's a taste of the **LoRA Royale** tab, right in the browser.
+
 ### Dataset prep
 - **Florence-2 AI captioning** — bulk-generate detailed captions in one click.
 - **Bilingual captions** — optionally append Chinese via Helsinki-NLP. Klein's Qwen3 text encoder has deep Chinese training, so bilingual captions act as text-level data augmentation, improving visual quality without changing loss. In a controlled A/B (same data, seed, and hyperparameters — captions the only change) the loss curves stayed within ±0.001/epoch, yet the bilingual run produced visibly more skin detail and faster visual convergence.
 - **Image Prep** — batch resize, PNG conversion, and InsightFace face-crop derivatives, with optional **gender targeting** (largest male/female face) so it locks onto your subject in group shots. Pairing a tight crop with a full shot adds a lot to a character dataset. Training defaults to ~512² (0.25 MP) and resizes in-cache, so any resolution or aspect ratio just works — nothing has to be square or pre-sized.
+- **Look Consistency Filter** — the final prep stage, built for **synthetic-heavy datasets**: the subtly off-look near-misses that drag a likeness down are *easy* for the model to reconstruct, so a loss curve never sees them — but face-embedding distance does. Pick the **3 images that best nail the look** and every image is scored against all three, averaged (close-up faces included — detection pads-and-retries). Worst matches surface first with colour-coded verdicts; mark drifters by click or let **Auto-Suggest** flag the statistical outliers, then move them out of the dataset in one go (to a subfolder — nothing is deleted, and moving them back re-admits them). The scores save with your dataset and drive the trainer's **look-outlier warm-up**.
 
 ### Compatibility
 Loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / LoHa) — all auto-converted on load. LoKR and LoHa run **natively at inference** — no pre-conversion — anywhere in the app: as a primary or donor in Repair Studio, in the Profiler, in Extract, even as a Context LoRA. **Bake** materialises them to a standard LoRA via GPU-accelerated SVD. Output is kohya-style `.safetensors` that drop straight into ComfyUI Klein nodes. Every tab links to the relevant section of the walkthrough video.
@@ -243,7 +255,7 @@ It's **on by default**; flip **INT8 fast inference** off in **Preferences → In
 Launch Fizgig and work left-to-right through the numbered tabs:
 
 1. **Start** — set your training image folder. If model paths aren't configured, a prompt points you to Preferences.
-2. **Image Prep** (optional) — resize, PNG-convert, or face-crop your images.
+2. **Image Prep** (optional) — resize, PNG-convert, or face-crop your images; finish with the **Look Consistency Filter** to weed out off-look images before they train.
 3. **Captions** — write trigger-word captions or generate with Florence-2; optionally translate to bilingual English + Chinese.
 4. **Samples** — configure the preview prompts that render during training (Distilled 4-step on by default).
 5. **Training** — pick a preset, tune, click **Start Training**.

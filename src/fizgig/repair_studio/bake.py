@@ -31,6 +31,12 @@ logger = logging.getLogger(__name__)
 
 
 _BLOCK_KEY_RE = re.compile(r"(?:lora_unet_)?(double_blocks|single_blocks)_(\d+)_")
+# Krea 2 module naming (see repair_studio.krea2_blocks). txtfusion is checked before main
+# blocks; the block-id namespaces (double_/single_ vs block_/txt_) never collide, so one
+# mapper serves both model families — a key that maps to an id absent from state.blocks
+# just falls into the keep-as-is branch.
+_KREA2_TXT_KEY_RE = re.compile(r"txtfusion_(layerwise|refiner)_blocks_(\d+)_")
+_KREA2_MAIN_KEY_RE = re.compile(r"lora_unet_blocks_(\d+)_")
 
 
 def _block_id_from_key(key: str) -> Optional[str]:
@@ -38,6 +44,12 @@ def _block_id_from_key(key: str) -> Optional[str]:
     if m:
         kind = m.group(1).replace("_blocks", "")  # "double" / "single"
         return f"{kind}_{int(m.group(2))}"
+    t = _KREA2_TXT_KEY_RE.search(key)
+    if t:
+        return f"txt_{'lw' if t.group(1) == 'layerwise' else 'rf'}_{int(t.group(2))}"
+    m = _KREA2_MAIN_KEY_RE.search(key)
+    if m:
+        return f"block_{int(m.group(1))}"
     return None
 
 

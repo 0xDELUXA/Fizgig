@@ -7178,7 +7178,19 @@ class LoRATrainerGUI:
 
     def stop_samples_watcher(self):
         """Stop the samples watcher thread"""
+        was_running = self.samples_watcher_running
         self.samples_watcher_running = False
+        if was_running:
+            # One last refresh: the final epoch's samples and the final .safetensors land
+            # seconds before the trainer exits, almost always inside the watcher's 5 s
+            # sleep — without this the gallery never gains the final-epoch previews or
+            # the Download Final LoRA button (loras.json "final" key).
+            def _final_refresh():
+                try:
+                    self.update_gallery_html()
+                except Exception:
+                    pass
+            threading.Thread(target=_final_refresh, daemon=True).start()
 
     def parse_sample_filename(self, filename):
         """Parse epoch, step, seed from sample filename"""

@@ -16003,7 +16003,9 @@ class LoRATrainerGUI:
                 self.master.after(0, self.stop_samples_watcher)
                 return
             if callback:
-                callback()
+                # Marshal to the Tk main thread: pipeline-chain callbacks touch Tk widgets
+                # (update_console etc.), and Tk calls off the main thread segfault on Linux.
+                self.master.after(0, callback)
 
         threading.Thread(target=check_process, daemon=True).start()
 

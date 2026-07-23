@@ -11373,6 +11373,14 @@ class LoRATrainerGUI:
                 self._repair_turbo_chk.pack(side=tk.RIGHT)
         except Exception:
             pass
+        # Preset list is family-dependent (Krea 2 has no semantic block map → Reset All only).
+        try:
+            self._refresh_repair_preset_combo()
+            if getattr(self, "repair_preset_var", None) is not None and \
+                    self.repair_preset_var.get() not in self._repair_preset_list():
+                self.repair_preset_var.set("")
+        except Exception:
+            pass
         # Reference Strength is a Klein edit-conditioning knob; Krea 2's vision-path reference
         # has no strength dial, so hide it there (the MP cap still applies).
         for _w in (getattr(self, "_repair_ref_strength_label", None),
@@ -15429,8 +15437,16 @@ class LoRATrainerGUI:
         os.makedirs(d, exist_ok=True)
         return d
 
+    def _repair_is_krea2(self) -> bool:
+        return (getattr(self, "repair_family_var", None) is not None
+                and self.repair_family_var.get() == "krea2")
+
     def _repair_preset_list(self) -> list:
-        names = list(self._REPAIR_BUILTIN_PRESETS.keys())
+        if self._repair_is_krea2():
+            # No Krea 2 semantic block map yet — only Reset All is meaningful there.
+            names = ["✨Reset All"]
+        else:
+            names = list(self._REPAIR_BUILTIN_PRESETS.keys())
         try:
             for fn in sorted(os.listdir(self._repair_preset_dir())):
                 if fn.lower().endswith(".json"):
@@ -15462,12 +15478,14 @@ class LoRATrainerGUI:
 
     def _repair_builtin_state(self, kind: str):
         from fizgig.repair_studio.state import SliderState
-        s = SliderState.default_klein9b()
+        # Family-correct layout: a Klein-shaped state applied to Krea 2 widgets (block_0/txt_*)
+        # matches no slider vars and silently does nothing (GitHub #12).
+        s = SliderState.default_krea2() if self._repair_is_krea2() else SliderState.default_klein9b()
         s.seed = self.repair_state.seed
         s.prompt = self.repair_state.prompt
         s.preview_width = self.repair_state.preview_width
         s.preview_height = self.repair_state.preview_height
-        if kind == "reset":
+        if kind == "reset" or self._repair_is_krea2():
             return s
         if kind == "identity":
             for bid, bs in s.blocks.items():

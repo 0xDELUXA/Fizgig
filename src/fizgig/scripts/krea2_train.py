@@ -53,6 +53,14 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--adaptive_lr", action="store_true", help="Bi-directional plateau LR tracker")
     p.add_argument("--adaptive_lr_min", type=float, default=1e-5)
     p.add_argument("--adaptive_lr_max", type=float, default=4e-4)
+    p.add_argument("--lr_scheduler", default="constant",
+                   choices=["constant", "constant_with_warmup", "cosine", "cosine_with_restarts",
+                            "linear", "polynomial"],
+                   help="Step-level LR schedule. Ignored when --adaptive_lr is set (that watcher owns the LR)")
+    p.add_argument("--lr_warmup_steps", type=int, default=0, help="Warmup steps for the LR scheduler")
+    p.add_argument("--lr_decay_steps", type=int, default=0, help="Reserved for parity with Klein (unused)")
+    p.add_argument("--lr_scheduler_num_cycles", type=int, default=1, help="Cycles for cosine_with_restarts")
+    p.add_argument("--lr_scheduler_power", type=float, default=1.0, help="Power for the polynomial schedule")
     p.add_argument("--log_per_image_loss", action="store_true",
                    help="Per-image loss tracking + stuck-image detection (loss_log/problem_images.json)")
     p.add_argument("--per_image_lr", action="store_true",
@@ -96,6 +104,10 @@ def main():
         context_lora_path=args.context_lora_path, context_lora_strength=args.context_lora_strength,
         adaptive_lr=args.adaptive_lr,
         adaptive_lr_min=args.adaptive_lr_min, adaptive_lr_max=args.adaptive_lr_max,
+        lr_scheduler=args.lr_scheduler, lr_warmup_steps=args.lr_warmup_steps,
+        lr_decay_steps=args.lr_decay_steps,
+        lr_scheduler_num_cycles=args.lr_scheduler_num_cycles,
+        lr_scheduler_power=args.lr_scheduler_power,
         log_per_image_loss=args.log_per_image_loss,
         per_image_lr=args.per_image_lr,
         auto_recaption=args.auto_recaption,

@@ -786,6 +786,12 @@ def train_krea2(
     shift: float = 2.5,
     max_grad_norm: float = 1.0,
     seed: int = 42,
+    # LR schedule (step-level). Ignored when adaptive_lr is on — that watcher owns the LR.
+    lr_scheduler: str = "constant",
+    lr_warmup_steps: int = 0,
+    lr_decay_steps: int = 0,
+    lr_scheduler_num_cycles: int = 1,
+    lr_scheduler_power: float = 1.0,
     # in-training previews (sample the fp8 Turbo with the live LoRA)
     sample_prompts: list = None,
     turbo_path: str = None,
@@ -900,6 +906,42 @@ def train_krea2(
         steps_per_epoch = len(loader)
     except TypeError:
         steps_per_epoch = group.num_train_items
+
+    # ---- Step-level LR scheduler (cosine / linear / warmup / ...) ----
+    # Mutually exclusive with adaptive LR by design: both write optimizer.param_groups[*]["lr"],
+    # so a live scheduler would stomp the watcher's epoch decisions every step. Adaptive wins
+    # (same rule as Klein, whose GUI also forces "constant" when adaptive is on).
+    scheduler = None
+    if adaptive:
+        if lr_scheduler and lr_scheduler != "constant":
+            logger.info(f"[lr_scheduler] '{lr_scheduler}' ignored — adaptive LR is enabled and owns the LR.")
+    elif lr_scheduler and lr_scheduler != "constant":
+        from diffusers.optimization import get_scheduler
+        total_steps = steps_per_epoch * max_train_epochs
+        kwargs = {}
+        if lr_scheduler == "cosine_with_restarts":
+            kwargs["num_cycles"] = int(lr_scheduler_num_cycles)
+        elif lr_scheduler == "polynomial":
+            kwargs["power"] = float(lr_scheduler_power)
+        scheduler = get_scheduler(
+            lr_scheduler, optimizer,
+            num_warmup_steps=int(lr_warmup_steps or 0),
+            num_training_steps=total_steps,
+            **kwargs,
+        )
+        # Resume: these schedulers are pure functions of the step count, and global_step is
+        # already restored from the state dir — so re-deriving the position is exact and needs
+        # no extra persisted state. Setting last_epoch then stepping once lands the LR exactly
+        # where global_step calls to step() would have.
+        if global_step > 0:
+            scheduler.last_epoch = global_step - 1
+            scheduler.step()
+        logger.info(f"[lr_scheduler] {lr_scheduler} — warmup {int(lr_warmup_steps or 0)} / "
+                    f"{total_steps} total steps, start lr={optimizer.param_groups[0]['lr']:.3e}"
+                    + (f" (resumed at step {global_step})" if global_step > 0 else ""))
+    elif lr_warmup_steps:
+        logger.info("[lr_scheduler] warmup steps ignored — LR scheduler is 'constant'.")
+
     pause_flag = os.path.join(output_dir, ".pause_requested")
     # Progress + loss display exactly as Klein: one continuous tqdm bar over all steps with
     # a smoothed avr_loss in the postfix (the raw per-step loss is very noisy — batch size 1
@@ -1065,6 +1107,8 @@ def train_krea2(
             if max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             optimizer.zero_grad(set_to_none=True)
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
@@ -1076,7 +1120,8 @@ def train_krea2(
             # "187, 187, 188, 188" doubling). Training itself is one step per iteration.
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)
             progress_bar.update(1)
-        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  step={global_step}")
+        logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  step={global_step}"
+                    + (f"  lr={optimizer.param_groups[0]['lr']:.3e}" if scheduler is not None else ""))
 
         # Adaptive LR: epoch-boundary plateau tracker (before save/preview so they reflect the
         # post-adjustment state). Uses the smoothed avr_loss as the signal, like Klein.

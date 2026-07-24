@@ -2676,7 +2676,10 @@ class LoRATrainerGUI:
         self.entries["LR_WARMUP_STEPS"] = ttk.Entry(lr_steps_frame, width=10)
         self.entries["LR_WARMUP_STEPS"].pack(side=tk.LEFT, padx=(0, 16))
 
-        tk.Label(lr_steps_frame, text="Decay:", font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(0, 4))
+        # Decay is Klein-only (its warmup_stable_decay path); krea2's scheduler set has no
+        # decay-steps knob, so this pair is hidden under Krea 2 rather than silently ignored.
+        self._lr_decay_label = tk.Label(lr_steps_frame, text="Decay:", font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+        self._lr_decay_label.pack(side=tk.LEFT, padx=(0, 4))
         self.entries["LR_DECAY_STEPS"] = ttk.Entry(lr_steps_frame, width=10)
         self.entries["LR_DECAY_STEPS"].pack(side=tk.LEFT)
 
@@ -3593,6 +3596,9 @@ class LoRATrainerGUI:
             self.scaled_check,                                   # FP8 Scaled
             self.fp8_text_encoder_label, self.fp8_text_encoder_check,
             self._grad_checkpoint_label, self.grad_checkpoint_check, self._grad_checkpoint_hint,
+            # LR Decay steps: Klein-only (warmup_stable_decay). LR Scheduler + Warmup ARE wired
+            # for krea2 (--lr_scheduler / --lr_warmup_steps) so they stay visible.
+            self._lr_decay_label, self.entries.get("LR_DECAY_STEPS"),
         ]
         for w in widgets:
             self._set_widget_visible(w, not is_krea2)
@@ -16649,6 +16655,20 @@ class LoRATrainerGUI:
             min_lr = str(self.settings.get("ADAPTIVE_LR_MIN", "1e-5")).split(" ")[0]
             max_lr = str(self.settings.get("ADAPTIVE_LR_MAX", "4e-4")).split(" ")[0]
             cmd += ["--adaptive_lr", "--adaptive_lr_min", min_lr, "--adaptive_lr_max", max_lr]
+        else:
+            # LR scheduler + warmup (Other Options). Only when adaptive is OFF — adaptive owns the
+            # LR, and the trainer would ignore the schedule anyway. These fields were visible under
+            # Krea 2 but silently unwired before this.
+            sched = (self.settings.get("LR_SCHEDULER") or "constant").strip() or "constant"
+            if sched != "constant":
+                cmd += ["--lr_scheduler", sched]
+            warmup = str(self.settings.get("LR_WARMUP_STEPS", "") or "").strip()
+            if warmup:
+                try:
+                    if int(float(warmup)) > 0:
+                        cmd += ["--lr_warmup_steps", str(int(float(warmup)))]
+                except ValueError:
+                    pass
         # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the

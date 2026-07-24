@@ -321,6 +321,17 @@ python src/fizgig/scripts/krea2_train.py \
 
 (`--quantize_4bit` forces block swap off, so no `--blocks_to_swap` here. On a 24 GB+ card you'd drop `--quantize_4bit` and use the default dynamic fp8 with `--blocks_to_swap` from the [VRAM table](#vram-guidance-block-swap). Drop `--warmup_look_outliers` unless you've run the GUI's Look Filter on the dataset — see below.)
 
+**Classic-recipe variant** — if you'd rather drive the LR yourself than hand it to the adaptive watcher: a cosine decay with warmup, and an effective batch of 2 via accumulation. Swap these lines into the run above, dropping `--adaptive_lr*` (the watcher and a schedule are mutually exclusive — adaptive wins, and the schedule is ignored with a log line):
+
+```bash
+  --lr_scheduler cosine \
+  --lr_warmup_steps 100 \
+  --gradient_accumulation_steps 2 \
+  --max_grad_norm 1.0 \
+```
+
+Pause/resume continues the cosine curve where it left off rather than restarting it, with or without accumulation.
+
 The Krea 2 parser is small enough to know in full: run `krea2_train.py --help`. The non-obvious flags:
 
 **Core**

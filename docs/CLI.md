@@ -243,7 +243,12 @@ Checkpoints land as `output_loras/my_subject/my_subject-000001.safetensors` (epo
 
 - `--learning_rate` — the trainer's raw default is a placeholder; always pass one. GUI presets use 1e-4 (rank 16 identity) to 4e-4 (rank 4 style/details).
 - `--adaptive_lr` — the bi-directional plateau tracker: probes LR up on steady descent, cuts it (with weight rollback) on plateau or instability. When active it takes over from `--lr_scheduler`. Bounds via `--adaptive_lr_min` (floor — 5e-5 for single-subject sets, 1e-4 for noisy multi-subject sets) and `--adaptive_lr_max` (4e-4 is the empirical ceiling). A starting LR below the floor is clamped up to it.
-- Without adaptive LR, the usual `--lr_scheduler` options exist (`constant`, `cosine`, `constant_with_warmup`, ...) with `--lr_warmup_steps` etc.
+- Without adaptive LR, the usual `--lr_scheduler` options exist (`constant`, `cosine`, `constant_with_warmup`, ...) with `--lr_warmup_steps` / `--lr_decay_steps`.
+
+**Batching**
+
+- `--gradient_accumulation_steps N` — accumulate over N micro-batches per optimizer step, so the effective batch is `batch_size × N`. The usual reason to reach for it is a bigger effective batch than VRAM allows at once.
+- `--max_grad_norm` — gradient clipping (default 1.0; 0 disables).
 
 **Training only part of the model** (the GUI's "Model Area to Train")
 

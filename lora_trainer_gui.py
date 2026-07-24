@@ -13031,11 +13031,11 @@ class LoRATrainerGUI:
         ttk.Entry(_cr2, textvariable=self.royale_cmp_seed_var, width=8).pack(side=tk.LEFT)
         tk.Label(_cr2, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 3))
         self.royale_cmp_w_var = tk.StringVar(value=self.last_used.get("royale_cmp_w", "512"))
-        ttk.Combobox(_cr2, textvariable=self.royale_cmp_w_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_cr2, textvariable=self.royale_cmp_w_var, values=["384", "512", "768", "1024", "1280"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         tk.Label(_cr2, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
         self.royale_cmp_h_var = tk.StringVar(value=self.last_used.get("royale_cmp_h", "512"))
-        ttk.Combobox(_cr2, textvariable=self.royale_cmp_h_var, values=["384", "512", "768", "1024"],
+        ttk.Combobox(_cr2, textvariable=self.royale_cmp_h_var, values=["384", "512", "768", "1024", "1280"],
                      state="readonly", width=5).pack(side=tk.LEFT)
         self.royale_cmp_rowlabels_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(_cr2, text="Row captions", variable=self.royale_cmp_rowlabels_var).pack(side=tk.LEFT, padx=(16, 0))
@@ -13052,7 +13052,8 @@ class LoRATrainerGUI:
         tk.Label(_cb, textvariable=self.royale_cmp_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
         tk.Label(cmpc, text="Every cell is a fresh render — rows x columns images, so keep the prompt list short "
-                            "the first time. The sheet is saved next to your LoRA and opened for you.",
+                            "the first time. The finished sheet opens in a window to review, then you choose "
+                            "whether to save it.",
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
         for _v in (self.royale_cmp_mode_var, self.royale_cmp_trigger_var, self.royale_cmp_seed_var,
@@ -14444,29 +14445,102 @@ class LoRATrainerGUI:
             from fizgig.lora_royale.export import build_comparison_grid
             sheet = build_comparison_grid(grid, headers, row_labels=row_caps,
                                           cell=(p["width"], p["height"]), brand=p["brand"])
-            base = os.path.join(p["out_dir"], "fizgig_comparison")
-            out = base + ".png"
-            i = 2
-            while os.path.exists(out):
-                out = f"{base}_{i}.png"; i += 1
-            sheet.save(out)
-            self.master.after(0, lambda: self._royale_comparison_finish(out, None))
+            self.master.after(0, lambda: self._royale_comparison_finish(sheet, None, p["out_dir"]))
         except Exception as e:
             import traceback
             traceback.print_exc()
-            self.master.after(0, lambda e=e: self._royale_comparison_finish(None, e))
+            self.master.after(0, lambda e=e: self._royale_comparison_finish(None, e, None))
         finally:
             self._royale_release_vram()
 
-    def _royale_comparison_finish(self, out, err):
+    def _royale_comparison_finish(self, sheet, err, out_dir):
         self._royale_cmp_running = False
         self._royale_cmp_btn.configure(state="normal")
         if err is not None:
             self.royale_cmp_status_var.set("Comparison sheet failed — see console.")
             messagebox.showerror("Comparison sheet failed", str(err))
             return
-        self.royale_cmp_status_var.set(f"Saved {os.path.basename(out)}")
-        self._royale_reveal(out)
+        self._royale_cmp_sheet = sheet
+        self.royale_cmp_status_var.set(f"Sheet ready ({sheet.width}x{sheet.height}) — review, then save.")
+        self._royale_cmp_popup(sheet, out_dir)
+
+    def _royale_cmp_popup(self, sheet, out_dir):
+        """Review window for a finished sheet: scaled-to-fit preview + Save / Close.
+
+        Nothing is written to disk until Save is clicked — a sheet is a few minutes of
+        renders, so it's worth looking at before deciding to keep it."""
+        from PIL import ImageTk
+        win = tk.Toplevel(self.master)
+        win.title("LoRA Royale — Comparison sheet")
+        win.configure(bg="#101010")
+        # Open at a sensible fraction of the screen; the image scales to whatever size you drag to.
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        scale = min(1.0, (sw * 0.75) / sheet.width, (sh * 0.75) / sheet.height)
+        win.geometry(f"{max(320, int(sheet.width * scale))}x{max(240, int(sheet.height * scale) + 46)}")
+        win.minsize(320, 240)
+
+        lbl = tk.Label(win, bg="#101010")
+        lbl.pack(fill=tk.BOTH, expand=True)
+        bar = tk.Frame(win, bg=COLORS["bg_surface"])
+        bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        state = {"img": None, "after": None}
+
+        def _render():
+            state["after"] = None
+            try:
+                bw = max(64, lbl.winfo_width()); bh = max(64, lbl.winfo_height())
+            except Exception:
+                return
+            r = min(bw / sheet.width, bh / sheet.height)
+            w, h = max(1, int(sheet.width * r)), max(1, int(sheet.height * r))
+            state["img"] = ImageTk.PhotoImage(sheet.resize((w, h), Image.LANCZOS))
+            lbl.configure(image=state["img"])
+
+        def _on_configure(event):
+            if event.widget is not win:
+                return
+            if state["after"] is not None:
+                try:
+                    win.after_cancel(state["after"])
+                except Exception:
+                    pass
+            state["after"] = win.after(80, _render)     # debounce drags
+
+        def _save():
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(
+                parent=win, title="Save comparison sheet",
+                initialdir=out_dir or os.getcwd(),
+                initialfile="fizgig_comparison.png",
+                defaultextension=".png",
+                filetypes=[("PNG image", "*.png"), ("JPEG image", "*.jpg")])
+            if not path:
+                return
+            try:
+                img = sheet
+                if path.lower().endswith((".jpg", ".jpeg")):
+                    img = sheet.convert("RGB")
+                img.save(path)
+            except Exception as e:
+                messagebox.showerror("Save failed", str(e), parent=win)
+                return
+            self.royale_cmp_status_var.set(f"Saved {os.path.basename(path)}")
+            self._royale_reveal(path)
+
+        tk.Button(bar, text="Save sheet…", font=(FONT_FAMILY, 10, "bold"), fg="#FFFFFF",
+                  bg="#B7791F", activeforeground="#FFFFFF", activebackground="#9A6518",
+                  relief="flat", bd=0, padx=16, pady=4, cursor="hand2",
+                  command=_save).pack(side=tk.LEFT, padx=10, pady=6)
+        tk.Label(bar, text=f"{sheet.width} x {sheet.height}px", font=(FONT_FAMILY, 9),
+                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT)
+        tk.Button(bar, text="Close", font=(FONT_FAMILY, 10), relief="flat", bd=0,
+                  padx=14, pady=4, cursor="hand2",
+                  command=win.destroy).pack(side=tk.RIGHT, padx=10, pady=6)
+
+        win.bind("<Configure>", _on_configure)
+        win.after(60, _render)
+        win.lift()
 
     # ----- Shared render->scrub->save preview used by all three travel modes -----
     def _royale_make_scrubber(self, parent, mode, save_prefix, bg, status_var, options_getter):

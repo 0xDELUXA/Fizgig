@@ -786,6 +786,9 @@ def train_krea2(
     shift: float = 2.5,
     max_grad_norm: float = 1.0,
     seed: int = 42,
+    # Effective batch = batch_size (1) x this. Grads accumulate over N micro-batches, then one
+    # optimizer step. Per-image LR still applies per micro-batch (each image scales its own loss).
+    gradient_accumulation_steps: int = 1,
     # LR schedule (step-level). Ignored when adaptive_lr is on — that watcher owns the LR.
     lr_scheduler: str = "constant",
     lr_warmup_steps: int = 0,
@@ -911,13 +914,19 @@ def train_krea2(
     # Mutually exclusive with adaptive LR by design: both write optimizer.param_groups[*]["lr"],
     # so a live scheduler would stomp the watcher's epoch decisions every step. Adaptive wins
     # (same rule as Klein, whose GUI also forces "constant" when adaptive is on).
+    accum = max(1, int(gradient_accumulation_steps or 1))
+    if accum > 1:
+        logger.info(f"[grad_accum] {accum} micro-batches per optimizer step "
+                    f"(effective batch {accum}); ~{max(1, steps_per_epoch // accum)} updates/epoch")
+
     scheduler = None
     if adaptive:
         if lr_scheduler and lr_scheduler != "constant":
             logger.info(f"[lr_scheduler] '{lr_scheduler}' ignored — adaptive LR is enabled and owns the LR.")
     elif lr_scheduler and lr_scheduler != "constant":
         from diffusers.optimization import get_scheduler
-        total_steps = steps_per_epoch * max_train_epochs
+        # Schedules count OPTIMIZER steps, not micro-batches.
+        total_steps = math.ceil(steps_per_epoch / accum) * max_train_epochs
         kwargs = {}
         if lr_scheduler == "cosine_with_restarts":
             kwargs["num_cycles"] = int(lr_scheduler_num_cycles)
@@ -934,7 +943,9 @@ def train_krea2(
         # no extra persisted state. Setting last_epoch then stepping once lands the LR exactly
         # where global_step calls to step() would have.
         if global_step > 0:
-            scheduler.last_epoch = global_step - 1
+            # global_step counts micro-batches; the schedule's position is optimizer steps.
+            done_updates = global_step // accum
+            scheduler.last_epoch = done_updates - 1
             scheduler.step()
         logger.info(f"[lr_scheduler] {lr_scheduler} — warmup {int(lr_warmup_steps or 0)} / "
                     f"{total_steps} total steps, start lr={optimizer.param_groups[0]['lr']:.3e}"
@@ -1085,6 +1096,7 @@ def train_krea2(
             loss_watch.resume_from_jsonl(up_to_epoch=start_epoch, resets=_resets)
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
+    pending_accum = 0  # micro-batches backward'd since the last optimizer step
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         for i, batch in enumerate(loader):
@@ -1102,14 +1114,20 @@ def train_krea2(
             # images, boost healthy learned ones). Raw loss is still what gets recorded/averaged below,
             # so avr_loss and the global adaptive-LR watcher see unscaled numbers.
             step_mult = loss_watch.multiplier(batch.get("item_keys")) if loss_watch is not None else 1.0
-            (loss * step_mult if step_mult != 1.0 else loss).backward()
-            # Gradient clipping to match the musubi reference (max_grad_norm default 1.0). 0 disables.
-            if max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
-            optimizer.step()
-            if scheduler is not None:
-                scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
+            # Divide by the accumulation count so N micro-batches AVERAGE into one update rather
+            # than summing (which would scale the effective LR by N).
+            _scaled = loss * step_mult if step_mult != 1.0 else loss
+            (_scaled / accum if accum > 1 else _scaled).backward()
+            pending_accum += 1
+            if pending_accum >= accum:
+                # Gradient clipping to match the musubi reference (max_grad_norm default 1.0). 0 disables.
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                pending_accum = 0
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
             if loss_watch is not None:
@@ -1120,6 +1138,17 @@ def train_krea2(
             # "187, 187, 188, 188" doubling). Training itself is one step per iteration.
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)
             progress_bar.update(1)
+        # Flush a partial accumulation group at the epoch boundary: the epoch-end work (adaptive
+        # LR decisions, rollback snapshot, state save) must see a settled optimizer, and leftover
+        # grads must not leak into the next epoch.
+        if pending_accum > 0:
+            if max_grad_norm > 0:
+                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            pending_accum = 0
         logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  step={global_step}"
                     + (f"  lr={optimizer.param_groups[0]['lr']:.3e}" if scheduler is not None else ""))
 

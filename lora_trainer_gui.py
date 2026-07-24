@@ -1044,7 +1044,8 @@ class LoRATrainerGUI:
         strength travel / morph export / likeness scoring)."""
         return any(getattr(self, f, False) for f in (
             '_royale_rendering', '_royale_traveling', '_royale_pt_running',
-            '_royale_lora_running', '_royale_exporting', '_royale_scoring'))
+            '_royale_lora_running', '_royale_exporting', '_royale_scoring',
+            '_royale_cmp_running'))
 
     def _is_render_busy(self):
         """In-process GPU render on a tab that unloads its engine on switch (Repair
@@ -1280,6 +1281,16 @@ class LoRATrainerGUI:
             data["royale_lora_frames"] = self.royale_lora_frames_var.get()
             data["royale_lora_w"] = self.royale_lora_w_var.get()
             data["royale_lora_h"] = self.royale_lora_h_var.get()
+        if hasattr(self, 'royale_cmp_mode_var'):
+            data["royale_cmp_mode"] = self.royale_cmp_mode_var.get()
+            data["royale_cmp_trigger"] = self.royale_cmp_trigger_var.get()
+            data["royale_cmp_seed"] = self.royale_cmp_seed_var.get()
+            data["royale_cmp_w"] = self.royale_cmp_w_var.get()
+            data["royale_cmp_h"] = self.royale_cmp_h_var.get()
+            try:
+                data["royale_cmp_prompts"] = self.royale_cmp_prompts.get("1.0", tk.END).strip()
+            except Exception:
+                pass
         if hasattr(self, 'royale_pt_prompt_var'):
             data["royale_pt_prompt"] = self.royale_pt_prompt_var.get()
             data["royale_pt_dim"] = self.royale_pt_dim_var.get()
@@ -3574,7 +3585,9 @@ class LoRATrainerGUI:
 
         Deferred-for-Krea-2 feature groups (re-enable by removing from these lists as they land):
           • Model Area to Train (dropdown + desc + Custom panel) — no Krea 2 block map yet
-          • Optimizer section                                   — krea2 hardcodes AdamW8bit
+          • Optimizer Type / Args / Network Dropout             — krea2 hardcodes AdamW8bit
+            (the Optimizer SECTION itself is shown: Gradient Accumulation + Max Grad Norm are wired)
+          • LR Decay steps                                      — Klein-only warmup_stable_decay
           • Timestep & Noise section                            — krea2 uses a fixed shift schedule
           • FP8 Scaled (in Memory & FP8)                        — krea2's fp8 path is always scaled
           • FP8 Text Encoder (in Memory & FP8)                  — krea2 caches the TE in bf16
@@ -3599,6 +3612,12 @@ class LoRATrainerGUI:
             # LR Decay steps: Klein-only (warmup_stable_decay). LR Scheduler + Warmup ARE wired
             # for krea2 (--lr_scheduler / --lr_warmup_steps) so they stay visible.
             self._lr_decay_label, self.entries.get("LR_DECAY_STEPS"),
+            # Optimizer section is shown under Krea 2 for Gradient Accumulation + Max Grad Norm
+            # (both wired); the rest of its fields have no krea2 equivalent — AdamW8bit is
+            # hardcoded and network dropout isn't implemented — so hide those individually.
+            self.labels.get("OPTIMIZER_TYPE"), self.entries.get("OPTIMIZER_TYPE"),
+            self.labels.get("OPTIMIZER_ARGS"), self.entries.get("OPTIMIZER_ARGS"),
+            self.labels.get("NETWORK_DROPOUT"), self.entries.get("NETWORK_DROPOUT"),
         ]
         for w in widgets:
             self._set_widget_visible(w, not is_krea2)
@@ -3622,7 +3641,9 @@ class LoRATrainerGUI:
 
         # Whole collapsible sections. Re-show in canonical order (Timestep before Optimizer,
         # Optimizer before Other Options) — show Optimizer first so Timestep's anchor is packed.
-        self._set_training_section_visible("optimizer", "scheduler", not is_krea2)
+        # Optimizer section now stays visible for Krea 2 (Gradient Accumulation + Max Grad Norm
+        # are wired); its unwired fields are hidden individually above.
+        self._set_training_section_visible("optimizer", "scheduler", True)
         self._set_training_section_visible("timestep", "optimizer", not is_krea2)
 
     # ── Problem Images window (per-image loss watch) ────────────────────
@@ -12969,6 +12990,75 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
 
+        # ----- Comparison sheet (before/after grid) -----
+        cmpc = self._start_section_card(outer, "Comparison sheet",
+                                        "The share image people actually post for a new LoRA: one row per prompt, "
+                                        "columns for without-LoRA vs with-LoRA (or one column per epoch), same seed "
+                                        "across a row so only the LoRA changes. Saved as a single labelled PNG.")
+        tk.Label(cmpc, text="Prompts (one per line — each becomes a row):", bg=_sbg,
+                 fg=COLORS["text_muted"], font=(FONT_FAMILY, 9)).pack(anchor=tk.W)
+        self.royale_cmp_prompts = tk.Text(cmpc, height=4, width=90, wrap=tk.WORD,
+                                          bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
+                                          insertbackground=COLORS["text_primary"], relief="flat",
+                                          font=(FONT_FAMILY, 9))
+        self.royale_cmp_prompts.pack(fill=tk.X, pady=(2, 6))
+        _cp = self.last_used.get("royale_cmp_prompts", "")
+        if _cp:
+            self.royale_cmp_prompts.insert("1.0", _cp)
+
+        _cr1 = tk.Frame(cmpc, bg=_sbg); _cr1.pack(anchor=tk.W, pady=(0, 6))
+        tk.Label(_cr1, text="Columns", bg=_sbg, fg=COLORS["text_muted"], width=10,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_cmp_mode_var = tk.StringVar(
+            value=self.last_used.get("royale_cmp_mode", "Without / with LoRA"))
+        _cmb = ttk.Combobox(_cr1, textvariable=self.royale_cmp_mode_var,
+                            values=["Without / with LoRA", "Every epoch"],
+                            state="readonly", width=22)
+        _cmb.pack(side=tk.LEFT)
+        ToolTip(_cmb, "Without / with LoRA: two columns on the current LoRA.\n"
+                      "Every epoch: one column per epoch of the scanned run (Folder mode).")
+        tk.Label(_cr1, text="Trigger", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 4))
+        self.royale_cmp_trigger_var = tk.StringVar(value=self.last_used.get("royale_cmp_trigger", ""))
+        _ctg = ttk.Entry(_cr1, textvariable=self.royale_cmp_trigger_var, width=14)
+        _ctg.pack(side=tk.LEFT)
+        ToolTip(_ctg, "Removed from the prompt for the no-LoRA column, so the base model isn't fed a\n"
+                      "token it doesn't know. Also names the with-LoRA column header.")
+
+        _cr2 = tk.Frame(cmpc, bg=_sbg); _cr2.pack(anchor=tk.W, pady=(0, 8))
+        tk.Label(_cr2, text="Seed", bg=_sbg, fg=COLORS["text_muted"], width=10,
+                 anchor="w").pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_cmp_seed_var = tk.StringVar(value=self.last_used.get("royale_cmp_seed", "42"))
+        ttk.Entry(_cr2, textvariable=self.royale_cmp_seed_var, width=8).pack(side=tk.LEFT)
+        tk.Label(_cr2, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 3))
+        self.royale_cmp_w_var = tk.StringVar(value=self.last_used.get("royale_cmp_w", "512"))
+        ttk.Combobox(_cr2, textvariable=self.royale_cmp_w_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        tk.Label(_cr2, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
+        self.royale_cmp_h_var = tk.StringVar(value=self.last_used.get("royale_cmp_h", "512"))
+        ttk.Combobox(_cr2, textvariable=self.royale_cmp_h_var, values=["384", "512", "768", "1024"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        self.royale_cmp_rowlabels_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(_cr2, text="Row captions", variable=self.royale_cmp_rowlabels_var).pack(side=tk.LEFT, padx=(16, 0))
+        self.royale_cmp_brand_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(_cr2, text="Fizgig tag", variable=self.royale_cmp_brand_var).pack(side=tk.LEFT, padx=(12, 0))
+
+        _cb = tk.Frame(cmpc, bg=_sbg); _cb.pack(anchor=tk.W)
+        self._royale_cmp_btn = tk.Button(_cb, text="Render comparison sheet…", font=(FONT_FAMILY, 10, "bold"),
+                                         fg="#FFFFFF", bg="#B7791F", activeforeground="#FFFFFF",
+                                         activebackground="#9A6518", relief="flat", bd=0, padx=18, pady=5,
+                                         cursor="hand2", command=self._royale_comparison_sheet)
+        self._royale_cmp_btn.pack(side=tk.LEFT)
+        self.royale_cmp_status_var = tk.StringVar(value="")
+        tk.Label(_cb, textvariable=self.royale_cmp_status_var, font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
+        tk.Label(cmpc, text="Every cell is a fresh render — rows x columns images, so keep the prompt list short "
+                            "the first time. The sheet is saved next to your LoRA and opened for you.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
+        for _v in (self.royale_cmp_mode_var, self.royale_cmp_trigger_var, self.royale_cmp_seed_var,
+                   self.royale_cmp_w_var, self.royale_cmp_h_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
+
         grid_card = self._start_section_card(outer, "All epochs",
                                              "Click a thumbnail to jump the crossfade there.")
         self._royale_grid = tk.Frame(grid_card, bg=_sbg)
@@ -14247,6 +14337,133 @@ class LoRATrainerGUI:
             return
         self._royale_sc_populate("strength", frames, labels)
         self.royale_lora_status_var.set(f"Rendered {len(frames)} frames — scrub to review, then save.")
+
+    # ----- Comparison sheet (labelled before/after grid) -----
+    @staticmethod
+    def _royale_strip_trigger(prompt: str, trigger: str) -> str:
+        """Drop the trigger token from a prompt for the no-LoRA column. The base model has never
+        seen it, so leaving it in feeds the baseline a junk token and makes the comparison unfair."""
+        trigger = (trigger or "").strip()
+        if not trigger:
+            return prompt
+        tl = trigger.lower()
+        parts = [p for p in (seg.strip() for seg in prompt.split(","))
+                 if p and p.lower() != tl]
+        out = ", ".join(parts)
+        if out.lower() == prompt.strip().lower():   # trigger wasn't its own comma segment
+            import re as _re
+            out = _re.sub(rf"\b{_re.escape(trigger)}\b", "", prompt, flags=_re.IGNORECASE)
+            out = _re.sub(r"\s{2,}", " ", out).strip(" ,")
+        return out or prompt
+
+    def _royale_comparison_sheet(self):
+        if self._royale_is_busy():
+            return
+        prompts = [ln.strip() for ln in self.royale_cmp_prompts.get("1.0", tk.END).splitlines()
+                   if ln.strip() and not ln.strip().startswith("#")]
+        if not prompts:
+            messagebox.showinfo("LoRA Royale", "Enter at least one prompt — each line becomes a row of the sheet.")
+            return
+        mode = self.royale_cmp_mode_var.get()
+        label, path = self._royale_current_epoch()
+        if mode == "Every epoch":
+            cols = [(lbl, self._royale_paths.get(lbl)) for lbl, _ in (self._royale_images or [])]
+            cols = [(l, p) for l, p in cols if p and os.path.exists(p)]
+            if not cols:
+                messagebox.showinfo("LoRA Royale", "Render the epochs first (Folder mode) — then the sheet can "
+                                                   "put one epoch per column.")
+                return
+        else:
+            if path is None or not os.path.exists(path):
+                messagebox.showinfo("LoRA Royale", "Pick a LoRA file (Single-LoRA mode), or render epochs and slide "
+                                                   "to the one you want to showcase.")
+                return
+            cols = [(None, path), (label, path)]      # column 0 renders at strength 0 (base model)
+        if not self._royale_validate_models():
+            return
+        try:
+            seed = int(self.royale_cmp_seed_var.get() or "42")
+        except ValueError:
+            seed = 42
+        try:
+            width = int(self.royale_cmp_w_var.get()); height = int(self.royale_cmp_h_var.get())
+        except ValueError:
+            width = height = 512
+        total = len(prompts) * len(cols)
+        if total > 24 and not messagebox.askyesno(
+                "Large sheet",
+                f"That's {total} renders ({len(prompts)} prompts x {len(cols)} columns).\n\n"
+                "It will take a while. Continue?"):
+            return
+        params = dict(prompts=prompts, cols=cols, mode=mode, seed=seed, width=width, height=height,
+                      trigger=self.royale_cmp_trigger_var.get().strip(),
+                      row_labels=bool(self.royale_cmp_rowlabels_var.get()),
+                      brand=bool(self.royale_cmp_brand_var.get()),
+                      out_dir=os.path.dirname(path) if path else os.getcwd())
+        self._royale_cmp_running = True
+        self._royale_cmp_btn.configure(state="disabled")
+        self.royale_cmp_status_var.set("Loading model…")
+        import threading
+        threading.Thread(target=self._royale_comparison_worker, args=(params,), daemon=True).start()
+
+    def _royale_comparison_worker(self, p):
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        eng = self.royale_engine
+        try:
+            self._royale_ensure_pipeline_loaded()
+            n_cols, n_rows = len(p["cols"]), len(p["prompts"])
+            # Column-major: each LoRA loads once, then renders every row.
+            grid = [[None] * n_cols for _ in range(n_rows)]
+            done = 0
+            for ci, (clabel, cpath) in enumerate(p["cols"]):
+                base_col = (p["mode"] != "Every epoch" and ci == 0)   # the no-LoRA column
+                self._royale_load_or_swap_primary(eng, cpath)
+                for ri, prompt in enumerate(p["prompts"]):
+                    done += 1
+                    self.master.after(0, lambda d=done, t=n_rows * n_cols:
+                                      self.royale_cmp_status_var.set(f"Rendering {d}/{t}…"))
+                    st = self._royale_default_state()
+                    st.prompt = self._royale_strip_trigger(prompt, p["trigger"]) if base_col else prompt
+                    st.seed = p["seed"]                     # same seed down a row: only the LoRA differs
+                    st.preview_width = p["width"]; st.preview_height = p["height"]
+                    for bs in st.blocks.values():
+                        bs.primary_strength = 0.0 if base_col else 1.0
+                    grid[ri][ci] = eng.generate_preview(st).copy()
+
+            if p["mode"] == "Every epoch":
+                headers = [f"epoch {l}" if str(l).isdigit() else str(l) for l, _ in p["cols"]]
+            else:
+                trig = p["trigger"] or "LoRA"
+                headers = ["no lora", f"{trig} lora"]
+            row_caps = p["prompts"] if p["row_labels"] else None
+
+            from fizgig.lora_royale.export import build_comparison_grid
+            sheet = build_comparison_grid(grid, headers, row_labels=row_caps,
+                                          cell=(p["width"], p["height"]), brand=p["brand"])
+            base = os.path.join(p["out_dir"], "fizgig_comparison")
+            out = base + ".png"
+            i = 2
+            while os.path.exists(out):
+                out = f"{base}_{i}.png"; i += 1
+            sheet.save(out)
+            self.master.after(0, lambda: self._royale_comparison_finish(out, None))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.master.after(0, lambda e=e: self._royale_comparison_finish(None, e))
+        finally:
+            self._royale_release_vram()
+
+    def _royale_comparison_finish(self, out, err):
+        self._royale_cmp_running = False
+        self._royale_cmp_btn.configure(state="normal")
+        if err is not None:
+            self.royale_cmp_status_var.set("Comparison sheet failed — see console.")
+            messagebox.showerror("Comparison sheet failed", str(err))
+            return
+        self.royale_cmp_status_var.set(f"Saved {os.path.basename(out)}")
+        self._royale_reveal(out)
 
     # ----- Shared render->scrub->save preview used by all three travel modes -----
     def _royale_make_scrubber(self, parent, mode, save_prefix, bg, status_var, options_getter):
@@ -16669,6 +16886,20 @@ class LoRATrainerGUI:
                         cmd += ["--lr_warmup_steps", str(int(float(warmup)))]
                 except ValueError:
                     pass
+        # Gradient accumulation + grad clipping (Optimizer section — both wired for krea2).
+        try:
+            _accum = int(str(self.settings.get("GRADIENT_ACCUMULATION", 1) or 1).strip() or 1)
+        except ValueError:
+            _accum = 1
+        if _accum > 1:
+            cmd += ["--gradient_accumulation_steps", str(_accum)]
+        _mgn = str(self.settings.get("MAX_GRAD_NORM", "") or "").strip()
+        if _mgn:
+            try:
+                if abs(float(_mgn) - 1.0) > 1e-9:   # 1.0 is the trainer default
+                    cmd += ["--max_grad_norm", str(float(_mgn))]
+            except ValueError:
+                pass
         # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the

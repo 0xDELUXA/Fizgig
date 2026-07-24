@@ -53,6 +53,9 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--adaptive_lr", action="store_true", help="Bi-directional plateau LR tracker")
     p.add_argument("--adaptive_lr_min", type=float, default=1e-5)
     p.add_argument("--adaptive_lr_max", type=float, default=4e-4)
+    p.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                   help="Accumulate grads over N micro-batches per optimizer step (effective batch = N)")
+    p.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient clipping norm (0 disables)")
     p.add_argument("--lr_scheduler", default="constant",
                    choices=["constant", "constant_with_warmup", "cosine", "cosine_with_restarts",
                             "linear", "polynomial"],
@@ -104,6 +107,8 @@ def main():
         context_lora_path=args.context_lora_path, context_lora_strength=args.context_lora_strength,
         adaptive_lr=args.adaptive_lr,
         adaptive_lr_min=args.adaptive_lr_min, adaptive_lr_max=args.adaptive_lr_max,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_grad_norm=args.max_grad_norm,
         lr_scheduler=args.lr_scheduler, lr_warmup_steps=args.lr_warmup_steps,
         lr_decay_steps=args.lr_decay_steps,
         lr_scheduler_num_cycles=args.lr_scheduler_num_cycles,

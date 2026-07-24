@@ -85,6 +85,8 @@ def _materialize_lycoris_module(mod_keys: Dict[str, torch.Tensor]) -> Optional[D
     Returns a new dict with lora_up.weight, lora_down.weight, alpha — or None
     if the module isn't a recognised LyCORIS variant.
     """
+    from fizgig.networks.lora import lycoris_scale_from_keys
+
     # --- LoKR ---
     if mod_keys.get("lokr_w1") is not None or mod_keys.get("lokr_w1_a") is not None:
         if mod_keys.get("lokr_w1_a") is not None:
@@ -95,22 +97,14 @@ def _materialize_lycoris_module(mod_keys: Dict[str, torch.Tensor]) -> Optional[D
             w2 = (mod_keys["lokr_w2_a"].float() @ mod_keys["lokr_w2_b"].float())
         else:
             w2 = mod_keys["lokr_w2"].float()
-        alpha_t = mod_keys.get("alpha")
-        dim = w1.shape[0] * w2.shape[0]
-        alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
-        scale = 1.0 if alpha > _ALPHA_SENTINEL_THRESHOLD else alpha / max(dim, 1)
         from fizgig.utils.device import gpu_kron
-        W = gpu_kron(w1, w2) * scale
+        W = gpu_kron(w1, w2) * lycoris_scale_from_keys(mod_keys)
 
     # --- LoHa ---
     elif mod_keys.get("hada_w1_a") is not None:
         W1 = mod_keys["hada_w1_a"].float() @ mod_keys["hada_w1_b"].float()
         W2 = mod_keys["hada_w2_a"].float() @ mod_keys["hada_w2_b"].float()
-        alpha_t = mod_keys.get("alpha")
-        dim = W1.shape[0]
-        alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
-        scale = 1.0 if alpha > _ALPHA_SENTINEL_THRESHOLD else alpha / max(dim, 1)
-        W = (W1 * W2) * scale
+        W = (W1 * W2) * lycoris_scale_from_keys(mod_keys)
 
     else:
         return None

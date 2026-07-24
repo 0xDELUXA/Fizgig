@@ -155,7 +155,8 @@ class LoRAExtractor:
                 scale = alpha / max(rank, 1)
                 W = up.float() @ down.float() * scale * mult
             elif mod_keys.get("lokr_w1") is not None or mod_keys.get("lokr_w1_a") is not None:
-                # LoKR
+                # LoKR — scale mirrors LoKRInfModule (incl. Comfy-Realtime sentinel)
+                from fizgig.networks.lora import lycoris_scale_from_keys
                 if mod_keys.get("lokr_w1_a") is not None:
                     w1 = (mod_keys["lokr_w1_a"].float() @ mod_keys["lokr_w1_b"].float())
                 else:
@@ -164,22 +165,14 @@ class LoRAExtractor:
                     w2 = (mod_keys["lokr_w2_a"].float() @ mod_keys["lokr_w2_b"].float())
                 else:
                     w2 = mod_keys["lokr_w2"].float()
-                alpha_t = mod_keys.get("alpha")
-                dim = w1.shape[0] * w2.shape[0]  # approximate
-                alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
-                # Sentinel detection (Comfy-Realtime-Lora)
-                scale = 1.0 if alpha > 1e8 else alpha / max(dim, 1)
                 from fizgig.utils.device import gpu_kron
-                W = gpu_kron(w1, w2) * scale * mult
+                W = gpu_kron(w1, w2) * lycoris_scale_from_keys(mod_keys) * mult
             elif mod_keys.get("hada_w1_a") is not None:
-                # LoHa
+                # LoHa — scale mirrors LoHaInfModule
+                from fizgig.networks.lora import lycoris_scale_from_keys
                 W1 = mod_keys["hada_w1_a"].float() @ mod_keys["hada_w1_b"].float()
                 W2 = mod_keys["hada_w2_a"].float() @ mod_keys["hada_w2_b"].float()
-                alpha_t = mod_keys.get("alpha")
-                dim = W1.shape[0]
-                alpha = float(alpha_t.item()) if alpha_t is not None else float(dim)
-                scale = 1.0 if alpha > 1e8 else alpha / max(dim, 1)
-                W = (W1 * W2) * scale * mult
+                W = (W1 * W2) * lycoris_scale_from_keys(mod_keys) * mult
             else:
                 continue
 

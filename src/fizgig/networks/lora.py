@@ -300,6 +300,31 @@ class LoRAInfModule(LoRAModule):
 # load_state_dict populates them directly.
 # ---------------------------------------------------------------------------
 
+def lycoris_scale_from_keys(mod_keys: Dict[str, torch.Tensor]) -> float:
+    """Effective scale for a LoKR/LoHa module's dense delta, mirroring
+    LoKRInfModule / LoHaInfModule exactly. Bake and extraction materialize
+    through this so the saved file matches what live inference showed —
+    a divergent convention here silently rescales the whole LoRA.
+    """
+    alpha_t = mod_keys.get("alpha")
+    alpha = float(alpha_t.item()) if alpha_t is not None else 1.0
+    if alpha >= LoKRInfModule._ALPHA_SENTINEL_THRESHOLD:
+        return 1.0  # refined-export sentinel → scale baked into the weights
+    if mod_keys.get("hada_w1_a") is not None:  # LoHa
+        r1 = int(mod_keys["hada_w1_a"].shape[1])
+        r2 = int(mod_keys["hada_w2_a"].shape[1])
+        return alpha / max(1, min(r1, r2))
+    # LoKR: dim = min of the decomposition ranks that are actually in use;
+    # a full-matrix LoKR (no w1_a/w2_a factors) has dim 1 → scale = alpha.
+    dims = []
+    if mod_keys.get("lokr_w1_a") is not None:
+        dims.append(int(mod_keys["lokr_w1_a"].shape[1]))
+    if mod_keys.get("lokr_w2_a") is not None:
+        dims.append(int(mod_keys["lokr_w2_a"].shape[1]))
+    dim = max(1, min(dims)) if dims else 1
+    return alpha / dim
+
+
 def _lokr_forward_update(x: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor,
                         a: int, b: int, c: int, d: int) -> torch.Tensor:
     """Compute kron(w1, w2) @ x efficiently via the identity

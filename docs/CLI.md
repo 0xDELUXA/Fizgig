@@ -83,9 +83,11 @@ The two model families share the dataset format and most of the workflow, but no
 | Per-image LR (`--per_image_lr`) | ❌ | ✅ Krea 2 only |
 | Auto-recaption (`--auto_recaption`) | ❌ | ✅ Krea 2 only |
 | Look-outlier warm-up (`--warmup_look_outliers`) | ❌ | ✅ Krea 2 only |
+| LR scheduler (cosine, linear, warmup, ...) | ✅ | ✅ |
+| Gradient accumulation | ✅ | ✅ |
 | Block targeting (`include_patterns`) / Model Area | ✅ Klein only | ❌ (no Krea 2 block map yet) |
 | Timestep range (`--min/max_timestep`) | ✅ Klein only | ❌ (fixed `krea2_shift` recipe) |
-| Optimizer / scheduler choice | ✅ Klein only | ❌ (AdamW8bit + the watchers) |
+| Optimizer choice | ✅ Klein only | ❌ (AdamW8bit hardcoded) |
 | Weight-only extraction (rank reduction, `--samples 0`) | ✅ | ✅ |
 | Profiling | ✅ full activation profile | ✅ weight-only (`--krea2`) |
 | Activation-weighted (specialized) extraction | ✅ Klein only | ❌ (needs the Klein pipeline) |
@@ -333,6 +335,12 @@ The Krea 2 parser is small enough to know in full: run `krea2_train.py --help`. 
 - `--warmup_look_outliers` — curriculum entry (×0.4 LR ramping to ×1.0) for real-but-unusual images. Reads `<dataset>/fizgig_look_scores.json`, which is produced by the GUI's Look Consistency Filter scan — **GUI-only prerequisite**; without the file this flag logs a warning and disables itself.
 
 Persistent artifacts: exclusions are stored in `<image_directory>/fizgig_excluded.json` so they travel with the dataset across runs; editing an excluded image's caption auto-pardons it. Fresh runs rotate the old JSONL to `.bak`; `--resume` replays the log to restore full watch history.
+
+**LR schedule and batching**
+
+- `--lr_scheduler` — `constant` (default), `constant_with_warmup`, `cosine`, `cosine_with_restarts`, `linear`, `polynomial`; with `--lr_warmup_steps` (plus `--lr_scheduler_num_cycles` / `--lr_scheduler_power` for the two that use them). **Ignored when `--adaptive_lr` is on** — the plateau watcher owns the LR and says so in the log. Resume continues the curve rather than restarting it.
+- `--gradient_accumulation_steps N` — accumulate over N micro-batches per optimizer step (effective batch = N). The loss is averaged over the group, and a partial group is flushed at the epoch boundary. Per-image LR still applies per image.
+- `--max_grad_norm` — gradient clipping (default 1.0, matching the reference recipe; 0 disables).
 
 **Not in the Krea 2 parser (by design):** optimizer choice (AdamW8bit hardcoded), timestep sampling (fixed `krea2_shift` recipe), block targeting (no Krea 2 block map yet), gradient checkpointing (always on). What's absent is deliberate, not missing.
 

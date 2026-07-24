@@ -129,6 +129,13 @@ def load_safetensors_with_lora_and_fp8(
 
         # detect network types for each lora_sd
         lora_network_types = [detect_network_type(lora_sd) for lora_sd in lora_weights_list]
+        if any(t != "lora" for t in lora_network_types):
+            # LyCORIS merge-on-load isn't implemented (Fizgig applies LoKR/LoHa via live
+            # LoRANetwork modules everywhere) — warn once instead of failing per-weight.
+            logger.warning(
+                "Merge-on-load supports standard LoRA only; LoKR/LoHa weights will be skipped. "
+                f"Detected types: {lora_network_types}. Apply LyCORIS LoRAs via the live network path."
+            )
 
         # Merge LoRA weights into the state dict
         logger.info(f"Merging LoRA weights into state dict. multipliers: {lora_multipliers}, network types: {lora_network_types}")
@@ -150,14 +157,11 @@ def load_safetensors_with_lora_and_fp8(
                 lora_name = model_weight_key.rsplit(".", 1)[0]  # remove trailing ".weight"
                 lora_name = "lora_unet_" + lora_name.replace(".", "_")
 
-                if net_type == "loha":
-                    from fizgig.krea2.loha import merge_weights_to_tensor as loha_merge
-
-                    model_weight = loha_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
-                elif net_type == "lokr":
-                    from fizgig.krea2.lokr import merge_weights_to_tensor as lokr_merge
-
-                    model_weight = lokr_merge(model_weight, lora_name, lora_sd, lora_weight_keys, multiplier, calc_device)
+                if net_type != "lora":
+                    # LoKR/LoHa: skip (warned once above). The vendored musubi merge imported
+                    # fizgig.krea2.lokr/loha modules that were never ported — dead code that
+                    # would have crashed on first touch. Mirrors the Klein loader's behavior.
+                    continue
                 else:
                     # standard LoRA (lora_down/lora_up)
                     down_key = lora_name + ".lora_down.weight"

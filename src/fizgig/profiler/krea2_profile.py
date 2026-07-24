@@ -56,25 +56,48 @@ def profile_krea2_weight_only(lora_path: str, output_html: str,
                               profiles_dir: Optional[str] = None):
     """Compute per-block weight norms, write the HTML report + sidecar. Returns (html, sidecar)."""
     from safetensors.torch import load_file
-    from fizgig.networks.lora import ensure_kohya_lora_state_dict
+    from fizgig.networks.lora import ensure_kohya_lora_state_dict, lycoris_scale_from_keys
     from fizgig.profiler.visualize import compute_lora_hash
 
     sd = ensure_kohya_lora_state_dict(load_file(lora_path))
+
+    by_module: dict = {}
+    for key, tensor in sd.items():
+        if "." not in key:
+            continue
+        name, _, suffix = key.partition(".")
+        by_module.setdefault(name, {})[suffix] = tensor
+
     block_norms = {}
     n_modules = 0
-    for key in list(sd.keys()):
-        if not key.endswith(".lora_down.weight"):
+    for name, keys in by_module.items():
+        down = keys.get("lora_down.weight")
+        up = keys.get("lora_up.weight")
+        if up is not None and down is not None:
+            norm = float(up.float().norm().item()) * float(down.float().norm().item())
+        elif keys.get("lokr_w1") is not None or keys.get("lokr_w1_a") is not None:
+            # ‖kron(w1,w2)‖F = ‖w1‖F · ‖w2‖F — exact, no materialization needed.
+            if keys.get("lokr_w1_a") is not None:
+                w1 = keys["lokr_w1_a"].float() @ keys["lokr_w1_b"].float()
+            else:
+                w1 = keys["lokr_w1"].float()
+            if keys.get("lokr_w2_a") is not None:
+                w2 = keys["lokr_w2_a"].float() @ keys["lokr_w2_b"].float()
+            else:
+                w2 = keys["lokr_w2"].float()
+            norm = float(w1.norm().item()) * float(w2.norm().item()) * lycoris_scale_from_keys(keys)
+        elif keys.get("hada_w1_a") is not None:
+            W1 = keys["hada_w1_a"].float() @ keys["hada_w1_b"].float()
+            W2 = keys["hada_w2_a"].float() @ keys["hada_w2_b"].float()
+            norm = float((W1 * W2).norm().item()) * lycoris_scale_from_keys(keys)
+        else:
             continue
-        name = key[: -len(".lora_down.weight")]
-        up = sd.get(name + ".lora_up.weight")
-        if up is None:
-            continue
-        norm = float(up.float().norm().item()) * float(sd[key].float().norm().item())
-        block_norms[_krea2_block_of(name)] = block_norms.get(_krea2_block_of(name), 0.0) + norm
+        block = _krea2_block_of(name)
+        block_norms[block] = block_norms.get(block, 0.0) + norm
         n_modules += 1
 
     if not block_norms:
-        raise RuntimeError("No standard lora_down/up modules found — is this a krea2 LoRA?")
+        raise RuntimeError("No LoRA / LoKR / LoHa modules found — is this a krea2 LoRA?")
 
     total = sum(block_norms.values()) or 1.0
     by_depth = sorted(block_norms.items(), key=lambda kv: _block_sort_key(kv[0]))

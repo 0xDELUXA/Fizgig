@@ -447,3 +447,87 @@ def write_mp4(frames: List[Image.Image], path: str, speed: str = "Normal"):
             writer.write(np.ascontiguousarray(arr))
     finally:
         writer.release()
+
+
+def build_comparison_grid(rows, col_labels, *, row_labels=None, cell=None,
+                          bg=(255, 255, 255), fg=(20, 20, 20), gap=0, brand=False):
+    """Compose a labelled comparison sheet: one row per prompt, one column per condition.
+
+    The share format people actually post for a new LoRA — "no lora | with lora" side by side
+    on the same seed, or a run's epochs across the columns.
+
+    rows:       list of rows, each a list of PIL images (one per column, same order as col_labels)
+    col_labels: header text per column (drawn once, above the grid)
+    row_labels: optional short caption drawn down the left gutter (rotated), e.g. the prompt
+    cell:       (w, h) to resize every image to; defaults to the first image's size
+    gap:        pixels between cells (bg-coloured)
+    brand:      draw a small "Fizgig" mark bottom-right
+
+    Returns a single RGB PIL image.
+    """
+    rows = [r for r in rows if r]
+    if not rows:
+        raise ValueError("No rows to compose.")
+    n_cols = max(len(r) for r in rows)
+    if cell is None:
+        cell = rows[0][0].size
+    cw, ch = int(cell[0]), int(cell[1])
+
+    probe = Image.new("RGB", (10, 10))
+    d0 = ImageDraw.Draw(probe)
+
+    # Header font scales with cell width; shrink until the widest label fits its column.
+    fs = max(14, int(cw * 0.055))
+    font = _load_font(fs)
+    while fs > 9 and any(d0.textlength(str(t), font=font) > cw * 0.94 for t in col_labels):
+        fs -= 1
+        font = _load_font(fs)
+    asc, desc = font.getmetrics()
+    header_h = asc + desc + max(8, int(fs * 0.7)) if col_labels else 0
+
+    gutter = 0
+    rlfont = None
+    if row_labels:
+        rfs = max(11, int(cw * 0.035))
+        rlfont = _load_font(rfs)
+        gutter = rfs + max(8, int(rfs * 0.8))
+
+    W = gutter + n_cols * cw + (n_cols - 1) * gap
+    H = header_h + len(rows) * ch + (len(rows) - 1) * gap
+    sheet = Image.new("RGB", (W, H), bg)
+    draw = ImageDraw.Draw(sheet)
+
+    for ci, label in enumerate(col_labels or []):
+        cx = gutter + ci * (cw + gap) + cw // 2
+        tw = draw.textlength(str(label), font=font)
+        draw.text((cx - tw / 2, max(2, (header_h - asc - desc) // 2)), str(label), font=font, fill=fg)
+
+    for ri, row in enumerate(rows):
+        y = header_h + ri * (ch + gap)
+        for ci in range(n_cols):
+            if ci >= len(row) or row[ci] is None:
+                continue
+            im = row[ci]
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            if im.size != (cw, ch):
+                im = im.resize((cw, ch), Image.LANCZOS)
+            sheet.paste(im, (gutter + ci * (cw + gap), y))
+        if row_labels and ri < len(row_labels) and row_labels[ri]:
+            # Rotated caption in the left gutter, clipped to the row height.
+            txt = str(row_labels[ri])
+            strip = Image.new("RGB", (ch, gutter), bg)
+            sd = ImageDraw.Draw(strip)
+            while rlfont.size > 9 and sd.textlength(txt, font=rlfont) > ch - 8:
+                rlfont = _load_font(rlfont.size - 1)
+            sd.text((4, max(0, (gutter - rlfont.size) // 2 - 1)), txt, font=rlfont, fill=fg)
+            sheet.paste(strip.rotate(90, expand=True), (0, y))
+
+    if brand:
+        bfs = max(10, int(cw * 0.03))
+        bfont = _load_font(bfs)
+        bt = "Fizgig"
+        bw = draw.textlength(bt, font=bfont)
+        draw.text((W - bw - max(6, bfs // 2), H - bfs - max(6, bfs // 2)), bt, font=bfont,
+                  fill=(150, 150, 150))
+    return sheet

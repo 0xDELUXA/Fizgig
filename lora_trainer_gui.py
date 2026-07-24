@@ -1230,12 +1230,17 @@ class LoRATrainerGUI:
         """Save last-used folder paths and settings to config file"""
         if _persist_disabled():
             return
-        data = {
+        # Seed from what's already remembered, THEN overwrite with live widget values. Keys that
+        # are set directly on self.last_used (the per-tab Klein/Krea 2 family selectors, for
+        # instance) have no widget stanza below, so building `data` from scratch silently dropped
+        # them on the very next save — the setting looked persisted until you restarted.
+        data = dict(self.last_used) if isinstance(getattr(self, "last_used", None), dict) else {}
+        data.update({
             "prep_mode": self.prep_mode_var.get(),
             "image_folder": self.image_folder_var.get(),
             "caption_trigger": self.caption_text_var.get(),
             "dataset_cache_dir": self.dataset_cache_dir_var.get(),
-        }
+        })
         # Save architecture if variable exists
         if hasattr(self, 'architecture_var'):
             data["architecture"] = self.architecture_var.get()

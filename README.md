@@ -62,10 +62,10 @@ Find the best LoRA the human way — then turn the winner into share-ready clips
 Because the morph *is* the magic, the payoff is four **travel** tools that each render a sequence you **scrub to review and only save if you like it** — as a looping MP4 or GIF, re-saveable in either format without re-rendering, with an optional **deflicker** pass (the timelapse trick DaVinci uses) for flicker-free clips. **Export the morph** saves the whole epoch sweep, a face resolving epoch by epoch — or **Save all stills** dumps every rendered epoch to a folder as full-res PNGs (the renders otherwise live only in memory). **Seed travel** slerps through a journey of seeds to show the LoRA's range. **Prompt travel** interpolates the text embedding through waypoints — Time of day, Season, Age, Era, or your own words — so one subject flows through the change; pick a **Preset + Subject** and it writes the prompt for you. And **LoRA strength travel** ramps the LoRA from 0 (base model) to full and beyond, so you literally *watch the effect fade in*. Every travel can be anchored to a reference to hold the subject steady, with interpolation and seed-drift knobs for a smooth, brightness-even result. (The epoch morph shows the LoRA *learning*; the travels show what it can *do*.)
 
 ### Profiler
-A per-block activation profile with a colour-coded, five-bucket HTML report — which blocks carry style, identity, and detail signal, and where they overlap. Writes a JSON sidecar that Repair Studio reads automatically, showing the findings inline when you load the same LoRA.
+A per-block activation profile with a colour-coded, five-bucket HTML report — which blocks carry style, identity, and detail signal, and where they overlap. Writes a JSON sidecar that Repair Studio reads automatically, showing the findings inline when you load the same LoRA. Krea 2 LoRAs get a weight-only per-block report (no models loaded) — the instrument for the community block-mapping effort below.
 
 ### Extract
-Distil any Klein LoRA to a lower rank with block and timestep targeting. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
+Distil any Klein or Krea 2 LoRA to a lower rank — Klein with block and timestep targeting, Krea 2 via weight-only SVD. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets (Klein) use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
 
 ---
 

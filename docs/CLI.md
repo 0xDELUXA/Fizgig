@@ -86,7 +86,9 @@ The two model families share the dataset format and most of the workflow, but no
 | Block targeting (`include_patterns`) / Model Area | ✅ Klein only | ❌ (no Krea 2 block map yet) |
 | Timestep range (`--min/max_timestep`) | ✅ Klein only | ❌ (fixed `krea2_shift` recipe) |
 | Optimizer / scheduler choice | ✅ Klein only | ❌ (AdamW8bit + the watchers) |
-| LoRA extraction / profiling scripts | ✅ Klein only | ❌ |
+| Weight-only extraction (rank reduction, `--samples 0`) | ✅ | ✅ |
+| Profiling | ✅ full activation profile | ✅ weight-only (`--krea2`) |
+| Activation-weighted (specialized) extraction | ✅ Klein only | ❌ (needs the Klein pipeline) |
 
 The four intelligence toggles are Krea 2-only because auto-recaption needs a text encoder that can *see* — Krea 2's Qwen3-VL is a full vision-language model; Klein's stripped Qwen3-8B can't generate text or look at images.
 
@@ -399,19 +401,19 @@ Klein's fp8 Base is only ~9.6 GB resident, so 16 GB+ cards skip swap entirely (f
 
 ## LoRA extraction
 
-`extract_lora.py` distills an existing LoRA to a lower rank, optionally specialized to block categories and timestep ranges. Klein only.
+`extract_lora.py` distills an existing LoRA to a lower rank, optionally specialized to block categories and timestep ranges.
 
-**Rank reduction (the common case)** — pure weight SVD, `--samples 0`, no models loaded, runs in seconds from the safetensors alone:
+**Rank reduction (the common case)** — pure weight SVD with `--samples 0`: no model paths, no GPU models loaded, runs straight from the safetensors. Model-agnostic, so it handles **both Klein and Krea 2** LoRAs:
 
 ```bash
 python src/fizgig/scripts/extract_lora.py \
   --source big_r32.safetensors --output small_r8.safetensors \
-  --dit /models/flux-2-klein-base-9b.safetensors \
-  --vae /models/ae.safetensors --text_encoder /models/qwen_3_8b.safetensors \
   --rank 8 --blocks all --samples 0
 ```
 
-**Specialized extraction** — activation-weighted SVD (`--samples 16`, loads the full pipeline, needs GPU). Example: pull just the style out of a character LoRA:
+For Krea 2 sources always use `--blocks all` — the named block categories are Klein's semantic map. Rank-reducing a full-model LoRA takes **~5 minutes on Klein** and **~25 minutes on Krea 2** (264 modules with 6144-wide dense deltas to SVD) — the long quiet stretch is normal, not a hang.
+
+**Specialized extraction** (Klein only) — activation-weighted SVD (`--samples 16`, loads the full Klein pipeline, needs the model paths). Example: pull just the style out of a character LoRA:
 
 ```bash
 python src/fizgig/scripts/extract_lora.py \
@@ -429,7 +431,9 @@ python src/fizgig/scripts/extract_lora.py \
 
 ## LoRA profiling
 
-`profile_lora.py` measures which blocks a LoRA actually uses (weight norms + activation probes across timestep bins) and emits an HTML report with the 5-bucket block breakdown, plus a JSON sidecar the GUI's Repair Studio picks up. Klein only.
+`profile_lora.py` measures which blocks a LoRA actually uses and writes a report plus a JSON sidecar the GUI's Repair Studio picks up.
+
+**Klein** — full activation profile (weight norms + activation probes across timestep bins, needs the model paths):
 
 ```bash
 python src/fizgig/scripts/profile_lora.py \
@@ -442,6 +446,14 @@ python src/fizgig/scripts/profile_lora.py \
 ```
 
 Use the Distilled DiT for speed. PEFT and LyCORIS LoRAs auto-convert on load.
+
+**Krea 2** — weight-only per-block profile, no models loaded, runs in seconds:
+
+```bash
+python src/fizgig/scripts/profile_lora.py --lora my_krea2_subject.safetensors --krea2
+```
+
+Writes `<name>_krea2_profile.html` next to the LoRA (or pass `--output report.html`) with per-block bars ranked by depth, plus the Repair Studio sidecar. Krea 2's block *roles* aren't mapped yet — this report is the instrument for discovering them, so if you spot patterns, share them on GitHub.
 
 ---
 

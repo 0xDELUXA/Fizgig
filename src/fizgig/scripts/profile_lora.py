@@ -27,9 +27,11 @@ logging.basicConfig(level=logging.INFO)
 def main():
     parser = argparse.ArgumentParser(description="Profile a LoRA to map per-block per-timestep activity")
     parser.add_argument("--lora", type=str, required=True, help="Path to LoRA safetensors file")
-    parser.add_argument("--dit", type=str, required=True, help="Path to Klein 9B DiT checkpoint")
-    parser.add_argument("--vae", type=str, required=True, help="Path to VAE/AE checkpoint")
-    parser.add_argument("--text_encoder", type=str, required=True, help="Path to Qwen3-8B checkpoint")
+    parser.add_argument("--krea2", action="store_true",
+                        help="Krea 2 LoRA: weight-only per-block profile (HTML report + sidecar, no models loaded)")
+    parser.add_argument("--dit", type=str, default=None, help="Path to Klein 9B DiT checkpoint (Klein mode only)")
+    parser.add_argument("--vae", type=str, default=None, help="Path to VAE/AE checkpoint (Klein mode only)")
+    parser.add_argument("--text_encoder", type=str, default=None, help="Path to Qwen3-8B checkpoint (Klein mode only)")
     parser.add_argument("--output", type=str, default="profile.png", help="Output heatmap path (default: profile.png)")
     parser.add_argument("--model_version", type=str, default="klein-base-9b", help="Model version")
     parser.add_argument("--num_samples", type=int, default=8, help="Samples per timestep bin (default: 8)")
@@ -42,6 +44,22 @@ def main():
     parser.add_argument("--blocks_to_swap", type=int, default=12, help="Blocks to swap to CPU (default: 12)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     args = parser.parse_args()
+
+    if args.krea2:
+        from fizgig.profiler.krea2_profile import profile_krea2_weight_only
+
+        out_html = args.output
+        if not out_html.lower().endswith(".html"):
+            out_html = os.path.splitext(args.lora)[0] + "_krea2_profile.html"
+        html, sidecar = profile_krea2_weight_only(args.lora, out_html)
+        print(f"\nKrea 2 weight-only profile:")
+        print(f"  Report:  {html}")
+        print(f"  Sidecar: {sidecar}")
+        return
+
+    if not (args.dit and args.vae and args.text_encoder):
+        parser.error("--dit, --vae and --text_encoder are required for Klein activation profiling "
+                     "(or pass --krea2 for a weight-only Krea 2 profile).")
 
     pipeline = KleinInferencePipeline()
     pipeline.load_models(

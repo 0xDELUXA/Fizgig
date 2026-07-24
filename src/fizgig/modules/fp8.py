@@ -349,6 +349,7 @@ _ONE_BY_DEVICE = {}                    # cached scalar 1.0 per device
 # set FIZGIG_FP8_DIAG=1 to enable (very verbose — one line per fp8 Linear).
 _FP8_DIAG = os.environ.get("FIZGIG_FP8_DIAG", "0") != "0"
 _fp8_diag_last = {}
+_scaled_mm_probe_warned = False
 
 
 def _train_scaled_mm_supported() -> bool:
@@ -514,6 +515,12 @@ def _try_fp8_scaled_mm_train(self: nn.Linear, x):
     if sw is None or sw.numel() != 1:   # per-tensor scale only (not block-wise)
         _diag("DEQUANT")
         return None
+    if sw.device != self.weight.device:
+        # Block swap moves parameters but not buffers, so a swapped-in Linear can
+        # have its weight on GPU with scale_weight still on CPU — _scaled_mm
+        # rejects mixed devices. Persist the move so it's one copy, not one per step.
+        sw = sw.to(self.weight.device)
+        self.scale_weight = sw
     K = x.shape[-1]
     N = self.weight.shape[0]
     M = x.numel() // K if K else 0
@@ -540,7 +547,14 @@ def _try_fp8_scaled_mm_train(self: nn.Linear, x):
         return out
     except RuntimeError as e:
         self._fp8_train_decision = "dequant"
-        logger.warning(f"fp8 scaled_mm disabled for this Linear ({type(e).__name__}: {e}); using dequant.")
+        global _scaled_mm_probe_warned
+        if not _scaled_mm_probe_warned:
+            _scaled_mm_probe_warned = True
+            logger.warning(
+                f"fp8 scaled_mm disabled ({type(e).__name__}: {e}); using dequant. "
+                "Further Linears that fall back will do so silently (harmless — dequant is bit-identical, just misses the fp8 GEMM speedup).")
+        else:
+            logger.debug(f"fp8 scaled_mm disabled for this Linear ({type(e).__name__}: {e}); using dequant.")
         _diag("DEQUANT", M)
         return None
 

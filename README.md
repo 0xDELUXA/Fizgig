@@ -65,7 +65,7 @@ Because the morph *is* the magic, the payoff is four **travel** tools that each 
 A per-block activation profile with a colour-coded, five-bucket HTML report — which blocks carry style, identity, and detail signal, and where they overlap. Writes a JSON sidecar that Repair Studio reads automatically, showing the findings inline when you load the same LoRA. Krea 2 LoRAs get a weight-only per-block report (no models loaded) — the instrument for the community block-mapping effort below.
 
 ### Extract
-Distil any Klein or Krea 2 LoRA to a lower rank — Klein with block and timestep targeting, Krea 2 via weight-only SVD. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets (Klein) use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources.
+Distil any Klein or Krea 2 LoRA to a lower rank — Klein with block and timestep targeting, Krea 2 via weight-only SVD. Fast presets run pure weight SVD with no GPU models loaded; activation-weighted presets (Klein) use forward passes for better accuracy. Supports PEFT and LyCORIS (LoKR / LoHa) sources. Expect roughly **5 minutes for a full-model Klein LoRA and ~25 for Krea 2** (its 264 modules are 6144-wide) — a long quiet stretch mid-extract is normal, not a hang.
 
 ---
 

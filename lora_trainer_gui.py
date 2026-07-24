@@ -1292,6 +1292,7 @@ class LoRATrainerGUI:
             data["royale_cmp_seed"] = self.royale_cmp_seed_var.get()
             data["royale_cmp_w"] = self.royale_cmp_w_var.get()
             data["royale_cmp_h"] = self.royale_cmp_h_var.get()
+            data["royale_cmp_epochs"] = self.royale_cmp_epochs_var.get()
             try:
                 data["royale_cmp_prompts"] = self.royale_cmp_prompts.get("1.0", tk.END).strip()
             except Exception:
@@ -12998,8 +12999,28 @@ class LoRATrainerGUI:
         # ----- Comparison sheet (before/after grid) -----
         cmpc = self._start_section_card(outer, "Comparison sheet",
                                         "The share image people actually post for a new LoRA: one row per prompt, "
-                                        "columns for without-LoRA vs with-LoRA (or one column per epoch), same seed "
-                                        "across a row so only the LoRA changes. Saved as a single labelled PNG.")
+                                        "one column per condition, same seed across a row so only the LoRA changes. "
+                                        "Saved as a single labelled PNG.")
+        _cmphow = tk.Frame(cmpc, bg=COLORS["bg_deep"])
+        _cmphow.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(_cmphow, text="How to use it", bg=COLORS["bg_deep"], fg=COLORS["accent"],
+                 font=(FONT_FAMILY, 9, "bold")).pack(anchor=tk.W, padx=10, pady=(8, 2))
+        tk.Label(_cmphow, bg=COLORS["bg_deep"], fg=COLORS["text_secondary"],
+                 font=(FONT_FAMILY, 9), justify=tk.LEFT, wraplength=740,
+                 text=("Without / with LoRA  —  two columns, showing what your LoRA adds.\n"
+                       "    1. Load a LoRA:  Single-LoRA mode (pick the file), or Folder mode → Render,\n"
+                       "        then slide the crossfade to the epoch you want to show off.\n"
+                       "    2. Type your prompts below, one per line.\n"
+                       "    3. Fill in Trigger so the no-LoRA column can drop it (the base model has\n"
+                       "        never seen that word — leaving it in makes the comparison unfair).\n"
+                       "    4. Render.\n\n"
+                       "Every epoch  —  one column per epoch, showing the LoRA learning.\n"
+                       "    1. Folder mode → pick your training output folder → Scan → Render.\n"
+                       "        (This is the main render at the top of the tab, not this card — the\n"
+                       "        sheet reuses those epochs, so it must happen first.)\n"
+                       "    2. Set Epochs to keep it readable: blank = all, \"every 4\", or \"4,8,12\".\n"
+                       "    3. Type your prompts, then Render.")
+                 ).pack(anchor=tk.W, padx=10, pady=(0, 8))
         tk.Label(cmpc, text="Prompts (one per line — each becomes a row):", bg=_sbg,
                  fg=COLORS["text_muted"], font=(FONT_FAMILY, 9)).pack(anchor=tk.W)
         self.royale_cmp_prompts = tk.Text(cmpc, height=4, width=90, wrap=tk.WORD,
@@ -13022,6 +13043,15 @@ class LoRATrainerGUI:
         _cmb.pack(side=tk.LEFT)
         ToolTip(_cmb, "Without / with LoRA: two columns on the current LoRA.\n"
                       "Every epoch: one column per epoch of the scanned run (Folder mode).")
+        tk.Label(_cr1, text="Epochs", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 4))
+        self.royale_cmp_epochs_var = tk.StringVar(value=self.last_used.get("royale_cmp_epochs", ""))
+        _cep = ttk.Entry(_cr1, textvariable=self.royale_cmp_epochs_var, width=14)
+        _cep.pack(side=tk.LEFT)
+        ToolTip(_cep, "Which epochs become columns (Every epoch mode only).\n"
+                      "Blank = all of them.\n"
+                      "\"every 4\" = every 4th, always including the last.\n"
+                      "\"4,8,12\" = just those.\n"
+                      "A 40-epoch run as 40 columns is unreadable — pick 4-6.")
         tk.Label(_cr1, text="Trigger", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 4))
         self.royale_cmp_trigger_var = tk.StringVar(value=self.last_used.get("royale_cmp_trigger", ""))
         _ctg = ttk.Entry(_cr1, textvariable=self.royale_cmp_trigger_var, width=14)
@@ -13056,13 +13086,13 @@ class LoRATrainerGUI:
         self.royale_cmp_status_var = tk.StringVar(value="")
         tk.Label(_cb, textvariable=self.royale_cmp_status_var, font=(FONT_FAMILY, 10, "italic"),
                  fg=COLORS["accent"], bg=_sbg).pack(side=tk.LEFT, padx=(12, 0))
-        tk.Label(cmpc, text="Every cell is a fresh render — rows x columns images, so keep the prompt list short "
-                            "the first time. The finished sheet opens in a window to review, then you choose "
-                            "whether to save it.",
+        tk.Label(cmpc, text="Every cell is a fresh render — rows x columns images — so 3 prompts across 5 epochs "
+                            "is 15 renders. Keep the prompt list short the first time. The finished sheet opens "
+                            "in a window to review, then you choose whether to save it.",
                  font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
         for _v in (self.royale_cmp_mode_var, self.royale_cmp_trigger_var, self.royale_cmp_seed_var,
-                   self.royale_cmp_w_var, self.royale_cmp_h_var):
+                   self.royale_cmp_w_var, self.royale_cmp_h_var, self.royale_cmp_epochs_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
         grid_card = self._start_section_card(outer, "All epochs",
@@ -14349,6 +14379,37 @@ class LoRATrainerGUI:
 
     # ----- Comparison sheet (labelled before/after grid) -----
     @staticmethod
+    def _royale_pick_epoch_columns(cols, spec):
+        """Subset (label, path) epoch columns by a user spec.
+
+        '' -> all;  'every N' / '/N' -> every Nth, last always kept;  '4,8,12' -> those labels.
+        A 40-epoch run as 40 columns is unreadable, so this is how you get a shareable sheet.
+        Unparseable specs fall back to everything rather than failing the run.
+        """
+        spec = (spec or "").strip().lower()
+        if not spec or not cols:
+            return cols
+        import re as _re
+        m = _re.fullmatch(r"(?:every\s*|/)(\d+)", spec)
+        if m:
+            n = max(1, int(m.group(1)))
+            picked = cols[n - 1::n]
+            if cols[-1] not in picked:      # the final epoch is the one people most want
+                picked.append(cols[-1])
+            return picked or [cols[-1]]
+        wanted = [t.strip() for t in spec.replace(" ", ",").split(",") if t.strip()]
+        if not wanted:
+            return cols
+        picked = []
+        for lbl, path in cols:
+            s = str(lbl)
+            for w in wanted:
+                if s == w or (s.isdigit() and w.isdigit() and int(s) == int(w)):
+                    picked.append((lbl, path))
+                    break
+        return picked or cols
+
+    @staticmethod
     def _royale_strip_trigger(prompt: str, trigger: str) -> str:
         """Drop the trigger token from a prompt for the no-LoRA column. The base model has never
         seen it, so leaving it in feeds the baseline a junk token and makes the comparison unfair."""
@@ -14379,9 +14440,15 @@ class LoRATrainerGUI:
             cols = [(lbl, self._royale_paths.get(lbl)) for lbl, _ in (self._royale_images or [])]
             cols = [(l, p) for l, p in cols if p and os.path.exists(p)]
             if not cols:
-                messagebox.showinfo("LoRA Royale", "Render the epochs first (Folder mode) — then the sheet can "
-                                                   "put one epoch per column.")
+                messagebox.showinfo(
+                    "Render the epochs first",
+                    "\"Every epoch\" reuses the epochs from the main render at the top of this tab.\n\n"
+                    "1. Switch to Folder mode and pick your training output folder\n"
+                    "2. Click Render (the epoch/crossfade render)\n"
+                    "3. Come back here and render the sheet\n\n"
+                    "Or set Columns to \"Without / with LoRA\", which needs no epoch render.")
                 return
+            cols = self._royale_pick_epoch_columns(cols, self.royale_cmp_epochs_var.get())
         else:
             if path is None or not os.path.exists(path):
                 messagebox.showinfo("LoRA Royale", "Pick a LoRA file (Single-LoRA mode), or render epochs and slide "

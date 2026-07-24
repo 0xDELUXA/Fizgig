@@ -264,6 +264,12 @@ The unnumbered tabs are the post-training workbench — and work on any Klein Lo
 
 ---
 
+## Headless / CLI training
+
+Everything the trainer does is also available from the command line — the GUI is a front-end over the scripts in `src/fizgig/scripts/`, so the CLI is always feature-complete: adaptive LR, the full per-image loss watch, auto-recaptioning, Context LoRA, pause/resume. Works on a Linux box with no display. See **[docs/CLI.md](docs/CLI.md)** for the pipeline, dataset config format, and worked examples for both Klein 9B and Krea 2.
+
+---
+
 ## Support the project
 
 If Fizgig saves you time or helps you make better LoRAs, consider supporting development:

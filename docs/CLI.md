@@ -1,0 +1,447 @@
+# Fizgig Headless CLI
+
+Everything the GUI does for training runs through the scripts in `src/fizgig/scripts/` — the GUI is a front-end that builds these exact commands and runs them as subprocesses. That means the CLI is always feature-complete: adaptive LR, the per-image loss watch, auto-recaptioning, Context LoRA, pause/resume — all of it is available headless, including on a Linux box with no display.
+
+All commands below are run from the repo root. The scripts add `src/` to `sys.path` themselves, so the direct form always works:
+
+```bash
+# Windows (bundled venv)
+venv\Scripts\python.exe src\fizgig\scripts\train.py --help
+
+# Linux / macOS
+python src/fizgig/scripts/train.py --help
+```
+
+Every script supports `--help` for the full argument list. This document covers the workflow, the dataset config format, and the flags that matter.
+
+---
+
+## Contents
+
+- [Model files: where they come from, where they go](#model-files-where-they-come-from-where-they-go)
+- [What's family-specific at a glance](#whats-family-specific-at-a-glance)
+- [The three-step pipeline](#the-three-step-pipeline)
+- [Dataset config (TOML)](#dataset-config-toml)
+- [Preparing images and captions](#preparing-images-and-captions)
+- [Klein 9B training](#klein-9b-training)
+- [Krea 2 training](#krea-2-training)
+- [Sample previews during training](#sample-previews-during-training)
+- [Pause and resume](#pause-and-resume)
+- [VRAM guidance (block swap)](#vram-guidance-block-swap)
+- [LoRA extraction (rank reduction / specialization)](#lora-extraction)
+- [LoRA profiling](#lora-profiling)
+- [Analyzing a per-image loss log](#analyzing-a-per-image-loss-log)
+
+---
+
+## Model files: where they come from, where they go
+
+Headless, there is no Preferences tab: **model locations are passed as flags on every command** (`--dit`, `--vae`, `--text_encoder`, and for Krea 2 previews `--turbo_dit`). The CLI does not read the GUI's `prefs.json` — put the paths in a shell script or Makefile once and forget about them. The files themselves are the same ones the GUI's Preferences tab links to:
+
+**Klein 9B:**
+
+| File | Download | Used for |
+|---|---|---|
+| Base DiT (fp8, recommended) | [FLUX.2-klein-base-9b-fp8](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8/tree/main) | training (`--dit`) |
+| Base DiT (bf16, big cards) | [FLUX.2-klein-base-9B](https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9B/tree/main) | training (`--dit`) |
+| Distilled DiT (fp8) | [FLUX.2-klein-9b-fp8](https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/tree/main) | fast 4-step previews (`--sample_dit`), extraction/profiling |
+| VAE `ae.safetensors` | [FLUX.2-dev → ae.safetensors](https://huggingface.co/black-forest-labs/FLUX.2-dev/blob/main/ae.safetensors) | `--vae` |
+| Text encoder `qwen_3_8b.safetensors` | [Comfy-Org Klein text encoder](https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/blob/main/split_files/text_encoders/qwen_3_8b.safetensors) | `--text_encoder` |
+
+> **VAE trap:** use `ae.safetensors` from the FLUX.2-dev repo **root** — not `vae/diffusion_pytorch_model.safetensors`, which is the Diffusers-format file and will not load.
+
+**Krea 2:**
+
+| File | Download | Used for |
+|---|---|---|
+| RAW DiT | [krea2_raw_bf16.safetensors](https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_raw_bf16.safetensors) | training (`--dit`) |
+| fp8 Turbo DiT | [krea2_turbo_fp8_scaled.safetensors](https://huggingface.co/Comfy-Org/Krea-2/blob/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors) | 8-step previews (`--turbo_dit`) |
+| VAE `qwen_image_vae.safetensors` | [Krea-2 → vae](https://huggingface.co/Comfy-Org/Krea-2/blob/main/vae/qwen_image_vae.safetensors) | `--vae` |
+| Text encoder `qwen3vl_4b_bf16.safetensors` | [Krea-2 → text_encoders](https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors) | `--text_encoder` |
+
+---
+
+## What's family-specific at a glance
+
+The two model families share the dataset format and most of the workflow, but not every feature exists on both sides:
+
+| Feature | Klein 9B | Krea 2 |
+|---|---|---|
+| Adaptive LR (`--adaptive_lr`) | ✅ | ✅ |
+| Context LoRA | ✅ | ✅ |
+| Pause / resume | ✅ | ✅ |
+| NF4 4-bit base (`--quant_4bit` / `--quantize_4bit`) | ✅ | ✅ |
+| Per-image loss watch (`--log_per_image_loss`) | ❌ | ✅ Krea 2 only |
+| Per-image LR (`--per_image_lr`) | ❌ | ✅ Krea 2 only |
+| Auto-recaption (`--auto_recaption`) | ❌ | ✅ Krea 2 only |
+| Look-outlier warm-up (`--warmup_look_outliers`) | ❌ | ✅ Krea 2 only |
+| Block targeting (`include_patterns`) / Model Area | ✅ Klein only | ❌ (no Krea 2 block map yet) |
+| Timestep range (`--min/max_timestep`) | ✅ Klein only | ❌ (fixed `krea2_shift` recipe) |
+| Optimizer / scheduler choice | ✅ Klein only | ❌ (AdamW8bit + the watchers) |
+| LoRA extraction / profiling scripts | ✅ Klein only | ❌ |
+
+The four intelligence toggles are Krea 2-only because auto-recaption needs a text encoder that can *see* — Krea 2's Qwen3-VL is a full vision-language model; Klein's stripped Qwen3-8B can't generate text or look at images.
+
+---
+
+## The three-step pipeline
+
+Training is always three steps: cache the VAE latents, cache the text-encoder outputs, then train. Latents and text embeddings are computed once and reused across epochs (and across runs, if the dataset hasn't changed).
+
+**Klein 9B:**
+
+```bash
+python src/fizgig/scripts/cache_latents.py --dataset_config my_dataset.toml --vae /models/ae.safetensors
+python src/fizgig/scripts/cache_text.py    --dataset_config my_dataset.toml --text_encoder /models/qwen_3_8b.safetensors
+python src/fizgig/scripts/train.py         --dataset_config my_dataset.toml ...   # full example below
+```
+
+**Krea 2:**
+
+```bash
+python src/fizgig/scripts/krea2_cache_latents.py --dataset_config my_dataset.toml --vae /models/qwen_image_vae.safetensors
+python src/fizgig/scripts/krea2_cache_text.py    --dataset_config my_dataset.toml --text_encoder /models/qwen3vl_4b_bf16.safetensors
+python src/fizgig/scripts/krea2_train.py         --dataset_config my_dataset.toml ...   # full example below
+```
+
+Re-running a cache step is cheap: pass `--skip_existing` to only encode new images. Stale cache files for images that were removed from the dataset are deleted automatically (pass `--keep_cache` to keep them, but see the warning in the next section).
+
+---
+
+## Dataset config (TOML)
+
+The dataset config is a small TOML file. The GUI writes one automatically (`dataset/Fizgig_train.toml`); headless you write it yourself:
+
+```toml
+[general]
+resolution = [1024, 1024]     # target training resolution (see megapixel note below)
+caption_extension = ".txt"    # caption sidecar extension
+batch_size = 1
+num_repeats = 1               # times each image is seen per epoch
+enable_bucket = true          # multi-aspect-ratio bucketing (recommended)
+bucket_no_upscale = true      # never upscale images smaller than the target
+
+[[datasets]]
+image_directory = "/data/my_subject/images"
+cache_directory = "/data/my_subject/cache"
+```
+
+Field notes:
+
+- **`resolution`** — `[width, height]`. With bucketing enabled this is the *area* target: each image is assigned to the nearest aspect-ratio bucket of roughly `width × height` pixels, so mixed portrait/landscape/square datasets train at their natural aspect ratios. `[1024, 1024]` ≈ 1 MP is the sweet spot for both Klein and Krea 2; `[768, 768]` trains faster on smaller cards at some quality cost.
+- **`num_repeats`** — multiplies how often each image appears per epoch. Leave at 1 and train more epochs instead, unless you're balancing multiple `[[datasets]]` blocks against each other.
+- **`cache_directory`** — where latents and text embeddings are stored. **Give every dataset its own cache directory.** The training set is built from the cache, and a shared cache directory can mix a previous dataset's images into your run. (Fizgig cross-checks the cache against `image_directory` and skips orphans with a warning, but a dedicated directory per dataset is the clean way.)
+- **Multiple `[[datasets]]` blocks** are supported — each with its own `image_directory`, `cache_directory`, and optional per-dataset overrides of any `[general]` key (e.g. a different `num_repeats` to weight one folder more heavily).
+
+If you change captions, re-run the text cache step. If you add/remove/edit images, re-run both cache steps.
+
+---
+
+## Preparing images and captions
+
+### Images
+
+A dataset is just a folder of images with caption sidecars — no manifest, no subfolder structure. Accepted formats: `.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp` (plus `.jxl` if jxlpy is installed). You do **not** need to pre-resize or crop to a fixed size: with `enable_bucket = true` the loader assigns each image to its nearest aspect-ratio bucket at the target megapixel area, and `bucket_no_upscale = true` keeps undersized images at their native resolution instead of upscaling them. Aim for source images at or above ~1 MP; a mix of framings (close-up, half-body, full-body, varied backgrounds) trains better identity than 40 near-identical headshots.
+
+The GUI's Image Prep tab (batch resize, PNG conversion, face-crop detection) is convenience, not requirement — anything that produces ordinary image files works.
+
+### Caption modes
+
+One `.txt` file per image, same basename (`portrait_012.png` → `portrait_012.txt`), plain text. The GUI's Captions tab offers three modes; all three produce plain sidecar files you can equally write yourself headless:
+
+1. **Trigger word only** — every caption is just `ohwx`. Fastest to make, and workable for single-concept datasets, but the model has to absorb *everything* in each image into the trigger, backgrounds included.
+2. **Trigger + description** (recommended) — trigger first, then describe the image: `ohwx man, close-up portrait, grey backdrop, soft window light`. What you describe, the model can separate out; what you leave silent gets baked into the trigger. Headless, any captioner works (the GUI uses Florence-2) — or write them by hand for small sets.
+3. **Bilingual English + Chinese** — each caption becomes `<trigger>, <english> - <chinese>`. Empirically improves Klein visual quality at identical loss (both Klein's Qwen3 and Krea 2's Qwen3-VL have deep Chinese training). The GUI translates with Helsinki-NLP MT; headless, any MT model works — keep the trigger word verbatim, translate only the description.
+
+Captioning rules that come from real runs:
+
+- **Caption anything the model's prior would call a lie** — viewpoint especially. A profile shot captioned like a frontal portrait teaches the model to fight itself; caption it `..., profile view from the left`. On Krea 2 this matters doubly: caption-viewpoint mismatches are the single most common thing the per-image loss watch convicts.
+- That rule includes the trigger itself: if the subject isn't actually recognizable in a shot (back of head, extreme distance), consider leaving the trigger out of that caption.
+- Changed captions require re-running the text-cache step. (During a Krea 2 run, `--auto_recaption` handles stuck images' captions for you, including the re-encode.)
+
+### Dataset sidecar files (Krea 2 intelligence)
+
+Two JSON files can live alongside the images and travel with the dataset:
+
+- `fizgig_look_scores.json` — written by the GUI's Look Consistency Filter scan (ArcFace similarity of every image to 3 baseline picks). `--warmup_look_outliers` reads it to give real-but-unusual images a gentle LR ramp. Keys are image basenames, so the file survives the folder being moved or copied. There's no headless generator for it yet — run the Look Filter once in the GUI, or skip the flag.
+- `fizgig_excluded.json` — the per-image watch's persistent exclusion list, written during training. It follows the images across runs; editing an excluded image's caption auto-pardons it. Delete the file to give everything a clean slate.
+
+---
+
+## Klein 9B training
+
+You need the four Klein model files from the [download table](#model-files-where-they-come-from-where-they-go) above (Base DiT, optional Distilled for previews, `ae.safetensors`, `qwen_3_8b.safetensors`).
+
+### Full example
+
+A realistic identity LoRA run (rank 16, adaptive LR, per-epoch checkpoints, Distilled previews every epoch), mirroring the GUI's ✨Identity r16 preset:
+
+```bash
+python src/fizgig/scripts/train.py \
+  --dataset_config my_dataset.toml \
+  --dit /models/flux-2-klein-base-9b.safetensors \
+  --vae /models/ae.safetensors \
+  --text_encoder /models/qwen_3_8b.safetensors \
+  --sdpa \
+  --mixed_precision bf16 \
+  --fp8_base --fp8_scaled \
+  --gradient_checkpointing \
+  --blocks_to_swap 0 \
+  --optimizer_type adamw8bit \
+  --learning_rate 1e-4 \
+  --network_module fizgig.networks.lora_klein \
+  --network_dim 16 --network_alpha 16 \
+  --timestep_sampling flux2_shift \
+  --max_train_epochs 55 \
+  --save_every_n_epochs 1 \
+  --save_state \
+  --seed 42 \
+  --output_dir ./output_loras/my_subject \
+  --output_name my_subject \
+  --pause_flag_path ./output_loras/my_subject/.pause_requested \
+  --adaptive_lr --adaptive_lr_min 5e-5 --adaptive_lr_max 4e-4 \
+  --sample_dit /models/flux-2-klein-9b.safetensors \
+  --sample_prompts sample_prompts.txt \
+  --sample_every_n_epochs 1
+```
+
+Checkpoints land as `output_loras/my_subject/my_subject-000001.safetensors` (epoch 1) etc., with the final LoRA as `my_subject.safetensors` — all directly loadable in ComfyUI, no conversion.
+
+### The flags that matter
+
+**Required plumbing**
+
+- An attention flag is mandatory: `--sdpa` (PyTorch native, always available — use this) or `--flash_attn` / `--flash3` / `--xformers` / `--sage_attn` if you have them installed.
+- `--mixed_precision bf16` and `--gradient_checkpointing` should be considered defaults. Turning checkpointing off is ~20-30% faster steps but much higher VRAM — only sensible on big cards with no block swap.
+- `--network_module fizgig.networks.lora_klein` is the LoRA implementation; always pass it.
+
+**Precision / VRAM**
+
+- Training on a **bf16** Base: pass `--fp8_base --fp8_scaled` (quantizes to fp8 at load, ~halves DiT memory, this is the validated recipe).
+- Training on a **pre-quantized fp8** Base file: pass **neither** — the file is already fp8, and re-quantizing degrades it.
+- `--quant_4bit` — QLoRA-style NF4 4-bit frozen base for very low-VRAM cards. Supersedes the fp8 flags and forces block swap off.
+- `--blocks_to_swap N` — see [VRAM guidance](#vram-guidance-block-swap).
+
+**LoRA shape**
+
+- `--network_dim` / `--network_alpha` — rank and alpha. The GUI presets use matched pairs: 4/4 (style, details), 8/8, 16/16 (identity). Higher rank captures more but overfits sooner.
+- `--network_args loraplus_lr_ratio=4` — optional LoRA+ (higher LR on the up-projection).
+
+**Learning rate**
+
+- `--learning_rate` — the trainer's raw default is a placeholder; always pass one. GUI presets use 1e-4 (rank 16 identity) to 4e-4 (rank 4 style/details).
+- `--adaptive_lr` — the bi-directional plateau tracker: probes LR up on steady descent, cuts it (with weight rollback) on plateau or instability. When active it takes over from `--lr_scheduler`. Bounds via `--adaptive_lr_min` (floor — 5e-5 for single-subject sets, 1e-4 for noisy multi-subject sets) and `--adaptive_lr_max` (4e-4 is the empirical ceiling). A starting LR below the floor is clamped up to it.
+- Without adaptive LR, the usual `--lr_scheduler` options exist (`constant`, `cosine`, `constant_with_warmup`, ...) with `--lr_warmup_steps` etc.
+
+**Training only part of the model** (the GUI's "Model Area to Train")
+
+`--network_args include_patterns=[...]` restricts which blocks get LoRA modules, and `--min_timestep` / `--max_timestep` (0-1000) restrict the noise range. The GUI presets translate to:
+
+| Preset | `include_patterns` | Timesteps |
+|---|---|---|
+| Full Model | *(omit)* | *(omit)* |
+| Identity | `[".*single_blocks\\.(1[0-6]|[1-9])\\..*"]` | — |
+| Style / Style+Composition | `[".*double_blocks\\..*",".*single_blocks\\.[01]\\..*"]` | Style adds `--min_timestep 0 --max_timestep 400` |
+| Details | `[".*single_blocks\\.(1[2-9]|2[0-3])\\..*"]` | — |
+
+Shell-quoting example (note the single quotes — the value contains regex backslashes and brackets):
+
+```bash
+--network_args 'include_patterns=[".*double_blocks\..*",".*single_blocks\.[01]\..*"]' \
+--min_timestep 0 --max_timestep 400
+```
+
+Style genuinely lives at late timesteps (0-400) on Klein — combining the style blocks with that range is the validated recipe for style LoRAs.
+
+**Context LoRA** (train on top of an existing LoRA)
+
+```bash
+--context_lora_path /loras/style_anchor.safetensors --context_lora_strength 1.0
+```
+
+Loads the existing LoRA frozen-but-active on the base, so your new LoRA learns to coexist with it — identity-on-style, outfit-on-character, compatibility patches. At inference, deploy the pair together at the same strength. Accepts kohya, PEFT/Diffusers, OneTrainer, LoKR and LoHa formats.
+
+**Checkpoints / state**
+
+- `--save_every_n_epochs 1` + `--save_state` — per-epoch LoRA checkpoints plus resumable state dirs (`<name>-NNNNNN-state/`). State is what makes pause/resume and epoch-scrubbing possible; keep it on.
+- `--resume <path-to-state-dir>` — continue a run (see [Pause and resume](#pause-and-resume)).
+
+---
+
+## Krea 2 training
+
+Krea 2 (12.9B) is the second model family and the home of the intelligent-trainer features: the per-image loss watch, auto-recaptioning, per-image adaptive LR, and look-outlier warm-up are **Krea 2-only** (see the [family table](#whats-family-specific-at-a-glance)). You need the four Krea 2 files from the [download table](#model-files-where-they-come-from-where-they-go): the RAW DiT for training (fp8-quantized at load, ~14 GB resident), the fp8 Turbo for previews, the Qwen-Image VAE, and the Qwen3-VL-4B text encoder (which doubles as the vision model for auto-recaptioning).
+
+### Full example
+
+Everything on — the self-adapting run: rank 16:16, adaptive LR, all four intelligence toggles, and NF4 4-bit training so it fits low-VRAM cards:
+
+```bash
+python src/fizgig/scripts/krea2_train.py \
+  --dataset_config my_dataset.toml \
+  --dit /models/Krea-2-raw.safetensors \
+  --output_dir ./output_loras/my_subject \
+  --output_name my_subject \
+  --network_dim 16 --network_alpha 16 \
+  --learning_rate 1e-4 \
+  --max_train_epochs 40 \
+  --save_every_n_epochs 1 \
+  --quantize_4bit \
+  --seed 42 \
+  --adaptive_lr --adaptive_lr_min 5e-5 --adaptive_lr_max 4e-4 \
+  --log_per_image_loss \
+  --per_image_lr \
+  --auto_recaption \
+  --warmup_look_outliers \
+  --trigger_word ohwx \
+  --turbo_dit /models/krea2-turbo-fp8.safetensors \
+  --vae /models/qwen_image_vae.safetensors \
+  --text_encoder /models/qwen3vl_4b_bf16.safetensors \
+  --sample_prompts sample_prompts.txt \
+  --sample_every_n_epochs 1 \
+  --sample_width 1024 --sample_height 1024
+```
+
+(`--quantize_4bit` forces block swap off, so no `--blocks_to_swap` here. On a 24 GB+ card you'd drop `--quantize_4bit` and use the default dynamic fp8 with `--blocks_to_swap` from the [VRAM table](#vram-guidance-block-swap). Drop `--warmup_look_outliers` unless you've run the GUI's Look Filter on the dataset — see below.)
+
+The Krea 2 parser is small enough to know in full: run `krea2_train.py --help`. The non-obvious flags:
+
+**Core**
+
+- `--no_fp8` — train the base in bf16 instead of dynamic fp8 (needs a lot more VRAM; fp8 is the validated default).
+- `--quantize_4bit` — NF4 4-bit frozen base, ~5.6 GB DiT residency, fits 10-12 GB cards (block swap forced off).
+- `--blocks_to_swap` — see [VRAM guidance](#vram-guidance-block-swap). `--preview_blocks_to_swap` is the separate, forward-only swap for the preview Turbo.
+
+**The per-image loss watch** (any of these enables the watcher)
+
+- `--log_per_image_loss` — tracks every image's loss residual against its timestep bucket, classifies each image at every epoch boundary (`easy` / `suspect` / `stuck` / `exhausted` / `excluded`), and writes:
+  - `<output_dir>/loss_log/per_image_loss.jsonl` — the raw per-step log
+  - `<output_dir>/loss_log/problem_images.json` — current verdicts + trends (the GUI's Problem Images window reads this; it's plain JSON, perfectly greppable headless)
+  - a **plateau banner** in the console when ≤~5% of images are still improving, with a best-checkpoint epoch estimate — your "you're done" signal.
+- `--per_image_lr` — acts on the verdicts: stuck images get throttled (×0.5 → ×0.25 → ×0.125), mined-out images ease off (×0.6), the healthy cohort gets a gentle boost (×1.1). Batch size 1 makes this a true per-image learning rate.
+- `--auto_recaption` — between epochs, confirmed-stuck images get their captions rewritten by Qwen3-VL from what's actually visible, the text cache is re-encoded, and the image gets a fresh start. Two failed attempts and a still-stuck image is excluded from the run entirely. Requires `--text_encoder`. Pass `--trigger_word` so rewritten captions keep your trigger (appended as `, <trigger>`).
+- `--warmup_look_outliers` — curriculum entry (×0.4 LR ramping to ×1.0) for real-but-unusual images. Reads `<dataset>/fizgig_look_scores.json`, which is produced by the GUI's Look Consistency Filter scan — **GUI-only prerequisite**; without the file this flag logs a warning and disables itself.
+
+Persistent artifacts: exclusions are stored in `<image_directory>/fizgig_excluded.json` so they travel with the dataset across runs; editing an excluded image's caption auto-pardons it. Fresh runs rotate the old JSONL to `.bak`; `--resume` replays the log to restore full watch history.
+
+**Not in the Krea 2 parser (by design):** optimizer choice (AdamW8bit hardcoded), timestep sampling (fixed `krea2_shift` recipe), block targeting (no Krea 2 block map yet), gradient checkpointing (always on). What's absent is deliberate, not missing.
+
+---
+
+## Sample previews during training
+
+`--sample_prompts` takes a text file, one prompt per line, `#` lines are comments.
+
+**Klein** supports kohya-style per-prompt overrides appended after the prompt:
+
+```
+# sample_prompts.txt
+ohwx man, portrait, studio light --w 1024 --h 1024 --d 42
+ohwx man, full body, city street --w 832 --h 1216 --d 42 --l 4.0 --n blurry, low quality
+```
+
+Recognized: `--w` width, `--h` height, `--d` seed, `--s` steps, `--g` guidance (Distilled), `--l` CFG scale (Base — Base has no guidance embed, so `--l` is what actually steers it; 1.0 disables CFG), `--n` negative prompt, `--ci` control image.
+
+Pass `--sample_dit <distilled>` to render previews on the Distilled model (4-step, fast) instead of the training Base; `--sample_blocks_to_swap` gives the sample model its own swap setting.
+
+**Krea 2** prompt files are plain prompts only; geometry and seed come from `--sample_width` / `--sample_height` / `--sample_seed`, and previews always render on the fp8 Turbo (`--turbo_dit`, 8-step). `--sample_ref_image` enables the Qwen3-VL vision path (generate driven by a reference picture; works even with an empty prompt file).
+
+Samples are written to `<output_dir>/sample/` with the epoch number in the filename. Prefer ~1024×1024 — sub-1024 previews degrade anatomy and undersell the checkpoint.
+
+---
+
+## Pause and resume
+
+Pause is a file, which makes it fully scriptable:
+
+```bash
+# request a graceful pause (both Klein and Krea 2)
+touch ./output_loras/my_subject/.pause_requested
+```
+
+At the next epoch boundary the trainer force-saves a full state dir, logs `[pause] requested ... Exiting cleanly`, and exits 0 — GPU freed, no quality loss. (Klein: pass `--pause_flag_path` as in the example so the trainer knows where to look. Krea 2 watches `<output_dir>/.pause_requested` automatically.)
+
+Resume by pointing at the state directory:
+
+```bash
+python src/fizgig/scripts/train.py       ... --resume ./output_loras/my_subject/my_subject-000012-state
+python src/fizgig/scripts/krea2_train.py ... --resume ./output_loras/my_subject/my_subject-000012-state
+```
+
+The epoch number is parsed from the dir name; optimizer, scheduler, RNG, dataloader state, adaptive-LR scalars, and (Krea 2) the full per-image watch history are all restored. Pass the same flags as the original run plus `--resume`.
+
+---
+
+## VRAM guidance (block swap)
+
+`--blocks_to_swap` parks transformer blocks in CPU RAM and streams them over PCIe — slower per step, but fits big models on small cards. What the GUI auto-detects:
+
+| GPU VRAM | Klein `--blocks_to_swap` | Krea 2 `--blocks_to_swap` |
+|---|---|---|
+| 32 GB | 0 | 0 |
+| 24 GB | 0 | 12 |
+| 16 GB | 0 | 20 |
+| 10-14 GB | 12 | 26 |
+| < 10 GB | 16 | *(use `--quantize_4bit` instead)* |
+
+Klein's fp8 Base is only ~9.6 GB resident, so 16 GB+ cards skip swap entirely (faster — no PCIe transfers). Krea 2's fp8 RAW is ~14 GB resident, hence the more aggressive ladder. `--quantize_4bit` (both trainers) is the below-10 GB escape hatch and forces swap off.
+
+---
+
+## LoRA extraction
+
+`extract_lora.py` distills an existing LoRA to a lower rank, optionally specialized to block categories and timestep ranges. Klein only.
+
+**Rank reduction (the common case)** — pure weight SVD, `--samples 0`, no models loaded, runs in seconds from the safetensors alone:
+
+```bash
+python src/fizgig/scripts/extract_lora.py \
+  --source big_r32.safetensors --output small_r8.safetensors \
+  --dit /models/flux-2-klein-base-9b.safetensors \
+  --vae /models/ae.safetensors --text_encoder /models/qwen_3_8b.safetensors \
+  --rank 8 --blocks all --samples 0
+```
+
+**Specialized extraction** — activation-weighted SVD (`--samples 16`, loads the full pipeline, needs GPU). Example: pull just the style out of a character LoRA:
+
+```bash
+python src/fizgig/scripts/extract_lora.py \
+  --source character.safetensors --output character_style_only.safetensors \
+  --dit ... --vae ... --text_encoder ... \
+  --rank 4 --blocks style_composition --timesteps late \
+  --samples 16 --prompt "a photo in the style of ohwx"
+```
+
+- `--blocks`: `all`, `style_composition` (double 0-7 + single 0-2), `identity` (single 1-16), `details` (single 12-23), or `custom` with `--custom_blocks "double_blocks.5,single_blocks.12"`.
+- `--timesteps`: `all`, `late` (0.0-0.4 — where style lives), `mid`, `early`, `midlate`, `earlymid`.
+- LyCORIS (LoKR/LoHa) sources work — the dense delta is materialized and SVD'd to a standard LoRA.
+
+---
+
+## LoRA profiling
+
+`profile_lora.py` measures which blocks a LoRA actually uses (weight norms + activation probes across timestep bins) and emits an HTML report with the 5-bucket block breakdown, plus a JSON sidecar the GUI's Repair Studio picks up. Klein only.
+
+```bash
+python src/fizgig/scripts/profile_lora.py \
+  --lora my_subject.safetensors \
+  --dit /models/flux-2-klein-9b.safetensors \
+  --vae /models/ae.safetensors --text_encoder /models/qwen_3_8b.safetensors \
+  --prompt "ohwx man, portrait" \
+  --output my_subject_profile.png \
+  --blocks_to_swap 12
+```
+
+Use the Distilled DiT for speed. PEFT and LyCORIS LoRAs auto-convert on load.
+
+---
+
+## Analyzing a per-image loss log
+
+For a quick headless read of a Krea 2 run's per-image data (no GUI needed):
+
+```bash
+python src/fizgig/scripts/analyze_loss_log.py ./output_loras/my_subject --top 20
+```
+
+Points at the output dir (or the `per_image_loss.jsonl` directly) and prints the N hardest images by mean residual — the same signal that drives the watch's verdicts. Cross-reference against your captions: the top offenders are usually caption-viewpoint mismatches, and fixing the caption beats letting the throttle handle it.

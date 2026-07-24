@@ -1,11 +1,11 @@
 # Fizgig Headless CLI
 
-Everything the GUI does for training runs through the scripts in `src/fizgig/scripts/` — the GUI is a front-end that builds these exact commands and runs them as subprocesses. That means the CLI is always feature-complete: adaptive LR, the per-image loss watch, auto-recaptioning, Context LoRA, pause/resume — all of it is available headless, including on a Linux box with no display.
+Everything the GUI does for training runs through the scripts in `src/fizgig/scripts/` — the GUI is a front-end that builds these exact commands and runs them as subprocesses. That means the CLI is always feature-complete: adaptive LR, the per-image loss watch, auto-recaptioning, Context LoRA, pause/resume — all of it is available from a plain terminal, on **Windows and Linux alike** (including display-less boxes).
 
 All commands below are run from the repo root. The scripts add `src/` to `sys.path` themselves, so the direct form always works:
 
 ```bash
-# Windows (bundled venv)
+# Windows (bundled venv, cmd or PowerShell)
 venv\Scripts\python.exe src\fizgig\scripts\train.py --help
 
 # Linux / macOS
@@ -13,6 +13,14 @@ python src/fizgig/scripts/train.py --help
 ```
 
 Every script supports `--help` for the full argument list. This document covers the workflow, the dataset config format, and the flags that matter.
+
+**Windows notes** — the examples below are written in bash style for compactness; on Windows the flags are identical, only the shell dressing changes:
+
+- Use `venv\Scripts\python.exe` instead of `python`.
+- The trailing `\` at line ends is bash line-continuation. In **PowerShell** use a backtick `` ` `` at line ends, in **cmd** use `^` — or simply put the whole command on one line.
+- Forward slashes are fine in all path arguments (`S:/models/ae.safetensors` works everywhere, including inside the dataset TOML — no need to escape backslashes).
+- Quote any path containing spaces: `--dit "C:\my models\klein.safetensors"`.
+- Where the docs say `touch <file>` (the pause sentinel), the Windows equivalent is `type nul > <file>` (cmd) or `New-Item <file>` (PowerShell).
 
 ---
 
@@ -356,7 +364,8 @@ Pause is a file, which makes it fully scriptable:
 
 ```bash
 # request a graceful pause (both Klein and Krea 2)
-touch ./output_loras/my_subject/.pause_requested
+touch ./output_loras/my_subject/.pause_requested        # Linux/macOS
+New-Item ./output_loras/my_subject/.pause_requested     # Windows PowerShell
 ```
 
 At the next epoch boundary the trainer force-saves a full state dir, logs `[pause] requested ... Exiting cleanly`, and exits 0 — GPU freed, no quality loss. (Klein: pass `--pause_flag_path` as in the example so the trainer knows where to look. Krea 2 watches `<output_dir>/.pause_requested` automatically.)

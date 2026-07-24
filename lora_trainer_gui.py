@@ -13114,7 +13114,10 @@ class LoRATrainerGUI:
 
         # Final display order. _royale_apply_mode packs these (skipping the folder-only
         # cards in Single-LoRA mode), so this list IS the canonical order.
-        self._royale_cards_in_order = [setup, cf, exp, grid_card, like, trav, ptrav, ltrav, promote]
+        # NOTE: every card built above MUST appear here — this list is what gets packed.
+        # A card left out keeps its build-time slot while these re-pack after it, so it
+        # jumps to the very top (above Setup) on the first mode apply.
+        self._royale_cards_in_order = [setup, cf, exp, grid_card, like, trav, ptrav, ltrav, cmpc, promote]
         # Cards that only make sense with a folder of epochs (hidden in Single-LoRA mode).
         self._royale_folder_only_cards = {cf, exp, grid_card, like, promote}
         self._royale_apply_mode()

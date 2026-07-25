@@ -143,6 +143,27 @@ def load_dit_for_training(
     return dit, network
 
 
+class _CheckpointedBlock(torch.nn.Module):
+    """A transformer block that does its own gradient checkpointing.
+
+    Exists so torch.compile can capture the checkpoint inside the graph. `_handles_checkpointing`
+    tells the DiT forward not to wrap it a second time.
+    """
+
+    _handles_checkpointing = True
+
+    def __init__(self, block, checkpointing: bool):
+        super().__init__()
+        self.block = block
+        self.checkpointing = checkpointing
+
+    def forward(self, x, vec, freqs, attn_params=None):
+        if self.checkpointing and self.training and torch.is_grad_enabled():
+            return torch.utils.checkpoint.checkpoint(
+                self.block, x, vec, freqs, attn_params, use_reentrant=False)
+        return self.block(x, vec, freqs, attn_params)
+
+
 def _find_msvc_env() -> bool:
     """Put MSVC on PATH for torch.compile, if it is installed but not in this shell.
 
@@ -234,12 +255,18 @@ def _compile_blocks(dit, blocks_to_swap: int) -> None:
     # fullgraph=True refuses to compile around a graph break instead of quietly degrading. The
     # known break (attn_params.seqlens[0].item(), a device sync in the trim check) was fixed
     # earlier, so this should now hold — and if it does not, it says so instead of hiding.
+    #
+    # Each block is wrapped so the GRADIENT CHECKPOINT sits INSIDE the compiled region. Compiling
+    # the raw block and checkpointing around it leaves the recompute outside the graph, and with
+    # checkpointing the forward runs twice per step, so the boundary is worth 1.19x on a real block
+    # (8.817 -> 7.428 ms/block-step).
+    checkpointing = bool(getattr(dit, "gradient_checkpointing", False))
     n = 0
     for i, block in enumerate(dit.blocks):
-        dit.blocks[i] = torch.compile(block, fullgraph=True)
+        dit.blocks[i] = torch.compile(_CheckpointedBlock(block, checkpointing), fullgraph=True)
         n += 1
-    logger.info("[compile] %d blocks compiled (fullgraph, cache_size_limit=8192) — the first step "
-                "of each new sequence shape pauses to compile", n)
+    logger.info("[compile] %d blocks compiled (fullgraph, checkpoint inside the graph, "
+                "cache_size_limit=8192) — the first step of each new shape pauses to compile", n)
 
 
 def _get_lin_function(x1, y1, x2, y2):

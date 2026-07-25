@@ -315,25 +315,28 @@ long enough to amortise warm-up — roughly 8+ epochs on a 36-image set. Warm-up
 cheaper across runs (whole-run 0.759 then 0.588 on a second run), which is consistent with
 inductor's on-disk cache, though that was not isolated.
 
-**Against OneTrainer, stacking their configuration choices closes almost all of it:**
+**Against OneTrainer: parity, reached by stacking their configuration choices.**
 
-    eager baseline                        0.5917 s/step
-    compiled (bf16 grads, default attn)   0.403          1.47x
-    compiled + int8 grads + cuDNN         0.333          1.78x
-    OneTrainer                            0.294          they lead 1.13x
+    eager baseline                            0.5917 s/step
+    + compile (cache_size_limit + sympy fix)  0.403          1.47x
+    + int8 grads + cuDNN attention            0.333          1.78x
+    + checkpoint INSIDE the compiled graph    0.292          2.03x
+    OneTrainer                                0.294
 
-Both extra knobs already existed in Fizgig and were simply off. `--quant_int8 int8` was set aside
-as "lossier" and cuDNN-for-training was set aside on a benchmark too short to see past its
-plan-building cost — the same short-run mistake as compile itself.
+Every rung was a Fizgig feature that already existed and was off, or a boundary drawn in the wrong
+place — not a missing capability:
 
-They are speed-for-accuracy trades, not free wins: int8 gradients measure rel-err 1.05e-02 against
-bf16's 4.94e-03, and neither has a trained-LoRA comparison behind it. Peter's call was that the
-gradient error is very unlikely to show up in output quality, so this configuration stands.
+- `cache_size_limit` at its default of 8 made dynamo fall back to eager, silently.
+- `--quant_int8 int8` was parked as "lossier".
+- cuDNN-for-training was parked on a benchmark too short to see past its plan-building cost.
+- The gradient checkpoint sat OUTSIDE the compiled region. Moving it inside is worth 1.19x on an
+  isolated block and 1.14x end to end (0.333 -> 0.292) — the one microbenchmark today that
+  predicted its real-run result.
 
-The residual ~13% is unexplained. Ruled out by measurement: the INT8 scaling formulation (ours and
-theirs compile to the same thing, 0.140 vs 0.139 ms). Remaining candidates: torch 2.12 vs our 2.10
-inductor, and compile granularity — they compile a wrapper that CONTAINS the gradient checkpoint,
-we compile the raw block inside it.
+Costs, none of which have a trained-LoRA comparison behind them: int8 gradients measure rel-err
+1.05e-02 against bf16's 4.94e-03; cuDNN pays per-shape plan building; and compile warm-up is now
+~91 s, so a 3-epoch run is still net slower and this only wins from roughly 8-10 epochs up. Compile
+stays opt-in behind `--compile_blocks` until a long-run A/B says otherwise.
 
 ## What was verified about OneTrainer
 

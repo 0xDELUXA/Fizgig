@@ -468,7 +468,11 @@ class SingleStreamDiT(nn.Module):
             if self.blocks_to_swap:
                 self.offloader.wait_for_block(index)
 
-            if self.gradient_checkpointing and self.training:
+            if getattr(block, "_handles_checkpointing", False):
+                # torch.compile wraps blocks in a module that checkpoints itself, so the recompute
+                # is captured inside the compiled graph. Checkpointing again here would nest it.
+                combined = block(combined, tvec, freqs, attn_params)
+            elif self.gradient_checkpointing and self.training:
                 combined = torch.utils.checkpoint.checkpoint(block, combined, tvec, freqs, attn_params, use_reentrant=False)
             else:
                 combined = block(combined, tvec, freqs, attn_params)

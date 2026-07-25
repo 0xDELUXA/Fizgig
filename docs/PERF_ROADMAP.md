@@ -102,29 +102,34 @@ A 3-epoch benchmark proves throughput, not numerical stability over 40 epochs. R
 at matched seed/epochs/dataset and compare the resulting LoRAs on likeness. Decides whether int8
 becomes the default above ~20 GB free.
 
-### Next: prototype NVFP4
-Blackwell has fp4 tensor cores, and `torch._scaled_mm` supports `float4_e2m1fn_x2` with blockwise
-1×16 scales in `float8_e4m3fn`. Raw matmul at 6144²:
+### NVFP4 — prototyped, hypothesis WRONG, parked
+
+Blackwell has fp4 tensor cores and `torch._scaled_mm` takes `float4_e2m1fn_x2` with blockwise
+1x16 scales. The raw matmul is genuinely fast at 6144²:
 
     NVFP4 ..... 0.070 ms   <- 4-bit
     INT8 ...... 0.121 ms
     bf16 ...... 0.594 ms
 
-1.7× faster than int8 at **half** the memory, and its per-16-element scales are far finer than
-NF4's 64-element blocks, so it should also be more accurate than the current 4-bit default. If it
-holds, it resolves the tension this whole exercise ran into: NF4-level memory that fits 16 GB,
-better-than-int8 speed, better-than-NF4 accuracy.
+I expected it to be *more accurate* than NF4 as well, since its scales cover 16 elements rather
+than NF4's 64. It is not:
 
-Blackwell-only (50-series). Ada has fp8 but no fp4; Ampere neither. So it is an addition to the
-strategy chooser, never a replacement. And it is a raw-matmul number on random bits — a real
-quantiser with correct 1×16 blockwise scaling is the actual work.
+    INT8 W8A8 ..... 1.31e-02
+    NF4 ........... 9.23e-02
+    NVFP4 ......... 1.03e-01   <- slightly WORSE than NF4
 
-Target strategy once validated:
+The reason is the codebook. **NF4 is NormalFloat4** — its 16 levels are placed to be optimal for
+normally-distributed values, which is what network weights are. NVFP4 is plain e2m1, whose eight
+magnitudes {0, .5, 1, 1.5, 2, 3, 4, 6} are spread in exponent space and not matched to a Gaussian.
+The better codebook beats the finer scaling.
 
-    Blackwell + headroom ...... NVFP4
-    Ada + >20 GB free ......... INT8
-    everything else ........... NF4
-    no bitsandbytes ........... fp8 (+ swap, with a "install bitsandbytes" note)
+So NVFP4 is a **pure speed play at NF4-level accuracy**, not the best-of-both it looked like. That
+needs a custom quantiser with NVIDIA's swizzled blockwise scale layout (my prototype's `_scaled_mm`
+path returns 51% error — a layout bug, though the weight-only comparison above is layout-independent
+and stands), and it is Blackwell-only.
+
+**Parked.** Revisit only if 16 GB users report speed as their blocker once the NF4 default lands.
+`tests/test_nvfp4_accuracy.py` reproduces the comparison.
 
 ### Then: optimizer options for Krea 2 (Phase 3)
 Krea 2 hardcodes AdamW8bit; OneTrainer offers ~40. Requested twice in the community thread. Not a

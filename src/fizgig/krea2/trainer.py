@@ -222,20 +222,24 @@ def _compile_blocks(dit, blocks_to_swap: int) -> None:
         return
     if not _find_msvc_env():
         return
-    # A compile failure must cost speed, not the run. Without this, anything dynamo cannot handle
-    # raises out of the first training step and kills a job that would otherwise have trained fine
-    # — and compile is an optimisation, never a requirement.
     import torch._dynamo
+    # Raises the recompile ceiling (default 8, which a bucketed dataset exhausts immediately —
+    # after which dynamo silently runs eager) and works around a torch assertion that otherwise
+    # aborts inductor mid-run. See fizgig/modules/compile_util.py.
+    from fizgig.modules.compile_util import init_compile
+    init_compile()
+    # A compile failure must cost speed, not the run.
     torch._dynamo.config.suppress_errors = True
-    # dynamic=True because the dataset is bucketed. Measured over five bucket shapes on an INT8
-    # block: static and dynamic reach the same speed (51.6 vs 51.5 ms, both 1.37x over eager),
-    # but static pays a recompile per shape (27 s of first-pass compiles against 11 s).
+
+    # fullgraph=True refuses to compile around a graph break instead of quietly degrading. The
+    # known break (attn_params.seqlens[0].item(), a device sync in the trim check) was fixed
+    # earlier, so this should now hold — and if it does not, it says so instead of hiding.
     n = 0
     for i, block in enumerate(dit.blocks):
-        dit.blocks[i] = torch.compile(block, dynamic=True)
+        dit.blocks[i] = torch.compile(block, fullgraph=True)
         n += 1
-    logger.info("[compile] %d blocks compiled (dynamic shapes) — the first step pauses ~15 s to "
-                "compile", n)
+    logger.info("[compile] %d blocks compiled (fullgraph, cache_size_limit=8192) — the first step "
+                "of each new sequence shape pauses to compile", n)
 
 
 def _get_lin_function(x1, y1, x2, y2):

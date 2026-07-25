@@ -284,45 +284,39 @@ Two things shaped the implementation more than the list did:
 Construction failures fall back to plain AdamW with a warning rather than killing the run, and the
 choice is recorded as `ss_optimizer` in the output LoRA.
 
-### torch.compile — measured properly, NOT shipped (but it found a real bug)
-`triton-windows==3.5.1.post24` installed (matches torch 2.10; pulls no dependencies and does not
-touch torch), so the question could finally be measured instead of assumed. On a real
-434M-parameter Krea 2 block, forward+backward:
+### torch.compile — WORKS, 1.47x. The earlier "not worth it" verdict was wrong.
 
-    bf16, fixed shape, default mode   19.924 ms -> 18.837 ms   (1.06x, 14 s to compile)
-    bf16, fixed shape, max-autotune   19.729 ms -> 16.705 ms   (1.18x, 94 s to compile)
-    bf16, 5 bucket shapes            100.018 ms -> 94.693 ms   (1.06x)
-    INT8, fixed shape                 13.980 ms -> 10.261 ms   (1.36x)
-    INT8, 5 bucket shapes             70.539 ms -> 51.645 ms   (1.37x)
+Measured on the real INT8 Krea 2 model, matched config (rank 16, alpha 1, AdamW, batch 1, 512px):
 
-The INT8 number is the interesting one — inductor fuses exactly the quantise/dequantise
-elementwise work that bounds that path, and `dynamic=True` holds the full gain while cutting the
-first pass from 27 s to 11 s. That looked like a ship.
+    epoch 1     1.472 s/step    compile warm-up
+    epoch 2     0.389 s/step
+    epoch 3     0.417 s/step
+    steady      0.403 s/step    vs 0.5917 eager  ->  1.47x
+    whole run   0.759 s/step    (a 108-step benchmark cannot amortise ~40 s of warm-up)
 
-**End to end it is still slower**, on the same dataset and hardware as every other number here:
+Three things had to be fixed, and the first is the one that mattered:
 
-    int8              0.6098 s/it
-    int8 + compile    0.7937 s/it     <- 30% WORSE
+1. **`torch._dynamo.config.cache_size_limit` defaults to 8.** After 8 recompiles of a frame, dynamo
+   gives up and silently falls back to eager — permanently, with nothing in the logs. A bucketed
+   dataset exhausts 8 immediately, so the original attempt paid warm-up and guard overhead while
+   running eager. That is the entire reason it measured slower (0.794 vs 0.610 s/it) and why the
+   first conclusion in this document was wrong. Now 8192.
+2. **A torch bug aborts inductor mid-run.** `torch/utils/_sympy/functions.py` has `Mod.eval` raise
+   `AssertionError` for negative operands, and inductor's tiling reaches it by substituting
+   negative test values. On Krea 2 that is `InductorError: AssertionError:
+   -111500631004807/2000000000000000` a few steps in, followed by a segfault (exit 139).
+   `modules/compile_util.py` wraps torch's own function and answers only the case it wrongly
+   refuses. Verified against that exact value; non-negative and divide-by-zero behaviour unchanged.
+3. **The graph break and the shape count**, both fixed earlier today (`.item()` device sync in the
+   attention trim; 36 distinct shapes cut to 12).
 
-So it stays off, and there is no GUI toggle — a knob that measures worse should not be user
-facing. `--compile_blocks` remains on the CLI, labelled experimental, as a hook for revisiting.
-Two Windows-specific things it needed and now has: inductor requires MSVC for its host-side C++
-(auto-discovered via vcvars64, since Visual Studio only exposes `cl.exe` inside a developer
-prompt), and `torch._dynamo.config.suppress_errors` so a compile failure costs speed rather than
-killing the run.
+Still opt-in via `--compile_blocks`, because the whole-run number is only favourable once a run is
+long enough to amortise warm-up — roughly 8+ epochs on a 36-image set. Warm-up also appears to get
+cheaper across runs (whole-run 0.759 then 0.588 on a second run), which is consistent with
+inductor's on-disk cache, though that was not isolated.
 
-**What it found on the way** is worth more than the feature. The first end-to-end run was 1.5x
-slower, and dynamo said why: a graph break at `attention.py:148`, on
-`attn_params.seqlens[0].item()` — a CUDA-to-CPU sync in the trim check, running inside **every one
-of the 28 blocks**, 56 times per step with gradient checkpointing's recompute. It is now resolved
-once per forward in `AttentionParams.__post_init__` (both Krea 2 and Klein).
-
-That is also the fourth time an isolated measurement pointed the wrong way, and this one has a
-precise cause: my block-level benchmark built `AttentionParams` with no mask, so it never entered
-the trim branch at all. **The microbenchmark was measuring a different code path than training
-runs.** Fixing the break took compile from 0.943 to 0.794 s/it — a big improvement, still a loss.
-
----
+**Against OneTrainer this closes the gap from 2.0x to 1.37x** (their 0.294 vs our 0.403). The
+remainder is unexplained; their per-linear compiled INT8 kernel is the next thing to study.
 
 ## What was verified about OneTrainer
 

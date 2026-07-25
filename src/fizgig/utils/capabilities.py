@@ -28,7 +28,8 @@ class Capabilities:
     has_cuda: bool = False
     device_name: str = "cpu"
     sm: tuple = (0, 0)
-    vram_gb: float = 0.0
+    vram_gb: float = 0.0        # card total, as reported
+    vram_free_gb: float = 0.0   # actually available right now — what decisions must use
     fp8_matmul: bool = False       # torch._scaled_mm on fp8 — Ada (sm 8.9) and newer
     int8_matmul: bool = False      # torch._scaled_mm on int8
     cudnn_attention: bool = False  # PyTorch SDPA cuDNN backend
@@ -40,11 +41,14 @@ class Capabilities:
         if not self.has_cuda:
             return "no CUDA device"
         flags = [f"sm_{self.sm[0]}{self.sm[1]}"]
+        used = self.vram_gb - self.vram_free_gb
+        vram = (f"{self.vram_free_gb:.1f} GB free of {self.vram_gb:.0f} GB"
+                + (f" ({used:.1f} GB already in use)" if used > 1.0 else ""))
         for name, ok in (("fp8", self.fp8_matmul), ("int8", self.int8_matmul),
                          ("cuDNN-attn", self.cudnn_attention), ("flash", self.flash_attn),
                          ("nf4", self.bitsandbytes)):
             flags.append(f"{name} {'yes' if ok else 'no'}")
-        return f"{self.device_name}, {self.vram_gb:.0f} GB — " + " · ".join(flags)
+        return f"{self.device_name}, {vram} — " + " · ".join(flags)
 
 
 def _probe_scaled_mm(dtype) -> bool:
@@ -80,6 +84,15 @@ def detect() -> Capabilities:
     caps.device_name = props.name
     caps.sm = torch.cuda.get_device_capability(0)
     caps.vram_gb = props.total_memory / (1024 ** 3)
+    try:
+        # What is ACTUALLY available: a "16 GB" card reports ~15.9 GiB total, and a browser or
+        # a running ComfyUI can be holding several more. Deciding from total would hand those
+        # users a config that OOMs or silently falls back to swapping.
+        free_b, _total_b = torch.cuda.mem_get_info(0)
+        caps.vram_free_gb = free_b / (1024 ** 3)
+    except Exception:
+        caps.vram_free_gb = caps.vram_gb
+        caps.notes.append("could not read free VRAM — using card total")
 
     caps.fp8_matmul = _probe_scaled_mm(torch.float8_e4m3fn)
     caps.int8_matmul = _probe_scaled_mm(torch.int8)
@@ -109,12 +122,14 @@ def detect() -> Capabilities:
 # whole-GPU readings on a desktop already holding ~2.4 GB, so they overstate what training
 # needs. Headroom then covers the user's own desktop plus allocator slack.
 #
-# Note the comparison is against TOTAL reported VRAM, and a "16 GB" card reports ~15.9 GiB —
-# thresholds have to clear that, not 16.0, or 16 GB cards fall through to swapping. That is
-# exactly the off-by-a-fraction that made them 4.4x slower before this.
+# The budget is FREE VRAM, not the number on the box: a "16 GB" card reports ~15.9 GiB total
+# and may have several GB already held by a browser or a running ComfyUI. Deciding from total
+# is how 16 GB cards ended up 4.4x slower — the config looked like it fit, and didn't.
 _FP8_PEAK_GB = 17.7
 _NF4_PEAK_GB = 11.4
-_HEADROOM_GB = 3.0
+# Smaller than it looks: the budget is FREE VRAM, which already excludes whatever else is
+# resident, so this only has to cover allocator slack and fragmentation.
+_HEADROOM_GB = 1.5
 
 
 @dataclass
@@ -134,7 +149,8 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
     materialises a bf16 copy of each weight per forward).
     """
     caps = caps or detect()
-    vram = vram_gb if vram_gb is not None else caps.vram_gb
+    # Decide on FREE memory, not the number on the box.
+    vram = vram_gb if vram_gb is not None else (caps.vram_free_gb or caps.vram_gb)
 
     if not caps.has_cuda:
         return MemoryStrategy(False, 0, "no CUDA device — settings left alone")
@@ -142,12 +158,12 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
     if caps.bitsandbytes and vram >= _NF4_PEAK_GB + _HEADROOM_GB:
         return MemoryStrategy(
             True, 0,
-            f"NF4 4-bit, no block swap (~{_NF4_PEAK_GB:.0f} GB of {vram:.0f} GB) — "
+            f"NF4 4-bit, no block swap (~{_NF4_PEAK_GB:.0f} GB needed, {vram:.1f} GB free) — "
             "fastest measured and leaves the most headroom")
 
     if vram >= _FP8_PEAK_GB + _HEADROOM_GB:
         return MemoryStrategy(
-            False, 0, f"fp8, no block swap (~{_FP8_PEAK_GB:.0f} GB of {vram:.0f} GB)")
+            False, 0, f"fp8, no block swap (~{_FP8_PEAK_GB:.0f} GB needed, {vram:.1f} GB free)")
 
     if not caps.bitsandbytes:
         swap = 12 if vram >= 22 else (20 if vram >= 15 else 26)
@@ -160,5 +176,5 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
     swap = 12 if vram >= 11 else 20
     return MemoryStrategy(
         True, swap,
-        f"NF4 4-bit with {swap} blocks swapped — {vram:.0f} GB is below what Krea 2 needs "
+        f"NF4 4-bit with {swap} blocks swapped — {vram:.1f} GB free is below what Krea 2 needs "
         "resident even at 4-bit, so some swapping is unavoidable")

@@ -2550,8 +2550,11 @@ class LoRATrainerGUI:
         ttk.Combobox(mp_frame, textvariable=self.dataset_megapixels_var,
                      values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0", "2.4", "3.0", "4.2"],
                      width=8).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Label(mp_frame, text="MP  (0.25 ≈ 512², 1.0 ≈ 1024², 2.4 ≈ 1536², 4.2 ≈ 2048² of area)",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 9)).pack(side=tk.LEFT)
+        ttk.Label(mp_frame,
+                  text="MP  (0.25 ≈ 512², 1.0 ≈ 1024², 2.4 ≈ 1536², 4.2 ≈ 2048²)   "
+                       "example: 512² = 512×512 pixels, or any other width × height with a similar pixel area",
+                  foreground="#95A5A6", font=(FONT_FAMILY, 9), wraplength=620,
+                  justify=tk.LEFT).pack(side=tk.LEFT)
         ttk.Label(training_content,
                   text="Images are automatically resized to fit this target area — no need to resize your dataset "
                        "beforehand. 0.25 MP ≈ 512×512 of pixel area, and your images do NOT have to be square: any "

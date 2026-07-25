@@ -3,6 +3,7 @@
 # Modified for Fizgig. See THIRD_PARTY_NOTICES.md.
 
 from dataclasses import dataclass
+import logging
 import torch
 from typing import Optional, Union
 
@@ -81,6 +82,57 @@ class AttentionParams:
             return AttentionParams(attn_mode, split_attn, img_len, attention_mask, seqlens, cu_seqlens, max_seqlen)
 
 
+# cuDNN's SDPA kernel is much faster than PyTorch's default choice for Krea 2's shapes — but
+# only in the FORWARD direction. Measured (48q/12kv heads, head_dim 128, bf16, RTX 5090):
+#
+#     forward only:  seq 1024  default 0.330 ms   cuDNN 0.128 ms   (2.6x)
+#                    seq 4096  default 4.664 ms   cuDNN 1.841 ms   (2.5x)
+#
+# End-to-end, however, the two diverge completely:
+#
+#     1024 preview (no grad) .......... 5.15 s -> 4.40 s   with cuDNN
+#     training step (fwd+bwd) ......... 0.70  -> 1.57 s/it with cuDNN   <- 2.2x SLOWER
+#
+# cuDNN's backward is the problem, and a forward-only microbenchmark hides it entirely. So the
+# backend is selected on whether gradients are being recorded, not globally.
+#
+# Numerically equivalent to bf16 tolerance (rel-err ~5e-4, masked or not). Probed once; if the
+# kernel is unavailable this is a no-op and PyTorch chooses as before. FIZGIG_SDPA_BACKEND=
+# default|cudnn overrides.
+logger = logging.getLogger(__name__)
+
+_SDPA_CTX = None
+
+
+def _sdpa_backend_ctx():
+    """cuDNN SDPA for inference; PyTorch's default when gradients are being recorded."""
+    import contextlib, os
+    choice = os.environ.get("FIZGIG_SDPA_BACKEND", "auto").lower()
+    if choice in ("default", "off", "none"):
+        return contextlib.nullcontext()
+    # Training: cuDNN's backward is 2.2x slower end-to-end (see above). is_grad_enabled is the
+    # right test — it is False under torch.no_grad (previews, the workbench, sampling) and True
+    # in a training step, including inside a gradient-checkpoint recompute.
+    if torch.is_grad_enabled() and choice != "cudnn":
+        return contextlib.nullcontext()
+
+    global _SDPA_CTX
+    if _SDPA_CTX is None:
+        _SDPA_CTX = contextlib.nullcontext
+        try:
+            import torch.nn.functional as _F
+            from torch.nn.attention import sdpa_kernel, SDPBackend
+            _q = torch.zeros(1, 8, 64, 64, device="cuda", dtype=torch.bfloat16)
+            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
+                _F.scaled_dot_product_attention(_q, _q, _q)
+            _SDPA_CTX = lambda: sdpa_kernel(SDPBackend.CUDNN_ATTENTION)
+            logger.info("[attention] using the cuDNN SDPA backend (~2.5x faster than the default here)")
+        except Exception as e:
+            logger.info("[attention] cuDNN SDPA backend unavailable (%s) — using PyTorch's default choice",
+                        type(e).__name__)
+    return _SDPA_CTX()
+
+
 def attention(
     qkv_or_q: Union[torch.Tensor, list],
     k: Optional[torch.Tensor] = None,
@@ -116,7 +168,9 @@ def attention(
     if attn_params is None:
         attn_params = AttentionParams.create_attention_params("torch", False)
 
-    # GQA: q may carry more heads than k/v (e.g. Krea 2 = 48 query / 12 kv heads). flash and
+    # GQA: q may carry more heads than k/v (e.g. Krea 2 = 48 query / 12 kv heads). Expanding
+    # k/v stays the right call even on cuDNN — measured 0.128 ms (expand) vs 0.138 ms
+    # (enable_gqa) at seq 1024, and enable_gqa on the DEFAULT backend is 1.802 ms. flash and
     # sageattn group heads natively inside the kernel (verified), so they ignore this. For the
     # torch (SDPA) path we expand k/v to q's head count below instead of passing enable_gqa=True,
     # because enable_gqa forces SDPA onto the slow math kernel (~7x slower than the fused kernels
@@ -179,7 +233,8 @@ def attention(
                     g = qi.shape[1] // ki.shape[1]  # [B, H, L, D] -> heads at dim 1
                     ki = ki.repeat_interleave(g, dim=1)
                     vi = vi.repeat_interleave(g, dim=1)
-                x_i = torch.nn.functional.scaled_dot_product_attention(qi, ki, vi, dropout_p=drop_rate)
+                with _sdpa_backend_ctx():
+                    x_i = torch.nn.functional.scaled_dot_product_attention(qi, ki, vi, dropout_p=drop_rate)
                 q[i] = None
                 k[i] = None
                 v[i] = None
@@ -192,7 +247,9 @@ def attention(
                 g = q.shape[1] // k.shape[1]  # [B, H, L, D] -> heads at dim 1
                 k = k.repeat_interleave(g, dim=1)
                 v = v.repeat_interleave(g, dim=1)
-            x = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate)
+            with _sdpa_backend_ctx():
+                x = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=attn_params.attention_mask, dropout_p=drop_rate)
             q, k, v = None, None, None
 
     elif attn_params.attn_mode == "xformers":

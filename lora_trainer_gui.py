@@ -4243,6 +4243,9 @@ class LoRATrainerGUI:
             self.update_console(f"[auto] {caps.summary()}\n[auto] {plan.reason}\n")
         except Exception:
             pass
+        # INT8 has no GUI toggle (it is newer than the 4-bit checkbox) — carry it on the
+        # instance so the krea2 command builder can pass --quant_int8.
+        self._auto_quant_int8 = getattr(plan, "quant_int8", "") or ""
         if hasattr(self, "quant_4bit_var") and bool(self.quant_4bit_var.get()) != plan.quant_4bit:
             self.quant_4bit_var.set(plan.quant_4bit)
             try:
@@ -17104,7 +17107,12 @@ class LoRATrainerGUI:
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the
         # user unchecked it (bf16, 26 GB — big-card / heavy-swap only).
-        if self.settings.get("QUANT_4BIT", False):
+        _auto_i8 = getattr(self, "_auto_quant_int8", "")
+        if _auto_i8 and not self.settings.get("QUANT_4BIT", False):
+            # Chosen by the auto strategy when there is VRAM for it: faster than NF4 and ~7x
+            # more accurate, with exact gradients.
+            cmd += ["--quant_int8", _auto_i8]
+        elif self.settings.get("QUANT_4BIT", False):
             cmd.append("--quantize_4bit")
         elif not self.settings.get("FP8", True):
             cmd.append("--no_fp8")

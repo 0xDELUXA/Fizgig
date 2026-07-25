@@ -31,7 +31,8 @@ class Capabilities:
     vram_gb: float = 0.0        # card total, as reported
     vram_free_gb: float = 0.0   # actually available right now — what decisions must use
     fp8_matmul: bool = False       # torch._scaled_mm on fp8 — Ada (sm 8.9) and newer
-    int8_matmul: bool = False      # torch._scaled_mm on int8
+    int8_matmul: bool = False      # torch._scaled_mm on int8 — NOT a thing; fp8-only API
+    int8_matmul_train: bool = False  # torch._int_mm — the real int8 GEMM, Turing and newer
     cudnn_attention: bool = False  # PyTorch SDPA cuDNN backend
     flash_attn: bool = False       # the flash_attn package
     bitsandbytes: bool = False     # required for NF4
@@ -44,7 +45,7 @@ class Capabilities:
         used = self.vram_gb - self.vram_free_gb
         vram = (f"{self.vram_free_gb:.1f} GB free of {self.vram_gb:.0f} GB"
                 + (f" ({used:.1f} GB already in use)" if used > 1.0 else ""))
-        for name, ok in (("fp8", self.fp8_matmul), ("int8", self.int8_matmul),
+        for name, ok in (("fp8", self.fp8_matmul), ("int8", self.int8_matmul_train),
                          ("cuDNN-attn", self.cudnn_attention), ("flash", self.flash_attn),
                          ("nf4", self.bitsandbytes)):
             flags.append(f"{name} {'yes' if ok else 'no'}")
@@ -61,6 +62,20 @@ def _probe_scaled_mm(dtype) -> bool:
         b = torch.zeros((16, 16), dtype=dtype, device="cuda").t()
         one = torch.ones((), dtype=torch.float32, device="cuda")
         torch._scaled_mm(a, b, scale_a=one, scale_b=one, out_dtype=torch.bfloat16)
+        return True
+    except Exception:
+        return False
+
+
+def _probe_int_mm() -> bool:
+    """torch._int_mm is the int8 GEMM — a different API from _scaled_mm, which is fp8-only.
+    Confusing the two is why int8 first looked unavailable."""
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False
+        a = torch.zeros((32, 32), dtype=torch.int8, device="cuda")
+        torch._int_mm(a, a.t().contiguous())
         return True
     except Exception:
         return False
@@ -95,7 +110,8 @@ def detect() -> Capabilities:
         caps.notes.append("could not read free VRAM — using card total")
 
     caps.fp8_matmul = _probe_scaled_mm(torch.float8_e4m3fn)
-    caps.int8_matmul = _probe_scaled_mm(torch.int8)
+    caps.int8_matmul = _probe_scaled_mm(torch.int8)     # expected False: _scaled_mm is fp8-only
+    caps.int8_matmul_train = _probe_int_mm()
 
     try:    # cuDNN SDPA backend: present from PyTorch 2.5-ish, Ampere and newer
         from torch.backends.cuda import can_use_cudnn_attention  # noqa: F401
@@ -127,6 +143,10 @@ def detect() -> Capabilities:
 # is how 16 GB cards ended up 4.4x slower — the config looked like it fit, and didn't.
 _FP8_PEAK_GB = 17.7
 _NF4_PEAK_GB = 11.4
+# INT8 keeps the full 12.9B at one byte per weight, so it is ~5 GB above NF4 — measured 18.6 GB
+# whole-GPU, ~16.2 GB training-only. It buys ~11% speed AND ~7x lower forward error than NF4
+# (1.3e-02 vs 9.2e-02: 8-bit beats 4-bit), so it leads wherever it fits.
+_INT8_PEAK_GB = 16.2
 # Smaller than it looks: the budget is FREE VRAM, which already excludes whatever else is
 # resident, so this only has to cover allocator slack and fragmentation.
 _HEADROOM_GB = 1.5
@@ -137,16 +157,19 @@ class MemoryStrategy:
     quant_4bit: bool
     blocks_to_swap: int
     reason: str
+    quant_int8: str = ""     # "" | "bf16" — W8A8 base with exact bf16 gradients
 
 
 def recommend_krea2_strategy(vram_gb: Optional[float] = None,
                              caps: Optional[Capabilities] = None) -> MemoryStrategy:
     """Pick quantisation + swap for Krea 2 training on this machine.
 
-    Preference order: NF4 with no swap > fp8 with no swap > fp8 with swap. Swapping is last
-    because it is 4.4x slower and 4x the CPU load; NF4 leads because it measured *faster* than
-    fp8 as well as smaller (its dequant is a fused bitsandbytes kernel, whereas the fp8 path
-    materialises a bf16 copy of each weight per forward).
+    Preference: INT8 no-swap > NF4 no-swap > fp8 no-swap > swapping.
+
+    INT8 leads where it fits — faster than NF4 AND ~7x more accurate (8-bit vs 4-bit), with
+    exact gradients, at the cost of ~5 GB. NF4 comes next because it measured faster than fp8 as
+    well as smaller (fused bitsandbytes dequant, where the fp8 path materialises a bf16 copy of
+    every weight per forward). Swapping is always last: 4.4x slower and 4x the CPU load.
     """
     caps = caps or detect()
     # Decide on FREE memory, not the number on the box.
@@ -154,6 +177,16 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
 
     if not caps.has_cuda:
         return MemoryStrategy(False, 0, "no CUDA device — settings left alone")
+
+    # INT8 first where it fits: faster than NF4 *and* far more accurate, with exact gradients.
+    # Needs int8 tensor cores, which torch._int_mm requires — present from Turing, so this is
+    # not Blackwell-only (unlike fp8 _scaled_mm, which needs sm_89+).
+    if caps.int8_matmul_train and vram >= _INT8_PEAK_GB + _HEADROOM_GB:
+        return MemoryStrategy(
+            False, 0,
+            f"INT8 W8A8, no block swap (~{_INT8_PEAK_GB:.0f} GB needed, {vram:.1f} GB free) — "
+            "fastest measured, and ~7x more accurate than NF4 (8-bit vs 4-bit)",
+            quant_int8="bf16")
 
     if caps.bitsandbytes and vram >= _NF4_PEAK_GB + _HEADROOM_GB:
         return MemoryStrategy(

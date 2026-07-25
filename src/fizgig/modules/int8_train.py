@@ -35,6 +35,8 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
+_WARNED_FALLBACK = False
+
 
 def _quant_per_token(t: torch.Tensor):
     """Symmetric per-row int8 quantisation. Returns (int8 tensor, fp32 scale of shape (M,1))."""
@@ -58,10 +60,21 @@ class _Int8FrozenLinear(torch.autograd.Function):
             out = acc.to(x.dtype) * a_scale.to(x.dtype) * w_scale_1n.to(x.dtype)
             ctx._fell_back = False
         except Exception:
-            # Odd shapes (tiny M, bad alignment) — _int_mm is picky. Correctness first.
+            # _int_mm requires M > 16 (and dislikes some alignments), so short sequences land
+            # here and run in fp32 instead — MORE accurate than int8, not less, but it means
+            # numerics depend on token count: the same weights give different answers either
+            # side of that threshold. Worth knowing about, because it silently made a text
+            # padding experiment look like a masking bug (see docs/PERF_ROADMAP.md), so say it
+            # once rather than never.
             w = w_i8_nk.to(torch.float32) * w_scale_1n.reshape(-1, 1)
             out = (x2d.to(torch.float32) @ w.t()).to(x.dtype)
             ctx._fell_back = True
+            global _WARNED_FALLBACK
+            if not _WARNED_FALLBACK:
+                _WARNED_FALLBACK = True
+                logger.info("[int8] some matmuls fall back to fp32 (torch._int_mm needs M > 16, "
+                            "got %d) — those run exact rather than quantised, so int8 numerics "
+                            "vary with sequence length", x2d.shape[0])
         if bias is not None:
             out = out + bias
         ctx.save_for_backward(w_i8_nk, w_scale_1n)

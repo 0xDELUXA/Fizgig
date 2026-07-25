@@ -103,29 +103,33 @@ cuDNN accepts the key-padding mask directly, so this does not push it onto a fal
 The remaining churn is the **text-fusion** stack, which attends the text tensor at its exact
 length — there is no padding to round into, so 26 caption lengths stay 26 shapes. Total 36.
 
-**Padding the text was tried and REVERTED.** It is worth ~14 s of planning per run, because plan
-cost turns out to be FLAT in shape size — a 17-token shape costs the same ~0.55 s to plan as a
-1097-token one, so those 26 short text shapes really do carry equal weight:
+**Padding the text was tried, reverted, and then EXPLAINED — it was never a masking bug.**
 
-    seq len     17    plan 564 ms
-    seq len   1097    plan 597 ms
+The motivation held: plan cost is FLAT in shape size, so those 26 short text shapes cost as much
+to plan as the big ones (17-token shape 564 ms, 1097-token 597 ms).
 
-But rounding the text length up in `gather_valid_text` changed the model's output by **~2%
-relative for short captions** (16-28 tokens; longer ones were unaffected). That is not roundoff:
-the control — `FIZGIG_ATTN_TRIM=0`, which pads the COMBINED sequence and masks it, also
-mathematically identical — comes back **bit-exact** on the same samples.
+Rounding the text length changed the output ~2% relative for short captions, while the control
+(`FIZGIG_ATTN_TRIM=0`, which pads the COMBINED sequence and masks it) was bit-exact. The cause:
 
-    text len   pad-vs-exact   no-trim-vs-exact (control)
-          20       2.13e-02             0.00e+00
-          28       2.41e-02             0.00e+00
-          16       2.02e-02             0.00e+00
-         116       0.00e+00             0.00e+00
+    torch._int_mm requires M > 16.
 
-So masking is provably correct in the main blocks, and something about padding the text
-specifically is not inert. It does not reproduce on a small randomly-initialised DiT, which rules
-out the obvious masking-logic explanations. Reverted rather than shipped: an unexplained 2% change
-to a training forward is not worth a scheduling heuristic firing sooner. Worth re-opening with a
-per-stage bisect of txtfusion (layerwise -> projector -> refiner) on the real weights.
+`modules/int8_train.py` catches the failure and falls back to an fp32 matmul, which is *more*
+accurate than int8. Short sequences were quietly running exact; padding pushed them over the
+threshold and onto the quantised path. Confirmed on a tiny randomly-initialised DiT, where the
+difference appears **only with an INT8 base** and only for the shortest sequence:
+
+    bf16 base   every length          0.000e+00
+    INT8 base   5 tokens -> padded 16 1.172e-02
+
+So the 2% was int8 quantisation error arriving where it previously did not, not padding leaking
+past a mask. Two consequences worth keeping:
+
+- **INT8 numerics depend on token count.** The same weights give different answers either side of
+  M=16. The fallback now logs once instead of being silent.
+- **Text padding is defensible after all** — it does not break masking, it just puts short
+  sequences on the int8 path the user already opted into. Still not re-landed: it changes int8
+  training numerics, which is a call worth making deliberately rather than as a side effect of a
+  speed heuristic.
 
 `consider_training_backend()` then decides at each epoch boundary. After one epoch every shape has
 been seen, so it is arithmetic on a known count rather than a guess: ~35 steps per shape to break

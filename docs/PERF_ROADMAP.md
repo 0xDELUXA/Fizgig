@@ -333,10 +333,18 @@ place — not a missing capability:
   isolated block and 1.14x end to end (0.333 -> 0.292) — the one microbenchmark today that
   predicted its real-run result.
 
-Costs, none of which have a trained-LoRA comparison behind them: int8 gradients measure rel-err
-1.05e-02 against bf16's 4.94e-03; cuDNN pays per-shape plan building; and compile warm-up is now
-~91 s, so a 3-epoch run is still net slower and this only wins from roughly 8-10 epochs up. Compile
-stays opt-in behind `--compile_blocks` until a long-run A/B says otherwise.
+Costs, none of which have a trained-LoRA comparison behind them:
+
+- int8 gradients measure rel-err 1.05e-02 against bf16's 4.94e-03
+- cuDNN pays per-shape plan building
+- **compile warm-up is ~91 s**, so a 3-epoch benchmark measures 1.16 s/it whole-run — SLOWER than
+  eager. It only wins from roughly 8-10 epochs up.
+- **compile costs ~4 GB: peak VRAM 17.8 -> 21.7 GB.** That matters, because the auto strategy
+  selects INT8 from 19.2 GB free, and INT8 + compile together will not fit where INT8 alone does.
+  If compile ever becomes a default, `_INT8_PEAK_GB` has to account for it.
+
+Compile stays opt-in behind `--compile_blocks` (and a Krea 2 Training-tab checkbox) until a
+long-run A/B says otherwise.
 
 ## What was verified about OneTrainer
 

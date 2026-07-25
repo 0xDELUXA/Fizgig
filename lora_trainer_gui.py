@@ -665,6 +665,7 @@ PRESETS = {
         "FP8": True,
         "SCALED": True,  # BF16 model, use fp8_scaled for memory efficiency
         "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
+        "COMPILE_BLOCKS": False,  # torch.compile the DiT blocks (krea2; long runs only)
         "GRADIENT_CHECKPOINTING": True,  # ON by default — needed to fit 9B on most cards
     },
 }
@@ -855,6 +856,7 @@ class LoRATrainerGUI:
             "FP8": True,  # Default FP8 setting (--fp8_base)
             "SCALED": True,  # Default Scaled setting (--fp8_scaled, recommended with fp8_base)
             "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
+            "COMPILE_BLOCKS": False,  # torch.compile the DiT blocks (krea2; long runs only)
                 "GRADIENT_CHECKPOINTING": True,  # ON by default — recompute activations to fit 9B on most cards
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
             "KREA2_LOSS_WATCH": False,   # per-image loss tracking + stuck-image detection (krea2)
@@ -2841,6 +2843,26 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self._grad_checkpoint_hint.grid(row=8, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        # torch.compile (Krea 2 only — hidden under Klein by _apply_training_arch_visibility).
+        self._compile_blocks_label = tk.Label(memory_content, text="Compile Blocks:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
+        self._compile_blocks_label.grid(row=9, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.compile_blocks_var = tk.BooleanVar(value=self.settings.get("COMPILE_BLOCKS", False))
+        self.compile_blocks_check = ttk.Checkbutton(
+            memory_content, text="torch.compile the transformer blocks (long runs only)",
+            variable=self.compile_blocks_var, style="Surface.TCheckbutton")
+        self.compile_blocks_check.grid(row=9, column=1, sticky=tk.W, padx=5, pady=4)
+        self._compile_blocks_hint = tk.Label(memory_content,
+                 text="Fuses the per-matmul quantise/dequantise work that bounds the INT8 and NF4 paths — measured "
+                      "2.0× per step on Krea 2 (0.59 → 0.29 s/step), matching OneTrainer. The catch is a "
+                      "~90 s compile pause on the first step, so it only pays off from roughly 8–10 epochs up; a "
+                      "short run is SLOWER overall. Needs Triton (pip install triton-windows) and a C++ compiler "
+                      "(Visual Studio Build Tools, C++ workload) — both located automatically. Ignored when "
+                      "Blocks Swap is above 0, since swapping moves weights and compiled graphs assume they stay put.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT)
+        self._compile_blocks_hint.grid(row=10, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+
         # Re-sync now that the GC checkbox exists: the earlier _on_quant_4bit_toggle
         # call ran before it was created, so this applies the NF4→force-GC-on lock
         # when a saved config has 4-bit already enabled.
@@ -3303,6 +3325,7 @@ class LoRATrainerGUI:
         _grab("fp8_var", "FP8")
         _grab("scaled_var", "SCALED")
         _grab("quant_4bit_var", "QUANT_4BIT")
+        _grab("compile_blocks_var", "COMPILE_BLOCKS")
         _grab("krea2_loss_watch_var", "KREA2_LOSS_WATCH")
         _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
         _grab("krea2_auto_recaption_var", "KREA2_AUTO_RECAPTION")
@@ -3663,7 +3686,9 @@ class LoRATrainerGUI:
         # wired into krea2_train for now — hide them under Klein.
         for w in (self._krea2_losswatch_frame, self._krea2_perimglr_cb,
                   self._krea2_autorecap_cb, self._krea2_warmuplook_cb,
-                  self._krea2_losswatch_hint):
+                  self._krea2_losswatch_hint,
+                  # torch.compile is wired into krea2_train only.
+                  self._compile_blocks_label, self.compile_blocks_check, self._compile_blocks_hint):
             self._set_widget_visible(w, is_krea2)
 
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
@@ -16611,6 +16636,7 @@ class LoRATrainerGUI:
             "FP8": self.fp8_var.get(),
             "SCALED": self.scaled_var.get(),
             "QUANT_4BIT": self.quant_4bit_var.get(),
+            "COMPILE_BLOCKS": self.compile_blocks_var.get(),
             "GRADIENT_CHECKPOINTING": self.grad_checkpoint_var.get(),
             "FP8_TEXT_ENCODER": self.fp8_text_encoder_var.get(),
             "ENABLE_BUCKET": self.dataset_enable_bucket_var.get(),
@@ -17137,6 +17163,8 @@ class LoRATrainerGUI:
         _opt_args = str(self.settings.get("OPTIMIZER_ARGS", "") or "").strip()
         if _opt_args:
             cmd += ["--optimizer_args", _opt_args]
+        if self.settings.get("COMPILE_BLOCKS", False):
+            cmd.append("--compile_blocks")
         # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the
@@ -17435,6 +17463,7 @@ class LoRATrainerGUI:
         current_settings["FP8"] = self.fp8_var.get()
         current_settings["SCALED"] = self.scaled_var.get()
         current_settings["QUANT_4BIT"] = self.quant_4bit_var.get()
+        current_settings["COMPILE_BLOCKS"] = self.compile_blocks_var.get()
         current_settings["GRADIENT_CHECKPOINTING"] = self.grad_checkpoint_var.get()
         current_settings["FP8_TEXT_ENCODER"] = self.fp8_text_encoder_var.get()
         current_settings["ENABLE_BUCKET"] = self.dataset_enable_bucket_var.get()

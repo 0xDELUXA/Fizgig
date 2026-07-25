@@ -67,7 +67,7 @@ def load_dit_for_training(
     quant_int8: str = "",          # "" | "bf16" | "int8" — W8A8 base, grad_mode of the same name
     blocks_to_swap: int = 0,
     gradient_checkpointing: bool = True,
-    compile_blocks: bool = False,
+    compile_blocks: bool = False,   # resolved by the caller; load_dit_ takes a plain bool
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
     device: str = "cuda",
@@ -989,7 +989,7 @@ def train_krea2(
     # Optimizer family + free-form kwargs ("weight_decay=0.01 betas=0.9,0.99").
     optimizer_type: str = "adamw8bit",
     optimizer_args: str = "",
-    compile_blocks: bool = False,
+    compile_blocks: str = "auto",   # "auto" | "on" | "off"
     # LR schedule (step-level). Ignored when adaptive_lr is on — that watcher owns the LR.
     lr_scheduler: str = "constant",
     lr_warmup_steps: int = 0,
@@ -1038,6 +1038,16 @@ def train_krea2(
         raise RuntimeError("No training items — run the krea2 cache scripts first.")
     logger.info(f"Krea 2 training: {group.num_train_items} items, {max_train_epochs} epochs")
 
+    # torch.compile: "auto" weighs its ~90 s warm-up against how long this run actually is, which
+    # is knowable here because the dataset is already built. Short runs are a straight loss, so the
+    # default must not simply turn it on. "on"/"off" are the explicit overrides.
+    _do_compile = str(compile_blocks).lower() in ("1", "true", "on", "yes")
+    if str(compile_blocks).lower() == "auto":
+        from fizgig.utils.capabilities import should_compile
+        _steps_est = group.num_train_items * max_train_epochs
+        _do_compile, _why = should_compile(_steps_est, quant_4bit, quant_int8, blocks_to_swap)
+        logger.info("[compile] auto: %s — %s", "ENABLED" if _do_compile else "off", _why)
+
     # Preview setup: pre-encode prompts (frees the 8GB encoder) + load the VAE BEFORE the RAW DiT,
     # so the encoder never coexists with the resident base.
     do_previews = bool(sample_every_n_epochs and sample_prompts and turbo_path and vae_path and te_path)
@@ -1057,7 +1067,7 @@ def train_krea2(
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
         fp8_scaled=fp8_scaled, quant_4bit=quant_4bit, quant_int8=quant_int8,
-        blocks_to_swap=blocks_to_swap, compile_blocks=compile_blocks,
+        blocks_to_swap=blocks_to_swap, compile_blocks=_do_compile,
         context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
         device=device, dtype=dtype)
     if blocks_to_swap > 0 and not quant_4bit:

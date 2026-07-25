@@ -665,7 +665,7 @@ PRESETS = {
         "FP8": True,
         "SCALED": True,  # BF16 model, use fp8_scaled for memory efficiency
         "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
-        "COMPILE_BLOCKS": False,  # torch.compile the DiT blocks (krea2; long runs only)
+        "COMPILE_BLOCKS": "auto",  # torch.compile the DiT blocks (krea2): auto | on | off
         "GRADIENT_CHECKPOINTING": True,  # ON by default — needed to fit 9B on most cards
     },
 }
@@ -856,7 +856,7 @@ class LoRATrainerGUI:
             "FP8": True,  # Default FP8 setting (--fp8_base)
             "SCALED": True,  # Default Scaled setting (--fp8_scaled, recommended with fp8_base)
             "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
-            "COMPILE_BLOCKS": False,  # torch.compile the DiT blocks (krea2; long runs only)
+            "COMPILE_BLOCKS": "auto",  # torch.compile the DiT blocks (krea2): auto | on | off
                 "GRADIENT_CHECKPOINTING": True,  # ON by default — recompute activations to fit 9B on most cards
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
             "KREA2_LOSS_WATCH": False,   # per-image loss tracking + stuck-image detection (krea2)
@@ -2847,18 +2847,23 @@ class LoRATrainerGUI:
         self._compile_blocks_label = tk.Label(memory_content, text="Compile Blocks:", font=(FONT_FAMILY, 10),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         self._compile_blocks_label.grid(row=9, column=0, sticky=tk.W, padx=(12, 8), pady=4)
-        self.compile_blocks_var = tk.BooleanVar(value=self.settings.get("COMPILE_BLOCKS", False))
-        self.compile_blocks_check = ttk.Checkbutton(
-            memory_content, text="torch.compile the transformer blocks (long runs only)",
-            variable=self.compile_blocks_var, style="Surface.TCheckbutton")
+        # Auto / On / Off rather than a checkbox: compile is a long-run win and a short-run loss,
+        # so the right default is a judgement the trainer makes from the actual run length, the
+        # same way Blocks Swap defaults to "Auto (detect from GPU)".
+        self.compile_blocks_var = tk.StringVar(value=str(self.settings.get("COMPILE_BLOCKS", "auto")).capitalize())
+        self.compile_blocks_check = ttk.Combobox(
+            memory_content, textvariable=self.compile_blocks_var, state="readonly", width=36,
+            values=["Auto", "On", "Off"])
         self.compile_blocks_check.grid(row=9, column=1, sticky=tk.W, padx=5, pady=4)
         self._compile_blocks_hint = tk.Label(memory_content,
-                 text="Fuses the per-matmul quantise/dequantise work that bounds the INT8 and NF4 paths — measured "
-                      "2.0× per step on Krea 2 (0.59 → 0.29 s/step), matching OneTrainer. The catch is a "
-                      "~90 s compile pause on the first step, so it only pays off from roughly 8–10 epochs up; a "
-                      "short run is SLOWER overall. Needs Triton (pip install triton-windows) and a C++ compiler "
-                      "(Visual Studio Build Tools, C++ workload) — both located automatically. Ignored when "
-                      "Blocks Swap is above 0, since swapping moves weights and compiled graphs assume they stay put.",
+                 text="Auto (recommended) turns torch.compile on only when this run is long enough to repay it. "
+                      "It fuses the per-matmul quantise/dequantise work that bounds the INT8 and NF4 paths — "
+                      "2.0× per step on INT8 (0.59 → 0.29 s/step, matching OneTrainer) and 1.28× on "
+                      "NF4 (0.71 → 0.56) — but costs a ~90 s compile pause first, so a short run is SLOWER "
+                      "overall. Break-even is around 600 steps on INT8, 1200 on NF4. NF4 + compile still fits a 16 GB "
+                      "card (verified under a 13.5 GB cap); INT8 + compile needs ~24 GB. Requires Triton and, on "
+                      "Windows, a C++ compiler (VS Build Tools) — both located automatically. Never used with "
+                      "Blocks Swap, since swapping moves weights and compiled graphs assume they stay put.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self._compile_blocks_hint.grid(row=10, column=1, sticky=tk.W, padx=5, pady=(0, 4))
@@ -17163,8 +17168,9 @@ class LoRATrainerGUI:
         _opt_args = str(self.settings.get("OPTIMIZER_ARGS", "") or "").strip()
         if _opt_args:
             cmd += ["--optimizer_args", _opt_args]
-        if self.settings.get("COMPILE_BLOCKS", False):
-            cmd.append("--compile_blocks")
+        _cb = str(self.settings.get("COMPILE_BLOCKS", "auto") or "auto").lower()
+        if _cb in ("auto", "on", "off"):
+            cmd += ["--compile_blocks", _cb]
         # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the

@@ -211,3 +211,50 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
         True, swap,
         f"NF4 4-bit with {swap} blocks swapped — {vram:.1f} GB free is below what Krea 2 needs "
         "resident even at 4-bit, so some swapping is unavoidable")
+
+
+# torch.compile decision. Warm-up is the whole story: compiling costs ~90 s up front (one plan per
+# distinct sequence shape) and then saves per step, so it is a straight loss on a short run and a
+# clear win on a long one. Measured per step on an RTX 5090, Krea 2, rank 16:
+#
+#     INT8   0.5917 -> 0.292   saves 0.300 s/step   break-even ~300 steps
+#     NF4    0.7092 -> 0.556   saves 0.153 s/step   break-even ~590 steps
+#
+# Doubled for margin, as with the attention backend: at break-even there is nothing to win, and
+# being wrong should cost a few percent rather than a run.
+_COMPILE_WARMUP_S = 90.0
+_COMPILE_SAVING_S = {"int8": 0.300, "nf4": 0.153}
+_COMPILE_MARGIN = 2.0
+# INT8 + compile peaked at 21.7 GB against 17.8 GB for INT8 alone. NF4 + compile is VRAM-neutral
+# (12.9 GB vs 13.6 GB) and completes under a hard 15.5 GB cap, so it fits a 16 GB card.
+_INT8_COMPILE_PEAK_GB = 20.0
+
+
+def should_compile(total_steps: int, quant_4bit: bool, quant_int8: str,
+                   blocks_to_swap: int, vram_gb: Optional[float] = None,
+                   caps: Optional[Capabilities] = None) -> tuple:
+    """Decide whether torch.compile pays for itself on this run. Returns (bool, reason)."""
+    caps = caps or detect()
+    vram = vram_gb if vram_gb is not None else (caps.vram_free_gb or caps.vram_gb)
+
+    if blocks_to_swap:
+        return False, "block swap is active — swapping moves weights between devices every step, " \
+                      "which compiled graphs cannot tolerate"
+    try:
+        import triton  # noqa: F401
+    except Exception:
+        return False, "triton is not installed (pip install triton-windows on Windows)"
+
+    kind = "nf4" if quant_4bit else ("int8" if quant_int8 else None)
+    if kind is None:
+        return False, "only measured for the quantised paths (NF4 / INT8); not enabled for fp8 or bf16"
+    if kind == "int8" and vram < _INT8_COMPILE_PEAK_GB + _HEADROOM_GB:
+        return False, (f"INT8 + compile peaks near {_INT8_COMPILE_PEAK_GB:.0f} GB and only "
+                       f"{vram:.1f} GB is free — INT8 alone still fits, compile does not")
+
+    needed = int(_COMPILE_WARMUP_S / _COMPILE_SAVING_S[kind] * _COMPILE_MARGIN)
+    if total_steps < needed:
+        return False, (f"{total_steps} steps is too short — compiling costs ~{_COMPILE_WARMUP_S:.0f} s "
+                       f"up front and needs ~{needed} steps on the {kind.upper()} path to pay back")
+    return True, (f"{total_steps} steps on the {kind.upper()} path — compile pays back within "
+                  f"~{needed} steps and this run is longer")

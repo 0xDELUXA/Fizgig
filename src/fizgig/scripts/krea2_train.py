@@ -65,11 +65,12 @@ def setup_parser() -> argparse.ArgumentParser:
                         + ", ".join(available_optimizers()))
     p.add_argument("--optimizer_args", default="",
                    help='Extra optimizer kwargs, e.g. "weight_decay=0.01 betas=0.9,0.99"')
-    p.add_argument("--compile_blocks", action="store_true",
-                   help="EXPERIMENTAL, and currently SLOWER: torch.compile each transformer block. "
-                        "1.37x on an isolated block but 0.794 vs 0.610 s/it end to end on an RTX "
-                        "5090. Kept as a research hook, not a recommendation. Needs triton (and "
-                        "MSVC on Windows); ignored under block swap")
+    p.add_argument("--compile_blocks", default="auto", choices=["auto", "on", "off"],
+                   help="torch.compile the transformer blocks. 'auto' (default) enables it only "
+                        "when the run is long enough to repay its ~90 s warm-up and the VRAM fits "
+                        "— roughly 600+ steps on INT8, 1200+ on NF4. Measured 2.0x per step on "
+                        "INT8 (0.59 -> 0.29) and 1.28x on NF4 (0.71 -> 0.56). Needs triton and, on "
+                        "Windows, MSVC; never used under block swap")
     p.add_argument("--lr_scheduler", default="constant",
                    choices=["constant", "constant_with_warmup", "cosine", "cosine_with_restarts",
                             "linear", "polynomial"],

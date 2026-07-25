@@ -350,8 +350,21 @@ Costs, none of which have a trained-LoRA comparison behind them:
   **compile is available to 16 GB users on the NF4 path** — the case OneTrainer reaches only by
   paying 13.8x in offloading. 16 GB stays on NF4-no-swap either way; compile is an option on top.
 
-Compile stays opt-in behind `--compile_blocks` (and a Krea 2 Training-tab checkbox) until a
-long-run A/B says otherwise.
+`--compile_blocks auto|on|off` (Training tab: Auto / On / Off), defaulting to **auto**, which
+decides from the run's actual length — the dataset is built before the DiT loads, so total steps
+are known. Break-even is ~600 steps on INT8 and ~1200 on NF4, both doubled for margin, and auto
+declines on block swap, missing triton, or too little VRAM for INT8 + compile.
+
+    16 GB NF4, 3 epochs      off   too short to repay ~90 s
+    16 GB NF4, 40 epochs     ON
+    32 GB INT8, 3 epochs     off
+    32 GB INT8, 20 epochs    ON
+    INT8 with 19 GB free     off   INT8 alone fits, INT8 + compile does not
+    any quant + block swap   off
+
+**NF4 + compile verified on a 16 GB budget**: completed under a hard 13.5 GB cap (a 16 GB card
+minus ~2.4 GB for Windows), zero OOM. An earlier 15.5 GB cap was too generous to prove anything —
+Peter's point — since it left only ~400 MB for the desktop.
 
 ## What was verified about OneTrainer
 

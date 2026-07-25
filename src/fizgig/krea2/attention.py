@@ -96,7 +96,21 @@ class AttentionParams:
 #     training step (bucketed)            0.704 s/it -> 1.57 s/it  with cuDNN
 #
 # NOT a backward-pass problem — cuDNN's backward is fine, and is 2.7-3.1x faster than the
-# default at a fixed shape with or without an attention mask. It is purely shape churn.
+# default at a fixed shape with or without an attention mask.
+#
+# cudnn.benchmark matters enormously and in the opposite direction to intuition. PyTorch
+# defaults it to False, which puts cuDNN on a heuristic path that collapses under shape churn;
+# letting it autotune costs one benchmark per shape and then caches:
+#
+#     varying shapes, cudnn.benchmark=False .... 51.573 ms
+#     varying shapes, cudnn.benchmark=True .....  0.757 ms   (68x better, and 2.9x the default)
+#
+# It is therefore enabled whenever cuDNN is selected. In isolation that ought to make cuDNN win
+# for training too — but end to end it does NOT: 1.57 -> 1.28 s/it with autotuning, against
+# 0.704 for the default backend. Three cuDNN variants (plain / bucket-grouped / autotuned) all
+# lose, so something in the real attention call (variable-shaped masks, the split-attn path)
+# costs more than the isolated kernel benchmark shows. Inference-only stands, on measurement
+# rather than theory.
 #
 # torch.is_grad_enabled() is used as the switch because it tracks that distinction exactly:
 # False under no_grad (previews, Royale, Repair Studio, Explorer, sampling — one resolution
@@ -127,6 +141,11 @@ def _sdpa_backend_ctx():
         try:
             import torch.nn.functional as _F
             from torch.nn.attention import sdpa_kernel, SDPBackend
+            # cuDNN MUST be allowed to autotune. With benchmark=False (PyTorch's default) it
+            # uses a heuristic path that is catastrophic under shape churn — 51.6 ms vs 0.76 ms
+            # for the same varying-shape workload. Autotuning benchmarks once per shape and
+            # caches, and a bucketed dataset only ever presents a handful of shapes.
+            torch.backends.cudnn.benchmark = True
             _q = torch.zeros(1, 8, 64, 64, device="cuda", dtype=torch.bfloat16)
             with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
                 _F.scaled_dot_product_attention(_q, _q, _q)

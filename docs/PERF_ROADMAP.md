@@ -339,9 +339,16 @@ Costs, none of which have a trained-LoRA comparison behind them:
 - cuDNN pays per-shape plan building
 - **compile warm-up is ~91 s**, so a 3-epoch benchmark measures 1.16 s/it whole-run — SLOWER than
   eager. It only wins from roughly 8-10 epochs up.
-- **compile costs ~4 GB: peak VRAM 17.8 -> 21.7 GB.** That matters, because the auto strategy
-  selects INT8 from 19.2 GB free, and INT8 + compile together will not fit where INT8 alone does.
-  If compile ever becomes a default, `_INT8_PEAK_GB` has to account for it.
+- **compile's VRAM cost is INT8-specific, not a property of compile.** On INT8 peak went
+  17.8 -> 21.7 GB, so INT8 + compile needs ~24 GB and `_INT8_PEAK_GB` would have to account for it
+  before compile could be a default there. On NF4 it is roughly neutral — slightly lower, in fact:
+
+      NF4, no compile   13.6 GB whole-GPU   0.7092 s/it
+      NF4 + compile     12.9 GB             0.556  s/it     28% faster
+
+  That fits a 16 GB card with headroom (~11.7 GB training-only against a ~1.2 GB desktop), so
+  **compile is available to 16 GB users on the NF4 path** — the case OneTrainer reaches only by
+  paying 13.8x in offloading. 16 GB stays on NF4-no-swap either way; compile is an option on top.
 
 Compile stays opt-in behind `--compile_blocks` (and a Krea 2 Training-tab checkbox) until a
 long-run A/B says otherwise.

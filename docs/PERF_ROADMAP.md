@@ -268,11 +268,21 @@ runs.** Fixing the break took compile from 0.943 to 0.794 s/it — a big improve
 
 Read from a clone of the repo, not inferred:
 
-- **Attention default is torch SDPA**, same as ours. cuDNN is one of three options, not the
-  default — the community claim that it defaults to cuDNN is wrong, and anyone selecting it for
-  bucketed training is likely taking the same shape-churn penalty we measured.
-- **`offload_fraction` defaults to 0.0** — they never swap; they quantise until it fits. That was
-  the entire speed difference.
+- **Attention: the global default is SDP, but every shipped Krea 2 preset selects CUDNN.** Exactly
+  4 of their 60 presets set `attention_mechanism: CUDNN`, and all 4 are the Krea 2 ones (LoRA and
+  Finetune, 16 and 24 GB). So my earlier "the community claim that it defaults to cuDNN is wrong"
+  was too broad: it is wrong about the global default and right about Krea 2 in practice, because
+  anyone using their preset for this model is on cuDNN. That sits directly against our own
+  measurement (cuDNN 1.6-1.9x slower for training even with stable shapes), which makes it the
+  single most interesting thing to check in the comparison — either their attention path keeps
+  shapes stable in a way ours does not, or the preset is inherited rather than measured.
+- **`offload_fraction` defaults to 0.0**, and their 24 GB Krea 2 preset uses it — but the **16 GB
+  preset offloads 0.3**. So they do offload on small cards; just far less than the 20-of-28 (71%)
+  our old auto-swap was handing 16 GB users.
+- **Their Krea 2 transformer recipe is `INT_W8A8` on BOTH 16 and 24 GB.** Independent corroboration
+  of today's int8 default from a second implementation, on this exact model. The design difference
+  is what happens when it does not fit: they keep int8 and offload 30%, we drop to NF4 with no
+  offload. Worth measuring against each other — 0.3 offload is not the same animal as 71% swap.
 - Their int8 path uses `torch._int_mm` (not `_scaled_mm`, which is fp8-only in torch 2.10).
 - `AspectBatchSorting` groups batches by resolution.
 - ~40 optimizers, default AdamW. Pinned to torch 2.12. The count is the headline, but most of that

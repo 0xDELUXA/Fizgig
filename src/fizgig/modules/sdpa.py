@@ -1,38 +1,39 @@
 """Which SDPA backend to use, and when — one decision, shared by every attention site.
 
-cuDNN's SDPA kernel is much faster than PyTorch's default choice for these shapes — as long as
-the shape STAYS THE SAME. It plans a kernel per shape and re-plans whenever the shape changes.
-Measured on Krea 2's attention shape (48q/12kv heads, head_dim 128, bf16, RTX 5090, fwd+bwd):
+cuDNN's SDPA kernel is faster than PyTorch's default choice for these shapes — but it builds a
+plan the first time it sees each shape, and that build is expensive. Measured on the REAL
+INT8 Krea 2 model, real cached batches, fwd+bwd+optimizer (RTX 5090):
 
-    fixed shape (one sequence length, repeated)     default 1.904 ms   cuDNN  0.656 ms
-    varying shapes (576/900/1024/1156/1444 tokens)  default 2.248 ms   cuDNN 26.353 ms
+                      first sight    steady state    one-time, 36 shapes
+    default backend     582.2 ms       572.2 ms            0.4 s
+    cuDNN              1829.9 ms       536.6 ms           46.6 s
 
-Bucketed training cycles through a different token count per aspect ratio, so it pays that
-re-planning cost on nearly every step:
+So cuDNN is ~6% FASTER per step once warm, and costs ~1.3 s per distinct shape to get there.
+Which one wins is purely a question of how many steps amortize that:
 
-    1024 preview (one shape, 8 steps)   5.15 s     -> 4.40 s     with cuDNN
-    training step (bucketed)            0.704 s/it -> 1.57 s/it  with cuDNN
+    saves 37 ms/step, costs 46.6 s once  ->  breaks even near 1260 steps
 
-NOT a backward-pass problem — cuDNN's backward is fine, and is 2.7-3.1x faster than the default
-at a fixed shape with or without an attention mask.
+Inference is the clear case FOR it: one resolution held for a whole render, so the plan is built
+once and reused for every step of every image.
 
-cudnn.benchmark matters enormously and in the opposite direction to intuition. PyTorch defaults
-it to False, which puts cuDNN on a heuristic path that collapses under shape churn; letting it
-autotune costs one benchmark per shape and then caches:
+    Krea 2 1024 preview   5.15 s -> 4.40 s
+    Klein  1024 preview   3.01 s -> 2.74 s
 
-    varying shapes, cudnn.benchmark=False .... 51.573 ms
-    varying shapes, cudnn.benchmark=True .....  0.757 ms   (68x better, and 2.9x the default)
+Training is the ambiguous case. On a 36-image set that break-even lands around 35 epochs; shorter
+runs lose, longer runs win by up to ~6%. The default backend is chosen for training because it is
+the one that cannot lose, not because cuDNN is bad — FIZGIG_SDPA_BACKEND=cudnn is there for anyone
+doing long runs. Note the cost scales with the number of DISTINCT shapes, which the attention trim
+inflates (each caption's token count becomes part of the sequence length — 30 shapes from 36
+images); FIZGIG_ATTN_TRIM=0 trades compute for far fewer shapes.
 
-It is therefore enabled whenever cuDNN is selected. In isolation that ought to make cuDNN win for
-training too — but end to end it does NOT: 1.57 -> 1.28 s/it with autotuning, against 0.704 for
-the default backend. Three cuDNN variants (plain / bucket-grouped / autotuned) all lose, so
-something in the real attention call (variable-shaped masks, the split-attn path) costs more than
-the isolated kernel benchmark shows. Inference-only stands, on measurement rather than theory.
+Two earlier conclusions here were WRONG and are corrected above: that cuDNN is ~2x slower for
+training (it was a short-benchmark artifact — 46.6 s of plan building charged against 108 steps),
+and that cudnn.benchmark is worth 68x (it makes no measurable difference at all: 66.0 s of plan
+building with it off vs 65.9 s on, 535.1 vs 536.6 ms/step steady).
 
 `torch.is_grad_enabled()` is the switch because it tracks that distinction exactly: False under
 no_grad (previews, Royale, Repair Studio, Explorer, sampling — one resolution held for a whole
-render) and True in a training step, including inside a gradient-checkpoint recompute. If a
-fixed-shape trainer ever appears, revisit the test rather than the conclusion.
+render) and True in a training step, including inside a gradient-checkpoint recompute.
 
 Numerically equivalent to bf16 tolerance (rel-err ~5e-4, masked or not). Probed once; if the
 kernel is unavailable this is a no-op. FIZGIG_SDPA_BACKEND=default|cudnn overrides.
@@ -70,7 +71,13 @@ def sdpa_backend_ctx():
         try:
             import torch.nn.functional as _F
             from torch.nn.attention import sdpa_kernel, SDPBackend
-            torch.backends.cudnn.benchmark = True    # see the module docstring — 68x
+            # cudnn.benchmark is NOT set here. It used to be, justified by a 68x figure that
+            # later failed to reproduce; measured on the real model it changes nothing at all —
+            # neither the per-shape plan cost (66.0 s off vs 65.9 s on, over 36 shapes) nor the
+            # steady state (535.1 vs 536.6 ms/step). Setting a global torch flag with no
+            # measurable effect is worse than not setting it. FIZGIG_CUDNN_BENCHMARK=1 opts in.
+            if os.environ.get("FIZGIG_CUDNN_BENCHMARK", "0") != "0":
+                torch.backends.cudnn.benchmark = True
             # A PREFERENCE, not a demand. Forcing the single backend raises "No available
             # kernel" on anything cuDNN can't take — head_dim > 128, which is exactly the
             # VAE's single-head attention. The priority list keeps the win where cuDNN is

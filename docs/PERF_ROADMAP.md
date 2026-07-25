@@ -20,7 +20,7 @@ subtly inverted — not to missing kernels.
 | Klein 1024 preview | 3.01 s | **2.74 s** |
 | Optimizer choice (Krea 2) | AdamW8bit, hardcoded | **7 families + any module path** |
 | Attention device syncs per step | 56 (every block, twice) | **1** |
-| Training attention backend | — | unchanged, deliberately |
+| Training attention backend | — | unchanged (cuDNN wins only past ~1260 steps) |
 
 ### 1. Block swap was the whole story
 `_auto_krea2_blocks_swap` picked a swap count from VRAM, which handed 16 GB cards the worst
@@ -55,56 +55,46 @@ is a free view, and that layout is what int8 tensor cores want.
 "INT8 fast inference" is on by default and used by Royale, Repair Studio and the Explorer, so
 users were paying int8's quantisation error for no speed at all.
 
-### 3. cuDNN attention — inference only
-Fast forwards, but it plans a kernel per shape and re-plans on every change. Bucketed training
-churns shapes constantly.
+### 3. cuDNN attention — inference yes, training it depends (and NOT for the reason first given)
+cuDNN builds a plan the first time it sees each shape, and that build is expensive. Measured on
+the REAL INT8 Krea 2 model with real cached batches — fwd + bwd + optimizer, the whole step:
 
-    fixed shape (fwd+bwd)     default 1.904 ms   cuDNN 0.656 ms
-    varying shapes            default 2.248 ms   cuDNN 26.353 ms
+                          first sight    steady state    one-time, 36 shapes
+        default backend     582.2 ms       572.2 ms            0.4 s
+        cuDNN              1829.9 ms       536.6 ms           46.6 s
 
-Selected on `torch.is_grad_enabled()`: cuDNN when nothing is recording gradients (previews,
-Royale, Repair Studio, sampling), PyTorch's default in a training step. Not a backward-pass
-problem — cuDNN's backward is fine at a fixed shape.
+**Warm, cuDNN is ~6% FASTER.** It costs ~1.3 s per distinct shape to get there, so which one wins
+is arithmetic: saves 37 ms/step, costs 46.6 s once, breaks even near **1260 steps** — about 35
+epochs on a 36-image set. Inference is the unambiguous case for it (one resolution held for a
+whole render, plan built once):
 
-`torch.backends.cudnn.benchmark` defaults to False, and that is the *bad* setting: the heuristic
-path is 51.6 ms under shape churn against 0.757 ms when autotuning is allowed. Enabled with cuDNN.
+        Krea 2 1024 preview   5.15 s -> 4.40 s
+        Klein  1024 preview   3.01 s -> 2.74 s
 
-Even so, cuDNN loses for training across three variants (plain 1.57, bucket-grouped 1.29,
-autotuned 1.28 vs 0.704), so inference-only stands on measurement, not theory.
+Selected on `torch.is_grad_enabled()`. Training keeps the default backend because it is the one
+that **cannot lose**, not because cuDNN is bad; `FIZGIG_SDPA_BACKEND=cudnn` is there for long runs.
 
-**Why it loses, settled.** The first write-up guessed "variable-shaped masks, the split-attn path".
-Both guesses were wrong, and the two real candidates have now been removed one at a time:
+**Two earlier conclusions in this document were wrong.**
 
-    int8, trim (30 shapes) ................ 0.6098 s/it     cuDNN 1.17
-    int8, no trim (4 shapes) .............. 0.6289 s/it     cuDNN 1.00
+1. *"cuDNN is ~2x slower for training"* — a short-benchmark artifact. 46.6 s of plan building
+   charged against a 108-step benchmark is +431 ms/step, which accounts for essentially all of the
+   +370 ms gap that was measured. The 3-epoch A/B could not see past its own warm-up.
+2. *"cudnn.benchmark is worth 68x"* — it makes **no measurable difference at all**. Plan building
+   with autotuning off: 66.0 s, on: 65.9 s. Steady state 535.1 vs 536.6 ms/step. The original
+   51.573-vs-0.757 ms figure never reproduced. `modules/sdpa.py` no longer sets the flag —
+   setting a global torch flag with no measurable effect is worse than leaving it alone
+   (`FIZGIG_CUDNN_BENCHMARK=1` opts back in).
 
-- **No mask ever reaches SDPA in training.** At batch size 1 the "are all sequences the same
-  length" test is trivially true, so attention always trims and passes `attn_mask=None`.
-- **Shape churn is real and self-inflicted** — but not the main cause. The DiT pads the sequence
-  to a multiple of 256 *explicitly to keep kernel shapes stable*, and the trim immediately undoes
-  it: because the trimmed length includes each caption's own token count, a 36-image set produces
-  **30 distinct shapes, not the 7 image buckets**. Stable shapes are worth 15% to cuDNN
-  (1.17 -> 1.00) and it is still 1.6x slower than the default backend.
+**What the cost actually scales with is the number of DISTINCT shapes**, and that is self-inflicted.
+The DiT pads the sequence to a multiple of 256 *explicitly to keep kernel shapes stable*, and the
+attention trim immediately undoes it: the trimmed length carries each caption's own token count, so
+36 images produce **30 distinct shapes, not the 7 image buckets** anyone would assume. `FIZGIG_ATTN_TRIM=0`
+keeps the padded shapes (4 instead of 30) at the cost of attending over padding — measured 0.6289
+vs 0.6098 s/it on the default backend, so the trim stays on by default.
 
-So cuDNN is simply the worse kernel for this shape in a training step, with both confounds gone.
-The trim stays on: it costs the default backend nothing to keep (0.6098 vs 0.6289, ~3% in its
-favour). `FIZGIG_ATTN_TRIM=0` keeps the padded shapes for anyone re-testing a shape-sensitive
-backend.
-
-The gate now lives in `modules/sdpa.py` and covers **Klein's DiT as well as Krea 2's** — one
-decision for the whole app. Two changes came out of extending it:
-
-- It expresses a **preference**, not a demand (`sdpa_kernel(..., set_priority=True)`). Forcing the
-  single backend raises "No available kernel" on anything cuDNN cannot take — head_dim > 128,
-  which is exactly the VAE's single-head attention. The priority list keeps the win where cuDNN is
-  eligible (0.128 ms vs 0.133 forced, against 0.331 default) and falls back silently elsewhere.
-- Klein's gain is real but smaller than Krea 2's, and only at the resolution that matters:
-
-      Klein preview  512x512    1.195 s -> 1.184 s   (1.01x — nothing)
-      Klein preview  1024x1024  3.010 s -> 2.743 s   (1.10x)
-
-  Attention is a smaller share of Klein's forward than of Krea 2's, and at 512 it is small enough
-  to vanish. Measured end to end through the real Repair Studio path, not in isolation.
+Also settled while chasing this: **no mask ever reaches SDPA in training.** At batch size 1 the
+"are all sequences the same length" test is trivially true, so attention always trims and passes
+`attn_mask=None`. The earlier guess that variable-shaped masks were the cost was simply wrong.
 
 VAE attention is deliberately left alone: single-head with head_dim = channels, which cuDNN
 cannot run at all.
@@ -124,10 +114,9 @@ claim it as a speed win on its own. It is worth having regardless: it removes 56
 stalls per step, and it was the graph break that made torch.compile lose (see below).
 
 It does **not** change the cuDNN verdict — the sync was present in both arms, so it could never
-have explained a 2.2x gap. Re-measured after the fix, cuDNN is 1.17 vs 0.6098: still ~1.9x
-slower, from ~2.2x before. The narrowing is consistent with the syncs having blocked CPU/GPU
-overlap (cuDNN does more CPU-side work per call, planning per shape, and a stalled CPU cannot
-hide it), but nowhere near enough to flip the result.
+have explained the gap. Re-measured after the fix, cuDNN still came out at 1.17 vs 0.6098 on a
+3-epoch benchmark, which is what finally forced the question of *why* an isolated kernel that
+benchmarks 3x FASTER loses end to end. The answer is in section 3: warm-up, not the kernel.
 
 ### 5. Things measured and deliberately NOT shipped
 - **Bucket-grouped batch ordering** (what OneTrainer's `AspectBatchSorting` does). Random
@@ -303,7 +292,10 @@ optimizer factory were new code. Three conclusions had to be reversed after re-m
 "slow backward" was actually shape churn; int8 "unavailable" was the wrong API — `_int_mm`, not
 `_scaled_mm`; NVFP4's finer scales were assumed to beat NF4's better codebook and don't).
 
-Isolated microbenchmarks pointed the wrong way about the end-to-end result **four times**, and the
-torch.compile case explains the pattern: the microbenchmark constructed `AttentionParams` without
-a mask, so it never executed the branch that training actually takes. An isolated benchmark tests
-the code path you set up, not the one that runs. Measure the whole step.
+Isolated microbenchmarks pointed the wrong way about the end-to-end result **four times** — and
+then, on the fifth, the end-to-end benchmark was the one that lied. cuDNN's kernel really is 3x
+faster; the 3-epoch A/B just could not see past 46 s of one-time plan building. Both directions
+have the same cure: know what your measurement includes. A microbenchmark tests the code path you
+set up rather than the one that runs (the torch.compile case built `AttentionParams` without a
+mask and never entered the branch training takes); a short end-to-end run charges warm-up costs
+to steady state. Separate cold from warm, and measure the whole step.

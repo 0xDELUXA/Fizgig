@@ -87,7 +87,8 @@ The two model families share the dataset format and most of the workflow, but no
 | Gradient accumulation | ✅ | ✅ |
 | Block targeting (`include_patterns`) / Model Area | ✅ Klein only | ❌ (no Krea 2 block map yet) |
 | Timestep range (`--min/max_timestep`) | ✅ Klein only | ❌ (fixed `krea2_shift` recipe) |
-| Optimizer choice | ✅ Klein only | ❌ (AdamW8bit hardcoded) |
+| Optimizer choice (`--optimizer_type`) | ✅ | ✅ |
+| INT8 W8A8 base (`--quant_int8`) | ❌ | ✅ Krea 2 only |
 | Weight-only extraction (rank reduction, `--samples 0`) | ✅ | ✅ |
 | Profiling | ✅ full activation profile | ✅ weight-only (`--krea2`) |
 | Activation-weighted (specialized) extraction | ✅ Klein only | ❌ (needs the Klein pipeline) |
@@ -338,7 +339,8 @@ The Krea 2 parser is small enough to know in full: run `krea2_train.py --help`. 
 
 - `--no_fp8` — train the base in bf16 instead of dynamic fp8 (needs a lot more VRAM; fp8 is the validated default).
 - `--quantize_4bit` — NF4 4-bit frozen base, ~5.6 GB DiT residency, fits 10-12 GB cards (block swap forced off).
-- `--blocks_to_swap` — see [VRAM guidance](#vram-guidance-block-swap). `--preview_blocks_to_swap` is the separate, forward-only swap for the preview Turbo.
+- `--quant_int8 bf16` — INT8 W8A8 frozen base: ~18.6 GB, so it needs a 24 GB card, and in exchange it is both the fastest option measured (0.637 s/it vs NF4's 0.709 on an RTX 5090) and ~7× more accurate than NF4 in forward error, since 8 bits beat 4. `bf16` keeps gradients exact; `int8` quantises the backward too — faster again, lossier. The GUI picks this automatically when there is free VRAM for it; on the CLI it is opt-in. Mutually exclusive with `--quantize_4bit`.
+- `--blocks_to_swap` — see [VRAM guidance](#vram-guidance-block-swap). `--preview_blocks_to_swap` is the separate, forward-only swap for the preview Turbo. **Swapping is the slow path** (4.4× the time, 4× the CPU): quantise first, and only swap when even NF4 will not fit.
 
 **The per-image loss watch** (any of these enables the watcher)
 
@@ -358,7 +360,14 @@ Persistent artifacts: exclusions are stored in `<image_directory>/fizgig_exclude
 - `--gradient_accumulation_steps N` — accumulate over N micro-batches per optimizer step (effective batch = N). The loss is averaged over the group, and a partial group is flushed at the epoch boundary. Per-image LR still applies per image.
 - `--max_grad_norm` — gradient clipping (default 1.0, matching the reference recipe; 0 disables).
 
-**Not in the Krea 2 parser (by design):** optimizer choice (AdamW8bit hardcoded), timestep sampling (fixed `krea2_shift` recipe), block targeting (no Krea 2 block map yet), gradient checkpointing (always on). What's absent is deliberate, not missing.
+**Optimizer**
+
+- `--optimizer_type` — `adamw8bit` (default, the validated recipe), `adamw` (fp32 state, CUDA-fused where available), `pagedadamw8bit`, `ademamix8bit`, `pagedademamix8bit`, `lion8bit`, `adafactor`, plus `prodigy` / `came` if you install `prodigyopt` / `came_pytorch`. Anything else is taken as a full `module.path.ClassName`, so an optimizer Fizgig has never heard of works without a release. The list the CLI actually offers on your machine is in `--help` — entries whose package is missing are filtered out.
+- `--optimizer_args` — extra kwargs, e.g. `--optimizer_args "weight_decay=0.01 betas=0.9,0.99"`. Values are parsed as Python literals.
+
+Two warnings worth internalising before you reach for the dropdown. **Learning rates do not transfer between families:** Lion applies the *sign* of the update and wants roughly a tenth of an AdamW LR; Prodigy estimates the LR itself and wants `--learning_rate 1.0`. Fizgig logs a warning when the LR looks wrong for the family, but it will not override you. And **saving optimizer memory buys you little here** — a LoRA's state is tens of MB against a 13–19 GB base, so the reason to change optimizer is update *behaviour*, not VRAM. If a run fails to construct the optimizer it falls back to plain AdamW and says so in the log; the choice is recorded in the output LoRA as `ss_optimizer`.
+
+**Not in the Krea 2 parser (by design):** timestep sampling (fixed `krea2_shift` recipe), block targeting (no Krea 2 block map yet), gradient checkpointing (always on). What's absent is deliberate, not missing.
 
 ---
 

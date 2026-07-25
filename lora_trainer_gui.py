@@ -855,7 +855,7 @@ class LoRATrainerGUI:
             "FP8": True,  # Default FP8 setting (--fp8_base)
             "SCALED": True,  # Default Scaled setting (--fp8_scaled, recommended with fp8_base)
             "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
-            "GRADIENT_CHECKPOINTING": True,  # ON by default — recompute activations to fit 9B on most cards
+                "GRADIENT_CHECKPOINTING": True,  # ON by default — recompute activations to fit 9B on most cards
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
             "KREA2_LOSS_WATCH": False,   # per-image loss tracking + stuck-image detection (krea2)
             "KREA2_PER_IMAGE_LR": False,  # per-image adaptive LR (throttle stuck images) — experimental
@@ -889,7 +889,16 @@ class LoRATrainerGUI:
         if self.last_used.get("lora_output_dir"):
             self.settings["LORA_OUTPUT_DIR"] = self.last_used["lora_output_dir"]
 
+        # Klein's trainer resolves these itself (name-or-module-path). Krea 2 goes through
+        # fizgig.training.optimizers, which offers a different set — filtered to what's actually
+        # installed — so the dropdown is re-populated when the Base Model selector changes.
         self.optimizer_types = ["adamw", "adamw8bit", "adafactor", "bitsandbytes.optim.AdEMAMix8bit", "bitsandbytes.optim.PagedAdEMAMix8bit"]
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+            from fizgig.training.optimizers import available_optimizers
+            self.krea2_optimizer_types = available_optimizers()
+        except Exception:
+            self.krea2_optimizer_types = ["adamw8bit", "adamw", "adafactor"]
 
         self.setup_styles()
 
@@ -2837,6 +2846,7 @@ class LoRATrainerGUI:
         # when a saved config has 4-bit already enabled.
         self._on_quant_4bit_toggle()
 
+
         # === Timestep & Noise Schedule Section (Collapsed by default) ===
         timestep_section = CollapsibleFrame(outer,"Timestep & Noise Schedule", default_expanded=False)
         timestep_section.pack(fill=tk.X, padx=36, pady=(0, 16))
@@ -3592,13 +3602,25 @@ class LoRATrainerGUI:
         except Exception:
             pass
 
+    def _refresh_optimizer_choices(self, is_krea2: bool):
+        """Point the Optimizer Type dropdown at the selected family's catalog."""
+        combo = self.entries.get("OPTIMIZER_TYPE")
+        if combo is None:
+            return
+        choices = self.krea2_optimizer_types if is_krea2 else self.optimizer_types
+        combo["values"] = choices
+        if combo.get() not in choices:
+            combo.set("adamw8bit" if "adamw8bit" in choices else choices[0])
+
     def _apply_training_arch_visibility(self, is_krea2: bool):
         """Hide Training-tab controls not yet wired into the Krea 2 native trainer; re-show for Klein.
 
         Deferred-for-Krea-2 feature groups (re-enable by removing from these lists as they land):
           • Model Area to Train (dropdown + desc + Custom panel) — no Krea 2 block map yet
-          • Optimizer Type / Args / Network Dropout             — krea2 hardcodes AdamW8bit
-            (the Optimizer SECTION itself is shown: Gradient Accumulation + Max Grad Norm are wired)
+          • Network Dropout                                     — not implemented for krea2
+            (the rest of the Optimizer section is wired: Type, Args, Gradient Accumulation,
+             Max Grad Norm. The Type dropdown re-populates per family — see
+             _refresh_optimizer_choices — because the two resolve names differently.)
           • LR Decay steps                                      — Klein-only warmup_stable_decay
           • Timestep & Noise section                            — krea2 uses a fixed shift schedule
           • FP8 Scaled (in Memory & FP8)                        — krea2's fp8 path is always scaled
@@ -3624,15 +3646,18 @@ class LoRATrainerGUI:
             # LR Decay steps: Klein-only (warmup_stable_decay). LR Scheduler + Warmup ARE wired
             # for krea2 (--lr_scheduler / --lr_warmup_steps) so they stay visible.
             self._lr_decay_label, self.entries.get("LR_DECAY_STEPS"),
-            # Optimizer section is shown under Krea 2 for Gradient Accumulation + Max Grad Norm
-            # (both wired); the rest of its fields have no krea2 equivalent — AdamW8bit is
-            # hardcoded and network dropout isn't implemented — so hide those individually.
-            self.labels.get("OPTIMIZER_TYPE"), self.entries.get("OPTIMIZER_TYPE"),
-            self.labels.get("OPTIMIZER_ARGS"), self.entries.get("OPTIMIZER_ARGS"),
+            # Optimizer Type / Args are wired for BOTH now (krea2 -> --optimizer_type /
+            # --optimizer_args); only network dropout has no krea2 equivalent.
             self.labels.get("NETWORK_DROPOUT"), self.entries.get("NETWORK_DROPOUT"),
         ]
         for w in widgets:
             self._set_widget_visible(w, not is_krea2)
+
+        # The two families resolve optimizer names differently, so the dropdown's contents follow
+        # the selector. A name valid for one may not exist in the other (Klein takes module paths;
+        # krea2 takes catalog names), so fall back to the shared default rather than carrying a
+        # value across that the trainer would then have to reject.
+        self._refresh_optimizer_choices(is_krea2)
 
         # Krea 2-ONLY controls (inverse of the above): the per-image loss watch toggles are only
         # wired into krea2_train for now — hide them under Klein.
@@ -17103,6 +17128,15 @@ class LoRATrainerGUI:
                     cmd += ["--max_grad_norm", str(float(_mgn))]
             except ValueError:
                 pass
+        # Optimizer family + free-form kwargs. Sent whenever set: the trainer's own default is
+        # adamw8bit, so passing it explicitly is harmless and keeps the launched command a full
+        # record of what the run actually used.
+        _opt = str(self.settings.get("OPTIMIZER_TYPE", "") or "").strip()
+        if _opt:
+            cmd += ["--optimizer_type", _opt]
+        _opt_args = str(self.settings.get("OPTIMIZER_ARGS", "") or "").strip()
+        if _opt_args:
+            cmd += ["--optimizer_args", _opt_args]
         # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the

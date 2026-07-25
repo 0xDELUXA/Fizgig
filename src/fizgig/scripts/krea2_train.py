@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from fizgig.krea2.trainer import train_krea2
+from fizgig.training.optimizers import available_optimizers
 
 logging.basicConfig(level=logging.INFO)
 
@@ -59,6 +60,16 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--gradient_accumulation_steps", type=int, default=1,
                    help="Accumulate grads over N micro-batches per optimizer step (effective batch = N)")
     p.add_argument("--max_grad_norm", type=float, default=1.0, help="Gradient clipping norm (0 disables)")
+    p.add_argument("--optimizer_type", default="adamw8bit",
+                   help="Optimizer family, or a full module.path.ClassName. Available here: "
+                        + ", ".join(available_optimizers()))
+    p.add_argument("--optimizer_args", default="",
+                   help='Extra optimizer kwargs, e.g. "weight_decay=0.01 betas=0.9,0.99"')
+    p.add_argument("--compile_blocks", action="store_true",
+                   help="EXPERIMENTAL, and currently SLOWER: torch.compile each transformer block. "
+                        "1.37x on an isolated block but 0.794 vs 0.610 s/it end to end on an RTX "
+                        "5090. Kept as a research hook, not a recommendation. Needs triton (and "
+                        "MSVC on Windows); ignored under block swap")
     p.add_argument("--lr_scheduler", default="constant",
                    choices=["constant", "constant_with_warmup", "cosine", "cosine_with_restarts",
                             "linear", "polynomial"],
@@ -112,6 +123,8 @@ def main():
         adaptive_lr_min=args.adaptive_lr_min, adaptive_lr_max=args.adaptive_lr_max,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_grad_norm=args.max_grad_norm,
+        optimizer_type=args.optimizer_type, optimizer_args=args.optimizer_args,
+        compile_blocks=args.compile_blocks,
         lr_scheduler=args.lr_scheduler, lr_warmup_steps=args.lr_warmup_steps,
         lr_decay_steps=args.lr_decay_steps,
         lr_scheduler_num_cycles=args.lr_scheduler_num_cycles,

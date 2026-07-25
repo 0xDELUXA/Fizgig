@@ -66,6 +66,7 @@ def load_dit_for_training(
     quant_int8: str = "",          # "" | "bf16" | "int8" — W8A8 base, grad_mode of the same name
     blocks_to_swap: int = 0,
     gradient_checkpointing: bool = True,
+    compile_blocks: bool = False,
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
     device: str = "cuda",
@@ -132,7 +133,108 @@ def load_dit_for_training(
     network.apply_to(text_encoders=None, unet=dit, apply_text_encoder=False, apply_unet=True)
     network.requires_grad_(True)
     network.to(device=device, dtype=dtype)
+
+    # torch.compile LAST — after the LoRA has patched the forwards, so the compiled graph is the
+    # one that actually runs. Per block, not whole-model: the 28 blocks share a graph signature so
+    # inductor compiles once and reuses, and a failure is contained to one block.
+    if compile_blocks:
+        _compile_blocks(dit, blocks_to_swap)
     return dit, network
+
+
+def _find_msvc_env() -> bool:
+    """Put MSVC on PATH for torch.compile, if it is installed but not in this shell.
+
+    On Windows, inductor generates C++ for the host-side wrapper around the Triton kernels and
+    needs `cl.exe` to build it. Visual Studio installs it but only exposes it inside a developer
+    prompt, so launching Fizgig normally leaves torch.compile dead on arrival with a traceback out
+    of `get_cpp_compiler`. Running vcvars64.bat and importing the environment it sets is what a
+    developer prompt does; doing it here means the user does not have to know any of this.
+    """
+    import shutil
+    import subprocess
+
+    if os.name != "nt" or shutil.which("cl"):
+        return True
+
+    vswhere = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+                           "Microsoft Visual Studio", "Installer", "vswhere.exe")
+    roots = []
+    if os.path.isfile(vswhere):
+        try:
+            out = subprocess.run([vswhere, "-latest", "-products", "*", "-property", "installationPath"],
+                                 capture_output=True, text=True, timeout=30)
+            roots += [line.strip() for line in out.stdout.splitlines() if line.strip()]
+        except Exception:
+            pass
+    for pf in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+               os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+        for year in ("2022", "2019"):
+            for ed in ("BuildTools", "Community", "Professional", "Enterprise"):
+                roots.append(os.path.join(pf, "Microsoft Visual Studio", year, ed))
+
+    for root in roots:
+        vcvars = os.path.join(root, "VC", "Auxiliary", "Build", "vcvars64.bat")
+        if not os.path.isfile(vcvars):
+            continue
+        try:
+            out = subprocess.run(f'"{vcvars}" >nul && set', shell=True, capture_output=True,
+                                 text=True, timeout=120)
+            if out.returncode != 0:
+                continue
+            for line in out.stdout.splitlines():
+                if "=" in line:
+                    k, v = line.split("=", 1)
+                    os.environ[k] = v
+            if shutil.which("cl"):
+                logger.info("[compile] MSVC found via %s", os.path.basename(root))
+                return True
+        except Exception:
+            continue
+
+    logger.warning("[compile] no MSVC C++ compiler found — torch.compile needs one on Windows to "
+                   "build inductor's host-side code. Install 'Visual Studio Build Tools' with the "
+                   "C++ workload, or leave Compile Blocks off. Training continues uncompiled.")
+    return False
+
+
+def _compile_blocks(dit, blocks_to_swap: int) -> None:
+    """Compile each transformer block. Opt-in — see the roadmap for what it is and isn't worth.
+
+    The win is real on the quantised path (inductor fuses the per-matmul quantise/dequantise
+    elementwise work that bounds INT8), and small on dense bf16. It costs compile time on the
+    first step, and a recompile for every new latent shape a bucketed dataset presents.
+
+    Refused under block swap: compiled graphs assume their weights stay put, and swap moves them
+    between CPU and GPU every step.
+    """
+    if blocks_to_swap > 0:
+        logger.warning("[compile] ignored — block swap moves weights between devices every step, "
+                       "which invalidates compiled graphs. Quantise instead of swapping if you "
+                       "want both.")
+        return
+    try:
+        import triton  # noqa: F401
+    except Exception:
+        logger.warning("[compile] ignored — triton is not installed (pip install triton-windows "
+                       "on Windows, triton on Linux)")
+        return
+    if not _find_msvc_env():
+        return
+    # A compile failure must cost speed, not the run. Without this, anything dynamo cannot handle
+    # raises out of the first training step and kills a job that would otherwise have trained fine
+    # — and compile is an optimisation, never a requirement.
+    import torch._dynamo
+    torch._dynamo.config.suppress_errors = True
+    # dynamic=True because the dataset is bucketed. Measured over five bucket shapes on an INT8
+    # block: static and dynamic reach the same speed (51.6 vs 51.5 ms, both 1.37x over eager),
+    # but static pays a recompile per shape (27 s of first-pass compiles against 11 s).
+    n = 0
+    for i, block in enumerate(dit.blocks):
+        dit.blocks[i] = torch.compile(block, dynamic=True)
+        n += 1
+    logger.info("[compile] %d blocks compiled (dynamic shapes) — the first step pauses ~15 s to "
+                "compile", n)
 
 
 def _get_lin_function(x1, y1, x2, y2):
@@ -852,6 +954,10 @@ def train_krea2(
     # Effective batch = batch_size (1) x this. Grads accumulate over N micro-batches, then one
     # optimizer step. Per-image LR still applies per micro-batch (each image scales its own loss).
     gradient_accumulation_steps: int = 1,
+    # Optimizer family + free-form kwargs ("weight_decay=0.01 betas=0.9,0.99").
+    optimizer_type: str = "adamw8bit",
+    optimizer_args: str = "",
+    compile_blocks: bool = False,
     # LR schedule (step-level). Ignored when adaptive_lr is on — that watcher owns the LR.
     lr_scheduler: str = "constant",
     lr_warmup_steps: int = 0,
@@ -919,7 +1025,7 @@ def train_krea2(
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
         fp8_scaled=fp8_scaled, quant_4bit=quant_4bit, quant_int8=quant_int8,
-        blocks_to_swap=blocks_to_swap,
+        blocks_to_swap=blocks_to_swap, compile_blocks=compile_blocks,
         context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
         device=device, dtype=dtype)
     if blocks_to_swap > 0 and not quant_4bit:
@@ -932,13 +1038,9 @@ def train_krea2(
     network.requires_grad_(True)
 
     params = list(network.get_trainable_params())
-    try:
-        import bitsandbytes as bnb
-        optimizer = bnb.optim.AdamW8bit(params, lr=learning_rate)
-        logger.info("optimizer: AdamW8bit")
-    except Exception:
-        optimizer = torch.optim.AdamW(params, lr=learning_rate)
-        logger.info("optimizer: AdamW (bitsandbytes unavailable)")
+    from fizgig.training.optimizers import create_optimizer
+    optimizer, optimizer_label = create_optimizer(
+        optimizer_type, params, learning_rate, optimizer_args)
 
     collator = _Krea2Collator(shared_epoch, group)
     # Bucket-grouped ordering (OFF by default — measured, and it buys nothing today).
@@ -1361,10 +1463,10 @@ def train_krea2(
     out = os.path.join(output_dir, f"{output_name}.safetensors")
     # Record the context LoRA in metadata so users know to pair it at the same strength at
     # inference (the trained LoRA is context-dependent — same contract as Klein).
-    extra = None
+    extra = {"ss_optimizer": optimizer_label}
     if context_lora_path:
-        extra = {"ss_context_lora": os.path.basename(context_lora_path),
-                 "ss_context_lora_strength": str(context_lora_strength)}
+        extra.update({"ss_context_lora": os.path.basename(context_lora_path),
+                      "ss_context_lora_strength": str(context_lora_strength)})
     _save_lora(network, out, network_dim, network_alpha, dtype, extra_metadata=extra)
     logger.info(f"saved final LoRA -> {out}")
     return out

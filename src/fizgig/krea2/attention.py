@@ -40,6 +40,16 @@ class AttentionParams:
     cu_seqlens: Optional[torch.Tensor] = None
     max_seqlen: Optional[int] = None
 
+    def __post_init__(self):
+        # Every sequence the same length means attention can trim to it instead of attending over
+        # padding. Deciding that requires reading a CUDA tensor on the CPU, so it is resolved here,
+        # once per forward, rather than inside each of the 28 blocks. None = do not trim.
+        self.uniform_seqlen = None
+        if (self.seqlens is not None and self.attention_mask is not None and not self.split_attn
+                and self.attn_mode not in ("flash", "sageattn")):
+            if bool(torch.all(self.seqlens == self.seqlens[0])):
+                self.uniform_seqlen = int(self.seqlens[0])
+
     @staticmethod
     def create_attention_params(attn_mode: Optional[str], split_attn: bool) -> "AttentionParams":
         return AttentionParams(attn_mode, split_attn)
@@ -82,79 +92,12 @@ class AttentionParams:
             return AttentionParams(attn_mode, split_attn, img_len, attention_mask, seqlens, cu_seqlens, max_seqlen)
 
 
-# cuDNN's SDPA kernel is much faster than PyTorch's default choice for Krea 2's shapes — as
-# long as the shape STAYS THE SAME. It plans a kernel per shape, and re-plans whenever the shape
-# changes. Measured (48q/12kv heads, head_dim 128, bf16, RTX 5090, forward+backward):
-#
-#     fixed shape (one sequence length, repeated)     default 1.904 ms   cuDNN  0.656 ms
-#     varying shapes (576/900/1024/1156/1444 tokens)  default 2.248 ms   cuDNN 26.353 ms
-#
-# Bucketed training cycles through a different token count per aspect ratio, so it pays that
-# re-planning cost on nearly every step:
-#
-#     1024 preview (one shape, 8 steps)   5.15 s     -> 4.40 s     with cuDNN
-#     training step (bucketed)            0.704 s/it -> 1.57 s/it  with cuDNN
-#
-# NOT a backward-pass problem — cuDNN's backward is fine, and is 2.7-3.1x faster than the
-# default at a fixed shape with or without an attention mask.
-#
-# cudnn.benchmark matters enormously and in the opposite direction to intuition. PyTorch
-# defaults it to False, which puts cuDNN on a heuristic path that collapses under shape churn;
-# letting it autotune costs one benchmark per shape and then caches:
-#
-#     varying shapes, cudnn.benchmark=False .... 51.573 ms
-#     varying shapes, cudnn.benchmark=True .....  0.757 ms   (68x better, and 2.9x the default)
-#
-# It is therefore enabled whenever cuDNN is selected. In isolation that ought to make cuDNN win
-# for training too — but end to end it does NOT: 1.57 -> 1.28 s/it with autotuning, against
-# 0.704 for the default backend. Three cuDNN variants (plain / bucket-grouped / autotuned) all
-# lose, so something in the real attention call (variable-shaped masks, the split-attn path)
-# costs more than the isolated kernel benchmark shows. Inference-only stands, on measurement
-# rather than theory.
-#
-# torch.is_grad_enabled() is used as the switch because it tracks that distinction exactly:
-# False under no_grad (previews, Royale, Repair Studio, Explorer, sampling — one resolution
-# held for a whole render) and True in a training step, including inside a gradient-checkpoint
-# recompute. If a fixed-shape trainer ever appears, revisit the test rather than the conclusion.
-#
-# Numerically equivalent to bf16 tolerance (rel-err ~5e-4, masked or not). Probed once; if the
-# kernel is unavailable this is a no-op. FIZGIG_SDPA_BACKEND=default|cudnn overrides.
+# Backend choice (cuDNN for inference, PyTorch's default while training) lives in
+# fizgig.modules.sdpa so every attention site in the app makes the same decision — this one,
+# Klein's DiT, and both VAEs. See that module for the measurements behind it.
+from fizgig.modules.sdpa import sdpa_backend_ctx as _sdpa_backend_ctx
 
 logger = logging.getLogger(__name__)
-
-_SDPA_CTX = None
-
-
-def _sdpa_backend_ctx():
-    """cuDNN SDPA for inference; PyTorch's default when gradients are being recorded."""
-    import contextlib, os
-    choice = os.environ.get("FIZGIG_SDPA_BACKEND", "auto").lower()
-    if choice in ("default", "off", "none"):
-        return contextlib.nullcontext()
-    # Training means bucketing means shape churn, which is what cuDNN handles badly (see above).
-    if torch.is_grad_enabled() and choice != "cudnn":
-        return contextlib.nullcontext()
-
-    global _SDPA_CTX
-    if _SDPA_CTX is None:
-        _SDPA_CTX = contextlib.nullcontext
-        try:
-            import torch.nn.functional as _F
-            from torch.nn.attention import sdpa_kernel, SDPBackend
-            # cuDNN MUST be allowed to autotune. With benchmark=False (PyTorch's default) it
-            # uses a heuristic path that is catastrophic under shape churn — 51.6 ms vs 0.76 ms
-            # for the same varying-shape workload. Autotuning benchmarks once per shape and
-            # caches, and a bucketed dataset only ever presents a handful of shapes.
-            torch.backends.cudnn.benchmark = True
-            _q = torch.zeros(1, 8, 64, 64, device="cuda", dtype=torch.bfloat16)
-            with sdpa_kernel(SDPBackend.CUDNN_ATTENTION):
-                _F.scaled_dot_product_attention(_q, _q, _q)
-            _SDPA_CTX = lambda: sdpa_kernel(SDPBackend.CUDNN_ATTENTION)
-            logger.info("[attention] using the cuDNN SDPA backend (~2.5x faster than the default here)")
-        except Exception as e:
-            logger.info("[attention] cuDNN SDPA backend unavailable (%s) — using PyTorch's default choice",
-                        type(e).__name__)
-    return _SDPA_CTX()
 
 
 def attention(
@@ -202,24 +145,22 @@ def attention(
     # fused (flash / mem-efficient) kernels gain native GQA support. (q/k/v here are [B, L, H, D].)
     enable_gqa = q.shape[-2] != k.shape[-2]
 
-    # If split attn is False, attention mask is provided and all sequence lengths are same, we can trim the sequence
+    # When every sequence is the same length, attend over that length instead of the padded
+    # maximum. Whether that applies is decided once, in AttentionParams.__post_init__ — it needs
+    # to read a CUDA tensor on the CPU, and doing that here meant a device sync inside every one
+    # of the 28 blocks (56 with gradient checkpointing's recompute), plus a hard graph break that
+    # is why compiling the blocks lost end to end while the same block compiled 1.37x faster in
+    # isolation. flash/sageattn handle masks efficiently themselves and are excluded there.
     seqlen_trimmed = False
-    # Trim if all seqlens are the same, for attention modes other than flash or sageattn (which can handle masks efficiently)
-    if (
-        not attn_params.split_attn
-        and attn_params.attention_mask is not None
-        and attn_params.seqlens is not None
-        and (attn_params.attn_mode != "flash" and attn_params.attn_mode != "sageattn")
-    ):
-        if torch.all(attn_params.seqlens == attn_params.seqlens[0]):
-            seqlen = attn_params.seqlens[0].item()
-            q = q[:, :seqlen]
-            k = k[:, :seqlen]
-            v = v[:, :seqlen]
-            max_seqlen = attn_params.max_seqlen
-            attn_params = AttentionParams.create_attention_params(attn_params.attn_mode, False)  # do not in-place modify
-            attn_params.max_seqlen = max_seqlen  # keep max_seqlen for padding
-            seqlen_trimmed = True
+    seqlen = attn_params.uniform_seqlen
+    if seqlen is not None:
+        q = q[:, :seqlen]
+        k = k[:, :seqlen]
+        v = v[:, :seqlen]
+        max_seqlen = attn_params.max_seqlen
+        attn_params = AttentionParams.create_attention_params(attn_params.attn_mode, False)  # do not in-place modify
+        attn_params.max_seqlen = max_seqlen  # keep max_seqlen for padding
+        seqlen_trimmed = True
 
     # Determine tensor layout based on attention implementation
     if attn_params.attn_mode == "torch" or (

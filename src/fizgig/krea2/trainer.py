@@ -63,6 +63,7 @@ def load_dit_for_training(
     network_alpha: float = 32,
     fp8_scaled: bool = True,
     quant_4bit: bool = False,
+    quant_int8: str = "",          # "" | "bf16" | "int8" — W8A8 base, grad_mode of the same name
     blocks_to_swap: int = 0,
     gradient_checkpointing: bool = True,
     context_lora_path: str = None,
@@ -79,7 +80,12 @@ def load_dit_for_training(
     swap (weights live in _nf4_packed, not .weight). Loads the base bf16 on CPU and NF4-quantizes
     the block Linears onto the GPU layer-by-layer (peak VRAM never holds the whole bf16 model).
     Reuses the same target/exclude keys as the fp8 path (`blocks.` minus mod./norm/txtfusion)."""
-    if quant_4bit:
+    if quant_int8:
+        # INT8 W8A8: quantize from bf16 like NF4 (avoids fp8->int8 double-quant).
+        fp8_scaled = False
+        quant_4bit = False
+        loading_device = "cpu"
+    elif quant_4bit:
         # NF4 quantizes from bf16 (cleaner than fp8->NF4 double-quant), staged on CPU, and can't
         # coexist with block swap — force both here so callers can't misconfigure it.
         fp8_scaled = False
@@ -90,6 +96,18 @@ def load_dit_for_training(
     dit = load_krea2_dit(raw_path, device=device, dtype=dtype, fp8_scaled=fp8_scaled,
                          loading_device=loading_device)
     dit.requires_grad_(False)  # frozen base (QLoRA-style)
+    if quant_int8:
+        from fizgig.krea2.utils import KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS
+        from fizgig.modules.int8_train import apply_int8_training
+        n_q = apply_int8_training(
+            dit, target_keys=KREA2_FP8_OPTIMIZATION_TARGET_KEYS,
+            exclude_keys=KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS,
+            compute_device=torch.device(device), grad_mode=quant_int8)
+        dit.to(device)
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        logger.info(f"INT8 W8A8 base active: {n_q} Linears; grad_mode={quant_int8}; resident on {device}.")
     if quant_4bit:
         from fizgig.krea2.utils import KREA2_FP8_OPTIMIZATION_TARGET_KEYS, KREA2_FP8_OPTIMIZATION_EXCLUDE_KEYS
         from fizgig.modules.nf4 import apply_nf4_quantization
@@ -826,6 +844,7 @@ def train_krea2(
     save_every_n_epochs: int = 0,
     fp8_scaled: bool = True,
     quant_4bit: bool = False,
+    quant_int8: str = "",
     blocks_to_swap: int = 0,
     shift: float = 2.5,
     max_grad_norm: float = 1.0,
@@ -899,7 +918,8 @@ def train_krea2(
         blocks_to_swap = 0
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
-        fp8_scaled=fp8_scaled, quant_4bit=quant_4bit, blocks_to_swap=blocks_to_swap,
+        fp8_scaled=fp8_scaled, quant_4bit=quant_4bit, quant_int8=quant_int8,
+        blocks_to_swap=blocks_to_swap,
         context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
         device=device, dtype=dtype)
     if blocks_to_swap > 0 and not quant_4bit:

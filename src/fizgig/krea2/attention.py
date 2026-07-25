@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 import logging
+import os
 import torch
 from typing import Optional, Union
 
@@ -44,8 +45,16 @@ class AttentionParams:
         # Every sequence the same length means attention can trim to it instead of attending over
         # padding. Deciding that requires reading a CUDA tensor on the CPU, so it is resolved here,
         # once per forward, rather than inside each of the 28 blocks. None = do not trim.
+        #
+        # FIZGIG_ATTN_TRIM=0 keeps the padded length and passes the key-padding mask instead.
+        # Slower in raw compute (more tokens attend), but it is what makes SHAPES STABLE: the DiT
+        # pads the sequence to a multiple of 256 explicitly to keep kernel shapes stable, and
+        # trimming undoes that — on a 36-image set it turns 4 distinct shapes into 30, because the
+        # trimmed length includes each caption's own token count. That matters to any backend that
+        # plans or compiles per shape (cuDNN, torch.compile), so it needs to be measurable.
         self.uniform_seqlen = None
         if (self.seqlens is not None and self.attention_mask is not None and not self.split_attn
+                and os.environ.get("FIZGIG_ATTN_TRIM", "1") != "0"
                 and self.attn_mode not in ("flash", "sageattn")):
             if bool(torch.all(self.seqlens == self.seqlens[0])):
                 self.uniform_seqlen = int(self.seqlens[0])

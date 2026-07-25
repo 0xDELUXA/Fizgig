@@ -72,6 +72,25 @@ path is 51.6 ms under shape churn against 0.757 ms when autotuning is allowed. E
 Even so, cuDNN loses for training across three variants (plain 1.57, bucket-grouped 1.29,
 autotuned 1.28 vs 0.704), so inference-only stands on measurement, not theory.
 
+**Why it loses, settled.** The first write-up guessed "variable-shaped masks, the split-attn path".
+Both guesses were wrong, and the two real candidates have now been removed one at a time:
+
+    int8, trim (30 shapes) ................ 0.6098 s/it     cuDNN 1.17
+    int8, no trim (4 shapes) .............. 0.6289 s/it     cuDNN 1.00
+
+- **No mask ever reaches SDPA in training.** At batch size 1 the "are all sequences the same
+  length" test is trivially true, so attention always trims and passes `attn_mask=None`.
+- **Shape churn is real and self-inflicted** — but not the main cause. The DiT pads the sequence
+  to a multiple of 256 *explicitly to keep kernel shapes stable*, and the trim immediately undoes
+  it: because the trimmed length includes each caption's own token count, a 36-image set produces
+  **30 distinct shapes, not the 7 image buckets**. Stable shapes are worth 15% to cuDNN
+  (1.17 -> 1.00) and it is still 1.6x slower than the default backend.
+
+So cuDNN is simply the worse kernel for this shape in a training step, with both confounds gone.
+The trim stays on: it costs the default backend nothing to keep (0.6098 vs 0.6289, ~3% in its
+favour). `FIZGIG_ATTN_TRIM=0` keeps the padded shapes for anyone re-testing a shape-sensitive
+backend.
+
 The gate now lives in `modules/sdpa.py` and covers **Klein's DiT as well as Krea 2's** — one
 decision for the whole app. Two changes came out of extending it:
 
@@ -103,6 +122,12 @@ both). Behaviour is identical, covered by `tests/test_attention_trim.py`.
 That is ~2.5%, which is close enough to run-to-run noise (±2% across repeats) that I would not
 claim it as a speed win on its own. It is worth having regardless: it removes 56 avoidable device
 stalls per step, and it was the graph break that made torch.compile lose (see below).
+
+It does **not** change the cuDNN verdict — the sync was present in both arms, so it could never
+have explained a 2.2x gap. Re-measured after the fix, cuDNN is 1.17 vs 0.6098: still ~1.9x
+slower, from ~2.2x before. The narrowing is consistent with the syncs having blocked CPU/GPU
+overlap (cuDNN does more CPU-side work per call, planning per shape, and a stalled CPU cannot
+hide it), but nowhere near enough to flip the result.
 
 ### 5. Things measured and deliberately NOT shipped
 - **Bucket-grouped batch ordering** (what OneTrainer's `AspectBatchSorting` does). Random

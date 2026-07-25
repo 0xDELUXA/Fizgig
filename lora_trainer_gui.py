@@ -4207,10 +4207,55 @@ class LoRATrainerGUI:
         if raw.lower().startswith("auto"):
             cfg = ARCHITECTURES.get(self.architecture_var.get(), {})
             if cfg.get("is_krea2"):
-                return self._auto_krea2_blocks_swap()
+                return self._auto_krea2_strategy()
             return self._auto_training_blocks_swap()
         m = _re.match(r'\d+', raw)
         return int(m.group()) if m else 0
+
+    def _auto_krea2_strategy(self) -> int:
+        """Choose Krea 2 quantisation AND swap together, then return the swap count.
+
+        Picking a swap count from VRAM alone produced the worst possible outcome on 16 GB
+        cards: fp8 doesn't fit, so it swapped 20 of 28 blocks every step. Measured on a 5090
+        (Krea 2, 36 imgs @ 0.25 MP, batch 1):
+
+            fp8, no swap   0.85 s/it   20.1 GB   12.5% CPU
+            fp8, swap 20   3.09 s/it   12.3 GB   49.9% CPU
+            NF4, no swap   0.70 s/it   13.8 GB   14.0% CPU
+
+        NF4 is both faster and smaller, so it leads. Only touches the 4-bit toggle when the
+        user has left block swap on Auto — an explicit swap choice is left alone.
+        """
+        try:
+            import sys as _sys, os as _os
+            _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "src"))
+            from fizgig.utils.capabilities import detect, recommend_krea2_strategy
+        except Exception:
+            return self._auto_krea2_blocks_swap()
+
+        try:
+            caps = detect()
+            plan = recommend_krea2_strategy(caps=caps)
+        except Exception:
+            return self._auto_krea2_blocks_swap()
+
+        try:
+            self.update_console(f"[auto] {caps.summary()}\n[auto] {plan.reason}\n")
+        except Exception:
+            pass
+        if hasattr(self, "quant_4bit_var") and bool(self.quant_4bit_var.get()) != plan.quant_4bit:
+            self.quant_4bit_var.set(plan.quant_4bit)
+            try:
+                self._on_quant_4bit_toggle()
+            except Exception:
+                pass
+            try:
+                self.update_console(
+                    f"[auto] 4-bit NF4 base turned {'ON' if plan.quant_4bit else 'OFF'} "
+                    "(block swap is on Auto — set it explicitly to control this yourself)\n")
+            except Exception:
+                pass
+        return int(plan.blocks_to_swap)
 
     def _auto_krea2_blocks_swap(self) -> int:
         """Pick Krea 2 training block swap from GPU VRAM. Krea 2's RAW DiT is ~14 GB in fp8,

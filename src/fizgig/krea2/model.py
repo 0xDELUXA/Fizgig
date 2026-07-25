@@ -430,8 +430,16 @@ class SingleStreamDiT(nn.Module):
         imglen = img.shape[1]
         txtmask = mask[:, imglen:]  # (B, txt_len) bool
 
-        # Text fusion is a self-attention over text tokens only (img_len=0). The per-layer
-        # blocks see every token (no mask); the refiner masks padding via txtmask.
+        # Text fusion is a self-attention over text tokens only (img_len=0), in two stages that
+        # attend along DIFFERENT axes. The per-layer blocks flatten to (b*seq, layers, dim) and
+        # attend across the encoder's layer stack for each token — the text length is their BATCH,
+        # not their sequence — which is why a key-padding mask does not apply to them and they get
+        # `nomask`. The refiner attends the text sequence itself and does mask padding.
+        #
+        # Do NOT assume text padding is therefore inert here: padding the text up to a multiple
+        # (to cut the distinct-shape count) measurably changed the output for short captions,
+        # ~2% relative, while the equivalent padding of the COMBINED sequence is bit-exact. That
+        # is unexplained and the change was reverted — see docs/PERF_ROADMAP.md.
         txt_attn_params_nomask = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, None)
         txt_attn_params = AttentionParams.create_attention_params_from_mask(self.attn_mode, self.split_attn, 0, txtmask)
         context = self.txtfusion(context, txt_attn_params_nomask, txt_attn_params)

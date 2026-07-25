@@ -41,6 +41,10 @@ def gather_valid_text(txt, mask):
     """
     valid = [txt[i][mask[i]] for i in range(txt.shape[0])]  # list of (n_i, L, D)
     max_len = max(v.shape[0] for v in valid)
+    # NOTE: rounding max_len up to a multiple (to cut the distinct-shape count, which is what
+    # cuDNN and torch.compile pay per-plan for) was tried and REVERTED — it changed the model's
+    # output by ~2% relative for short captions. See docs/PERF_ROADMAP.md; padding here is not
+    # as inert as this docstring's "lossless" claim suggests, and the reason is not yet known.
     out = txt.new_zeros(txt.shape[0], max_len, txt.shape[2], txt.shape[3])
     newmask = torch.zeros(txt.shape[0], max_len, device=txt.device, dtype=torch.bool)
     for i, v in enumerate(valid):

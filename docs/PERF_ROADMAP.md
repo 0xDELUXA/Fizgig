@@ -102,7 +102,30 @@ cuDNN accepts the key-padding mask directly, so this does not push it onto a fal
 
 The remaining churn is the **text-fusion** stack, which attends the text tensor at its exact
 length — there is no padding to round into, so 26 caption lengths stay 26 shapes. Total 36.
-Padding text before txtfusion the way the main path pads would cut that to ~13; not done yet.
+
+**Padding the text was tried and REVERTED.** It is worth ~14 s of planning per run, because plan
+cost turns out to be FLAT in shape size — a 17-token shape costs the same ~0.55 s to plan as a
+1097-token one, so those 26 short text shapes really do carry equal weight:
+
+    seq len     17    plan 564 ms
+    seq len   1097    plan 597 ms
+
+But rounding the text length up in `gather_valid_text` changed the model's output by **~2%
+relative for short captions** (16-28 tokens; longer ones were unaffected). That is not roundoff:
+the control — `FIZGIG_ATTN_TRIM=0`, which pads the COMBINED sequence and masks it, also
+mathematically identical — comes back **bit-exact** on the same samples.
+
+    text len   pad-vs-exact   no-trim-vs-exact (control)
+          20       2.13e-02             0.00e+00
+          28       2.41e-02             0.00e+00
+          16       2.02e-02             0.00e+00
+         116       0.00e+00             0.00e+00
+
+So masking is provably correct in the main blocks, and something about padding the text
+specifically is not inert. It does not reproduce on a small randomly-initialised DiT, which rules
+out the obvious masking-logic explanations. Reverted rather than shipped: an unexplained 2% change
+to a training forward is not worth a scheduling heuristic firing sooner. Worth re-opening with a
+per-stage bisect of txtfusion (layerwise -> projector -> refiner) on the real weights.
 
 `consider_training_backend()` then decides at each epoch boundary. After one epoch every shape has
 been seen, so it is arithmetic on a known count rather than a guess: ~35 steps per shape to break

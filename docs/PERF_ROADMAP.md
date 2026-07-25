@@ -85,12 +85,38 @@ that **cannot lose**, not because cuDNN is bad; `FIZGIG_SDPA_BACKEND=cudnn` is t
    setting a global torch flag with no measurable effect is worse than leaving it alone
    (`FIZGIG_CUDNN_BENCHMARK=1` opts back in).
 
-**What the cost actually scales with is the number of DISTINCT shapes**, and that is self-inflicted.
-The DiT pads the sequence to a multiple of 256 *explicitly to keep kernel shapes stable*, and the
-attention trim immediately undoes it: the trimmed length carries each caption's own token count, so
-36 images produce **30 distinct shapes, not the 7 image buckets** anyone would assume. `FIZGIG_ATTN_TRIM=0`
-keeps the padded shapes (4 instead of 30) at the cost of attending over padding — measured 0.6289
-vs 0.6098 s/it on the default backend, so the trim stays on by default.
+**Shipped: the shape count is fixed, and the backend now chooses itself.**
+
+The cost scales with the number of DISTINCT shapes, and ours was self-inflicted. The DiT pads the
+sequence to a multiple of 256 *explicitly to keep kernel shapes stable*, and the attention trim
+immediately undid it: the trimmed length carried each caption's own token count, so 36 images
+produced 30 distinct shapes where 4 were intended. Attention now rounds the trim UP to a multiple
+of 64 and masks the slack (`FIZGIG_ATTN_TRIM_MULTIPLE`, 1 disables):
+
+    main-block shapes    30 -> 10
+    token cost           +3.6%
+    end to end           0.6098 -> 0.6098 s/it   (no measurable cost; peak VRAM 19.0 -> 18.1 GB)
+    valid tokens         bit-identical to the exact trim (tests/test_attention_trim.py)
+
+cuDNN accepts the key-padding mask directly, so this does not push it onto a fallback.
+
+The remaining churn is the **text-fusion** stack, which attends the text tensor at its exact
+length — there is no padding to round into, so 26 caption lengths stay 26 shapes. Total 36.
+Padding text before txtfusion the way the main path pads would cut that to ~13; not done yet.
+
+`consider_training_backend()` then decides at each epoch boundary. After one epoch every shape has
+been seen, so it is arithmetic on a known count rather than a guess: ~35 steps per shape to break
+even (the measured 1.3 s plan vs 37 ms/step saving), doubled for margin. Verified on a real run:
+
+    epoch 1   0.611 s/step   default
+    epoch 2   1.583 s/step   cuDNN, building 36 plans (~37 s, ~1.0 s each)
+    epoch 3   0.556 s/step   cuDNN warm
+    epoch 4   0.583 s/step   cuDNN warm      -> ~7% faster, as predicted
+
+With 36 shapes the real payback is ~925 steps; the formula asks for 1260 and the margin doubles
+that, so on a 36-image set it takes ~70 epochs to trigger. Conservative on purpose — being wrong
+should cost nothing. Fixing txtfusion padding is what would make it fire for normal run lengths.
+`FIZGIG_SDPA_BACKEND=default` disables it outright; `FIZGIG_SDPA_TRAIN_MARGIN` tunes the margin.
 
 Also settled while chasing this: **no mask ever reaches SDPA in training.** At batch size 1 the
 "are all sequences the same length" test is trivially true, so attention always trims and passes

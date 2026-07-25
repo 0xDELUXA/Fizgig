@@ -55,14 +55,59 @@ logger = logging.getLogger(__name__)
 
 _SDPA_CTX = None
 
+# Auto-enable for training. cuDNN costs ~1.3 s per distinct shape to plan and saves ~37 ms/step,
+# so it pays for itself after roughly 35 steps per shape — a ratio, which travels across hardware
+# better than either absolute would. Doubled for margin: at exactly break-even there is nothing to
+# win, and being wrong should cost a few percent, not a run.
+_STEPS_PER_SHAPE = 35
+_MARGIN = float(os.environ.get("FIZGIG_SDPA_TRAIN_MARGIN", "2.0"))
+_seen_shapes: set = set()
+_training_cudnn = False
+
+
+def note_shape(seqlen) -> None:
+    """Record a TRAINING sequence length. Called once per forward, not per block.
+
+    Gated on grad being recorded: in-training previews render at their own resolution under
+    no_grad, and counting those would inflate the shape count with shapes the training steps
+    never pay for — pushing the payback estimate out and suppressing a switch that would win.
+    """
+    if seqlen and torch.is_grad_enabled():
+        _seen_shapes.add(int(seqlen))
+
+
+def consider_training_backend(steps_remaining: int):
+    """Turn cuDNN on for the rest of a training run once it will pay for itself.
+
+    Called at an epoch boundary, by which point every shape the dataset produces has been seen —
+    so this is arithmetic on a known shape count, not a guess. Returns (n_shapes, steps_needed)
+    when it flips the switch, else None.
+    """
+    global _training_cudnn
+    if _training_cudnn or not _seen_shapes:
+        logger.debug("[attention] backend unchanged (%s)",
+                     "already switched" if _training_cudnn else "no shapes recorded")
+        return None
+    if os.environ.get("FIZGIG_SDPA_BACKEND", "auto").lower() in ("default", "off", "none"):
+        return None       # explicitly overridden — do not second-guess the user
+    needed = len(_seen_shapes) * _STEPS_PER_SHAPE * _MARGIN
+    if steps_remaining >= needed:
+        _training_cudnn = True
+        return len(_seen_shapes), int(needed)
+    logger.info("[attention] staying on the default backend: %d distinct sequence shape(s) need "
+                "~%d steps to pay back cuDNN's per-shape planning, and %d remain",
+                len(_seen_shapes), int(needed), steps_remaining)
+    return None
+
 
 def sdpa_backend_ctx():
     """cuDNN SDPA for inference; PyTorch's default when gradients are being recorded."""
     choice = os.environ.get("FIZGIG_SDPA_BACKEND", "auto").lower()
     if choice in ("default", "off", "none"):
         return contextlib.nullcontext()
-    # Training means bucketing means shape churn, which is what cuDNN handles badly (see above).
-    if torch.is_grad_enabled() and choice != "cudnn":
+    # Training pays cuDNN's per-shape planning cost up front, so it only wins on runs long enough
+    # to amortize it — consider_training_backend() decides that from the real shape count.
+    if torch.is_grad_enabled() and choice != "cudnn" and not _training_cudnn:
         return contextlib.nullcontext()
 
     global _SDPA_CTX

@@ -31,6 +31,12 @@ except ImportError:
     xops = None
 
 
+# Sequence lengths are rounded up to a multiple of this before attention, so a bucketed dataset
+# presents a few distinct shapes rather than one per caption length. 1 disables the rounding
+# (exact trim, the old behaviour). See AttentionParams.__post_init__.
+_TRIM_MULTIPLE = int(os.environ.get("FIZGIG_ATTN_TRIM_MULTIPLE", "64"))
+
+
 @dataclass
 class AttentionParams:
     attn_mode: Optional[str] = None
@@ -53,11 +59,28 @@ class AttentionParams:
         # trimmed length includes each caption's own token count. That matters to any backend that
         # plans or compiles per shape (cuDNN, torch.compile), so it needs to be measurable.
         self.uniform_seqlen = None
+        self.uniform_exact = True     # False -> the trimmed window still contains padding
         if (self.seqlens is not None and self.attention_mask is not None and not self.split_attn
                 and os.environ.get("FIZGIG_ATTN_TRIM", "1") != "0"
                 and self.attn_mode not in ("flash", "sageattn")):
             if bool(torch.all(self.seqlens == self.seqlens[0])):
-                self.uniform_seqlen = int(self.seqlens[0])
+                valid = int(self.seqlens[0])
+                # Round the trim length UP to a multiple, so sequence lengths land in a handful
+                # of buckets instead of taking a distinct value per caption. Trimming to the
+                # exact valid length sounds optimal and is not: the length carries each caption's
+                # own token count, which turned 36 images into 30 distinct shapes and made every
+                # shape-planning backend (cuDNN, torch.compile) pay a first-sight cost it could
+                # never amortize. At x64 that is 10 shapes for +3.6% tokens.
+                q = _TRIM_MULTIPLE
+                if q > 1 and self.max_seqlen:
+                    rounded = min(((valid + q - 1) // q) * q, int(self.max_seqlen))
+                    self.uniform_exact = rounded == valid
+                    self.uniform_seqlen = rounded
+                else:
+                    self.uniform_seqlen = valid
+                # Tell the backend chooser which shapes this run actually attends, so it can work
+                # out whether cuDNN's per-shape planning will pay for itself.
+                _note_shape(self.uniform_seqlen)
 
     @staticmethod
     def create_attention_params(attn_mode: Optional[str], split_attn: bool) -> "AttentionParams":
@@ -104,6 +127,7 @@ class AttentionParams:
 # Backend choice (cuDNN for inference, PyTorch's default while training) lives in
 # fizgig.modules.sdpa so every attention site in the app makes the same decision — this one,
 # Klein's DiT, and both VAEs. See that module for the measurements behind it.
+from fizgig.modules.sdpa import note_shape as _note_shape  # noqa: E402
 from fizgig.modules.sdpa import sdpa_backend_ctx as _sdpa_backend_ctx
 
 logger = logging.getLogger(__name__)
@@ -167,7 +191,12 @@ def attention(
         k = k[:, :seqlen]
         v = v[:, :seqlen]
         max_seqlen = attn_params.max_seqlen
+        # The window is rounded up to a multiple, so unless it landed exactly on the valid length
+        # it still contains padding — which must stay masked or those tokens join the attention.
+        # The mask is [B, 1, 1, S] for the torch path, so it slices on the last axis.
+        kept_mask = None if attn_params.uniform_exact else attn_params.attention_mask[..., :seqlen]
         attn_params = AttentionParams.create_attention_params(attn_params.attn_mode, False)  # do not in-place modify
+        attn_params.attention_mask = kept_mask
         attn_params.max_seqlen = max_seqlen  # keep max_seqlen for padding
         seqlen_trimmed = True
 

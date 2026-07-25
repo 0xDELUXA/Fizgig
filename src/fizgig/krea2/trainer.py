@@ -30,6 +30,7 @@ from fizgig.dataset.config import (
 )
 from fizgig.krea2.utils import load_krea2_dit
 from fizgig.krea2.sampling import gather_valid_text, prepare
+from fizgig.modules.sdpa import consider_training_backend as _consider_training_backend
 from fizgig.networks.lora import create_network
 from fizgig.training.metadata import ARCHITECTURE_KREA2
 from fizgig.training.train_utils import LossRecorder
@@ -1344,6 +1345,18 @@ def train_krea2(
             pending_accum = 0
         logger.info(f"epoch {epoch + 1}/{max_train_epochs}  avr_loss={loss_recorder.moving_average:.4f}  step={global_step}"
                     + (f"  lr={optimizer.param_groups[0]['lr']:.3e}" if scheduler is not None else ""))
+
+        # Attention backend: cuDNN's kernel is ~6% faster per step but costs ~1.3 s per distinct
+        # sequence shape to plan, so it only wins on runs long enough to amortize that. After a
+        # full epoch every shape the dataset produces has been seen, so this is arithmetic rather
+        # than a guess — see fizgig/modules/sdpa.py.
+        _switch = _consider_training_backend(steps_per_epoch * (max_train_epochs - epoch - 1))
+        if _switch:
+            _n_shapes, _needed = _switch
+            logger.info(f"[attention] switching to the cuDNN backend for the rest of the run — "
+                        f"{_n_shapes} distinct sequence shape(s), which pays back within "
+                        f"{_needed} steps and this run has more left. Expect a slower first pass "
+                        f"over each shape while it plans, then ~6% faster steps.")
 
         # Adaptive LR: epoch-boundary plateau tracker (before save/preview so they reflect the
         # post-adjustment state). Uses the smoothed avr_loss as the signal, like Klein.

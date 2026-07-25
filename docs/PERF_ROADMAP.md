@@ -355,6 +355,35 @@ Read from a clone of the repo, not inferred:
 
 ---
 
+## OneTrainer comparison (measured, and it does not flatter us)
+
+Same RTX 5090, same 36 images, same 3 epochs, batch 1, 512px, INT8 W8A8, LoRA rank 16 / alpha 1,
+plain AdamW, gradient checkpointing. OneTrainer 116cf51 with torch 2.12.0+cu130, configured from
+their own defaults plus their shipped `#krea2 LoRA 24GB` preset. Identical final losses across
+their runs (0.191 / smooth 0.0925) confirm the configurations do the same work.
+
+    OneTrainer, as shipped (async_offloading: true)    4.05   s/step    GPU 45-60%
+    OneTrainer, async_offloading: false                0.294  s/step    GPU 98%
+    Fizgig, matched                                    0.5917 s/step    GPU 85-97%
+
+**Their shipped default is badly misconfigured** — `async_offloading: true` with
+`temp_device: cpu`, on a preset whose whole point is that everything fits in 24 GB
+(`offload_fraction: 0.0`). Turning it off is 13.8x. That is the same trap Fizgig had this morning,
+where a swap default cost 16 GB users 4.4x; theirs costs every user of that preset 13.8x.
+
+**But their trainer at its best is 2.0x faster than ours**, and that is the finding that matters.
+The likely cause is `torch.compile`, which they enable by default and which fuses the
+quantise/dequantise elementwise work that bounds an INT8 path — exactly the 1.37x I measured on an
+isolated INT8 block and then failed to realise end to end (0.794 vs 0.610 s/it). Their result says
+the win is real and my implementation was the problem: whole-block compile, graph breaks, and
+per-shape recompiles. **Revisit torch.compile — it is now the single biggest known perf lead.**
+
+Note their compile is not free either: a 32 s first step, and it only pays off because the rest of
+the run is fast. Against their as-shipped default we are 6.8x faster, which is true and worth
+nothing — nobody should be quoting a number from a misconfigured baseline.
+
+---
+
 ## Method note
 
 Most of the wins were pre-existing code that was subtly wrong — a swap default, an inverted weight

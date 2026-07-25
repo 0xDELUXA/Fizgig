@@ -185,6 +185,50 @@ def compute_loss(dit, latent, hidden_states, attention_mask, *, shift=2.5, dtype
     return F.mse_loss(pred.float(), target_tokens.float()), float(t.mean().item())
 
 
+
+class _BucketOrderSampler(torch.utils.data.Sampler):
+    """Yield indices grouped by latent shape, shuffled within and across groups.
+
+    Keeps an epoch random while making consecutive steps mostly share a shape, which is what
+    lets shape-sensitive kernels (cuDNN attention, cuBLAS heuristics, torch.compile's shape
+    cache) stay warm. Reshuffles every epoch so the order is never identical twice.
+    """
+
+    def __init__(self, dataset, seed: int = 42):
+        self.dataset = dataset
+        self.seed = int(seed)
+        self.epoch = 0
+        buckets = {}
+        for i in range(len(dataset)):
+            lat = dataset[i]["latents"]
+            buckets.setdefault(tuple(lat.shape[-2:]), []).append(i)
+        self.buckets = list(buckets.values())
+        self.n = sum(len(b) for b in self.buckets)
+        self.n_shapes = len(self.buckets)
+        # What a plain shuffle would cost, for the log line: probability consecutive draws
+        # differ, times the number of transitions.
+        p_same = sum((len(b) / self.n) ** 2 for b in self.buckets)
+        self.est_random_changes = int(round((1 - p_same) * (self.n - 1)))
+
+    def set_epoch(self, epoch: int):
+        self.epoch = int(epoch)
+
+    def __len__(self):
+        return self.n
+
+    def __iter__(self):
+        import random as _r
+        rng = _r.Random(self.seed + self.epoch)
+        order = []
+        groups = [list(b) for b in self.buckets]
+        for g in groups:
+            rng.shuffle(g)
+        rng.shuffle(groups)
+        for g in groups:
+            order.extend(g)
+        return iter(order)
+
+
 class _Krea2Collator:
     """DataLoader batch_size is always 1 (the dataset batches internally by bucket)."""
 
@@ -877,7 +921,32 @@ def train_krea2(
         logger.info("optimizer: AdamW (bitsandbytes unavailable)")
 
     collator = _Krea2Collator(shared_epoch, group)
-    loader = DataLoader(group, batch_size=1, shuffle=True, collate_fn=collator, num_workers=0)
+    # Bucket-grouped ordering (OFF by default — measured, and it buys nothing today).
+    #
+    # OneTrainer groups batches by resolution (AspectBatchSorting); Fizgig shuffles freely,
+    # which changes latent shape on ~43% of steps for a mixed-aspect dataset. That sounded
+    # like it should matter — shape churn makes cuDNN re-plan, cuBLAS re-pick algorithms and
+    # the allocator fragment. Measured on a 36-image set, 3 epochs, NF4:
+    #
+    #     shuffled ................ 0.7042 s/it
+    #     bucket-grouped .......... 0.7042 s/it   (no change at all)
+    #     bucket-grouped + cuDNN .. 1.29   s/it   (vs 1.57 unbucketed — helps, still 1.8x worse)
+    #
+    # So the default backend does not care, and it is not enough to rescue cuDNN either. Left
+    # in because it should matter for torch.compile, which recompiles per shape — but not
+    # enabled without evidence, since grouping correlates consecutive gradients (all one aspect
+    # in a row), and that is a real if modest quality risk to take for nothing.
+    _sampler = None
+    if os.environ.get("FIZGIG_BUCKET_ORDER", "0") != "0":
+        try:
+            _sampler = _BucketOrderSampler(group, seed=seed)
+            logger.info("[dataloader] bucket-grouped order: %d shapes, ~%d shape changes/epoch "
+                        "(random shuffle would be ~%d)", _sampler.n_shapes,
+                        _sampler.n_shapes, _sampler.est_random_changes)
+        except Exception as e:
+            logger.warning("[dataloader] bucket ordering unavailable (%s) — using plain shuffle", e)
+    loader = DataLoader(group, batch_size=1, shuffle=(_sampler is None), sampler=_sampler,
+                        collate_fn=collator, num_workers=0)
 
     os.makedirs(output_dir, exist_ok=True)
     adaptive = AdaptiveLR(adaptive_lr_min, adaptive_lr_max) if adaptive_lr else None
@@ -1099,6 +1168,8 @@ def train_krea2(
     pending_accum = 0  # micro-batches backward'd since the last optimizer step
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
+        if _sampler is not None:
+            _sampler.set_epoch(epoch)      # reshuffle within/across buckets each epoch
         for i, batch in enumerate(loader):
             # Excluded images (two failed AI recaptions, still stuck) are skipped ENTIRELY: no
             # forward, no gradient, and no loss recorded — avr_loss stops carrying their permanent

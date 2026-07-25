@@ -82,23 +82,30 @@ class AttentionParams:
             return AttentionParams(attn_mode, split_attn, img_len, attention_mask, seqlens, cu_seqlens, max_seqlen)
 
 
-# cuDNN's SDPA kernel is much faster than PyTorch's default choice for Krea 2's shapes — but
-# only in the FORWARD direction. Measured (48q/12kv heads, head_dim 128, bf16, RTX 5090):
+# cuDNN's SDPA kernel is much faster than PyTorch's default choice for Krea 2's shapes — as
+# long as the shape STAYS THE SAME. It plans a kernel per shape, and re-plans whenever the shape
+# changes. Measured (48q/12kv heads, head_dim 128, bf16, RTX 5090, forward+backward):
 #
-#     forward only:  seq 1024  default 0.330 ms   cuDNN 0.128 ms   (2.6x)
-#                    seq 4096  default 4.664 ms   cuDNN 1.841 ms   (2.5x)
+#     fixed shape (one sequence length, repeated)     default 1.904 ms   cuDNN  0.656 ms
+#     varying shapes (576/900/1024/1156/1444 tokens)  default 2.248 ms   cuDNN 26.353 ms
 #
-# End-to-end, however, the two diverge completely:
+# Bucketed training cycles through a different token count per aspect ratio, so it pays that
+# re-planning cost on nearly every step:
 #
-#     1024 preview (no grad) .......... 5.15 s -> 4.40 s   with cuDNN
-#     training step (fwd+bwd) ......... 0.70  -> 1.57 s/it with cuDNN   <- 2.2x SLOWER
+#     1024 preview (one shape, 8 steps)   5.15 s     -> 4.40 s     with cuDNN
+#     training step (bucketed)            0.704 s/it -> 1.57 s/it  with cuDNN
 #
-# cuDNN's backward is the problem, and a forward-only microbenchmark hides it entirely. So the
-# backend is selected on whether gradients are being recorded, not globally.
+# NOT a backward-pass problem — cuDNN's backward is fine, and is 2.7-3.1x faster than the
+# default at a fixed shape with or without an attention mask. It is purely shape churn.
+#
+# torch.is_grad_enabled() is used as the switch because it tracks that distinction exactly:
+# False under no_grad (previews, Royale, Repair Studio, Explorer, sampling — one resolution
+# held for a whole render) and True in a training step, including inside a gradient-checkpoint
+# recompute. If a fixed-shape trainer ever appears, revisit the test rather than the conclusion.
 #
 # Numerically equivalent to bf16 tolerance (rel-err ~5e-4, masked or not). Probed once; if the
-# kernel is unavailable this is a no-op and PyTorch chooses as before. FIZGIG_SDPA_BACKEND=
-# default|cudnn overrides.
+# kernel is unavailable this is a no-op. FIZGIG_SDPA_BACKEND=default|cudnn overrides.
+
 logger = logging.getLogger(__name__)
 
 _SDPA_CTX = None
@@ -110,9 +117,7 @@ def _sdpa_backend_ctx():
     choice = os.environ.get("FIZGIG_SDPA_BACKEND", "auto").lower()
     if choice in ("default", "off", "none"):
         return contextlib.nullcontext()
-    # Training: cuDNN's backward is 2.2x slower end-to-end (see above). is_grad_enabled is the
-    # right test — it is False under torch.no_grad (previews, the workbench, sampling) and True
-    # in a training step, including inside a gradient-checkpoint recompute.
+    # Training means bucketing means shape churn, which is what cuDNN handles badly (see above).
     if torch.is_grad_enabled() and choice != "cudnn":
         return contextlib.nullcontext()
 

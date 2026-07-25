@@ -315,8 +315,25 @@ long enough to amortise warm-up — roughly 8+ epochs on a 36-image set. Warm-up
 cheaper across runs (whole-run 0.759 then 0.588 on a second run), which is consistent with
 inductor's on-disk cache, though that was not isolated.
 
-**Against OneTrainer this closes the gap from 2.0x to 1.37x** (their 0.294 vs our 0.403). The
-remainder is unexplained; their per-linear compiled INT8 kernel is the next thing to study.
+**Against OneTrainer, stacking their configuration choices closes almost all of it:**
+
+    eager baseline                        0.5917 s/step
+    compiled (bf16 grads, default attn)   0.403          1.47x
+    compiled + int8 grads + cuDNN         0.333          1.78x
+    OneTrainer                            0.294          they lead 1.13x
+
+Both extra knobs already existed in Fizgig and were simply off. `--quant_int8 int8` was set aside
+as "lossier" and cuDNN-for-training was set aside on a benchmark too short to see past its
+plan-building cost — the same short-run mistake as compile itself.
+
+They are speed-for-accuracy trades, not free wins: int8 gradients measure rel-err 1.05e-02 against
+bf16's 4.94e-03, and neither has a trained-LoRA comparison behind it. Peter's call was that the
+gradient error is very unlikely to show up in output quality, so this configuration stands.
+
+The residual ~13% is unexplained. Ruled out by measurement: the INT8 scaling formulation (ours and
+theirs compile to the same thing, 0.140 vs 0.139 ms). Remaining candidates: torch 2.12 vs our 2.10
+inductor, and compile granularity — they compile a wrapper that CONTAINS the gradient checkpoint,
+we compile the raw block inside it.
 
 ## What was verified about OneTrainer
 

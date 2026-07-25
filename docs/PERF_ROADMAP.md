@@ -20,7 +20,8 @@ subtly inverted — not to missing kernels.
 | Klein 1024 preview | 3.01 s | **2.74 s** |
 | Optimizer choice (Krea 2) | AdamW8bit, hardcoded | **7 families + any module path** |
 | Attention device syncs per step | 56 (every block, twice) | **1** |
-| Training attention backend | — | unchanged (cuDNN wins only past ~1260 steps) |
+| Distinct attention shapes | 36 | **12** (a known perturbation — see below) |
+| Training attention backend | — | auto-cuDNN, now viable at ~23 epochs |
 
 ### 1. Block swap was the whole story
 `_auto_krea2_blocks_swap` picked a swap count from VRAM, which handed 16 GB cards the worst
@@ -103,14 +104,17 @@ cuDNN accepts the key-padding mask directly, so this does not push it onto a fal
 The remaining churn is the **text-fusion** stack, which attends the text tensor at its exact
 length — there is no padding to round into, so 26 caption lengths stay 26 shapes. Total 36.
 
-**Padding the text was tried twice and is still OFF. The cause remains unidentified.**
+**Text padding is LANDED, with a known perturbation nobody has explained.**
 
-The motivation holds: plan cost is FLAT in shape size, so those 26 short text-fusion shapes cost as
-much to plan as the big ones (17-token shape 564 ms, 1097-token 597 ms), and padding would take the
-count 36 -> 12 and the cuDNN payback from ~70 epochs to ~23.
+`gather_valid_text` rounds the padded text length up to the same multiple. Plan cost is FLAT in
+shape size (17-token shape 564 ms, 1097-token 597 ms), so the short text-fusion shapes cost as much
+to plan as the big ones, and removing them is where the remaining win is:
 
-Rounding the text length changes the model output on short captions. Measured on the real 12.9B
-model, relative difference on the returned image tokens:
+    distinct shapes    36 -> 12
+    cuDNN payback      ~70 epochs -> ~23 epochs on a 36-image set
+
+**It is not numerically inert, and that was accepted deliberately.** Short captions (<= ~30 tokens)
+shift on the real 12.9B model; longer ones do not:
 
     text len   INT8 base   bf16 base   control (pad the COMBINED seq)
           20    2.13e-02    4.34e-03      0.00e+00
@@ -118,28 +122,28 @@ model, relative difference on the returned image tokens:
           16    2.02e-02    5.23e-03      0.00e+00
          116    0.00e+00    0.00e+00      0.00e+00
 
-What this rules out:
+Ruled out by measurement:
 
-- **Not masking.** The control pads the combined sequence and masks it — equally "mathematically
+- **Masking.** The control pads the COMBINED sequence and masks it — equally "mathematically
   identical" — and is bit-exact on the same samples.
-- **Not INT8.** A bf16 base still shows it. INT8 amplifies it ~4x, nothing more.
-- **Not the `torch._int_mm` M>16 fallback**, which was my first published explanation and was
-  WRONG for the real model. It reproduced a similar symptom on a toy DiT, and the fallback does
-  not trigger on the real one at all (its warning never fires). Two different mechanisms produced
-  similar-looking symptoms and I generalised from the toy to the real without checking.
+- **INT8.** A bf16 base still shows it; INT8 only amplifies it ~4x.
+- **The `torch._int_mm` M>16 fallback.** This was my first published explanation and it was WRONG
+  for the real model: it reproduced a similar symptom on a toy DiT, but does not trigger on the
+  real one at all (its warning never fires). A real bug, found and fixed on the way — see below —
+  but not this one. I generalised from the cheap test to the expensive one because the story fit.
 
-What it points at: the effect is confined to short captions and to the **text-fusion** stage, whose
-per-layer blocks carry the text length in their BATCH dimension (they attend the layer axis). A
-changed batch plausibly changes kernel tiling and reduction order, and 28 blocks compound it. That
-is a hypothesis, not a finding — it has not been bisected per stage on the real weights.
+Remaining lead: the effect is confined to short captions and to the **text-fusion** stage, whose
+per-layer blocks carry the text length in their BATCH dimension (they attend the layer axis), so
+padding changes their reduction order and 28 blocks compound it. Hypothesis, not a finding — it
+needs a per-stage bisect on the real weights.
 
-Whether ~5e-03 (bf16) matters for training is arguable: it is the scale of ordinary bf16 noise, and
-every step is stochastic anyway. But "inert" was the claim, and it is not inert, so it stays off
-until someone can say exactly what moves.
+Accepted because ~5e-03 is the scale of ordinary bf16 step noise and training is stochastic anyway,
+and the shape reduction is what makes auto-cuDNN fire on realistic run lengths.
+`FIZGIG_ATTN_TRIM_MULTIPLE=1` restores exact-length behaviour for anyone who wants it.
 
 **The INT8 row-count bug found along the way is real and IS fixed.** `torch._int_mm` refuses M <= 16
 and `int8_train.py` silently fell back to fp32, so the same weights gave different answers either
-side of 16 tokens. It now pads the rows and slices back, which is exact:
+side of 16 tokens. It now zero-pads the rows and slices back, which is exact:
 
     M=1,5,8,16,17,32 all bit-identical to the same rows of an M=64 call (was: fp32 below 17)
 

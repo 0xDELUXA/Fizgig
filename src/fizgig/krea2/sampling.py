@@ -41,10 +41,18 @@ def gather_valid_text(txt, mask):
     """
     valid = [txt[i][mask[i]] for i in range(txt.shape[0])]  # list of (n_i, L, D)
     max_len = max(v.shape[0] for v in valid)
-    # NOTE: rounding max_len up to a multiple (to cut the distinct-shape count, which is what
-    # cuDNN and torch.compile pay per-plan for) was tried and REVERTED — it changed the model's
-    # output by ~2% relative for short captions. See docs/PERF_ROADMAP.md; padding here is not
-    # as inert as this docstring's "lossless" claim suggests, and the reason is not yet known.
+    # Round the padded length up to a multiple, so a dataset's captions produce a handful of
+    # distinct sequence lengths instead of one per caption. Every shape-planning backend pays a
+    # one-time cost per distinct length — ~0.55 s each on cuDNN, and FLAT in shape size, so a
+    # 17-token text shape costs as much to plan as a 1100-token image+text one.
+    #
+    # DISABLED — see docs/PERF_ROADMAP.md. On the real 12.9B model this still moves the output by
+    # ~2% on short captions, and the cause is NOT the torch._int_mm M>16 fallback (that was a real
+    # bug, found on a toy model and since fixed in int8_train.py, but it does not even trigger on
+    # the real one). Until the real cause is known this stays off.
+    _TRIM_MULTIPLE = 1
+    if _TRIM_MULTIPLE > 1:
+        max_len = ((max_len + _TRIM_MULTIPLE - 1) // _TRIM_MULTIPLE) * _TRIM_MULTIPLE
     out = txt.new_zeros(txt.shape[0], max_len, txt.shape[2], txt.shape[3])
     newmask = torch.zeros(txt.shape[0], max_len, device=txt.device, dtype=torch.bool)
     for i, v in enumerate(valid):

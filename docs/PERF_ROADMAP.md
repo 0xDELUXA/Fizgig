@@ -103,33 +103,45 @@ cuDNN accepts the key-padding mask directly, so this does not push it onto a fal
 The remaining churn is the **text-fusion** stack, which attends the text tensor at its exact
 length — there is no padding to round into, so 26 caption lengths stay 26 shapes. Total 36.
 
-**Padding the text was tried, reverted, and then EXPLAINED — it was never a masking bug.**
+**Padding the text was tried twice and is still OFF. The cause remains unidentified.**
 
-The motivation held: plan cost is FLAT in shape size, so those 26 short text shapes cost as much
-to plan as the big ones (17-token shape 564 ms, 1097-token 597 ms).
+The motivation holds: plan cost is FLAT in shape size, so those 26 short text-fusion shapes cost as
+much to plan as the big ones (17-token shape 564 ms, 1097-token 597 ms), and padding would take the
+count 36 -> 12 and the cuDNN payback from ~70 epochs to ~23.
 
-Rounding the text length changed the output ~2% relative for short captions, while the control
-(`FIZGIG_ATTN_TRIM=0`, which pads the COMBINED sequence and masks it) was bit-exact. The cause:
+Rounding the text length changes the model output on short captions. Measured on the real 12.9B
+model, relative difference on the returned image tokens:
 
-    torch._int_mm requires M > 16.
+    text len   INT8 base   bf16 base   control (pad the COMBINED seq)
+          20    2.13e-02    4.34e-03      0.00e+00
+          28    2.41e-02    5.77e-03      0.00e+00
+          16    2.02e-02    5.23e-03      0.00e+00
+         116    0.00e+00    0.00e+00      0.00e+00
 
-`modules/int8_train.py` catches the failure and falls back to an fp32 matmul, which is *more*
-accurate than int8. Short sequences were quietly running exact; padding pushed them over the
-threshold and onto the quantised path. Confirmed on a tiny randomly-initialised DiT, where the
-difference appears **only with an INT8 base** and only for the shortest sequence:
+What this rules out:
 
-    bf16 base   every length          0.000e+00
-    INT8 base   5 tokens -> padded 16 1.172e-02
+- **Not masking.** The control pads the combined sequence and masks it — equally "mathematically
+  identical" — and is bit-exact on the same samples.
+- **Not INT8.** A bf16 base still shows it. INT8 amplifies it ~4x, nothing more.
+- **Not the `torch._int_mm` M>16 fallback**, which was my first published explanation and was
+  WRONG for the real model. It reproduced a similar symptom on a toy DiT, and the fallback does
+  not trigger on the real one at all (its warning never fires). Two different mechanisms produced
+  similar-looking symptoms and I generalised from the toy to the real without checking.
 
-So the 2% was int8 quantisation error arriving where it previously did not, not padding leaking
-past a mask. Two consequences worth keeping:
+What it points at: the effect is confined to short captions and to the **text-fusion** stage, whose
+per-layer blocks carry the text length in their BATCH dimension (they attend the layer axis). A
+changed batch plausibly changes kernel tiling and reduction order, and 28 blocks compound it. That
+is a hypothesis, not a finding — it has not been bisected per stage on the real weights.
 
-- **INT8 numerics depend on token count.** The same weights give different answers either side of
-  M=16. The fallback now logs once instead of being silent.
-- **Text padding is defensible after all** — it does not break masking, it just puts short
-  sequences on the int8 path the user already opted into. Still not re-landed: it changes int8
-  training numerics, which is a call worth making deliberately rather than as a side effect of a
-  speed heuristic.
+Whether ~5e-03 (bf16) matters for training is arguable: it is the scale of ordinary bf16 noise, and
+every step is stochastic anyway. But "inert" was the claim, and it is not inert, so it stays off
+until someone can say exactly what moves.
+
+**The INT8 row-count bug found along the way is real and IS fixed.** `torch._int_mm` refuses M <= 16
+and `int8_train.py` silently fell back to fp32, so the same weights gave different answers either
+side of 16 tokens. It now pads the rows and slices back, which is exact:
+
+    M=1,5,8,16,17,32 all bit-identical to the same rows of an M=64 call (was: fp32 below 17)
 
 `consider_training_backend()` then decides at each epoch boundary. After one epoch every shape has
 been seen, so it is arithmetic on a known count rather than a guess: ~35 steps per shape to break

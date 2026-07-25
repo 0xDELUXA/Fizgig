@@ -54,7 +54,18 @@ class _Int8FrozenLinear(torch.autograd.Function):
         x2d = x.reshape(-1, orig_shape[-1])
         a_i8, a_scale = _quant_per_token(x2d)
         try:
+            # torch._int_mm refuses M <= 16. Rather than let those fall through to the fp32 path,
+            # pad the rows with zeros and slice the result back: zero rows produce zero output and
+            # are discarded, so this is exact. Without it, whether a matmul runs quantised depends
+            # on how many tokens happen to be in the tensor — which made the same weights give
+            # different answers for short captions vs long ones, silently.
+            m = x2d.shape[0]
+            pad_rows = 17 - m if m <= 16 else 0
+            if pad_rows:
+                a_i8 = torch.nn.functional.pad(a_i8, (0, 0, 0, pad_rows))
             acc = torch._int_mm(a_i8, w_i8_nk.t())                 # (M,N) int32, free view
+            if pad_rows:
+                acc = acc[:m]
             # Scale in the compute dtype: an fp32 (M,N) intermediate is 4x the bytes and this
             # step is bandwidth-bound, not arithmetic-bound.
             out = acc.to(x.dtype) * a_scale.to(x.dtype) * w_scale_1n.to(x.dtype)
@@ -96,7 +107,14 @@ class _Int8FrozenLinear(torch.autograd.Function):
             g_i8, g_scale = _quant_per_token(gs)
             try:
                 # (M,N)@(N,K): w_i8_nk is already (N,K) contiguous — no transpose needed.
+                # Same M > 16 row padding as the forward, for the same reason.
+                m = g2d.shape[0]
+                pad_rows = 17 - m if m <= 16 else 0
+                if pad_rows:
+                    g_i8 = torch.nn.functional.pad(g_i8, (0, 0, 0, pad_rows))
                 acc = torch._int_mm(g_i8, w_i8_nk)                     # (M,K) int32
+                if pad_rows:
+                    acc = acc[:m]
                 grad_x = acc.to(grad_out.dtype) * g_scale.to(grad_out.dtype)
             except Exception:
                 w = w_i8_nk.to(grad_out.dtype) * w_scale_1n.reshape(-1, 1).to(grad_out.dtype)

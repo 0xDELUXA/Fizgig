@@ -108,10 +108,12 @@ Padding text before txtfusion the way the main path pads would cut that to ~13; 
 been seen, so it is arithmetic on a known count rather than a guess: ~35 steps per shape to break
 even (the measured 1.3 s plan vs 37 ms/step saving), doubled for margin. Verified on a real run:
 
-    epoch 1   0.611 s/step   default
-    epoch 2   1.583 s/step   cuDNN, building 36 plans (~37 s, ~1.0 s each)
-    epoch 3   0.556 s/step   cuDNN warm
-    epoch 4   0.583 s/step   cuDNN warm      -> ~7% faster, as predicted
+    epoch 1     0.611 s/step   default
+    epoch 2     1.583 s/step   cuDNN, building 36 plans (~37 s, ~1.0 s each)
+    epochs 3-8  0.569 s/step   cuDNN warm, stable across all six -> 7.3% faster
+
+matching the 6% the isolated replica predicted (536.6 vs 572.2 ms), which is the first time today
+an isolated measurement and a real run agreed.
 
 With 36 shapes the real payback is ~925 steps; the formula asks for 1260 and the margin doubles
 that, so on a 36-image set it takes ~70 epochs to trigger. Conservative on purpose — being wrong

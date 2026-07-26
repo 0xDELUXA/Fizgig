@@ -2479,6 +2479,18 @@ class KleinTrainer:
 
             for step, batch in enumerate(train_dataloader):
                 _perf_t0 = _time.perf_counter() if _perf_diag else 0.0
+                # Warm-up reassurance: the first two epochs start slowly (first-sight kernel
+                # planning, cuBLAS picks, allocator/cache warm-up) — a crawling bar looks
+                # like a hang, so repeat a gentle note every ~30 s while it lasts.
+                if epoch < 2:
+                    _wu_now = _time.time()
+                    if _wu_now - getattr(self, "_warmup_note_last", 0.0) > 30.0:
+                        self._warmup_note_last = _wu_now
+                        accelerator.print(
+                            "[warm-up] Warm-up phase — the first two epochs start slowly while "
+                            "the GPU plans kernels and fills its caches. Nothing is stuck; full "
+                            "speed arrives from epoch 3."
+                        )
                 latents = batch["latents"]
 
                 with accelerator.accumulate(training_model):

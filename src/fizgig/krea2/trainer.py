@@ -14,6 +14,7 @@ import math
 import os
 import random
 import sys
+import time
 from multiprocessing import Value
 
 from tqdm import tqdm
@@ -1381,11 +1382,23 @@ def train_krea2(
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
     pending_accum = 0  # micro-batches backward'd since the last optimizer step
+    # Warm-up reassurance: the first two epochs start slowly (first-sight kernel planning,
+    # cuBLAS algorithm picks, allocator + cache warm-up; the cuDNN switch at the epoch-1
+    # boundary re-plans every shape in epoch 2). Users watching a crawling bar assume a
+    # hang, so repeat a gentle note every ~30 s while it lasts.
+    _warmup_note_last = 0.0
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         if _sampler is not None:
             _sampler.set_epoch(epoch)      # reshuffle within/across buckets each epoch
         for i, batch in enumerate(loader):
+            if epoch < 2:
+                _now = time.time()
+                if _now - _warmup_note_last > 30.0:
+                    _warmup_note_last = _now
+                    logger.info("[warm-up] Warm-up phase — the first two epochs start slowly "
+                                "while the GPU plans kernels and fills its caches. Nothing is "
+                                "stuck; full speed arrives from epoch 3.")
             # Excluded images (two failed AI recaptions, still stuck) are skipped ENTIRELY: no
             # forward, no gradient, and no loss recorded — avr_loss stops carrying their permanent
             # error term. Step accounting (bar + global_step) stays consistent for resume math.

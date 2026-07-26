@@ -330,6 +330,9 @@ def check_msvc_build_tools():
     print("  Or install unattended from a terminal:")
     print('    winget install Microsoft.VisualStudio.2022.BuildTools --override '
           '"--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"')
+    print()
+    print("  Install it any time — no need to re-run this installer. The next training run")
+    print("  detects it automatically.")
 
 
 def main():

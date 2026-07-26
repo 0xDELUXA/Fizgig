@@ -59,6 +59,9 @@ if "%MSVC_FOUND%"=="0" (
     echo.
     echo  Or install unattended from a terminal:
     echo    winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --passive"
+    echo.
+    echo  Install it any time - no need to re-run this update. The next training
+    echo  run detects it automatically.
     echo ------------------------------------------------------------------------
 )
 

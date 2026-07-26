@@ -2605,11 +2605,12 @@ class LoRATrainerGUI:
         self.krea2_loss_watch_var = tk.BooleanVar(value=bool(self.settings.get("KREA2_LOSS_WATCH", False)))
         self._krea2_losswatch_frame = ttk.Frame(training_content)
         self._krea2_losswatch_frame.grid(row=20, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
-        ttk.Checkbutton(
+        self._krea2_detect_cb = ttk.Checkbutton(
             self._krea2_losswatch_frame,
             text="Detect problem images (per-image loss tracking)",
             variable=self.krea2_loss_watch_var,
-        ).pack(side=tk.LEFT)
+        )
+        self._krea2_detect_cb.pack(side=tk.LEFT)
         ttk.Button(self._krea2_losswatch_frame, text="👁 View Problem Images",
                    command=self._open_problem_images_window).pack(side=tk.LEFT, padx=(12, 0))
         self.krea2_per_image_lr_var = tk.BooleanVar(value=bool(self.settings.get("KREA2_PER_IMAGE_LR", False)))
@@ -2633,6 +2634,23 @@ class LoRATrainerGUI:
             variable=self.krea2_warmup_look_var,
         )
         self._krea2_warmuplook_cb.grid(row=23, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(2, 0))
+        # All four features attribute a step's loss to ONE image — a batch-mean isn't a
+        # per-image signal, so they grey out whenever Batch Size > 1 (note shown instead).
+        self._krea2_perimage_batch_note = tk.Label(
+            training_content,
+            text="Per-image features need Batch Size 1 (Dataset section) — a batch-mean loss "
+                 "isn't a per-image signal, so these are disabled at the current batch size.",
+            font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+            wraplength=680, justify=tk.LEFT)
+        self._krea2_perimage_batch_note.grid(row=24, column=0, columnspan=2, sticky=tk.W,
+                                             padx=5, pady=(2, 0))
+        self._krea2_perimage_batch_note.grid_remove()
+        try:
+            self.dataset_batch_size_var.trace_add(
+                "write", lambda *_a: self._refresh_perimage_toggle_state())
+        except Exception:
+            pass
+        self._refresh_perimage_toggle_state()
         self._krea2_losswatch_hint = ttk.Label(training_content,
                   text="Tracks each image's loss (normalized for the random noise level) across epochs. Detection "
                        "flags images that stay hard without improving — usually mislabeled/off-concept data — in the "
@@ -2829,25 +2847,40 @@ class LoRATrainerGUI:
         self.fp8_text_encoder_check = ttk.Checkbutton(memory_content, text="Enable FP8 T5/LLM", variable=self.fp8_text_encoder_var, style="Surface.TCheckbutton")
         self.fp8_text_encoder_check.grid(row=4, column=1, sticky=tk.W, padx=5, pady=4)
 
-        # 4-bit (NF4) base — low-VRAM mode
+        # 4-bit (NF4) base — Auto / On / Off. quant_4bit_var stays the BooleanVar every
+        # downstream consumer reads; the mode combobox derives it. "Auto" hands the choice
+        # to the launch-time memory strategy (Krea 2 + Blocks Swap on Auto picks
+        # INT8/NF4/fp8 from free VRAM; Klein has no NF4 auto, so Auto = off there).
         self._quant_4bit_label = tk.Label(memory_content, text="4-bit Base:", font=(FONT_FAMILY, 10),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         self._quant_4bit_label.grid(row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
-        self.quant_4bit_var = tk.BooleanVar(value=self.settings.get("QUANT_4BIT", False))
-        self.quant_4bit_check = ttk.Checkbutton(
-            memory_content, text="Quantize base to 4-bit NF4 (low VRAM)",
-            variable=self.quant_4bit_var, command=self._on_quant_4bit_toggle,
-            style="Surface.TCheckbutton")
-        self.quant_4bit_check.grid(row=5, column=1, sticky=tk.W, padx=5, pady=4)
+        self.quant_4bit_var = tk.BooleanVar(value=False)
+        _q4_mode = str(self.settings.get("QUANT_4BIT_MODE", "") or
+                       ("On" if self.settings.get("QUANT_4BIT", False) else "Auto"))
+        if _q4_mode not in ("Auto", "On", "Off"):
+            _q4_mode = "Auto"
+        self.quant_4bit_mode_var = tk.StringVar(value=_q4_mode)
+        _q4_row = ttk.Frame(memory_content)
+        _q4_row.grid(row=5, column=1, sticky=tk.W, padx=5, pady=4)
+        self.quant_4bit_check = ttk.Combobox(
+            _q4_row, textvariable=self.quant_4bit_mode_var,
+            values=["Auto", "On", "Off"], state="readonly", width=6)
+        self.quant_4bit_check.pack(side=tk.LEFT)
+        self.quant_4bit_check.bind("<<ComboboxSelected>>",
+                                   lambda e: self._on_quant_4bit_mode_changed())
+        tk.Label(_q4_row, text="NF4 quantized base (low VRAM)",
+                 font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"],
+                 bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(8, 0))
         self._quant_4bit_hint = tk.Label(memory_content,
-                 text="Halves DiT VRAM (~9.6 → ~5.6 GB) so a full 9B LoRA trains on 10–12 GB cards — "
-                      "a LoRA trained on a frozen 4-bit base (QLoRA-style). This is for cards that can't fit "
-                      "fp8 training (~14 GB); 16 GB+ should use fp8. Forces block swap off, and supersedes the "
-                      "FP8 Base options. Slight quality trade vs fp8 — always check the output LoRA in ComfyUI.",
+                 text="Auto (recommended): with Blocks Swap on Auto, the launch-time strategy picks the best "
+                      "of INT8 / NF4 4-bit / fp8 from your FREE VRAM (Krea 2; Klein has no NF4 auto). "
+                      "On forces the NF4 base — halves DiT VRAM (~9.6 → ~5.6 GB) for 10–12 GB cards, forces "
+                      "block swap off, supersedes FP8 Base; slight quality trade — check the LoRA in ComfyUI. "
+                      "Off never uses NF4 even if the strategy would pick it.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self._quant_4bit_hint.grid(row=6, column=1, sticky=tk.W, padx=5, pady=(0, 4))
-        self._on_quant_4bit_toggle()  # sync initial enabled/disabled state
+        self._on_quant_4bit_mode_changed()  # derive the boolean + sync dependent locks
 
         # Gradient checkpointing — trades compute for VRAM.
         self._grad_checkpoint_label = tk.Label(memory_content, text="Grad Checkpoint:", font=(FONT_FAMILY, 10),
@@ -3241,13 +3274,18 @@ class LoRATrainerGUI:
         if "SCALED" in preset:
             self.scaled_var.set(preset["SCALED"])
 
-        # 4-bit (NF4) base checkbox — lives on a dedicated var (not in self.entries), so the generic
-        # loop above never restores it. Set it explicitly and re-run its toggle to re-apply the
-        # dependent locks (block swap off + force-GC-on) that _on_quant_4bit_toggle owns.
-        if "QUANT_4BIT" in preset and hasattr(self, 'quant_4bit_var'):
-            self.quant_4bit_var.set(bool(preset["QUANT_4BIT"]))
-            if hasattr(self, '_on_quant_4bit_toggle'):
-                self._on_quant_4bit_toggle()
+        # 4-bit (NF4) base — dedicated mode var (not in self.entries), so the generic loop
+        # never restores it. New presets carry QUANT_4BIT_MODE (Auto/On/Off); legacy ones
+        # carry the old boolean, which maps to an explicit On/Off.
+        if hasattr(self, 'quant_4bit_mode_var'):
+            if "QUANT_4BIT_MODE" in preset:
+                _m = str(preset["QUANT_4BIT_MODE"])
+                if _m in ("Auto", "On", "Off"):
+                    self.quant_4bit_mode_var.set(_m)
+                    self._on_quant_4bit_mode_changed()
+            elif "QUANT_4BIT" in preset:
+                self.quant_4bit_mode_var.set("On" if bool(preset["QUANT_4BIT"]) else "Off")
+                self._on_quant_4bit_mode_changed()
 
         # Per-image loss watch toggles (krea2) — dedicated vars, same not-in-self.entries situation.
         if "KREA2_LOSS_WATCH" in preset and hasattr(self, 'krea2_loss_watch_var'):
@@ -3393,6 +3431,7 @@ class LoRATrainerGUI:
         _grab("fp8_var", "FP8")
         _grab("scaled_var", "SCALED")
         _grab("quant_4bit_var", "QUANT_4BIT")
+        _grab("quant_4bit_mode_var", "QUANT_4BIT_MODE")
         _grab("compile_blocks_var", "COMPILE_BLOCKS")
         _grab("krea2_loss_watch_var", "KREA2_LOSS_WATCH")
         _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
@@ -4403,10 +4442,15 @@ class LoRATrainerGUI:
             self.update_console(f"[auto] {caps.summary()}\n[auto] {plan.reason}\n")
         except Exception:
             pass
-        # INT8 has no GUI toggle (it is newer than the 4-bit checkbox) — carry it on the
+        # INT8 has no GUI toggle (it is newer than the 4-bit control) — carry it on the
         # instance so the krea2 command builder can pass --quant_int8.
         self._auto_quant_int8 = getattr(plan, "quant_int8", "") or ""
-        if hasattr(self, "quant_4bit_var") and bool(self.quant_4bit_var.get()) != plan.quant_4bit:
+        # The plan only drives the NF4 flag when the user left the 4-bit control on Auto —
+        # an explicit On/Off is their call and the strategy must not override it.
+        _q4_auto = (not hasattr(self, "quant_4bit_mode_var")
+                    or self.quant_4bit_mode_var.get() == "Auto")
+        if (_q4_auto and hasattr(self, "quant_4bit_var")
+                and bool(self.quant_4bit_var.get()) != plan.quant_4bit):
             self.quant_4bit_var.set(plan.quant_4bit)
             try:
                 self._on_quant_4bit_toggle()
@@ -4680,6 +4724,44 @@ class LoRATrainerGUI:
         else:
             self.scaled_check.config(state=tk.DISABLED)
             self.scaled_var.set(False)
+
+    def _refresh_perimage_toggle_state(self, *args):
+        """Grey out the four per-image watch toggles whenever Batch Size > 1.
+
+        Every per-image feature (detection, per-image LR, auto-recaption, look warm-up)
+        rests on attributing one step's loss to one image; the trainer already disables
+        the LR side loudly at batch > 1, but the tickboxes stayed live and looked like
+        they'd work. Values are preserved — dropping batch back to 1 re-enables them."""
+        try:
+            bs = int(str(self.dataset_batch_size_var.get()).strip() or 1)
+        except (ValueError, AttributeError):
+            bs = 1
+        state = tk.DISABLED if bs > 1 else tk.NORMAL
+        for cb in (getattr(self, "_krea2_detect_cb", None),
+                   getattr(self, "_krea2_perimglr_cb", None),
+                   getattr(self, "_krea2_autorecap_cb", None),
+                   getattr(self, "_krea2_warmuplook_cb", None)):
+            if cb is not None:
+                try:
+                    cb.configure(state=state)
+                except Exception:
+                    pass
+        note = getattr(self, "_krea2_perimage_batch_note", None)
+        if note is not None:
+            try:
+                if bs > 1:
+                    note.grid()
+                else:
+                    note.grid_remove()
+            except Exception:
+                pass
+
+    def _on_quant_4bit_mode_changed(self):
+        """Derive quant_4bit_var from the Auto/On/Off mode. Auto rests at False — the
+        launch-time strategy sets it (Krea 2 + Blocks Swap on Auto) and only in Auto mode."""
+        mode = self.quant_4bit_mode_var.get()
+        self.quant_4bit_var.set(mode == "On")
+        self._on_quant_4bit_toggle()
 
     def _on_quant_4bit_toggle(self):
         """4-bit (NF4) base forces block swap off (NF4 weights live in
@@ -17587,13 +17669,24 @@ class LoRATrainerGUI:
 
         # Per-image loss watch: detection logs/reports stuck images (Problem Images window);
         # per-image LR also throttles them (the trainer runs detection when either flag is on).
-        if self.krea2_loss_watch_var.get():
+        # All four need Batch Size 1 (a batch-mean isn't a per-image signal) — the GUI greys
+        # the toggles at batch > 1, and the flags are skipped here to match, with a note.
+        try:
+            _watch_bs = int(str(self.dataset_batch_size_var.get()).strip() or 1)
+        except (ValueError, AttributeError):
+            _watch_bs = 1
+        _watch_ok = _watch_bs <= 1
+        if not _watch_ok and (self.krea2_loss_watch_var.get() or self.krea2_per_image_lr_var.get()
+                              or self.krea2_warmup_look_var.get() or self.krea2_auto_recaption_var.get()):
+            self.update_console("[loss-watch] per-image features skipped — Batch Size is "
+                                f"{_watch_bs}; they need Batch Size 1.\n")
+        if _watch_ok and self.krea2_loss_watch_var.get():
             cmd.append("--log_per_image_loss")
-        if self.krea2_per_image_lr_var.get():
+        if _watch_ok and self.krea2_per_image_lr_var.get():
             cmd.append("--per_image_lr")
-        if self.krea2_warmup_look_var.get():
+        if _watch_ok and self.krea2_warmup_look_var.get():
             cmd.append("--warmup_look_outliers")
-        if self.krea2_auto_recaption_var.get():
+        if _watch_ok and self.krea2_auto_recaption_var.get():
             cmd.append("--auto_recaption")
             # Trigger word from the Captions tab — appended (', <trigger>') to AI captions if
             # set. Reads the WIDGET-BOUND var (caption_text_var is an orphan that never

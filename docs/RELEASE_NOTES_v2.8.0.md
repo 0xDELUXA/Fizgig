@@ -99,7 +99,15 @@ Min/Max looked authoritative. Resumed runs keep their mid-flight LR.
 
 ## Upgrading
 
-Run `update_fizgig.bat` (or `git pull` + reinstall requirements). It will pull in triton and
-check for the MSVC Build Tools. Nothing else to do — caches, prefs, and presets carry over.
-Old presets that referenced removed optimizers or withdrawn options are sanitised on load with
-a console note.
+Run `update_fizgig.bat` (or `git pull` + reinstall requirements). Caches, prefs, and presets
+carry over; old presets that referenced removed optimizers or withdrawn options are sanitised
+on load with a console note.
+
+**One new (optional) Windows dependency for the compile speedup: the MSVC C++ Build Tools.**
+triton installs automatically with the requirements, but torch.compile also needs a C++
+compiler on Windows. Both the installer and `update_fizgig.bat` check for it and, if it's
+missing, print the exact installer link —
+**[aka.ms/vs/17/release/vs_BuildTools.exe](https://aka.ms/vs/17/release/vs_BuildTools.exe)**,
+tick the **"Desktop development with C++"** workload (or run the winget one-liner they print).
+Without it, everything works exactly as before — you just don't get the ~2× compiled step
+speed on Krea 2.

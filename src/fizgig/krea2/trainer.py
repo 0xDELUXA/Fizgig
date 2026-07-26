@@ -1055,6 +1055,23 @@ def train_krea2(
         raise RuntimeError("No training items — run the krea2 cache scripts first.")
     logger.info(f"Krea 2 training: {group.num_train_items} items, {max_train_epochs} epochs")
 
+    # Resolve quantisation/swap interactions BEFORE anything reads blocks_to_swap —
+    # should_compile used to be consulted with a swap value the NF4 branch zeroed a few
+    # lines later, declining compile "because block swap is active" about a swap that no
+    # longer existed (NF4 + compile is the one combination measured VRAM-neutral).
+    if quant_4bit and blocks_to_swap > 0:
+        logger.info("[nf4] 4-bit base is incompatible with block swap (weights live in _nf4_packed) "
+                    "— forcing blocks_to_swap=0.")
+        blocks_to_swap = 0
+    if quant_int8 and blocks_to_swap > 0:
+        # The int8 path stages on CPU then makes the whole quantised model resident —
+        # swap could never engage before the full residency, so it OOM'd at load on
+        # exactly the cards that asked for swapping. INT8 residency is ~its own budget;
+        # cards that need swap should use fp8+swap or NF4 instead.
+        logger.info("[int8] W8A8 base is fully resident (staged quantise -> GPU) — block swap "
+                    "can't reduce its footprint; forcing blocks_to_swap=0.")
+        blocks_to_swap = 0
+
     # torch.compile: "auto" weighs its ~90 s warm-up against how long this run actually is, which
     # is knowable here because the dataset is already built. Short runs are a straight loss, so the
     # default must not simply turn it on. "on"/"off" are the explicit overrides.
@@ -1077,17 +1094,13 @@ def train_krea2(
         sample_ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
         sample_dir = os.path.join(output_dir, "sample")
 
-    if quant_4bit and blocks_to_swap > 0:
-        logger.info("[nf4] 4-bit base is incompatible with block swap (weights live in _nf4_packed) "
-                    "— forcing blocks_to_swap=0.")
-        blocks_to_swap = 0
     dit, network = load_dit_for_training(
         raw_path, network_dim=network_dim, network_alpha=network_alpha,
         fp8_scaled=fp8_scaled, quant_4bit=quant_4bit, quant_int8=quant_int8,
         blocks_to_swap=blocks_to_swap, compile_blocks=_do_compile,
         context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
         device=device, dtype=dtype)
-    if blocks_to_swap > 0 and not quant_4bit:
+    if blocks_to_swap > 0 and not quant_4bit and not quant_int8:
         from fizgig.krea2.offloading import BlockSwapConfig
         dit.enable_block_swap(blocks_to_swap, BlockSwapConfig(torch.device(device), supports_backward=True))
         dit.move_to_device_except_swap_blocks(torch.device(device))

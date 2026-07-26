@@ -4362,6 +4362,9 @@ class LoRATrainerGUI:
             if cfg.get("is_krea2"):
                 return self._auto_krea2_strategy()
             return self._auto_training_blocks_swap()
+        # Explicit swap value: any INT8 pick from a PREVIOUS auto pass must not leak into
+        # this launch (stale --quant_int8 alongside --blocks_to_swap N OOM'd small cards).
+        self._auto_quant_int8 = ""
         m = _re.match(r'\d+', raw)
         return int(m.group()) if m else 0
 
@@ -4384,12 +4387,14 @@ class LoRATrainerGUI:
             _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "src"))
             from fizgig.utils.capabilities import detect, recommend_krea2_strategy
         except Exception:
+            self._auto_quant_int8 = ""   # no strategy ran — a stale INT8 pick must not leak
             return self._auto_krea2_blocks_swap()
 
         try:
             caps = detect()
             plan = recommend_krea2_strategy(caps=caps)
         except Exception:
+            self._auto_quant_int8 = ""   # no strategy ran — a stale INT8 pick must not leak
             return self._auto_krea2_blocks_swap()
 
         try:
@@ -7231,9 +7236,18 @@ class LoRATrainerGUI:
         try:
             if output_dir and os.path.isdir(output_dir):
                 import re as _re_ck
+                # Key on THIS run's name, not epoch alone: in a reused output folder
+                # (which the gallery supports) the last file listdir returned used to win,
+                # serving another run's checkpoint from the Download button.
+                _run_name = str(self.settings.get("LORA_NAME", "") or "").strip()
+                if _run_name:
+                    _ck_pat = _re_ck.compile(
+                        r'^' + _re_ck.escape(_run_name) + r'-(\d{6})\.safetensors$')
+                else:
+                    _ck_pat = _re_ck.compile(r'-(\d{6})\.safetensors$')
                 for f in os.listdir(output_dir):
                     if f.endswith(".safetensors"):
-                        m = _re_ck.search(r'-(\d{6})\.safetensors$', f)
+                        m = _ck_pat.search(f)
                         if m:
                             lora_map[str(int(m.group(1)))] = f
                 # The final LoRA is {LORA_NAME}.safetensors (no epoch suffix) — surface it as a
@@ -7267,13 +7281,16 @@ class LoRATrainerGUI:
                 with open(gallery_path, 'r', encoding='utf-8') as f:
                     html = f.read()
 
-                # Find and replace the embedded JSON
+                # Find and replace the embedded JSON. The replacement goes through a
+                # FUNCTION, never the template parser: json.dumps escapes non-ASCII as
+                # \uXXXX (one Chinese character in a sample filename), which re's template
+                # parser rejects as "bad escape \u" — swallowed below, so the fallback
+                # data silently stopped updating.
                 import re
                 new_json = json.dumps(images)
-                # Replace content between the script tags
                 pattern = r'(<script id="files-data" type="application/json">).*?(</script>)'
-                replacement = rf'\1{new_json}\2'
-                new_html = re.sub(pattern, replacement, html, flags=re.DOTALL)
+                new_html = re.sub(pattern, lambda m: m.group(1) + new_json + m.group(2),
+                                  html, flags=re.DOTALL)
 
                 if new_html != html:
                     with open(gallery_path, 'w', encoding='utf-8') as f:
@@ -12237,8 +12254,18 @@ class LoRATrainerGUI:
         if getattr(self, "_repair_master_mutating", False):
             return
         target = self.repair_master_target_var.get()
+        # Only touch blocks the target LoRA actually contains: disabled Scales don't block
+        # DoubleVar.set(), so bulk-setting greyed-out absent rows committed phantom
+        # strengths into saved presets and ss_repair_studio_config — values that become
+        # real when that preset is later applied to a full-model LoRA.
+        present = None
+        eng = getattr(self, "repair_engine", None)
+        if eng is not None:
+            present = (getattr(eng, "primary_block_ids", None) if target == "primary"
+                       else getattr(eng, "donor_block_ids", None))
         affected = [bid for bid in self.repair_block_vars
-                    if self._repair_category_for_block(bid) == category]
+                    if self._repair_category_for_block(bid) == category
+                    and (present is None or bid in present)]
         if not affected:
             return
         # Bulk-set: each per-block strength trace will update state, but we
@@ -17518,15 +17545,18 @@ class LoRATrainerGUI:
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the
         # user unchecked it (bf16, 26 GB — big-card / heavy-swap only).
+        # Explicit user choices FIRST — the auto branch used to be tested before them, so
+        # unticking "FP8 Base" (an explicit bf16 request) did nothing when auto had chosen
+        # INT8.
         _auto_i8 = getattr(self, "_auto_quant_int8", "")
-        if _auto_i8 and not self.settings.get("QUANT_4BIT", False):
-            # Chosen by the auto strategy when there is VRAM for it: faster than NF4 and ~7x
-            # more accurate, with exact gradients.
-            cmd += ["--quant_int8", _auto_i8]
-        elif self.settings.get("QUANT_4BIT", False):
+        if self.settings.get("QUANT_4BIT", False):
             cmd.append("--quantize_4bit")
         elif not self.settings.get("FP8", True):
             cmd.append("--no_fp8")
+        elif _auto_i8:
+            # Chosen by the auto strategy when there is VRAM for it: faster than NF4 and ~7x
+            # more accurate, with exact gradients.
+            cmd += ["--quant_int8", _auto_i8]
 
         # Per-image loss watch: detection logs/reports stuck images (Problem Images window);
         # per-image LR also throttles them (the trainer runs detection when either flag is on).

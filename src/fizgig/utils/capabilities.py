@@ -172,8 +172,17 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
     every weight per forward). Swapping is always last: 4.4x slower and 4x the CPU load.
     """
     caps = caps or detect()
-    # Decide on FREE memory, not the number on the box.
-    vram = vram_gb if vram_gb is not None else (caps.vram_free_gb or caps.vram_gb)
+    # Decide on FREE memory, not the number on the box — read it FRESH, not from the
+    # lru_cached detect() snapshot: a GUI session that started while a browser held 6 GB
+    # would otherwise plan every later run from that stale reading.
+    vram = vram_gb
+    if vram is None:
+        try:
+            import torch
+            free_b, _ = torch.cuda.mem_get_info(0)
+            vram = free_b / (1024 ** 3)
+        except Exception:
+            vram = caps.vram_free_gb or caps.vram_gb
 
     if not caps.has_cuda:
         return MemoryStrategy(False, 0, "no CUDA device — settings left alone")
@@ -205,12 +214,17 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
             f"fp8 with {swap} blocks swapped — bitsandbytes is missing, so NF4 (which would "
             "avoid swapping entirely and run ~4x faster) is unavailable. Install it.")
 
-    # Below NF4's own footprint: swap on top of 4-bit is the only way to fit.
-    swap = 12 if vram >= 11 else 20
+    # Below NF4's own footprint. NF4 CANNOT swap (the trainer force-zeroes blocks_to_swap
+    # under 4-bit — weights live in _nf4_packed, not .weight), so the old "NF4 + swap"
+    # recommendation here was a configuration that cannot exist: on a 12 GB card it was
+    # the only reachable tier, leaving the auto path with no working configuration at all.
+    # fp8 + heavy swap is the one combination that actually runs at this size.
+    swap = 20 if vram >= 11 else 26
     return MemoryStrategy(
-        True, swap,
-        f"NF4 4-bit with {swap} blocks swapped — {vram:.1f} GB free is below what Krea 2 needs "
-        "resident even at 4-bit, so some swapping is unavoidable")
+        False, swap,
+        f"fp8 with {swap} blocks swapped — {vram:.1f} GB free is below what Krea 2 needs "
+        "resident even at 4-bit, and NF4 can't block-swap, so fp8+swap is the only "
+        "combination that fits (slow: ~4x the step time)")
 
 
 # torch.compile decision. Warm-up is the whole story: compiling costs ~90 s up front (one plan per

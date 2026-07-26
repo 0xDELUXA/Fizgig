@@ -2921,7 +2921,9 @@ class LoRATrainerGUI:
         ts_sampling_label.grid(row=ts_row, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
         self.ts_sampling_var = tk.StringVar(value=self.settings["TIMESTEP_SAMPLING"])
-        ts_sampling_options = ["sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift", "qwen_shift", "logsnr"]
+        # Must mirror the trainer's argparse choices exactly — "qwen_shift" was offered here
+        # but rejected by the trainer at launch; "qinglong_flux" existed but wasn't offered.
+        ts_sampling_options = ["sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift", "logsnr", "qinglong_flux"]
         self.ts_sampling_combo = ttk.Combobox(ts_content, textvariable=self.ts_sampling_var,
                                                values=ts_sampling_options, state="readonly", width=20)
         self.ts_sampling_combo.grid(row=ts_row, column=1, sticky=tk.W, padx=5, pady=4)
@@ -3158,6 +3160,12 @@ class LoRATrainerGUI:
         if show_message:
             messagebox.showinfo("Preset Loaded", f"Loaded recommended preset for {arch}")
 
+    # Comboboxes whose values feed directly into the launch command: a saved value the
+    # current family doesn't offer (cross-family last-train leak, withdrawn LR floors,
+    # removed optimizers) must NOT be .set() onto them — readonly Comboboxes accept any
+    # value without complaint, and the bad name then dies (or misbehaves) at launch.
+    _STRICT_COMBO_KEYS = {"OPTIMIZER_TYPE", "ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX", "LR_SCHEDULER"}
+
     def _apply_preset_values(self, preset):
         """Apply preset values to the UI (shared by load_default_preset and load_custom_preset)"""
         for key, value in preset.items():
@@ -3174,6 +3182,11 @@ class LoRATrainerGUI:
                                 if str(opt).split(" ")[0] == value.split(" ")[0]:
                                     value = str(opt)
                                     break
+                        if value not in opts and key in self._STRICT_COMBO_KEYS:
+                            self.update_console(
+                                f"[preset] {key}: saved value {value!r} isn't offered here — "
+                                f"keeping {entry.get()!r}\n")
+                            continue
                     except tk.TclError:
                         pass
                     entry.set(value)
@@ -3189,9 +3202,18 @@ class LoRATrainerGUI:
                         # Unknown widget type — skip rather than crash
                         pass
 
-        # Update timestep settings from preset
+        # Update timestep settings from preset. Validate against what the trainer accepts —
+        # old presets can carry values a past version offered (e.g. "qwen_shift", which
+        # argparse rejects at launch).
         if "TIMESTEP_SAMPLING" in preset:
-            self.ts_sampling_var.set(preset["TIMESTEP_SAMPLING"])
+            _ts_val = str(preset["TIMESTEP_SAMPLING"])
+            _ts_ok = ("sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift",
+                      "logsnr", "qinglong_flux")
+            if _ts_val in _ts_ok:
+                self.ts_sampling_var.set(_ts_val)
+            else:
+                self.update_console(f"[preset] TIMESTEP_SAMPLING {_ts_val!r} isn't supported — "
+                                    f"keeping {self.ts_sampling_var.get()!r}\n")
         if "WEIGHTING_SCHEME" in preset:
             self.weighting_scheme_var.set(preset["WEIGHTING_SCHEME"])
         if "PRESERVE_DISTRIBUTION" in preset:
@@ -16456,6 +16478,33 @@ class LoRATrainerGUI:
         arch = self.architecture_var.get()
         config = ARCHITECTURES.get(arch, ARCHITECTURES["Flux 2 Klein Base 9B"])
 
+        # Free-text numeric fields: a bare int()/float() further down the launch path used
+        # to raise inside a Tk callback — swallowed to stderr, invisible under the windowed
+        # launcher, and the Start button just "did nothing forever". Validate them HERE with
+        # a message naming the field. Batch Size 0/blank was the sharpest: it reached
+        # math.ceil(len(bucket)/batch_size) deep in the dataloader minutes after launch.
+        def _check_num(label, raw, cast, minimum=None):
+            raw = str(raw).strip()
+            try:
+                v = cast(raw)
+            except (TypeError, ValueError):
+                errors.append(f"{label} must be a number (got {raw!r})")
+                return
+            if minimum is not None and v < minimum:
+                errors.append(f"{label} must be at least {minimum} (got {raw})")
+
+        _check_num("Learning Rate", self.entries["LEARNING_RATE"].get(), float, 0)
+        _check_num("Network Dim (Rank)", self.entries["NETWORK_DIM"].get(), int, 1)
+        _check_num("Network Alpha", self.entries["NETWORK_ALPHA"].get(), float, 0)
+        _check_num("Max Train Epochs", self.entries["MAX_TRAIN_EPOCHS"].get(), int, 1)
+        _check_num("Save Every N Epochs", self.entries["SAVE_EVERY_N_EPOCHS"].get(), int, 1)
+        _check_num("Seed", self.entries["SEED"].get(), int)
+        _check_num("LoRA+ LR Ratio", self.entries["LORA_LR_RATIO"].get(), int, 1)
+        _check_num("Gradient Accumulation", self.entries["GRADIENT_ACCUMULATION"].get(), int, 1)
+        _check_num("Max Grad Norm", self.entries["MAX_GRAD_NORM"].get(), float, 0)
+        _check_num("Network Dropout", self.entries["NETWORK_DROPOUT"].get(), float, 0)
+        _check_num("Batch Size (Dataset)", self.dataset_batch_size_var.get(), int, 1)
+
         # Check required paths exist (sources: prefs_vars for model paths, hidden var for dataset)
         dataset_config = self._get_path("DATASET_CONFIG")
         if not dataset_config:
@@ -17032,7 +17081,10 @@ class LoRATrainerGUI:
 
         # Optional parameters
         if self.settings["OPTIMIZER_ARGS"]:
-            command.extend(["--optimizer_args", self.settings["OPTIMIZER_ARGS"]])
+            # Klein's --optimizer_args is nargs='*' (one token per key=value). Passing the
+            # whole box as ONE token made the trainer's key=value split fail with more than
+            # one argument.
+            command.extend(["--optimizer_args"] + self.settings["OPTIMIZER_ARGS"].split())
 
         # Gradient accumulation (effective batch = batch × this)
         gradient_accum = self.settings.get("GRADIENT_ACCUMULATION", 1)
@@ -17149,13 +17201,14 @@ class LoRATrainerGUI:
             prompt_file = self.generate_sample_prompt_file()
             command.extend(["--sample_prompts", prompt_file])
 
-            # Frequency settings
-            every_n_epochs = self.sample_every_n_epochs_var.get()
-            if every_n_epochs and int(every_n_epochs) > 0:
+            # Frequency settings. Non-numeric text used to raise a bare ValueError out of
+            # the command builder — treat it as "not set" instead.
+            every_n_epochs = self.sample_every_n_epochs_var.get().strip()
+            if every_n_epochs.isdigit() and int(every_n_epochs) > 0:
                 command.extend(["--sample_every_n_epochs", every_n_epochs])
 
-            every_n_steps = self.sample_every_n_steps_var.get()
-            if every_n_steps and int(every_n_steps) > 0:
+            every_n_steps = self.sample_every_n_steps_var.get().strip()
+            if every_n_steps.isdigit() and int(every_n_steps) > 0:
                 command.extend(["--sample_every_n_steps", every_n_steps])
 
             if self.sample_at_first_var.get():

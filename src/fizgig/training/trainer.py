@@ -543,8 +543,15 @@ class KleinTrainer:
         optimizer_kwargs = {}
         if args.optimizer_args is not None and len(args.optimizer_args) > 0:
             for arg in args.optimizer_args:
-                key, value = arg.split("=")
-                value = ast.literal_eval(value)
+                if "=" not in arg:
+                    raise ValueError(f"--optimizer_args entry {arg!r} is not key=value")
+                # maxsplit=1 (values may contain '='); non-literals like name=cosine or
+                # growth_rate=inf stay strings instead of killing the run after caching.
+                key, value = arg.split("=", 1)
+                try:
+                    value = ast.literal_eval(value)
+                except (ValueError, SyntaxError):
+                    pass
                 optimizer_kwargs[key] = value
 
         lr = args.learning_rate
@@ -1980,7 +1987,11 @@ class KleinTrainer:
         net_kwargs = {}
         if args.network_args is not None:
             for net_arg in args.network_args:
-                key, value = net_arg.split("=")
+                if "=" not in net_arg:
+                    raise ValueError(f"--network_args entry {net_arg!r} is not key=value")
+                # maxsplit=1: values may legitimately contain '=' — the old unbounded
+                # split raised 'too many values to unpack'.
+                key, value = net_arg.split("=", 1)
                 net_kwargs[key] = value
 
         if args.dim_from_weights:
@@ -2324,7 +2335,12 @@ class KleinTrainer:
             accelerator.print(f"[resume] skipping initial sample (starting at epoch {epoch_to_start + 1})")
         elif should_sample_images(args, global_step, epoch=0):
             optimizer_eval_fn()
-            self.sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
+            # A preview failure must never end a training run (Krea 2 already degrades here).
+            try:
+                self.sample_images(accelerator, args, 0, global_step, vae, transformer, sample_parameters, dit_dtype)
+            except Exception:
+                logger.warning("sample generation failed — training continues, previews skipped "
+                               "this round", exc_info=True)
             optimizer_train_fn()
         if len(accelerator.trackers) > 0:
             accelerator.log({}, step=0)
@@ -2810,7 +2826,13 @@ class KleinTrainer:
                             except Exception as _e:
                                 accelerator.print(f"[adaptive_lr] sidecar save failed: {_e}")
 
-            self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
+            # A preview failure must never end a run that might be hours in (Krea 2 already
+            # degrades gracefully here) — the checkpoint for this epoch is already saved.
+            try:
+                self.sample_images(accelerator, args, epoch + 1, global_step, vae, transformer, sample_parameters, dit_dtype)
+            except Exception:
+                logger.warning("sample generation failed at epoch %d — training continues, "
+                               "previews skipped this round", epoch + 1, exc_info=True)
             optimizer_train_fn()
 
             # Graceful pause — after save_state + sample_images for this epoch are complete, exit cleanly

@@ -37,6 +37,13 @@ the actual targeted behaviour (smaller effective footprint, cleaner separation).
   each extra image of batch size costs **~2.4 GB** (the old budget's blind spot — batch 2
   could sail through the check and OOM), resolution is nearly free at batch 1, rank is minor.
 
+**Where this lands:** with INT8 + compile, Fizgig's per-step speed is now **approximately on a
+par with OneTrainer**. And raw step speed isn't the whole race — Fizgig's real-time dataset
+intelligence (the per-image loss watch you can enable with one click on the Training tab:
+detect problem images, throttle stuck ones, auto-recaption) showed **faster likeness and a
+higher final ceiling in matched-epoch A/B runs**. Same step speed, smarter steps — so
+wall-clock time to a *good* LoRA should now favour Fizgig.
+
 ## 🎛 Krea 2 sample controls, wired
 
 The Samples tab's **Steps**, **CFG Scale**, **Negative prompt**, and **Sample at Start** now

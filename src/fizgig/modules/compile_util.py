@@ -63,6 +63,12 @@ def init_compile(cache_size_limit: int = 8192) -> None:
 
     # Applies per process; dynamo reads it when it decides whether to recompile or bail to eager.
     torch._dynamo.config.cache_size_limit = cache_size_limit
+    # The ACCUMULATED limit (default 256) binds before a raised per-frame limit — and under
+    # fullgraph=True hitting it RAISES mid-run instead of falling back to eager, with an
+    # error message pointing at the knob already raised. Raise both together.
+    if hasattr(torch._dynamo.config, "accumulated_cache_size_limit"):
+        torch._dynamo.config.accumulated_cache_size_limit = max(
+            cache_size_limit, torch._dynamo.config.accumulated_cache_size_limit)
 
     if not _patched:
         _patch_sympy_mod()

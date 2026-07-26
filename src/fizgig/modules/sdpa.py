@@ -60,7 +60,16 @@ _SDPA_CTX = None
 # better than either absolute would. Doubled for margin: at exactly break-even there is nothing to
 # win, and being wrong should cost a few percent, not a run.
 _STEPS_PER_SHAPE = 35
-_MARGIN = float(os.environ.get("FIZGIG_SDPA_TRAIN_MARGIN", "2.0"))
+# Guarded parse: imported by the model, both trainers and the GUI — a typo'd env var used
+# to surface as a bare ValueError traceback at app start that never named it.
+try:
+    _MARGIN = float(os.environ.get("FIZGIG_SDPA_TRAIN_MARGIN", "2.0") or 2.0)
+except ValueError:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "FIZGIG_SDPA_TRAIN_MARGIN=%r is not a number — using the default 2.0",
+        os.environ.get("FIZGIG_SDPA_TRAIN_MARGIN"))
+    _MARGIN = 2.0
 _seen_shapes: set = set()
 _training_cudnn = False
 
@@ -130,7 +139,11 @@ def sdpa_backend_ctx():
             # Krea 2's shape) and quietly falls back everywhere else.
             _backends = [SDPBackend.CUDNN_ATTENTION, SDPBackend.FLASH_ATTENTION,
                          SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
-            _q = torch.zeros(1, 8, 64, 64, device="cuda", dtype=torch.bfloat16)
+            # Probe on the CURRENT device — a hard-coded "cuda" created a second CUDA
+            # context on device 0 on multi-GPU boxes.
+            _q = torch.zeros(1, 8, 64, 64,
+                             device=torch.device("cuda", torch.cuda.current_device()),
+                             dtype=torch.bfloat16)
             with sdpa_kernel(_backends, set_priority=True):
                 _F.scaled_dot_product_attention(_q, _q, _q)
             _SDPA_CTX = lambda: sdpa_kernel(_backends, set_priority=True)

@@ -34,7 +34,16 @@ except ImportError:
 # Sequence lengths are rounded up to a multiple of this before attention, so a bucketed dataset
 # presents a few distinct shapes rather than one per caption length. 1 disables the rounding
 # (exact trim, the old behaviour). See AttentionParams.__post_init__.
-_TRIM_MULTIPLE = int(os.environ.get("FIZGIG_ATTN_TRIM_MULTIPLE", "64"))
+# Guarded parse: this module is imported by the model, both trainers and the GUI — a typo'd
+# env var used to surface as a bare ValueError traceback at app start that never named it.
+try:
+    _TRIM_MULTIPLE = int(os.environ.get("FIZGIG_ATTN_TRIM_MULTIPLE", "64") or 64)
+except ValueError:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "FIZGIG_ATTN_TRIM_MULTIPLE=%r is not an integer — using the default 64",
+        os.environ.get("FIZGIG_ATTN_TRIM_MULTIPLE"))
+    _TRIM_MULTIPLE = 64
 
 
 @dataclass
@@ -78,9 +87,15 @@ class AttentionParams:
                     self.uniform_seqlen = rounded
                 else:
                     self.uniform_seqlen = valid
-                # Tell the backend chooser which shapes this run actually attends, so it can work
-                # out whether cuDNN's per-shape planning will pay for itself.
-                _note_shape(self.uniform_seqlen)
+        # Tell the backend chooser which shape this forward will ACTUALLY attend — including
+        # when trim is disabled (FIZGIG_ATTN_TRIM=0, which the docs recommend to help cuDNN)
+        # or the batch is ragged: both attend the padded length. Recording only inside the
+        # trim branch meant those runs recorded nothing and the cuDNN auto-switch could
+        # never fire.
+        if self.attention_mask is not None:
+            attended = self.uniform_seqlen or (int(self.max_seqlen) if self.max_seqlen else None)
+            if attended:
+                _note_shape(attended)
 
     @staticmethod
     def create_attention_params(attn_mode: Optional[str], split_attn: bool) -> "AttentionParams":

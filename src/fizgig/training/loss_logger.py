@@ -802,13 +802,18 @@ class PerImageLossWatch:
                 report = os.path.join(d, "problem_images.json")
                 # Atomic write — the GUI polls this file and must never read a half-written dump.
                 with open(report + ".tmp", "w", encoding="utf-8") as f:
+                    # Composite batch keys ("a|b|c") are excluded from the report: a
+                    # batch-mean isn't a per-image verdict, and the window filled with
+                    # rows naming three images whose thumbnails can't load.
                     json.dump({"epoch": epoch, "apply_lr": self.apply_lr,
+                               "batched": self._batched,
                                "improving_count": improving_count,
                                "plateaued": self.plateaued,
                                "pending_count": self.plateau_pending,
                                "best_epoch_estimate": self.best_epoch_estimate,
                                "images": {k: {kk: (round(vv, 6) if isinstance(vv, float) else vv)
-                                              for kk, vv in s.items()} for k, s in stats.items()}},
+                                              for kk, vv in s.items()}
+                                          for k, s in stats.items() if "|" not in k}},
                               f, indent=2)
                 _atomic_replace(report + ".tmp", report)
             except Exception:

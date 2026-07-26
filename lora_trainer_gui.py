@@ -4685,7 +4685,21 @@ class LoRATrainerGUI:
         the fp8 Base options. Grey those controls while it's on."""
         on = self.quant_4bit_var.get()
         try:
-            self.entries["BLOCKS_SWAP"].configure(state="disabled" if on else "normal")
+            # Show what will actually run: the trainer forces swap to 0 under 4-bit, but
+            # the greyed-out box kept displaying the old count. Remember the user's value
+            # and restore it when 4-bit is toggled off.
+            if on:
+                _cur = self.entries["BLOCKS_SWAP"].get()
+                if _cur != "0":
+                    self._blocks_swap_before_4bit = _cur
+                    self.entries["BLOCKS_SWAP"].set("0")
+                self.entries["BLOCKS_SWAP"].configure(state="disabled")
+            else:
+                self.entries["BLOCKS_SWAP"].configure(state="normal")
+                _prev = getattr(self, "_blocks_swap_before_4bit", None)
+                if _prev is not None and self.entries["BLOCKS_SWAP"].get() == "0":
+                    self.entries["BLOCKS_SWAP"].set(_prev)
+                    self._blocks_swap_before_4bit = None
         except Exception:
             pass
         for chk in (getattr(self, "fp8_check", None), getattr(self, "scaled_check", None)):
@@ -5930,7 +5944,10 @@ class LoRATrainerGUI:
         self.cache_sample_model_label = ttk.Label(freq_card, text="Cache sample model in RAM:")
         self.cache_sample_model_label.grid(
             row=4, column=0, sticky=tk.W, padx=(0, 10), pady=(8, 0))
-        self.cache_sample_model_var = tk.StringVar(value=self.settings.get("CACHE_SAMPLE_MODEL", "auto"))
+        # Allow-list on restore: a saved value outside auto/on/off lands in the readonly
+        # combobox without complaint otherwise.
+        _csm = str(self.settings.get("CACHE_SAMPLE_MODEL", "auto"))
+        self.cache_sample_model_var = tk.StringVar(value=_csm if _csm in ("auto", "on", "off") else "auto")
         self.cache_sample_model_combo = ttk.Combobox(freq_card, textvariable=self.cache_sample_model_var,
                      values=["auto", "on", "off"], state="readonly", width=8)
         self.cache_sample_model_combo.grid(row=4, column=1, sticky=tk.W, pady=(8, 0))
@@ -17147,7 +17164,15 @@ class LoRATrainerGUI:
         elif preset == "Custom":
             patterns = self._build_custom_training_patterns()
             if patterns is None:
-                print("[Warning] Training Preset is Custom but no blocks are selected — training full model.")
+                # Visible warning — print() went to stdout only, invisible under the
+                # windowed launcher, and the run silently trained the full model.
+                self.update_console("[Warning] Model Area is Custom but no blocks are "
+                                    "selected — training the FULL model.\n")
+                messagebox.showwarning(
+                    "Custom blocks empty",
+                    "Model Area to Train is set to Custom but no blocks are ticked.\n\n"
+                    "This run will train the FULL model. Tick blocks (or pick a preset) "
+                    "if you wanted block targeting.")
         # "Full Model" → patterns stays None (train everything)
 
         if patterns:
@@ -17594,6 +17619,12 @@ class LoRATrainerGUI:
             prompt_file = self._write_krea2_sample_prompts()
             every = self.sample_every_n_epochs_var.get().strip()
             every_n = int(every) if every.isdigit() else 0
+            # Krea 2 previews are per-EPOCH only. A steps-only config used to skip the
+            # whole sample block in silence — say so instead.
+            _steps_only = self.sample_every_n_steps_var.get().strip()
+            if every_n <= 0 and _steps_only.isdigit() and int(_steps_only) > 0:
+                self.update_console("[samples] Krea 2 previews are per-epoch — 'Every N Steps' "
+                                    "has no effect. Set 'Every N Epochs' to enable previews.\n")
             ref_img = (getattr(self, "sample_ref_image_var", None).get().strip()
                        if getattr(self, "sample_ref_image_var", None) else "")
             ref_img = ref_img if (ref_img and os.path.exists(ref_img)) else ""
@@ -17870,149 +17901,8 @@ class LoRATrainerGUI:
         else:
             self.update_console("No active process to stop\n")
 
-    def save_settings(self):
-        """Save all settings, including conversion settings, to a JSON file"""
-        if _persist_disabled():
-            return
-        current_settings = {}
-        for key, entry in self.entries.items():
-            if isinstance(entry, ttk.Combobox):
-                current_settings[key] = entry.get()
-            elif isinstance(entry, tk.BooleanVar):
-                current_settings[key] = entry.get()
-            else:
-                current_settings[key] = entry.get()
-        current_settings["ARCHITECTURE"] = self.architecture_var.get()
-        current_settings["PRESERVE_DISTRIBUTION"] = self.preserve_dist_var.get()
-        current_settings["ADAPTIVE_LR"] = self.adaptive_lr_var.get()
-        current_settings["BILINGUAL_SKIP_EXISTING"] = self.skip_bilingual_var.get()
-        current_settings["FP8"] = self.fp8_var.get()
-        current_settings["SCALED"] = self.scaled_var.get()
-        current_settings["QUANT_4BIT"] = self.quant_4bit_var.get()
-        current_settings["COMPILE_BLOCKS"] = self.compile_blocks_var.get()
-        current_settings["GRADIENT_CHECKPOINTING"] = self.grad_checkpoint_var.get()
-        current_settings["FP8_TEXT_ENCODER"] = self.fp8_text_encoder_var.get()
-        current_settings["ENABLE_BUCKET"] = self.dataset_enable_bucket_var.get()
-        current_settings["BUCKET_NO_UPSCALE"] = self.dataset_no_upscale_var.get()
-        current_settings["ENABLE_CACHE"] = self.enable_cache_var.get()
-
-        # Training preset + custom block selections
-        if hasattr(self, 'training_preset_var'):
-            current_settings["TARGET_LAYERS"] = self.training_preset_var.get()
-        if hasattr(self, 'training_block_vars'):
-            current_settings["TRAINING_CUSTOM_BLOCKS"] = {
-                k: v.get() for k, v in self.training_block_vars.items()
-            }
-
-        # Save sample settings
-        current_settings["SAMPLE_PROMPT"] = self.sample_prompt_text.get("1.0", tk.END).strip()
-
-        # Save caption settings
-        current_settings["CAPTION_TRIGGER_WORD"] = self.caption_trigger_var.get()
-        current_settings["CAPTION_MODEL"] = self.caption_model_var.get()
-        current_settings["CAPTION_TASK"] = self.caption_task_var.get()
-        current_settings["CAPTION_MAX_TOKENS"] = self.caption_max_tokens_var.get()
-
-        file_path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON files", "*.json")])
-        if file_path:
-            with open(file_path, "w") as f:
-                json.dump(current_settings, f, indent=4)
-
-    def load_settings(self):
-        """Load settings from a JSON file, including conversion settings"""
-        file_path = filedialog.askopenfilename(filetypes=[("JSON files", "*.json")])
-        if file_path:
-            with open(file_path, "r") as f:
-                loaded_settings = json.load(f)
-
-            # Load architecture first to update UI
-            if "ARCHITECTURE" in loaded_settings:
-                self.architecture_var.set(loaded_settings["ARCHITECTURE"])
-                self.update_ui_for_architecture()
-
-            for key, value in loaded_settings.items():
-                if key in self.entries:
-                    if isinstance(self.entries[key], ttk.Combobox):
-                        self.entries[key].set(value)
-                    elif isinstance(self.entries[key], tk.BooleanVar):
-                        self.entries[key].set(value)
-                    else:
-                        self.entries[key].delete(0, tk.END)
-                        self.entries[key].insert(0, value)
-            if "FP8" in loaded_settings:
-                self.fp8_var.set(loaded_settings["FP8"])
-            if "SCALED" in loaded_settings:
-                self.scaled_var.set(loaded_settings["SCALED"])
-            if "FP8_TEXT_ENCODER" in loaded_settings:
-                self.fp8_text_encoder_var.set(loaded_settings["FP8_TEXT_ENCODER"])
-            if "GRADIENT_CHECKPOINTING" in loaded_settings and hasattr(self, "grad_checkpoint_var"):
-                self.grad_checkpoint_var.set(loaded_settings["GRADIENT_CHECKPOINTING"])
-            if "ENABLE_BUCKET" in loaded_settings:
-                self.dataset_enable_bucket_var.set(loaded_settings["ENABLE_BUCKET"])
-            if "BUCKET_NO_UPSCALE" in loaded_settings:
-                self.dataset_no_upscale_var.set(loaded_settings["BUCKET_NO_UPSCALE"])
-            if "ENABLE_CACHE" in loaded_settings:
-                self.enable_cache_var.set(loaded_settings["ENABLE_CACHE"])
-
-            # Load sample settings
-            if "SAMPLE_PROMPT" in loaded_settings:
-                self.sample_prompt_text.delete("1.0", tk.END)
-                self.sample_prompt_text.insert("1.0", loaded_settings["SAMPLE_PROMPT"])
-
-            # Load caption settings
-            if "CAPTION_TRIGGER_WORD" in loaded_settings:
-                self.caption_trigger_var.set(loaded_settings["CAPTION_TRIGGER_WORD"])
-            if "CAPTION_MODEL" in loaded_settings:
-                self.caption_model_var.set(loaded_settings["CAPTION_MODEL"])
-            if "CAPTION_TASK" in loaded_settings:
-                self.caption_task_var.set(loaded_settings["CAPTION_TASK"])
-            if "CAPTION_MAX_TOKENS" in loaded_settings:
-                self.caption_max_tokens_var.set(loaded_settings["CAPTION_MAX_TOKENS"])
-
-            # Load timestep boolean settings
-            if "PRESERVE_DISTRIBUTION" in loaded_settings:
-                self.preserve_dist_var.set(loaded_settings["PRESERVE_DISTRIBUTION"])
-            if "ADAPTIVE_LR" in loaded_settings:
-                self.adaptive_lr_var.set(bool(loaded_settings["ADAPTIVE_LR"]))
-                self._on_adaptive_lr_toggle()
-            if "BILINGUAL_SKIP_EXISTING" in loaded_settings:
-                self.skip_bilingual_var.set(bool(loaded_settings["BILINGUAL_SKIP_EXISTING"]))
-
-            # Back-compat: old settings JSONs stored model paths under Training-tab keys.
-            # Route them into the prefs_vars (the new source of truth) so users don't lose paths on upgrade.
-            for old_key, pref_key in (("VAE_MODEL", "vae"), ("DIT_MODEL", "base_dit"),
-                                       ("TEXT_ENCODER", "text_encoder"), ("LORA_OUTPUT_DIR", "lora_output_dir")):
-                if old_key in loaded_settings and pref_key in self.prefs_vars:
-                    self.prefs_vars[pref_key].set(loaded_settings[old_key])
-            if "DATASET_CONFIG" in loaded_settings and hasattr(self, "_dataset_config_var"):
-                self._dataset_config_var.set(loaded_settings["DATASET_CONFIG"])
-
-            # Training preset + custom blocks (with back-compat for old names)
-            if "TARGET_LAYERS" in loaded_settings and hasattr(self, 'training_preset_var'):
-                raw = loaded_settings["TARGET_LAYERS"]
-                legacy_map = {
-                    "All Layers": "Full Model",
-                    "Identity Blocks": "Identity",
-                    "Style+Composition Blocks": "Style+Composition",
-                    "Details Blocks": "Details",
-                }
-                mapped = legacy_map.get(raw, raw)
-                valid = ("Full Model", "Identity", "Style", "Style+Composition", "Details", "Custom")
-                self.training_preset_var.set(mapped if mapped in valid else "Full Model")
-                self._on_training_preset_changed()
-            if "TRAINING_CUSTOM_BLOCKS" in loaded_settings and hasattr(self, 'training_block_vars'):
-                saved_blocks = loaded_settings["TRAINING_CUSTOM_BLOCKS"]
-                for k, v in saved_blocks.items():
-                    if k in self.training_block_vars:
-                        self.training_block_vars[k].set(bool(v))
-
-            self.toggle_scaled()  # Update Scaled checkbox state based on FP8
-            if hasattr(self, 'ts_sampling_var'):
-                self._on_timestep_sampling_changed()
-                self._on_weighting_scheme_changed()
-                self._update_noise_range_label()
-            if hasattr(self, 'sample_settings_frame'):
-                self.update_samples_ui_for_architecture()
+    # (save_settings/load_settings removed: 160 lines of dead code with no
+    #  callers, duplicating the preset system with a 4-key save/load asymmetry.)
 
 if __name__ == "__main__":
     # Set unique app ID so Windows taskbar shows our icon, not Python's

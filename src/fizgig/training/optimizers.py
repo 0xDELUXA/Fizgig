@@ -9,9 +9,10 @@ Two things matter for a LoRA and pull against the "more optimizers is better" in
   ~tens of MB against a 13-19 GB base. Choosing an 8-bit or factored optimizer to save memory is
   nearly pointless — the base dominates. What the choice actually buys is *update behaviour*.
 * **Learning rates are not comparable across families.** Lion's update is a sign, so it wants
-  roughly a tenth of AdamW's LR; Prodigy estimates the LR itself and wants `lr=1.0`. Handing
-  someone a dropdown without saying that is how you produce a fried LoRA and a bug report, so
-  `create_optimizer` warns loudly on the record when the LR looks wrong for the family.
+  roughly a tenth of AdamW's LR. Handing someone a dropdown without saying that is how you
+  produce a fried LoRA and a bug report, so `create_optimizer` warns loudly on the record when
+  the LR looks wrong for the family. (Self-tuning families — Prodigy, CAME, Adafactor — were
+  removed for exactly this class of failure; see the note above _CATALOG.)
 
 Free-form `module.path.ClassName` is accepted too, so a user who pip-installs something exotic
 does not need a Fizgig release to use it.
@@ -29,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 
 # name -> (import to test, one-line description shown in the GUI/CLI help)
+# Removed by decision (2026-07-28): prodigy, came, adafactor — the "manage their own LR"
+# family. They fight Adaptive LR by design (prodigy wants lr=1.0 as a multiplier, adafactor
+# relative_step stores lr=None, came is an Adafactor variant), two of the three needed
+# external packages, and both prodigy and adafactor caused real bugs (silent AdamW fallback
+# at lr=1.0; TypeError against the adaptive watcher). Exotic optimizers remain available
+# via the full module.path.ClassName form.
 _CATALOG = {
     "adamw8bit":          ("bitsandbytes", "AdamW, 8-bit state (default — the validated recipe)"),
     "adamw":              (None,           "AdamW, fp32 state, CUDA-fused where available"),
@@ -36,9 +43,6 @@ _CATALOG = {
     "ademamix8bit":       ("bitsandbytes", "AdEMAMix — second slow EMA, aimed at long runs"),
     "pagedademamix8bit":  ("bitsandbytes", "AdEMAMix8bit with CPU paging"),
     "lion8bit":           ("bitsandbytes", "Lion — sign updates; use ~1/10 the AdamW LR"),
-    "adafactor":          (None,           "Adafactor — factored state, lowest memory"),
-    "prodigy":            ("prodigyopt",   "Prodigy — estimates the LR itself; set LR to 1.0"),
-    "came":               ("came_pytorch", "CAME — confidence-guided Adafactor variant"),
 }
 
 DEFAULT_OPTIMIZER = "adamw8bit"
@@ -91,10 +95,7 @@ def _warn_lr(name: str, lr: float) -> None:
     if name == "lion8bit" and lr > 5e-5:
         logger.warning("[optimizer] Lion applies the SIGN of the update, so it needs roughly a "
                        "TENTH of an AdamW LR. %.2e will likely overbake — try %.2e.", lr, lr / 10)
-    elif name == "prodigy" and lr < 0.5:
-        logger.warning("[optimizer] Prodigy estimates the LR itself and expects lr=1.0 as a "
-                       "multiplier. At %.2e it will barely train.", lr)
-    elif name not in ("lion8bit", "prodigy") and lr > 1e-2:
+    elif name != "lion8bit" and lr > 1e-2:
         logger.warning("[optimizer] LR %.2e is very high for %s.", lr, name)
 
 
@@ -127,14 +128,6 @@ def create_optimizer(name: str, params, lr: float, args_str: str = "") -> tuple:
             # on CUDA and floating point, which LoRA factors are.
             kwargs.setdefault("fused", torch.cuda.is_available())
             opt = torch.optim.AdamW(params, lr=lr, **kwargs)
-        elif key == "adafactor":
-            opt = torch.optim.Adafactor(params, lr=lr, **kwargs)
-        elif key == "prodigy":
-            from prodigyopt import Prodigy
-            opt = Prodigy(params, lr=lr, **kwargs)
-        elif key == "came":
-            from came_pytorch import CAME
-            opt = CAME(params, lr=lr, **kwargs)
         elif "." in name:
             module_path, cls_name = name.rsplit(".", 1)
             opt = getattr(importlib.import_module(module_path), cls_name)(params, lr=lr, **kwargs)

@@ -894,13 +894,13 @@ class LoRATrainerGUI:
         # Klein's trainer resolves these itself (name-or-module-path). Krea 2 goes through
         # fizgig.training.optimizers, which offers a different set — filtered to what's actually
         # installed — so the dropdown is re-populated when the Base Model selector changes.
-        self.optimizer_types = ["adamw", "adamw8bit", "adafactor", "bitsandbytes.optim.AdEMAMix8bit", "bitsandbytes.optim.PagedAdEMAMix8bit"]
+        self.optimizer_types = ["adamw", "adamw8bit", "bitsandbytes.optim.AdEMAMix8bit", "bitsandbytes.optim.PagedAdEMAMix8bit"]
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
             from fizgig.training.optimizers import available_optimizers
             self.krea2_optimizer_types = available_optimizers()
         except Exception:
-            self.krea2_optimizer_types = ["adamw8bit", "adamw", "adafactor"]
+            self.krea2_optimizer_types = ["adamw8bit", "adamw"]
 
         self.setup_styles()
 
@@ -2082,7 +2082,12 @@ class LoRATrainerGUI:
             elif key == "OPTIMIZER_TYPE":
                 var = tk.StringVar(value=self.settings[key])
                 self.entries[key] = ttk.Combobox(parent, textvariable=var, values=self.optimizer_types, state="readonly", width=38)
-                self.entries[key].current(self.optimizer_types.index(self.settings[key]))
+                # Saved settings may carry a name that's no longer offered (e.g. the removed
+                # adafactor/prodigy/came) — fall back to the default instead of crashing.
+                if self.settings[key] in self.optimizer_types:
+                    self.entries[key].current(self.optimizer_types.index(self.settings[key]))
+                else:
+                    self.entries[key].set("adamw8bit")
             elif key == "LR_SCHEDULER":
                 lr_scheduler_options = ["constant", "constant_with_warmup", "cosine", "cosine_with_restarts", "linear", "polynomial"]
                 self.lr_scheduler_var = tk.StringVar(value=self.settings["LR_SCHEDULER"])

@@ -562,32 +562,6 @@ class KleinTrainer:
                 optimizer_class = bnb.optim.AdamW8bit
                 optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
-        elif optimizer_type == "adafactor":
-            if "relative_step" not in optimizer_kwargs:
-                optimizer_kwargs["relative_step"] = True
-            if not optimizer_kwargs["relative_step"] and optimizer_kwargs.get("warmup_init", False):
-                logger.info("Setting relative_step=True because warmup_init=True")
-                optimizer_kwargs["relative_step"] = True
-            logger.info(f"Using Adafactor optimizer | {optimizer_kwargs}")
-
-            if optimizer_kwargs["relative_step"]:
-                logger.info("relative_step is true")
-                if lr != 0.0:
-                    logger.warning("learning rate will be used as initial_lr")
-                args.learning_rate = None
-                if args.lr_scheduler != "adafactor":
-                    logger.info("Using adafactor_scheduler")
-                args.lr_scheduler = f"adafactor:{lr}"
-                lr = None
-            else:
-                if args.max_grad_norm != 0.0:
-                    logger.warning("max_grad_norm is set — clip_grad_norm will be enabled")
-                if args.lr_scheduler != "constant_with_warmup":
-                    logger.warning("constant_with_warmup is recommended for Adafactor")
-
-            optimizer_class = transformers.optimization.Adafactor
-            optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
-
         elif optimizer_type == "adamw":
             logger.info(f"Using AdamW optimizer | {optimizer_kwargs}")
             optimizer_class = torch.optim.AdamW
@@ -605,7 +579,15 @@ class KleinTrainer:
                 optimizer_module = importlib.import_module(".".join(values[:-1]))
                 case_sensitive_optimizer_type = values[-1]
 
-            optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
+            try:
+                optimizer_class = getattr(optimizer_module, case_sensitive_optimizer_type)
+            except AttributeError:
+                raise ValueError(
+                    f"Unknown optimizer {args.optimizer_type!r}. Use adamw, adamw8bit, or a "
+                    f"full module.path.ClassName (e.g. bitsandbytes.optim.AdEMAMix8bit). "
+                    f"(adafactor/prodigy/came were removed — they manage their own LR and "
+                    f"conflict with Adaptive LR.)"
+                ) from None
             optimizer = optimizer_class(trainable_params, lr=lr, **optimizer_kwargs)
 
         optimizer_name = optimizer_class.__module__ + "." + optimizer_class.__name__
@@ -685,13 +667,6 @@ class KleinTrainer:
                 lr_scheduler_type = values[-1]
             lr_scheduler_class = getattr(lr_scheduler_module, lr_scheduler_type)
             return lr_scheduler_class(optimizer, **lr_scheduler_kwargs)
-
-        if name.startswith("adafactor"):
-            assert type(optimizer) == transformers.optimization.Adafactor, (
-                "adafactor scheduler must be used with Adafactor optimizer"
-            )
-            initial_lr = float(name.split(":")[1])
-            return wrap_check_needless_num_warmup_steps(transformers.optimization.AdafactorSchedule(optimizer, initial_lr))
 
         if name.lower() == "rex":
             return RexLR(
@@ -3032,7 +3007,7 @@ def setup_parser() -> argparse.ArgumentParser:
 
     # ---- Optimizer ----
     parser.add_argument("--optimizer_type", type=str, default="",
-                        help="Optimizer: AdamW, AdamW8bit, Adafactor, or full.module.path.ClassName")
+                        help="Optimizer: AdamW, AdamW8bit, or full.module.path.ClassName")
     parser.add_argument("--optimizer_args", type=str, default=None, nargs="*")
     parser.add_argument("--learning_rate", type=float, default=2.0e-6)
     parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm (0 = no clipping)")
@@ -3040,7 +3015,7 @@ def setup_parser() -> argparse.ArgumentParser:
     # ---- LR Scheduler ----
     parser.add_argument("--lr_scheduler", type=str, default="constant",
                         help="LR scheduler: linear, cosine, cosine_with_restarts, polynomial, constant, "
-                             "constant_with_warmup, adafactor, rex")
+                             "constant_with_warmup, rex")
     parser.add_argument("--lr_warmup_steps", type=int_or_float, default=0)
     parser.add_argument("--lr_decay_steps", type=int_or_float, default=0)
     parser.add_argument("--lr_scheduler_num_cycles", type=int, default=1)

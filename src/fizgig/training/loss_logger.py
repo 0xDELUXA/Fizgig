@@ -869,6 +869,24 @@ class PerImageLossWatch:
         caption edit (reset_key) clears it."""
         self._incorrigible.add(str(key))
 
+    def _purge_records_only(self, key: str) -> None:
+        """Replay-only sibling of reset_key for keys whose exclusion must be preserved.
+
+        A historical reset must never pardon a LATER exclusion — but its record purge
+        still happened in the original run, and letting the old caption's records survive
+        skews the residual thresholds every OTHER image is judged against. So: purge the
+        records + per-key stats, leave _incorrigible/_excluded/_retired/_excl_data alone."""
+        key = str(key)
+        self._records = [r for r in self._records if r[0] != key]
+        for d in (self._stuck_votes, self._clear_votes, self._suspect_votes,
+                  self._exhaust_votes, self._stuck_epochs, self._mult):
+            d.pop(key, None)
+        self._confirmed_stuck.discard(key)
+        self._last_reported_stuck.discard(key)
+        self._last_improving_epoch.pop(key, None)
+        self._improving_streak.pop(key, None)
+        self.verdicts.pop(key, None)
+
     def reset_key(self, key: str) -> None:
         """Forget one image's history — used after a live caption fix, since its stuck record
         reflects the OLD caption. It re-enters fresh (needs 4 epochs of new trend before it can

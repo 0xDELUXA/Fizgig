@@ -17259,6 +17259,16 @@ class LoRATrainerGUI:
                     if hasattr(self, "caption_trigger_var") else "")
             if trig and trig.lower() != "trigger_word":
                 cmd += ["--trigger_word", trig]
+        # Caption repair (manual edits from the Problem Images window AND auto-recaption)
+        # re-encodes with the Qwen3-VL text encoder. --text_encoder used to be emitted only
+        # inside the samples block, so with previews off the trainer had no TE path and every
+        # caption fix bailed for the whole run, re-queueing forever. Emit it whenever any
+        # watch toggle is on (a duplicate in the samples block is harmless — same value).
+        if (self.krea2_loss_watch_var.get() or self.krea2_per_image_lr_var.get()
+                or self.krea2_warmup_look_var.get() or self.krea2_auto_recaption_var.get()):
+            _te = self._krea2_pref("krea2_text_encoder")
+            if _te:
+                cmd += ["--text_encoder", _te]
 
         # In-training previews: render the fp8 Turbo with the live LoRA. Resolution +
         # frequency come from the Samples tab; previews land in <output_dir>/sample, which

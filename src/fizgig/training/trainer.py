@@ -2380,16 +2380,21 @@ class KleinTrainer:
                 )
                 args.adaptive_lr = False
         if args.adaptive_lr:
-            # The Min LR floor is authoritative over the LR box: starting below the declared
-            # floor is contradictory, so the start is clamped UP to the floor.
-            if _initial_lr < args.adaptive_lr_min:
-                accelerator.print(
-                    f"[adaptive_lr] starting LR {_initial_lr:.3e} is below the Min LR floor — "
-                    f"raising start to {args.adaptive_lr_min:.3e} (the floor overrides the LR box)"
-                )
+            # The Learning Rate box is IGNORED while adaptive is on: the run starts at the
+            # GEOMETRIC MIDPOINT of the Min/Max window and the watcher owns the LR from
+            # there (probe up / ratchet down). Two knobs, not three — the old behaviour
+            # (box = start, floor-clamped) silently made the box authoritative.
+            # Resumed runs keep their restored LR: the watcher was mid-flight.
+            if not args.resume:
+                _mid = math.sqrt(args.adaptive_lr_min * args.adaptive_lr_max)
+                if abs(_initial_lr - _mid) > 1e-12:
+                    accelerator.print(
+                        f"[adaptive_lr] starting LR set to {_mid:.3e} — the geometric midpoint "
+                        f"of Min/Max (the Learning Rate box is ignored while adaptive is on)"
+                    )
                 for _g in optimizer.param_groups:
-                    _g["lr"] = args.adaptive_lr_min
-                _initial_lr = args.adaptive_lr_min
+                    _g["lr"] = _mid
+                _initial_lr = _mid
             accelerator.print(
                 f"[adaptive_lr] ENABLED — starting_lr={_initial_lr:.3e} "
                 f"min_lr={args.adaptive_lr_min:.3e} max_lr={args.adaptive_lr_max:.3e} "

@@ -1146,14 +1146,17 @@ def train_krea2(
     os.makedirs(output_dir, exist_ok=True)
     adaptive = AdaptiveLR(adaptive_lr_min, adaptive_lr_max) if adaptive_lr else None
     if adaptive:
-        # The Min LR floor is authoritative over the LR box: starting below the declared floor is
-        # contradictory, so the start is clamped UP to the floor (matches Klein).
-        if learning_rate < adaptive_lr_min:
-            logger.info(f"[adaptive_lr] starting LR {learning_rate:.3e} is below the Min LR floor — "
-                        f"raising start to {adaptive_lr_min:.3e} (the floor overrides the LR box)")
-            learning_rate = adaptive_lr_min
-            for g in optimizer.param_groups:
-                g["lr"] = adaptive_lr_min
+        # The Learning Rate box is IGNORED while adaptive is on: start at the GEOMETRIC
+        # MIDPOINT of Min/Max and let the watcher own the LR (matches Klein). Two knobs,
+        # not three. A resumed run's optimizer restore below overwrites this with the
+        # watcher's mid-flight LR, which is correct.
+        _mid = math.sqrt(adaptive_lr_min * adaptive_lr_max)
+        if abs(learning_rate - _mid) > 1e-12:
+            logger.info(f"[adaptive_lr] starting LR set to {_mid:.3e} — the geometric midpoint "
+                        f"of Min/Max (the Learning Rate box is ignored while adaptive is on)")
+        learning_rate = _mid
+        for g in optimizer.param_groups:
+            g["lr"] = _mid
         logger.info(f"[adaptive_lr] ENABLED — start_lr={learning_rate:.3e} "
                     f"min_lr={adaptive_lr_min:.3e} max_lr={adaptive_lr_max:.3e}")
 

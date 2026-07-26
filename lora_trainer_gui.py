@@ -2467,9 +2467,11 @@ class LoRATrainerGUI:
         self._adaptive_reset_btn = ttk.Button(adaptive_frame, text="Reset Defaults", command=self._reset_adaptive_lr_defaults)
         self._adaptive_reset_btn.pack(side=tk.LEFT, padx=(4, 0))
         self._adaptive_desc_label = ttk.Label(training_content,
-                  text="When on, starting LR = Learning Rate field. Probes UP on steady loss descent; reduces DOWN "
-                       "on loss plateau, heavy gradient clipping, or runaway weight-norm growth (with a rollback to "
-                       "the previous epoch's weights on stability events).",
+                  text="When on, the Learning Rate box is IGNORED (greyed out) — the run starts at the geometric "
+                       "midpoint of Min/Max (e.g. 1e-4 & 4e-4 → 2e-4) and the watcher owns the LR from there: "
+                       "probes UP on steady loss descent; reduces DOWN on loss plateau, heavy gradient clipping, "
+                       "or runaway weight-norm growth (with a rollback to the previous epoch's weights on "
+                       "stability events).",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._adaptive_desc_label.grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 6))
         self._on_adaptive_lr_toggle()  # sync initial enabled/disabled state
@@ -4382,16 +4384,28 @@ class LoRATrainerGUI:
     # ── Timestep section helpers ────────────────────────────────────────
 
     def _on_adaptive_lr_toggle(self):
-        """Enable/disable the Min/Max LR dropdowns based on the Adaptive LR checkbox."""
+        """Enable/disable the Min/Max LR dropdowns based on the Adaptive LR checkbox,
+        and grey out the Learning Rate box — it is IGNORED while adaptive is on (the run
+        starts at the geometric midpoint of Min/Max; the watcher owns the LR from there)."""
         if not hasattr(self, 'entries') or "ADAPTIVE_LR_MIN" not in self.entries:
             return
+        on = self.adaptive_lr_var.get()
         # Comboboxes: "readonly" when enabled (dropdown active, no free typing), "disabled" when not
-        combo_state = "readonly" if self.adaptive_lr_var.get() else "disabled"
-        btn_state = "normal" if self.adaptive_lr_var.get() else "disabled"
+        combo_state = "readonly" if on else "disabled"
+        btn_state = "normal" if on else "disabled"
         self.entries["ADAPTIVE_LR_MIN"].config(state=combo_state)
         self.entries["ADAPTIVE_LR_MAX"].config(state=combo_state)
         if hasattr(self, '_adaptive_reset_btn'):
             self._adaptive_reset_btn.config(state=btn_state)
+        # The LR box is the inverse: live when adaptive is OFF, greyed when ON.
+        try:
+            if "LEARNING_RATE" in self.entries:
+                self.entries["LEARNING_RATE"].config(state="disabled" if on else "normal")
+            if hasattr(self, "labels") and "LEARNING_RATE" in self.labels:
+                self.labels["LEARNING_RATE"].config(
+                    fg=COLORS["text_muted"] if on else COLORS["text_secondary"])
+        except Exception:
+            pass
 
     def _parse_blocks_swap(self) -> int:
         """Extract integer from the BLOCKS_SWAP combobox value.
@@ -16702,7 +16716,10 @@ class LoRATrainerGUI:
             if minimum is not None and v < minimum:
                 errors.append(f"{label} must be at least {minimum} (got {raw})")
 
-        _check_num("Learning Rate", self.entries["LEARNING_RATE"].get(), float, 0)
+        # Learning Rate box is ignored (and greyed) while Adaptive LR is on — don't let a
+        # stale value in a disabled box block Start.
+        if not (hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get()):
+            _check_num("Learning Rate", self.entries["LEARNING_RATE"].get(), float, 0)
         _check_num("Network Dim (Rank)", self.entries["NETWORK_DIM"].get(), int, 1)
         _check_num("Network Alpha", self.entries["NETWORK_ALPHA"].get(), float, 0)
         _check_num("Max Train Epochs", self.entries["MAX_TRAIN_EPOCHS"].get(), int, 1)
@@ -16772,26 +16789,25 @@ class LoRATrainerGUI:
                 elif not os.path.exists(clip_model):
                     errors.append(f"CLIP model file does not exist: {clip_model}")
 
-        # Validate numeric fields
-        try:
-            lr = float(self.entries["LEARNING_RATE"].get())
-            if lr <= 0:
-                errors.append("Learning rate must be positive")
-            # When adaptive LR is enabled, starting LR must not exceed max LR (both archs).
-            if hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get():
-                try:
-                    max_lr_str = self.entries["ADAPTIVE_LR_MAX"].get().split(" ")[0]
-                    min_lr_str = self.entries["ADAPTIVE_LR_MIN"].get().split(" ")[0]
-                    max_lr_val = float(max_lr_str)
-                    min_lr_val = float(min_lr_str)
-                    if lr > max_lr_val:
-                        errors.append(f"Starting Learning Rate ({lr}) exceeds Adaptive Max LR ({max_lr_str}). Lower Learning Rate or raise Max LR.")
-                    if min_lr_val >= max_lr_val:
-                        errors.append(f"Adaptive Min LR ({min_lr_str}) must be lower than Max LR ({max_lr_str}).")
-                except (ValueError, KeyError):
-                    errors.append("Adaptive Min/Max LR must be valid numbers.")
-        except ValueError:
-            errors.append("Learning rate must be a valid number")
+        # Validate numeric fields. With Adaptive LR on, the Learning Rate box is IGNORED
+        # (the run starts at the geometric midpoint of Min/Max), so only Min < Max matters
+        # — the old "starting LR exceeds Max" check no longer applies.
+        _adaptive_on = hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get()
+        if _adaptive_on:
+            try:
+                max_lr_str = self.entries["ADAPTIVE_LR_MAX"].get().split(" ")[0]
+                min_lr_str = self.entries["ADAPTIVE_LR_MIN"].get().split(" ")[0]
+                if float(min_lr_str) >= float(max_lr_str):
+                    errors.append(f"Adaptive Min LR ({min_lr_str}) must be lower than Max LR ({max_lr_str}).")
+            except (ValueError, KeyError):
+                errors.append("Adaptive Min/Max LR must be valid numbers.")
+        else:
+            try:
+                lr = float(self.entries["LEARNING_RATE"].get())
+                if lr <= 0:
+                    errors.append("Learning rate must be positive")
+            except ValueError:
+                errors.append("Learning rate must be a valid number")
 
         # Context LoRA validation (supported by both Klein and Krea 2).
         ctx_path = self.entries.get("CONTEXT_LORA_PATH").get().strip() if "CONTEXT_LORA_PATH" in self.entries else ""
@@ -17048,10 +17064,20 @@ class LoRATrainerGUI:
         # Update settings from entries
         # Path keys read via _get_path() (sourced from prefs_vars or hidden _dataset_config_var)
         # since the Model Paths section is no longer visible on the Training tab.
+        # With Adaptive LR on the Learning Rate box is ignored (the trainer starts at the
+        # geometric midpoint of Min/Max) — a stale value in the disabled box must not crash
+        # collection, so fall back to a harmless placeholder the trainer will override.
+        try:
+            _lr_val = float(self.entries["LEARNING_RATE"].get())
+        except ValueError:
+            if hasattr(self, 'adaptive_lr_var') and self.adaptive_lr_var.get():
+                _lr_val = 1e-4  # ignored by the trainer under adaptive
+            else:
+                raise
         self.settings.update({
             "ARCHITECTURE": arch,
             "MODEL_TYPE": self.entries["MODEL_TYPE"].get() if config["uses_model_type"] else "",
-            "LEARNING_RATE": float(self.entries["LEARNING_RATE"].get()),
+            "LEARNING_RATE": _lr_val,
             "LORA_LR_RATIO": int(self.entries["LORA_LR_RATIO"].get()),
             "NETWORK_DIM": int(self.entries["NETWORK_DIM"].get()),
             "NETWORK_ALPHA": float(self.entries["NETWORK_ALPHA"].get()),

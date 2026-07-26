@@ -151,6 +151,27 @@ _INT8_PEAK_GB = 16.2
 # resident, so this only has to cover allocator slack and fragmentation.
 _HEADROOM_GB = 1.5
 
+# Run-shape terms, measured on a 5090 (36-image grid, 28 Jul 2026; whole-GPU peaks minus the
+# ~1 GB desktop baseline; gradient checkpointing on, as the trainers force):
+#   batch      +2.4 GB per extra image — flat across 0.25–1.05 MP, and by far the largest
+#              term (the old single-constant budget's blind spot: batch 2 sailed through the
+#              check and OOM'd).
+#   resolution +0.15 GB from 0.25 → 1.05 MP at batch 1 (checkpointing absorbs it); budgeted
+#              at 0.25 GB/MP for slack.
+#   rank       +0.35 GB from r8 → r32 (~15 MB/rank); bases are measured AT rank 32.
+_BATCH_GB_PER_IMAGE = 2.4
+_RES_GB_PER_MP = 0.25
+_RANK_GB_PER_RANK = 0.015
+
+
+def estimate_krea2_peak(base_gb: float, mp: float = 0.25, batch: int = 1,
+                        rank: int = 32) -> float:
+    """Peak VRAM estimate for a Krea 2 run of this shape (base measured at 0.25 MP, b1, r32)."""
+    return (base_gb
+            + _BATCH_GB_PER_IMAGE * max(0, int(batch) - 1)
+            + _RES_GB_PER_MP * max(0.0, float(mp) - 0.25)
+            + _RANK_GB_PER_RANK * max(0, int(rank) - 32))
+
 
 @dataclass
 class MemoryStrategy:
@@ -161,7 +182,9 @@ class MemoryStrategy:
 
 
 def recommend_krea2_strategy(vram_gb: Optional[float] = None,
-                             caps: Optional[Capabilities] = None) -> MemoryStrategy:
+                             caps: Optional[Capabilities] = None,
+                             mp: float = 0.25, batch: int = 1,
+                             rank: int = 32) -> MemoryStrategy:
     """Pick quantisation + swap for Krea 2 training on this machine.
 
     Preference: INT8 no-swap > NF4 no-swap > fp8 no-swap > swapping.
@@ -190,22 +213,25 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
     # INT8 first where it fits: faster than NF4 *and* far more accurate, with exact gradients.
     # Needs int8 tensor cores, which torch._int_mm requires — present from Turing, so this is
     # not Blackwell-only (unlike fp8 _scaled_mm, which needs sm_89+).
-    if caps.int8_matmul_train and vram >= _INT8_PEAK_GB + _HEADROOM_GB:
+    _int8_need = estimate_krea2_peak(_INT8_PEAK_GB, mp, batch, rank)
+    _nf4_need = estimate_krea2_peak(_NF4_PEAK_GB, mp, batch, rank)
+    _fp8_need = estimate_krea2_peak(_FP8_PEAK_GB, mp, batch, rank)
+    if caps.int8_matmul_train and vram >= _int8_need + _HEADROOM_GB:
         return MemoryStrategy(
             False, 0,
-            f"INT8 W8A8, no block swap (~{_INT8_PEAK_GB:.0f} GB needed, {vram:.1f} GB free) — "
+            f"INT8 W8A8, no block swap (~{_int8_need:.0f} GB needed at this run shape, {vram:.1f} GB free) — "
             "fastest measured, and ~7x more accurate than NF4 (8-bit vs 4-bit)",
             quant_int8="bf16")
 
-    if caps.bitsandbytes and vram >= _NF4_PEAK_GB + _HEADROOM_GB:
+    if caps.bitsandbytes and vram >= _nf4_need + _HEADROOM_GB:
         return MemoryStrategy(
             True, 0,
-            f"NF4 4-bit, no block swap (~{_NF4_PEAK_GB:.0f} GB needed, {vram:.1f} GB free) — "
+            f"NF4 4-bit, no block swap (~{_nf4_need:.0f} GB needed at this run shape, {vram:.1f} GB free) — "
             "fastest measured and leaves the most headroom")
 
-    if vram >= _FP8_PEAK_GB + _HEADROOM_GB:
+    if vram >= _fp8_need + _HEADROOM_GB:
         return MemoryStrategy(
-            False, 0, f"fp8, no block swap (~{_FP8_PEAK_GB:.0f} GB needed, {vram:.1f} GB free)")
+            False, 0, f"fp8, no block swap (~{_fp8_need:.0f} GB needed at this run shape, {vram:.1f} GB free)")
 
     if not caps.bitsandbytes:
         swap = 12 if vram >= 22 else (20 if vram >= 15 else 26)

@@ -678,6 +678,14 @@ class LoRATrainerGUI:
         master.geometry("1360x1124")  # wide enough that the IDLE/BUSY light clears the last tab ("Preferences"); +100 height for the bottom status bar
         master.minsize(1180, 900)  # keeps the tab row clear of the status light + tab content not cut off
         master.configure(bg=BG_COLOR)
+        # Closing the window must not orphan a training subprocess: Tk's default destroy
+        # exits the interpreter but the trainer runs in its own process (no job object on
+        # Windows) — it SURVIVED, holding 14-20 GB of VRAM and still writing checkpoints,
+        # stoppable only via Task Manager. Confirm, then taskkill the tree via stop_training.
+        try:
+            master.protocol("WM_DELETE_WINDOW", self._on_app_close)
+        except Exception:
+            pass
 
         # Window/taskbar icon
         icon_path = os.path.join(os.path.dirname(__file__), "icon.png")
@@ -3238,6 +3246,17 @@ class LoRATrainerGUI:
             self.training_preset_var.set(mapped if mapped in valid else "Full Model")
             if hasattr(self, '_on_training_preset_changed'):
                 self._on_training_preset_changed()
+                # _on_training_preset_changed auto-fills MIN/MAX_TIMESTEP from the Model
+                # Area — which just overwrote the values the generic loop restored from
+                # the preset. The preset's explicit values are the user's saved choice:
+                # put them back.
+                for _ts_key in ("MIN_TIMESTEP", "MAX_TIMESTEP"):
+                    if _ts_key in preset and _ts_key in self.entries:
+                        try:
+                            self.entries[_ts_key].delete(0, tk.END)
+                            self.entries[_ts_key].insert(0, str(preset[_ts_key]))
+                        except Exception:
+                            pass
         if "FP8_TEXT_ENCODER" in preset:
             self.fp8_text_encoder_var.set(preset["FP8_TEXT_ENCODER"])
         if "ENABLE_BUCKET" in preset:
@@ -3293,11 +3312,15 @@ class LoRATrainerGUI:
 
     # Keys in self.entries that belong to OTHER tabs — skipped when collecting
     # a training-tab preset. Everything else in self.entries is fair game.
+    # RESUME_TRAINING is run-specific state, not a preset knob: capturing it baked an
+    # absolute state-dir path into every saved preset (and Load Last Train), silently
+    # turning future runs into resumes of an old checkpoint.
     _NON_TRAINING_ENTRY_KEYS = {
         "SAMPLE_ENABLED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
         "SAMPLE_SEED", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_EVERY_N_STEPS",
         "SAMPLE_AT_FIRST", "SAMPLE_FLOW_SHIFT",
         "SAMPLE_NEGATIVE", "SAMPLE_CFG_SCALE",
+        "RESUME_TRAINING",
     }
 
     def _collect_preset_values(self):
@@ -3524,49 +3547,81 @@ class LoRATrainerGUI:
         else:
             self.fp8_text_encoder_check.config(text="Enable FP8 Text Encoder")
 
-        # Update blocks swap max (enforce limit)
+        # Update blocks swap max (enforce limit). "Auto" is left ALONE: resolving it here
+        # ran the auto strategy (a GPU probe that can flip the 4-bit toggle) as a side
+        # effect of a bounds check, and writing the resolved number into the combobox
+        # silently turned an auto choice into a permanent manual one. Auto strategies
+        # already return in-range values; only explicit numbers need clamping.
         try:
-            current_blocks = self._parse_blocks_swap()
-            if current_blocks > config["blocks_swap_max"]:
-                self.entries["BLOCKS_SWAP"].delete(0, tk.END)
-                self.entries["BLOCKS_SWAP"].insert(0, str(config["blocks_swap_max"]))
+            _raw_swap = self.entries["BLOCKS_SWAP"].get().strip()
+            if not _raw_swap.lower().startswith("auto"):
+                current_blocks = self._parse_blocks_swap()
+                if current_blocks > config["blocks_swap_max"]:
+                    self.entries["BLOCKS_SWAP"].delete(0, tk.END)
+                    self.entries["BLOCKS_SWAP"].insert(0, str(config["blocks_swap_max"]))
         except ValueError:
             pass
 
-        # Update timestep section for architecture
+        # Update timestep section for architecture.
+        # Values are only touched when the ARCHITECTURE actually changed: several callers
+        # use this method as a pure visibility refresh, and unconditionally resetting the
+        # section wiped the user's timestep settings on every call. On a real switch, the
+        # outgoing family's values are stashed and restored when the user switches back.
         if hasattr(self, 'ts_sampling_var'):
-            # Set timestep sampling to architecture default
-            timestep_sampling = config.get("timestep_sampling", "shift")
-            self.ts_sampling_var.set(timestep_sampling)
+            _prev_arch = getattr(self, "_ts_defaults_arch", None)
+            if _prev_arch != arch:
+                if not hasattr(self, "_arch_ts_stash"):
+                    self._arch_ts_stash = {}
+                if _prev_arch is not None:
+                    self._arch_ts_stash[_prev_arch] = {
+                        "sampling": self.ts_sampling_var.get(),
+                        "shift": self.entries["DISCRETE_FLOW_SHIFT"].get(),
+                        "min_ts": self.entries["MIN_TIMESTEP"].get(),
+                        "max_ts": self.entries["MAX_TIMESTEP"].get(),
+                        "preserve": self.preserve_dist_var.get(),
+                        "weighting": self.weighting_scheme_var.get(),
+                    }
+                stash = self._arch_ts_stash.get(arch)
+                if stash is not None:
+                    # Returning to a family the user already configured — restore, don't reset.
+                    self.ts_sampling_var.set(stash["sampling"])
+                    self.entries["DISCRETE_FLOW_SHIFT"].config(state="normal")
+                    self.entries["DISCRETE_FLOW_SHIFT"].delete(0, tk.END)
+                    self.entries["DISCRETE_FLOW_SHIFT"].insert(0, stash["shift"])
+                    self.entries["MIN_TIMESTEP"].delete(0, tk.END)
+                    self.entries["MIN_TIMESTEP"].insert(0, stash["min_ts"])
+                    self.entries["MAX_TIMESTEP"].delete(0, tk.END)
+                    self.entries["MAX_TIMESTEP"].insert(0, stash["max_ts"])
+                    self.preserve_dist_var.set(stash["preserve"])
+                    self.weighting_scheme_var.set(stash["weighting"])
+                else:
+                    # First visit to this family — apply its defaults.
+                    self.ts_sampling_var.set(config.get("timestep_sampling", "shift"))
+                    default_shift = config.get("discrete_flow_shift")
+                    if default_shift is not None:
+                        self.entries["DISCRETE_FLOW_SHIFT"].config(state="normal")
+                        self.entries["DISCRETE_FLOW_SHIFT"].delete(0, tk.END)
+                        self.entries["DISCRETE_FLOW_SHIFT"].insert(0, str(default_shift))
+                    min_ts = config.get("min_timestep")
+                    max_ts = config.get("max_timestep")
+                    self.entries["MIN_TIMESTEP"].delete(0, tk.END)
+                    self.entries["MAX_TIMESTEP"].delete(0, tk.END)
+                    if min_ts is not None:
+                        self.entries["MIN_TIMESTEP"].insert(0, str(min_ts))
+                    if max_ts is not None:
+                        self.entries["MAX_TIMESTEP"].insert(0, str(max_ts))
+                    self.preserve_dist_var.set(config.get("preserve_distribution_shape", False))
+                self._ts_defaults_arch = arch
 
-            # Discrete Flow Shift
+            # Enable/disable states are pure display — refresh them on every call.
             supports_shift = config.get("supports_discrete_flow_shift", True)
             if supports_shift:
                 self.entries["DISCRETE_FLOW_SHIFT"].config(state="normal")
                 self.ts_flow_shift_label.config(fg=COLORS["text_secondary"])
-                # Set architecture default
-                default_shift = config.get("discrete_flow_shift")
-                if default_shift is not None:
-                    self.entries["DISCRETE_FLOW_SHIFT"].delete(0, tk.END)
-                    self.entries["DISCRETE_FLOW_SHIFT"].insert(0, str(default_shift))
             else:
                 self.entries["DISCRETE_FLOW_SHIFT"].config(state="disabled")
                 self.ts_flow_shift_label.config(fg=COLORS["text_muted"])
 
-            # Min/Max Timestep defaults from architecture
-            min_ts = config.get("min_timestep")
-            max_ts = config.get("max_timestep")
-            self.entries["MIN_TIMESTEP"].delete(0, tk.END)
-            self.entries["MAX_TIMESTEP"].delete(0, tk.END)
-            if min_ts is not None:
-                self.entries["MIN_TIMESTEP"].insert(0, str(min_ts))
-            if max_ts is not None:
-                self.entries["MAX_TIMESTEP"].insert(0, str(max_ts))
-
-            # Preserve distribution
-            self.preserve_dist_var.set(config.get("preserve_distribution_shape", False))
-
-            # Weighting scheme
             supports_weighting = config.get("supports_weighting_scheme", True)
             if supports_weighting:
                 self.ts_weighting_combo.config(state="readonly")
@@ -5486,7 +5541,18 @@ class LoRATrainerGUI:
         widget.configure(state="disabled")
 
     def update_caption_log(self, text):
-        """Update the caption log (preserves user scroll position)."""
+        """Update the caption log (preserves user scroll position).
+
+        Thread-safe: several captioning/translation workers call this directly from their
+        threads (fifteen call sites — some marshalled via after(), some not). Touching Tk
+        widgets + pumping update_idletasks from a worker thread is the classic Tkinter
+        hang, so marshal here, once, for every caller."""
+        if threading.current_thread() is not threading.main_thread():
+            try:
+                self.master.after(0, lambda t=text: self.update_caption_log(t))
+            except Exception:
+                pass   # window closed mid-caption — drop the line rather than crash the worker
+            return
         self._append_global_log(text)
         self._smart_text_insert(self.caption_log, text)
         self.master.update_idletasks()
@@ -6016,17 +6082,43 @@ class LoRATrainerGUI:
             self.sample_enabled_check.grid()
             self.sample_settings_frame.grid()
 
-            # Update default values for this architecture
-            if config.get("sample_cfg_default") is not None:
-                self.sample_cfg_scale_var.set(str(config["sample_cfg_default"]))
-            if config.get("sample_flow_shift_default") is not None:
-                self.sample_flow_shift_var.set(str(config["sample_flow_shift_default"]))
-            if config.get("sample_steps_default") is not None:
-                self.sample_steps_var.set(str(config["sample_steps_default"]))
-            if config.get("sample_width_default") is not None:
-                self.sample_width_var.set(str(config["sample_width_default"]))
-            if config.get("sample_height_default") is not None:
-                self.sample_height_var.set(str(config["sample_height_default"]))
+            # Apply this architecture's sample defaults ONLY when the architecture actually
+            # changed. This method fires on every Base Model combobox event — including
+            # re-picking the same family — and unconditionally overwriting CFG/flow-shift/
+            # steps/width/height silently reverted the user's preview config (e.g. a
+            # 1024x1024 preview back to 768x768). On a real switch, the outgoing family's
+            # values are stashed and restored when the user switches back.
+            _prev = getattr(self, "_sample_defaults_arch", None)
+            if _prev != arch:
+                if not hasattr(self, "_arch_sample_stash"):
+                    self._arch_sample_stash = {}
+                if _prev is not None:
+                    self._arch_sample_stash[_prev] = {
+                        "cfg": self.sample_cfg_scale_var.get(),
+                        "shift": self.sample_flow_shift_var.get(),
+                        "steps": self.sample_steps_var.get(),
+                        "w": self.sample_width_var.get(),
+                        "h": self.sample_height_var.get(),
+                    }
+                stash = self._arch_sample_stash.get(arch)
+                if stash is not None:
+                    self.sample_cfg_scale_var.set(stash["cfg"])
+                    self.sample_flow_shift_var.set(stash["shift"])
+                    self.sample_steps_var.set(stash["steps"])
+                    self.sample_width_var.set(stash["w"])
+                    self.sample_height_var.set(stash["h"])
+                else:
+                    if config.get("sample_cfg_default") is not None:
+                        self.sample_cfg_scale_var.set(str(config["sample_cfg_default"]))
+                    if config.get("sample_flow_shift_default") is not None:
+                        self.sample_flow_shift_var.set(str(config["sample_flow_shift_default"]))
+                    if config.get("sample_steps_default") is not None:
+                        self.sample_steps_var.set(str(config["sample_steps_default"]))
+                    if config.get("sample_width_default") is not None:
+                        self.sample_width_var.set(str(config["sample_width_default"]))
+                    if config.get("sample_height_default") is not None:
+                        self.sample_height_var.set(str(config["sample_height_default"]))
+                self._sample_defaults_arch = arch
 
             # Enable/disable flow shift based on architecture
             if config.get("sample_flow_shift_default") is None:
@@ -9302,6 +9394,10 @@ class LoRATrainerGUI:
             return False
 
     def _explorer_load_lora(self):
+        # Never tear down an engine a worker thread is mid-forward through (hard-hangs the app).
+        if getattr(self, "_explorer_generating", False):
+            messagebox.showinfo("Busy", "A preview is still rendering — wait for it to finish.")
+            return
         path = self.explorer_lora_var.get().strip()
         if not path or not os.path.exists(path):
             messagebox.showerror("Error", "Pick a valid LoRA file first.")
@@ -9373,6 +9469,20 @@ class LoRATrainerGUI:
         """Generate baseline image then 4 variants in a background thread."""
         if self._explorer_generating or self._explorer_engine is None:
             return
+        # Parse the free-text fields BEFORE setting the busy flag: a ValueError from a bad
+        # Seed/Resolution used to fire inside the Tk callback with the flag already set —
+        # never cleared — and the flag disables every other notebook tab, locking the whole
+        # app to this tab until restart.
+        try:
+            _seed = int(self.explorer_seed_var.get() or 42)
+            _res = int(self.explorer_res_var.get() or 512)
+        except ValueError:
+            messagebox.showerror(
+                "Invalid value",
+                f"Seed and Resolution must be whole numbers.\n\n"
+                f"Seed: {self.explorer_seed_var.get()!r}  "
+                f"Resolution: {self.explorer_res_var.get()!r}")
+            return
         self._explorer_generating = True
         self._explorer_roll_btn.configure(state="disabled")
         self._explorer_progress_var.set("Generating baseline...")
@@ -9381,8 +9491,8 @@ class LoRATrainerGUI:
         # Sync prompt/seed/res into baseline state
         state = self._explorer_baseline_state
         state.prompt = self.explorer_prompt_var.get()
-        state.seed = int(self.explorer_seed_var.get() or 42)
-        res = int(self.explorer_res_var.get() or 512)
+        state.seed = _seed
+        res = _res
         state.preview_width = res
         state.preview_height = res
         self._explorer_sync_ref_into(state)
@@ -10009,6 +10119,9 @@ class LoRATrainerGUI:
 
     def _unload_explorer_models(self):
         """Unload Explorer pipeline when leaving the tab."""
+        # Internal guard (all call sites): resetting under a live CUDA worker hard-hangs.
+        if getattr(self, "_explorer_generating", False):
+            return
         if self._explorer_engine is not None and self._explorer_engine.pipeline is not None:
             try:
                 self._explorer_engine.reset()
@@ -15635,6 +15748,9 @@ class LoRATrainerGUI:
         Load again is seamless.  The engine is fully reset so the next load
         rebuilds the pipeline from scratch.
         """
+        # Internal guard (all call sites): resetting under a live CUDA worker hard-hangs.
+        if getattr(self, "_repair_preview_in_flight", False):
+            return
         if self.repair_engine is not None and self.repair_engine.pipeline is not None:
             try:
                 self.repair_engine.reset()
@@ -15720,6 +15836,10 @@ class LoRATrainerGUI:
             self.explorer_status_var.set("Loading from Repair Studio...")
             self.master.update_idletasks()
             if self._explorer_engine.primary_network is not None:
+                if getattr(self, "_explorer_generating", False):
+                    messagebox.showinfo("Busy", "The Explorer is mid-render — try again when "
+                                        "the current preview finishes.")
+                    return
                 self._explorer_engine.reset()
                 self._explorer_engine = None
                 if not self._explorer_ensure_engine():
@@ -15764,6 +15884,11 @@ class LoRATrainerGUI:
             messagebox.showerror("Error", f"Failed to load in Explorer:\n{traceback.format_exc()}")
 
     def _reset_repair_session(self):
+        # Never tear down the engine while a preview worker is mid-forward through it.
+        if getattr(self, "_repair_preview_in_flight", False):
+            messagebox.showinfo("Busy", "A preview is still rendering — wait for it to finish "
+                                "before resetting the session.")
+            return
         # Close pop-out preview window if open
         if self._repair_popout_window is not None:
             try:
@@ -16267,7 +16392,19 @@ class LoRATrainerGUI:
         if "CUDA out of memory" in line or "OutOfMemoryError" in line:
             if not getattr(self, "_oom_warning_shown", False):
                 self._oom_warning_shown = True
-                current_swap = self._parse_blocks_swap()
+                # Read state WITHOUT side effects: _parse_blocks_swap() on "Auto" runs the
+                # auto strategy (GPU probe + can flip the 4-bit toggle) — it mutated the
+                # training config as a side effect of reporting an error, and did so BEFORE
+                # reading the nf4 flag it then tested, hiding the Krea 2 advice. Mid-run the
+                # probe is meaningless anyway (the trainer holds the VRAM).
+                _raw_swap = self.entries["BLOCKS_SWAP"].get().strip()
+                if _raw_swap.lower().startswith("auto"):
+                    current_swap, _swap_disp = 0, "Auto"
+                else:
+                    import re as _re
+                    _m = _re.match(r"\d+", _raw_swap)
+                    current_swap = int(_m.group()) if _m else 0
+                    _swap_disp = str(current_swap)
                 nf4_on = getattr(self, "quant_4bit_var", None) and self.quant_4bit_var.get()
                 if self._is_krea2_arch() and not nf4_on:
                     messagebox.showwarning("Out of Memory",
@@ -16281,7 +16418,7 @@ class LoRATrainerGUI:
                 else:
                     messagebox.showwarning("Out of Memory",
                         f"CUDA ran out of memory during training.\n\n"
-                        f"Current Block Swap: {current_swap}\n\n"
+                        f"Current Block Swap: {_swap_disp}\n\n"
                         f"Try increasing Block Swap on the Training tab "
                         f"(Memory & FP8 section) to move more blocks to CPU. "
                         f"If set to Auto, switch to a manual value like "
@@ -16546,6 +16683,22 @@ class LoRATrainerGUI:
 
     def start_training(self):
         """Start training with sequential cache process execution"""
+        # Re-entrancy guard: the Start button stays enabled during a run, so a double-click
+        # (or Start during caching) overwrote current_process and ORPHANED the first launch —
+        # stop_training only ever kills the current one, and both runs wrote the same
+        # checkpoints while the second's fresh-run wipe deleted the first's watch files.
+        _proc = getattr(self, "current_process", None)
+        try:
+            if _proc is not None and _proc.poll() is None:
+                messagebox.showinfo(
+                    "Already Running",
+                    "A training/caching run is already active.\n\n"
+                    "Stop it (or let it finish) before starting another."
+                )
+                return
+        except Exception:
+            pass
+
         # Validate inputs before starting
         if not self.validate_inputs():
             return
@@ -17430,6 +17583,17 @@ class LoRATrainerGUI:
                 )
         else:
             self.training_state = "idle"
+        # A finished run must never leave its resume path armed: the next "fresh" Start
+        # would silently continue the old LoRA from its saved state (restored optimizer/
+        # RNG/scheduler) under a new output name, and skip re-caching a changed dataset.
+        # The Resume button re-injects the right path itself when the user wants it.
+        try:
+            _entry = self.entries.get("RESUME_TRAINING")
+            if _entry is not None and _entry.get().strip():
+                _entry.delete(0, tk.END)
+            self.settings["RESUME_TRAINING"] = ""
+        except Exception:
+            pass
         self._refresh_training_buttons()
 
     def _resume_training(self):
@@ -17480,6 +17644,31 @@ class LoRATrainerGUI:
                     f"=== Paused training detected: {meta.get('output_name','?')} "
                     f"at state {os.path.basename(state_path)}. Click Resume Training to continue. ===\n"
                 )
+        except Exception:
+            pass
+
+    def _on_app_close(self):
+        """WM_DELETE_WINDOW: never orphan a live training subprocess on window close."""
+        proc = getattr(self, "current_process", None)
+        try:
+            running = proc is not None and proc.poll() is None
+        except Exception:
+            running = False
+        if running:
+            if not messagebox.askyesno(
+                "Training in progress",
+                "A training run is active.\n\n"
+                "Close Fizgig and STOP the training run?\n\n"
+                "(To keep training, click No — or use Pause Training first for a clean, "
+                "resumable exit.)"
+            ):
+                return
+            try:
+                self.stop_training()
+            except Exception:
+                pass
+        try:
+            self.master.destroy()
         except Exception:
             pass
 

@@ -16752,9 +16752,11 @@ class LoRATrainerGUI:
             "--network_module", config["network_module"],
             "--network_dim", str(self.settings["NETWORK_DIM"]),
             "--network_alpha", str(self.settings["NETWORK_ALPHA"]),
-            "--network_args", f"loraplus_lr_ratio={self.settings['LORA_LR_RATIO']}",
             "--timestep_sampling", self.settings["TIMESTEP_SAMPLING"],
         ])
+        # --network_args is nargs="*": a SECOND occurrence would REPLACE the first, so all
+        # network args must be emitted as one occurrence (loraplus + include_patterns below).
+        network_args_tokens = [f"loraplus_lr_ratio={self.settings['LORA_LR_RATIO']}"]
 
         # Gradient checkpointing — on by default (recomputes activations in backward
         # to fit a 9B LoRA on most cards). Off trades ~20-30% faster steps for much
@@ -16789,7 +16791,9 @@ class LoRATrainerGUI:
         if patterns:
             # Escape backslashes for the shell-parsed network_args value
             quoted = ",".join(f'"{p.replace(chr(92), chr(92) * 2)}"' for p in patterns)
-            command.extend(["--network_args", f"include_patterns=[{quoted}]"])
+            network_args_tokens.append(f"include_patterns=[{quoted}]")
+        # Single --network_args occurrence carrying every token (see note above).
+        command.extend(["--network_args"] + network_args_tokens)
 
         # Discrete flow shift (not for Flux 2 which uses flux2_shift automatic)
         if config.get("supports_discrete_flow_shift", True):

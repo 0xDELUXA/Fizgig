@@ -748,7 +748,11 @@ class LoRANetwork(torch.nn.Module):
                             original_name = (name + "." if name else "") + child_name
                             lora_name = f"{pfx}.{original_name}".replace(".", "_")
 
-                            # exclude/include filter
+                            # exclude/include filter.
+                            # - exclude_patterns drop matching modules.
+                            # - include_patterns, when present, RESTRICT training to matching
+                            #   modules (this is what the GUI's "Model Area to Train" relies on).
+                            # - a module matching both is kept (include overrides exclude).
                             excluded = False
                             for pattern in exclude_re_patterns:
                                 if pattern.fullmatch(original_name):
@@ -759,7 +763,7 @@ class LoRANetwork(torch.nn.Module):
                                 if pattern.fullmatch(original_name):
                                     included = True
                                     break
-                            if excluded and not included:
+                            if not included and (excluded or include_re_patterns):
                                 if verbose:
                                     logger.info(f"exclude: {original_name}")
                                 continue
@@ -810,6 +814,14 @@ class LoRANetwork(torch.nn.Module):
         # create LoRA for U-Net / DiT
         self.unet_loras: List[Union[LoRAModule, LoRAInfModule]]
         self.unet_loras, skipped_un = create_modules(True, prefix, unet, target_replace_modules)
+
+        # A block-targeted network that matched nothing must fail loudly: training would
+        # otherwise run to completion and save a LoRA containing no weights.
+        if include_re_patterns and unet is not None and len(self.unet_loras) == 0:
+            raise ValueError(
+                f"include_patterns matched no modules — nothing would train. "
+                f"Patterns: {[p.pattern for p in include_re_patterns]}"
+            )
 
         logger.info(f"create LoRA for U-Net/DiT: {len(self.unet_loras)} modules.")
         if verbose:

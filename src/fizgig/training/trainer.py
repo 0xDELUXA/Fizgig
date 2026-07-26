@@ -2378,6 +2378,17 @@ class KleinTrainer:
         # the first stability-triggered rollback (training is now in a delicate regime).
         if args.adaptive_lr:
             _initial_lr = optimizer.param_groups[0]["lr"]
+            # Adafactor with relative_step manages its own LR and stores None in the param
+            # groups — there is nothing for the watcher to adjust, and `None < float` was
+            # a TypeError before step 1. Disable adaptive cleanly instead of crashing.
+            if _initial_lr is None:
+                accelerator.print(
+                    "[adaptive_lr] DISABLED — the optimizer manages its own learning rate "
+                    "(Adafactor relative_step stores lr=None), so there is no LR for the "
+                    "watcher to adjust. Training continues without adaptive LR."
+                )
+                args.adaptive_lr = False
+        if args.adaptive_lr:
             # The Min LR floor is authoritative over the LR box: starting below the declared
             # floor is contradictory, so the start is clamped UP to the floor.
             if _initial_lr < args.adaptive_lr_min:
@@ -2833,6 +2844,12 @@ class KleinTrainer:
                     f"[pause] requested via {args.pause_flag_path}. State saved at "
                     f"{args.output_name}-{epoch + 1:06d}-state. Exiting cleanly to free GPU memory."
                 )
+                # Consume the flag HERE: relying on the GUI to remove it left it armed
+                # after a window close / crash, truncating the next run to one epoch.
+                try:
+                    os.remove(args.pause_flag_path)
+                except OSError:
+                    pass
                 import sys as _sys; _sys.stdout.flush()
                 _sys.exit(0)
 

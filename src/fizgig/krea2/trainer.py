@@ -680,6 +680,23 @@ def _read_sample_override(output_dir):
     return None
 
 
+def _remove_claimed_queue(path: str) -> None:
+    """Best-effort removal of the claimed caption queue (.processing).
+
+    The Problem Images window polls this exact file every 4 s and Python's open()
+    doesn't request FILE_SHARE_DELETE, so on Windows os.remove can raise
+    PermissionError while the GUI holds it open. That must never propagate out of
+    the epoch boundary — or (worse) trip the re-encode failure path AFTER a
+    successful encode, re-queueing captions that were already applied. The file
+    is consumed on the next boundary either way."""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        logger.debug("[caption-fix] could not remove %s (%s) — a reader holds it open; "
+                     "it will be cleaned up next boundary", os.path.basename(path), e)
+
+
 def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_swap, loss_watch, epoch,
                            *, auto_recaption=False, trigger_word=None, recaptioned=None,
                            image_dir=None, caption_ext=".txt"):
@@ -730,8 +747,7 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
                     break
 
     if not updates and not auto_todo:
-        if os.path.exists(processing):
-            os.remove(processing)
+        _remove_claimed_queue(processing)
         return
     if not te_path:
         logger.warning("[caption-fix] caption work is pending but no text encoder path was passed "
@@ -746,7 +762,7 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
                 with open(path + ".tmp", "w", encoding="utf-8") as f:
                     json.dump(merged, f, indent=2)
                 os.replace(path + ".tmp", path)
-                os.remove(processing)
+                _remove_claimed_queue(processing)
             except Exception:
                 pass
         return
@@ -768,8 +784,7 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
             logger.warning(f"[caption-fix] '{k}' not found in the training set — skipped")
     auto_todo = [(k, p, a) for k, p, a in auto_todo if k in items]
     if not todo and not auto_todo:
-        if os.path.exists(processing):
-            os.remove(processing)
+        _remove_claimed_queue(processing)
         return
 
     logger.info(f"[caption-fix] epoch boundary {epoch}: {len(todo)} manual edit(s), "
@@ -813,8 +828,7 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
 
         if not todo:
             del encoder
-            if os.path.exists(processing):
-                os.remove(processing)
+            _remove_claimed_queue(processing)
             return
         for _, item, cap, _auto in todo:
             item.caption = cap
@@ -852,8 +866,7 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
         with open(applied_path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(applied, f, indent=2)
         os.replace(applied_path + ".tmp", applied_path)
-        if os.path.exists(processing):
-            os.remove(processing)
+        _remove_claimed_queue(processing)
         logger.info(f"[caption-fix] {len(todo)} caption(s) re-encoded — next epoch trains on the "
                     f"fixed text. Loss-watch history reset for: "
                     + ", ".join(os.path.basename(k) for k, _, _, _ in todo))
@@ -872,26 +885,24 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
             with open(path + ".tmp", "w", encoding="utf-8") as f:
                 json.dump(merged, f, indent=2)
             os.replace(path + ".tmp", path)
-            if os.path.exists(processing):
-                os.remove(processing)
+            _remove_claimed_queue(processing)
         except Exception:
             pass
     finally:
+        # Restore the training DiT's placement exactly as load_dit_for_training left it.
+        # (A garbled duplicate of this block previously ran `dit.to(device)` on every
+        # non-NF4 run, hoisting all 28 blocks onto the GPU and undoing the block-swap
+        # placement two lines above it — OOM on small cards at the next step.)
         gc.collect()
         torch.cuda.empty_cache()
-        if blocks_to_swap > 0:
+        if getattr(dit, "_nf4_quantized", False):
+            from fizgig.modules.nf4 import move_nf4_to_device
+            move_nf4_to_device(dit, device)
+        elif blocks_to_swap > 0:
             dit.move_to_device_except_swap_blocks(torch.device(device))
             dit.switch_block_swap_for_training()
         else:
             dit.to(device)
-        if getattr(dit, "_nf4_quantized", False):
-            from fizgig.modules.nf4 import move_nf4_to_device
-            move_nf4_to_device(dit, device)
-        else:
-            dit.to(device)
-        if getattr(dit, "_nf4_quantized", False):
-            from fizgig.modules.nf4 import move_nf4_to_device
-            move_nf4_to_device(dit, device)
         dit.train()
     return ok
 

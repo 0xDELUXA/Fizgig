@@ -5576,7 +5576,11 @@ class LoRATrainerGUI:
     def generate_captions(self):
         """Generate caption files for all images in the selected folder"""
         folder = self.image_folder_var.get()
-        caption_text = self.caption_text_var.get()
+        # Read the WIDGET-BOUND trigger var. caption_text_var is an orphan StringVar no
+        # widget binds (default: the literal placeholder "trigger_word") — reading it here
+        # wrote the word "trigger_word" into every caption file regardless of what the
+        # user typed in the visible Trigger Word box.
+        caption_text = self.caption_trigger_var.get().strip()
         overwrite = self.overwrite_captions_var.get()
 
         if not folder:
@@ -5588,7 +5592,7 @@ class LoRATrainerGUI:
             return
 
         if not caption_text:
-            messagebox.showerror("Error", "Please enter caption text.")
+            messagebox.showerror("Error", "Please enter a trigger word in the Trigger Word box first.")
             return
 
         # Supported image extensions
@@ -16536,6 +16540,16 @@ class LoRATrainerGUI:
         if not self.validate_inputs():
             return
 
+        # Clear a stale pause sentinel from a previous session (window close / crash after
+        # Pause left it on disk; the trainer would read it at epoch 1 and exit "cleanly").
+        try:
+            _stale_flag = self._pause_flag_path()
+            if os.path.exists(_stale_flag) and getattr(self, "training_state", "idle") != "paused":
+                os.remove(_stale_flag)
+                self.update_console("[pause] removed stale .pause_requested from a previous session\n")
+        except Exception:
+            pass
+
         # Reset OOM warning flag for this run
         self._oom_warning_shown = False
         # Reset the VRAM/RAM peak markers so the status bar tracks THIS run.
@@ -17227,11 +17241,12 @@ class LoRATrainerGUI:
             cmd.append("--warmup_look_outliers")
         if self.krea2_auto_recaption_var.get():
             cmd.append("--auto_recaption")
-            # Trigger word from the Captions tab — appended (', <trigger>') to AI captions if set.
-            # The field DEFAULTS to the literal placeholder "trigger_word"; an untouched box must
-            # count as empty or AI captions end with ", trigger_word" (found the fun way).
-            trig = (self.caption_text_var.get().strip()
-                    if hasattr(self, "caption_text_var") else "")
+            # Trigger word from the Captions tab — appended (', <trigger>') to AI captions if
+            # set. Reads the WIDGET-BOUND var (caption_text_var is an orphan that never
+            # carried what the user typed). The placeholder guard stays in case an old
+            # last_used.json seeded the literal "trigger_word".
+            trig = (self.caption_trigger_var.get().strip()
+                    if hasattr(self, "caption_trigger_var") else "")
             if trig and trig.lower() != "trigger_word":
                 cmd += ["--trigger_word", trig]
 

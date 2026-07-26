@@ -380,6 +380,14 @@ class SingleStreamDiT(nn.Module):
         # inference, not the full-GPU forward pass, so the offloading port can come later.
         from fizgig.krea2.offloading import create_offloader
 
+        # Detach any previous offloader's backward hooks before replacing it — same
+        # guard Klein has. enable_block_swap can run more than once (e.g. around
+        # previews); a replaced offloader's stale hooks otherwise fire alongside the
+        # new ones on the next backward -> "mat2 is on cpu" / exploding loss.
+        _off = getattr(self, "offloader", None)
+        if _off is not None and hasattr(_off, "remove_hooks"):
+            _off.remove_hooks()
+
         self.blocks_to_swap = num_blocks
         num_main_blocks = len(self.blocks)
         assert num_blocks <= num_main_blocks - 2, f"Cannot swap more than {num_main_blocks - 2} blocks. Requested {num_blocks}."
@@ -391,12 +399,16 @@ class SingleStreamDiT(nn.Module):
 
     def move_to_device_except_swap_blocks(self, device: torch.device):
         # Assume the model is on CPU; keep the swap blocks on CPU to reduce peak memory.
+        # try/finally: an OOM inside .to() must not leave the model holding the empty
+        # placeholder ModuleList permanently (silent lobotomy — zero blocks thereafter).
         if self.blocks_to_swap:
             saved_blocks = self.blocks
             self.blocks = nn.ModuleList()
-        self.to(device)
-        if self.blocks_to_swap:
-            self.blocks = saved_blocks
+        try:
+            self.to(device)
+        finally:
+            if self.blocks_to_swap:
+                self.blocks = saved_blocks
 
     def prepare_block_swap_before_forward(self):
         if not self.blocks_to_swap:

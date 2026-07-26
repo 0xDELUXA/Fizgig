@@ -215,8 +215,9 @@ def _find_msvc_env() -> bool:
             continue
 
     logger.warning("[compile] no MSVC C++ compiler found — torch.compile needs one on Windows to "
-                   "build inductor's host-side code. Install 'Visual Studio Build Tools' with the "
-                   "C++ workload, or leave Compile Blocks off. Training continues uncompiled.")
+                   "build inductor's host-side code. Direct installer: "
+                   "https://aka.ms/vs/17/release/vs_BuildTools.exe (tick the 'Desktop development "
+                   "with C++' workload), or leave Compile Blocks off. Training continues uncompiled.")
     return False
 
 

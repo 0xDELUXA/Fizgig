@@ -8,20 +8,6 @@ controls Krea 2 was missing.
 
 ---
 
-## ⚠️ The one you should read: block targeting works now
-
-**"Model Area to Train" never actually restricted anything.** Since the initial release, every
-Klein preset — Identity, Style, Style+Composition, Details, Custom — silently trained the
-**full model**. The include-pattern filter could only *override* exclusions, never narrow, and
-no exclusions were ever sent. Every block-targeted Klein LoRA ever produced was a full-model
-LoRA.
-
-Fixed properly: presets now train exactly the blocks they name (Identity trains 32 modules
-instead of 112, and the console tells you so), and a block filter that matches nothing is a
-loud error instead of a silent full-model run. If you trained "Identity" or "Style" LoRAs
-before and they worked — they worked *as full-model LoRAs*. Retrain with this release to get
-the actual targeted behaviour (smaller effective footprint, cleaner separation).
-
 ## 🚀 Krea 2 got fast
 
 - **INT8 W8A8 auto strategy** — with Blocks Swap and 4-bit Base on **Auto**, Fizgig now picks
@@ -62,6 +48,7 @@ Min/Max looked authoritative. Resumed runs keep their mid-flight LR.
 ## 🛠 The reliability overhaul (highlights of 60+)
 
 **Silently-wrong-training fixes**
+- "Model Area to Train" now actually restricts training — the block presets previously trained the full model (retrain targeted LoRAs to get the real behaviour)
 - Resume + gradient accumulation ≥ 2 trained *nothing* (checkpoints still wrote normally) — fixed and verified live
 - `sigma` timestep sampling used min/max as indices into a descending schedule — a 0–400 "late" window actually selected 1000–600 (CLI/TOML runs; GUI runs were unaffected)
 - OneTrainer/ai-toolkit LoRAs with `alpha = rank/2` loaded with their attention at **2× strength** (QKV fusion discarded per-slot alphas)

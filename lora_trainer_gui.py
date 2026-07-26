@@ -350,14 +350,14 @@ BUILT_IN_PRESETS = {
     "✨ Identity (rank 4, single subject)": {
         "NETWORK_DIM": 4, "NETWORK_ALPHA": 4, "LEARNING_RATE": 4e-4,
         "MAX_TRAIN_EPOCHS": 15, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
-        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
+        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "TARGET_LAYERS": "Identity", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
         "OPTIMIZER_TYPE": "adamw8bit",
     },
     "✨ Identity (rank 8, harder dataset)": {
         "NETWORK_DIM": 8, "NETWORK_ALPHA": 8, "LEARNING_RATE": 4e-4,
         "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
-        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
+        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "TARGET_LAYERS": "Identity", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
         "OPTIMIZER_TYPE": "adamw8bit",
     },
@@ -2458,7 +2458,7 @@ class LoRATrainerGUI:
         adaptive_frame.grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 2))
         self._adaptive_frame = adaptive_frame
         ttk.Label(adaptive_frame, text="Min LR:").pack(side=tk.LEFT, padx=(0, 4))
-        self.entries["ADAPTIVE_LR_MIN"] = ttk.Combobox(adaptive_frame, width=28, values=["1e-5", "5e-5", "1e-4", "2e-4 - likely too high", "3e-4 - low-rank only"], state="readonly")
+        self.entries["ADAPTIVE_LR_MIN"] = ttk.Combobox(adaptive_frame, width=28, values=["1e-5", "5e-5", "1e-4", "2e-4 - rank 4/8 only", "3e-4 - low-rank only"], state="readonly")
         self.entries["ADAPTIVE_LR_MIN"].set("1e-5")
         self.entries["ADAPTIVE_LR_MIN"].pack(side=tk.LEFT, padx=(0, 12))
         ttk.Label(adaptive_frame, text="Max LR:").pack(side=tk.LEFT, padx=(0, 4))
@@ -3222,7 +3222,7 @@ class LoRATrainerGUI:
                     value = str(value)
                     try:
                         # A saved plain value (e.g. "2e-4") should select its labeled combobox
-                        # entry ("2e-4 - likely too high") so the warning suffix still shows.
+                        # entry ("2e-4 - rank 4/8 only") so the warning suffix still shows.
                         opts = entry.cget("values") or ()
                         if value not in opts:
                             for opt in opts:
@@ -17654,7 +17654,7 @@ class LoRATrainerGUI:
             ctx_strength = (self.settings.get("CONTEXT_LORA_STRENGTH") or "1.0").strip() or "1.0"
             cmd += ["--context_lora_path", ctx_path, "--context_lora_strength", ctx_strength]
         # Adaptive LR — bi-directional plateau tracker (model-agnostic). Min/Max combo values
-        # can carry a trailing note (e.g. "2e-4 - likely too high"); take the leading token.
+        # can carry a trailing note (e.g. "2e-4 - rank 4/8 only"); take the leading token.
         if self.settings.get("ADAPTIVE_LR"):
             min_lr = str(self.settings.get("ADAPTIVE_LR_MIN", "1e-5")).split(" ")[0]
             max_lr = str(self.settings.get("ADAPTIVE_LR_MAX", "4e-4")).split(" ")[0]

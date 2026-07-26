@@ -45,8 +45,21 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample_every_n_epochs", type=int, default=0)
     p.add_argument("--sample_width", type=int, default=512)
     p.add_argument("--sample_height", type=int, default=512)
+    p.add_argument("--sample_steps", type=int, default=8, help="Preview denoising steps (Turbo default 8)")
+    p.add_argument("--sample_cfg_scale", type=float, default=1.0,
+                   help=">1 enables CFG on the Turbo previews (pair with --sample_negative)")
+    p.add_argument("--sample_negative", default=None,
+                   help="Negative prompt for previews — only used when --sample_cfg_scale > 1")
+    p.add_argument("--sample_at_first", action="store_true",
+                   help="Render an epoch-0 preview before training starts")
     p.add_argument("--sample_seed", type=int, default=42, help="Seed for in-training preview samples")
     p.add_argument("--sample_ref_image", default=None, help="Reference image (Qwen3-VL vision path)")
+    # Output metadata (recorded in the saved LoRA)
+    p.add_argument("--metadata_title", default=None)
+    p.add_argument("--metadata_author", default=None)
+    p.add_argument("--metadata_description", default=None)
+    p.add_argument("--metadata_license", default=None)
+    p.add_argument("--metadata_tags", default=None)
     p.add_argument("--preview_blocks_to_swap", type=int, default=0,
                    help="Forward-only block swap on the preview Turbo (fits smaller cards)")
     p.add_argument("--preview_int8", action="store_true",
@@ -114,8 +127,13 @@ def main():
         sample_prompts=prompts, turbo_path=args.turbo_dit, vae_path=args.vae, te_path=args.text_encoder,
         sample_every_n_epochs=args.sample_every_n_epochs,
         sample_width=args.sample_width, sample_height=args.sample_height,
+        sample_steps=args.sample_steps, sample_cfg_scale=args.sample_cfg_scale,
+        sample_negative=args.sample_negative, sample_at_first=args.sample_at_first,
         sample_seed=args.sample_seed,
         sample_ref_image=args.sample_ref_image,
+        metadata_title=args.metadata_title, metadata_author=args.metadata_author,
+        metadata_description=args.metadata_description,
+        metadata_license=args.metadata_license, metadata_tags=args.metadata_tags,
         preview_blocks_to_swap=args.preview_blocks_to_swap,
         preview_int8=args.preview_int8,
         resume_state_dir=args.resume,

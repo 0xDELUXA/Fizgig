@@ -307,9 +307,10 @@ ARCHITECTURES = {
         "is_distilled": False,
         "supports_weighting_scheme": False,
         "supports_discrete_flow_shift": False,
-        # Sample generation: previews render on the fp8 Turbo (8-step, CFG-free).
+        # Sample generation: previews render on the fp8 Turbo (8-step; CFG optional —
+        # raise Sample CFG Scale above 1 with a negative prompt for guided previews).
         "supports_samples": True,
-        "sample_cfg_default": None,
+        "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 8,
         "sample_width_default": 1024,
@@ -4447,7 +4448,21 @@ class LoRATrainerGUI:
 
         try:
             caps = detect()
-            plan = recommend_krea2_strategy(caps=caps)
+            # Budget for THIS run's shape — batch size is the largest term (+2.4 GB/image);
+            # a single-constant budget let batch 2 sail through the check and OOM.
+            try:
+                _mp = float(self.dataset_megapixels_var.get().strip() or 0.25)
+            except (ValueError, AttributeError):
+                _mp = 0.25
+            try:
+                _bs = int(str(self.dataset_batch_size_var.get()).strip() or 1)
+            except (ValueError, AttributeError):
+                _bs = 1
+            try:
+                _rk = int(self.entries["NETWORK_DIM"].get().strip() or 32)
+            except (ValueError, KeyError, AttributeError):
+                _rk = 32
+            plan = recommend_krea2_strategy(caps=caps, mp=_mp, batch=_bs, rank=_rk)
         except Exception:
             self._auto_quant_int8 = ""   # no strategy ran — a stale INT8 pick must not leak
             return self._auto_krea2_blocks_swap()
@@ -10584,7 +10599,15 @@ class LoRATrainerGUI:
 
         # Skip timestep auto-fill for Custom (user-driven)
         if preset == "Custom":
+            self._last_area_applied = preset
             return
+
+        # Only rewrite MIN/MAX when the Model Area actually CHANGED. This handler is also
+        # invoked as a visibility refresh (arch switches, tab builds) — unconditionally
+        # auto-filling wiped the user's hand-set timesteps on every one of those calls.
+        if getattr(self, "_last_area_applied", None) == preset:
+            return
+        self._last_area_applied = preset
 
         # Auto-fill MIN/MAX_TIMESTEP entries
         min_entry = self.entries.get("MIN_TIMESTEP")
@@ -17676,6 +17699,16 @@ class LoRATrainerGUI:
         _cb = str(self.settings.get("COMPILE_BLOCKS", "auto") or "auto").lower()
         if _cb in ("auto", "on", "off"):
             cmd += ["--compile_blocks", _cb]
+        # Output metadata (Other Options → Metadata) — previously visible but never wired
+        # for Krea 2; now recorded in the saved LoRA.
+        for _mkey, _mflag in (("METADATA_TITLE", "--metadata_title"),
+                              ("METADATA_AUTHOR", "--metadata_author"),
+                              ("METADATA_DESCRIPTION", "--metadata_description"),
+                              ("METADATA_LICENSE", "--metadata_license"),
+                              ("METADATA_TAGS", "--metadata_tags")):
+            _mval = str(self.settings.get(_mkey, "") or "").strip()
+            if _mval:
+                cmd += [_mflag, _mval]
         # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the
@@ -17749,9 +17782,11 @@ class LoRATrainerGUI:
             ref_img = (getattr(self, "sample_ref_image_var", None).get().strip()
                        if getattr(self, "sample_ref_image_var", None) else "")
             ref_img = ref_img if (ref_img and os.path.exists(ref_img)) else ""
+            _at_first = bool(getattr(self, "sample_at_first_var", None)
+                             and self.sample_at_first_var.get())
             # Samples fire if there's a prompt OR a reference (ref-only = 'generate from this
-            # picture' via the Qwen3-VL vision path).
-            if (prompt_file or ref_img) and every_n > 0:
+            # picture' via the Qwen3-VL vision path). Sample-at-Start alone also counts.
+            if (prompt_file or ref_img) and (every_n > 0 or _at_first):
                 width = (self.sample_width_var.get().strip() or "1024")
                 height = (self.sample_height_var.get().strip() or "1024")
                 # Sample seed from the Samples tab (0 is a valid seed — don't let it fall through to
@@ -17772,6 +17807,23 @@ class LoRATrainerGUI:
                     # VRAM profile so previews fit the card — mirrors Klein's Distilled sample swap.
                     "--preview_blocks_to_swap", str(self._auto_krea2_inference_blocks_swap()),
                 ]
+                # Steps / CFG / Negative / Sample-at-Start — previously visible on the Samples
+                # tab but never wired into krea2_train.
+                _st = self.sample_steps_var.get().strip()
+                if _st.isdigit() and int(_st) > 0:
+                    cmd += ["--sample_steps", _st]
+                try:
+                    _cfg = float(self.sample_cfg_scale_var.get().strip() or 1.0)
+                except (ValueError, AttributeError):
+                    _cfg = 1.0
+                if _cfg > 0 and abs(_cfg - 1.0) > 1e-9:
+                    cmd += ["--sample_cfg_scale", str(_cfg)]
+                _negp = (self.sample_negative_var.get().strip()
+                         if getattr(self, "sample_negative_var", None) else "")
+                if _negp and _cfg > 1.0:
+                    cmd += ["--sample_negative", _negp]
+                if _at_first:
+                    cmd.append("--sample_at_first")
                 # INT8 fast preview matmul — same app-wide 'INT8 fast inference' toggle as the workbench.
                 if self._get_inference_int8():
                     cmd.append("--preview_int8")

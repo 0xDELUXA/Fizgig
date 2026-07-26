@@ -958,7 +958,16 @@ class KleinTrainer:
             )
             t_min = args.min_timestep if args.min_timestep is not None else 0
             t_max = args.max_timestep if args.max_timestep is not None else 1000
-            indices = (u * (t_max - t_min) + t_min).long()
+            # min/max are timestep VALUES (0-1000), same as every other sampling mode.
+            # The schedule is DESCENDING (timesteps[i] ~= 1000 - i), so convert the value
+            # window to an index window first. Previously min/max were used directly as
+            # indices, which selected the OPPOSITE end of the schedule (e.g. 0-400 picked
+            # timesteps 1000-600). For the default full range this is identical to the
+            # old behaviour, including the u-density orientation.
+            n = noise_scheduler.timesteps.shape[0]
+            lo_idx = n - t_max   # index of the highest requested timestep
+            hi_idx = n - t_min   # index of the lowest requested timestep
+            indices = (u * (hi_idx - lo_idx) + lo_idx).long().clamp(0, n - 1)
 
             timesteps = noise_scheduler.timesteps[indices].to(device=device)
 
@@ -2260,7 +2269,12 @@ class KleinTrainer:
             _m = _re.search(r'-(\d{6})-state', _resume_basename)
             if _m:
                 epoch_to_start = int(_m.group(1))
-                global_step = epoch_to_start * len(train_dataloader)
+                # global_step counts OPTIMIZER steps (incremented on sync_gradients), and
+                # max_train_steps is in the same unit — seeding from raw micro-batches
+                # inflated it by the accumulation factor, so a resumed run with accum >= 2
+                # hit `global_step >= max_train_steps` immediately and trained nothing
+                # while still writing checkpoints and samples.
+                global_step = epoch_to_start * num_update_steps_per_epoch
                 accelerator.print(
                     f"[resume] resuming from epoch {epoch_to_start}, global_step {global_step}"
                 )

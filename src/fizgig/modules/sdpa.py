@@ -121,6 +121,26 @@ def sdpa_backend_ctx():
 
     global _SDPA_CTX
     if _SDPA_CTX is None:
+        _init_ctx()
+    return _SDPA_CTX()
+
+
+def prime() -> None:
+    """Eagerly resolve the SDPA backend context OUTSIDE any compiled region.
+
+    sdpa_backend_ctx() lazily probes cuDNN on first use. If that first use happens
+    inside a torch.compile'd block — or a retrace lands on the uninitialised branch
+    after the epoch-boundary backend flip — the probe (device alloc + global write +
+    logging) sits inside the traced graph and fullgraph=True raises on it. Compile
+    paths call this first so the global is settled before any tracing."""
+    global _SDPA_CTX
+    if _SDPA_CTX is None:
+        _init_ctx()
+
+
+def _init_ctx() -> None:
+    global _SDPA_CTX
+    if _SDPA_CTX is None:
         _SDPA_CTX = contextlib.nullcontext
         try:
             import torch.nn.functional as _F
@@ -151,4 +171,3 @@ def sdpa_backend_ctx():
         except Exception as e:
             logger.info("[attention] cuDNN SDPA backend unavailable (%s) — using PyTorch's default choice",
                         type(e).__name__)
-    return _SDPA_CTX()

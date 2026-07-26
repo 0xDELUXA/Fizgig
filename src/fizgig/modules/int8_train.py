@@ -80,12 +80,18 @@ class _Int8FrozenLinear(torch.autograd.Function):
             w = w_i8_nk.to(torch.float32) * w_scale_1n.reshape(-1, 1)
             out = (x2d.to(torch.float32) @ w.t()).to(x.dtype)
             ctx._fell_back = True
-            global _WARNED_FALLBACK
-            if not _WARNED_FALLBACK:
-                _WARNED_FALLBACK = True
-                logger.info("[int8] some matmuls fall back to fp32 (torch._int_mm needs M > 16, "
-                            "got %d) — those run exact rather than quantised, so int8 numerics "
-                            "vary with sequence length", x2d.shape[0])
+            # Global write + logging are ONLY legal in eager: dynamo rejects a module-global
+            # mutation inside an autograd.Function outright, and this branch is rare enough
+            # that a compiled run would train for hours before an odd shape finally took it
+            # and died. is_compiling() is a trace-time constant, so the compiled graph simply
+            # omits this block (the warning still fires on the first EAGER fallback).
+            if not torch.compiler.is_compiling():
+                global _WARNED_FALLBACK
+                if not _WARNED_FALLBACK:
+                    _WARNED_FALLBACK = True
+                    logger.info("[int8] some matmuls fall back to fp32 (torch._int_mm needs M > 16, "
+                                "got %d) — those run exact rather than quantised, so int8 numerics "
+                                "vary with sequence length", x2d.shape[0])
         if bias is not None:
             out = out + bias
         ctx.save_for_backward(w_i8_nk, w_scale_1n)

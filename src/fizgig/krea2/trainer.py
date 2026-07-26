@@ -251,6 +251,10 @@ def _compile_blocks(dit, blocks_to_swap: int) -> None:
     # aborts inductor mid-run. See fizgig/modules/compile_util.py.
     from fizgig.modules.compile_util import init_compile
     init_compile()
+    # Settle the SDPA backend global BEFORE tracing: its lazy first-use probe (device alloc +
+    # global write + logging) inside a compiled block is exactly what fullgraph=True raises on.
+    from fizgig.modules import sdpa as _sdpa
+    _sdpa.prime()
     # A compile failure must cost speed, not the run.
     torch._dynamo.config.suppress_errors = True
 
@@ -916,7 +920,8 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
 
 
 def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
-                    output_name="krea2", steps=8, cfg_scale=1.0, width=512, height=512,
+                    output_name="krea2", steps=8, cfg_scale=1.0, neg=None,
+                    width=512, height=512,
                     seed=42, context_lora_path=None, context_lora_strength=1.0,
                     blocks_to_swap=0, int8=False, device="cuda"):
     """Load the (clean) pre-quant fp8 Turbo, apply the current LoRA LIVE (no merge -> no grid),
@@ -971,9 +976,13 @@ def sample_previews(turbo_path, ae, encoded_prompts, lora_sd, out_dir, epoch, *,
     os.makedirs(out_dir, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")  # 14-digit timestamp
     paths = []
+    # Negative prompt rides through the CFG path (untxt) — only when CFG is actually on.
+    _untxt = _untxtmask = None
+    if neg is not None and cfg_scale and cfg_scale > 1.0:
+        _untxt, _untxtmask = neg
     for i, (txt, txtmask) in enumerate(encoded_prompts):
         with torch.no_grad():
-            imgs = sampling.sample(turbo, ae, txt, txtmask, untxt=None, untxtmask=None,
+            imgs = sampling.sample(turbo, ae, txt, txtmask, untxt=_untxt, untxtmask=_untxtmask,
                                    device=device, dtype=torch.bfloat16, width=width, height=height,
                                    steps=steps, cfg_scale=cfg_scale, mu=1.15, seed=seed + i)
         p = os.path.join(out_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{seed + i}.png")
@@ -1024,6 +1033,9 @@ def train_krea2(
     sample_width: int = 512,
     sample_height: int = 512,
     sample_steps: int = 8,
+    sample_cfg_scale: float = 1.0,   # >1 enables CFG on the Turbo (needs sample_negative for a real uncond)
+    sample_negative: str = None,     # negative prompt, used only when sample_cfg_scale > 1
+    sample_at_first: bool = False,   # render an epoch-0 preview before training starts
     sample_seed: int = 42,
     sample_ref_image: str = None,
     preview_blocks_to_swap: int = 0,
@@ -1039,6 +1051,12 @@ def train_krea2(
     adaptive_lr: bool = False,
     adaptive_lr_min: float = 1e-5,
     adaptive_lr_max: float = 4e-4,
+    # Output metadata (Other Options → Metadata in the GUI) — recorded in the saved LoRA.
+    metadata_title: str = None,
+    metadata_author: str = None,
+    metadata_description: str = None,
+    metadata_license: str = None,
+    metadata_tags: str = None,
     device: str = "cuda",
     dtype: torch.dtype = torch.bfloat16,
 ):
@@ -1086,13 +1104,22 @@ def train_krea2(
 
     # Preview setup: pre-encode prompts (frees the 8GB encoder) + load the VAE BEFORE the RAW DiT,
     # so the encoder never coexists with the resident base.
-    do_previews = bool(sample_every_n_epochs and sample_prompts and turbo_path and vae_path and te_path)
+    # sample_at_first counts as wanting previews even without a per-epoch cadence.
+    do_previews = bool((sample_every_n_epochs or sample_at_first)
+                       and sample_prompts and turbo_path and vae_path and te_path)
     encoded_prompts = sample_ae = sample_dir = None
+    encoded_negative = None
     if do_previews:
         from fizgig.krea2.vae_loader import load_vae
         logger.info(f"pre-encoding {len(sample_prompts)} sample prompt(s)"
                     f"{' with reference image' if sample_ref_image else ''}...")
         encoded_prompts = encode_sample_prompts(te_path, sample_prompts, ref_image=sample_ref_image, device=device)
+        if sample_negative and sample_cfg_scale and sample_cfg_scale > 1.0:
+            # One shared negative embedding; only meaningful with CFG active.
+            encoded_negative = encode_sample_prompts(te_path, [sample_negative], device=device)[0]
+        elif sample_negative:
+            logger.info("[sample] negative prompt set but CFG Scale is 1.0 (CFG off) — it will "
+                        "be ignored. Set Sample CFG Scale above 1 to use it.")
         sample_ae = load_vae(vae_path, input_channels=3, device="cpu", disable_mmap=True)
         sample_dir = os.path.join(output_dir, "sample")
 
@@ -1379,6 +1406,44 @@ def train_krea2(
             except Exception:
                 pass
             loss_watch.resume_from_jsonl(up_to_epoch=start_epoch, resets=_resets)
+    # Sample at Start: an epoch-0 preview (base model + zero-init LoRA) so the run's
+    # starting point is on record. Fresh runs only — a resume already has samples.
+    if sample_at_first and do_previews and start_epoch == 0:
+        from safetensors.torch import load_file as _lf0
+        _tmp0 = os.path.join(output_dir, "_sample_lora.safetensors")
+        _save_lora(network, _tmp0, network_dim, network_alpha, dtype)
+        logger.info("rendering epoch-0 preview (Sample at Start)...")
+        dit.to("cpu")
+        if getattr(dit, "_nf4_quantized", False):
+            from fizgig.modules.nf4 import move_nf4_to_device
+            move_nf4_to_device(dit, "cpu")
+        gc.collect()
+        torch.cuda.empty_cache()
+        try:
+            _seed0 = sample_seed if sample_seed != 0 else random.randint(1, 2**31 - 1)
+            sample_previews(turbo_path, sample_ae, encoded_prompts, _lf0(_tmp0), sample_dir, 0,
+                            output_name=output_name, steps=sample_steps,
+                            cfg_scale=sample_cfg_scale, neg=encoded_negative,
+                            width=sample_width, height=sample_height, seed=_seed0,
+                            context_lora_path=context_lora_path,
+                            context_lora_strength=context_lora_strength,
+                            blocks_to_swap=preview_blocks_to_swap, int8=preview_int8, device=device)
+        except Exception as _e0:
+            logger.warning(f"[preview] Sample at Start failed ({type(_e0).__name__}) — training "
+                           f"continues; per-epoch previews will still be attempted.")
+        finally:
+            gc.collect()
+            torch.cuda.empty_cache()
+            if getattr(dit, "_nf4_quantized", False):
+                from fizgig.modules.nf4 import move_nf4_to_device
+                move_nf4_to_device(dit, device)
+            elif blocks_to_swap > 0:
+                dit.move_to_device_except_swap_blocks(torch.device(device))
+                dit.switch_block_swap_for_training()
+            else:
+                dit.to(device)
+            dit.train()
+
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
     pending_accum = 0  # micro-batches backward'd since the last optimizer step
@@ -1455,7 +1520,12 @@ def train_krea2(
         # sequence shape to plan, so it only wins on runs long enough to amortize that. After a
         # full epoch every shape the dataset produces has been seen, so this is arithmetic rather
         # than a guess — see fizgig/modules/sdpa.py.
-        _switch = _consider_training_backend(steps_per_epoch * (max_train_epochs - epoch - 1))
+        # SUPPRESSED under torch.compile: flipping the backend mid-run changes the branch every
+        # compiled block traced, forcing a retrace whose worst case (fullgraph + an unprimed
+        # path) killed the run at the epoch-2 boundary. Compile's own win is the larger one;
+        # take cuDNN only on uncompiled runs.
+        _switch = None if _do_compile else \
+            _consider_training_backend(steps_per_epoch * (max_train_epochs - epoch - 1))
         if _switch:
             _n_shapes, _needed = _switch
             logger.info(f"[attention] switching to the cuDNN backend for the rest of the run — "
@@ -1486,7 +1556,7 @@ def train_krea2(
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),
                        network_dim, network_alpha, dtype)
 
-        if do_previews and (epoch + 1) % sample_every_n_epochs == 0:
+        if do_previews and sample_every_n_epochs and (epoch + 1) % sample_every_n_epochs == 0:
             from safetensors.torch import load_file
             tmp = os.path.join(output_dir, "_sample_lora.safetensors")
             _save_lora(network, tmp, network_dim, network_alpha, dtype)
@@ -1524,7 +1594,8 @@ def train_krea2(
                     prev_seed = random.randint(1, 2**31 - 1)
                     logger.info(f"[sample] seed 0 -> random {prev_seed}")
                 sample_previews(turbo_path, sample_ae, prev_enc, load_file(tmp), sample_dir, epoch + 1,
-                                output_name=output_name, steps=sample_steps, width=prev_w,
+                                output_name=output_name, steps=sample_steps,
+                                cfg_scale=sample_cfg_scale, neg=encoded_negative, width=prev_w,
                                 height=prev_h, seed=prev_seed,
                                 context_lora_path=context_lora_path, context_lora_strength=context_lora_strength,
                                 blocks_to_swap=preview_blocks_to_swap, int8=preview_int8, device=device)
@@ -1585,6 +1656,12 @@ def train_krea2(
     if context_lora_path:
         extra.update({"ss_context_lora": os.path.basename(context_lora_path),
                       "ss_context_lora_strength": str(context_lora_strength)})
+    # User metadata (GUI: Other Options → Metadata) — same keys ComfyUI/model managers read.
+    for _mk, _mv in (("modelspec.title", metadata_title), ("modelspec.author", metadata_author),
+                     ("modelspec.description", metadata_description),
+                     ("modelspec.license", metadata_license), ("modelspec.tags", metadata_tags)):
+        if _mv:
+            extra[_mk] = str(_mv)
     _save_lora(network, out, network_dim, network_alpha, dtype, extra_metadata=extra)
     logger.info(f"saved final LoRA -> {out}")
     return out

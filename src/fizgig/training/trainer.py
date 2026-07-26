@@ -465,8 +465,14 @@ class KleinTrainer:
             f"mode={args.compile_mode}, dynamic={compile_dynamic}, fullgraph={args.compile_fullgraph}"
         )
 
-        if args.compile_cache_size_limit is not None:
-            torch._dynamo.config.cache_size_limit = args.compile_cache_size_limit
+        # Same two pre-compile fixes Krea 2 has: raise the recompile ceilings + sympy Mod
+        # patch (default cache limit of 8 meant a bucketed dataset silently dropped to
+        # permanent eager), and settle the SDPA backend global so its lazy first-use probe
+        # never executes inside a compiled block.
+        from fizgig.modules.compile_util import init_compile
+        init_compile(args.compile_cache_size_limit if args.compile_cache_size_limit is not None else 8192)
+        from fizgig.modules import sdpa as _sdpa_mod
+        _sdpa_mod.prime()
 
         for blocks in target_blocks:
             for i, block in enumerate(blocks):

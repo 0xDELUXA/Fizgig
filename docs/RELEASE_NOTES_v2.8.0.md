@@ -32,8 +32,7 @@ wall-clock time to a *good* LoRA should now favour Fizgig.
 
 ## 🎛 Krea 2 sample controls, wired
 
-The Samples tab's **Steps**, **CFG Scale**, **Negative prompt**, and **Sample at Start** now
-actually reach the Krea 2 trainer. Raise CFG above 1 with a negative for guided previews;
+The Samples tab's **Steps** and **Sample at Start** now actually reach the Krea 2 trainer —
 Sample at Start renders an epoch-0 baseline before training begins. **Metadata**
 (title/author/description/license/tags) is now recorded in saved Krea 2 LoRAs as
 `modelspec.*` keys.

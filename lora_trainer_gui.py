@@ -3318,6 +3318,8 @@ class LoRATrainerGUI:
 
     def _save_last_train_settings(self):
         """Snapshot current settings just before launching training, so 'Load Last Train' can restore them."""
+        if _persist_disabled():
+            return   # headless tests must never overwrite the real .last_train_settings.json
         try:
             os.makedirs(PRESETS_DIR, exist_ok=True)
             snapshot = self._collect_preset_values()

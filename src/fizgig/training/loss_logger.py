@@ -22,8 +22,34 @@ and record the batch size so analysis can skip those.
 import json
 import logging
 import os
+import time
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_replace(tmp: str, dst: str, retries: int = 3, delay: float = 0.05) -> bool:
+    """os.replace with brief retries for Windows sharing violations.
+
+    os.replace needs DELETE access to dst, and Python's open() doesn't request
+    FILE_SHARE_DELETE — so every atomic sidecar write fails with PermissionError
+    while a reader holds the file open (the Problem Images window's own 4-second
+    poll, OneDrive, an AV scanner). The reader's window is milliseconds; a couple
+    of short retries clears it. Returns False (tmp cleaned up) if it never does."""
+    for _ in range(retries):
+        try:
+            os.replace(tmp, dst)
+            return True
+        except PermissionError:
+            time.sleep(delay)
+        except OSError:
+            break
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    logger.warning("[loss-watch] could not update %s — a reader holds it open; "
+                   "it will refresh next boundary", os.path.basename(dst))
+    return False
 
 _ENV_FLAG = "FIZGIG_PERIMAGE_LOSS_LOG"
 _N_BUCKETS = 40  # timestep buckets over [0, 1] for the running-mean normalization. Finer buckets
@@ -310,7 +336,7 @@ class PerImageLossWatch:
             tmp = self._excl_file + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self._excl_data, f, indent=2)
-            os.replace(tmp, self._excl_file)
+            _atomic_replace(tmp, self._excl_file)
         except Exception:
             logger.warning("[loss-watch] could not write fizgig_excluded.json", exc_info=True)
 
@@ -784,7 +810,7 @@ class PerImageLossWatch:
                                "images": {k: {kk: (round(vv, 6) if isinstance(vv, float) else vv)
                                               for kk, vv in s.items()} for k, s in stats.items()}},
                               f, indent=2)
-                os.replace(report + ".tmp", report)
+                _atomic_replace(report + ".tmp", report)
             except Exception:
                 pass
             return self.verdicts

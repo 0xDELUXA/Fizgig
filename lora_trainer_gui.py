@@ -451,10 +451,16 @@ def load_last_used():
 
 
 def save_last_used(data):
-    """Save last-used folder paths to config file"""
+    """Save last-used folder paths to config file.
+
+    Atomic (tmp + os.replace): this file is rewritten on every traced-var edit, and its
+    reader falls back to defaults on a JSONDecodeError — so a crash mid-write used to
+    silently blank the remembered paths, and the next auto-save persisted the blanks."""
     try:
-        with open(LAST_USED_FILE, 'w', encoding='utf-8') as f:
+        tmp = LAST_USED_FILE + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, LAST_USED_FILE)
     except Exception:
         pass
 
@@ -629,8 +635,13 @@ def save_prefs(prefs: dict) -> None:
         else:
             to_save[key] = value
     try:
-        with open(PREFS_FILE, 'w', encoding='utf-8') as f:
+        # Atomic: a truncated prefs.json silently blanked every model path (the reader
+        # swallows JSONDecodeError and falls back to defaults, then the next auto-save
+        # persisted the blanks).
+        tmp = PREFS_FILE + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(to_save, f, indent=2)
+        os.replace(tmp, PREFS_FILE)
     except Exception:
         pass
 
@@ -5607,7 +5618,10 @@ class LoRATrainerGUI:
                     content = f.read()
 
                 if pattern.search(content):
-                    new_content = pattern.sub(replace_text, content)
+                    # Replacement via a function so re NEVER parses it as a template: a
+                    # Windows path typed into the box used to write real newlines/tabs
+                    # into captions (\n, \t), and \1 raised "invalid group reference".
+                    new_content = pattern.sub(lambda _m: replace_text, content)
                     results.append({
                         'file': txt_file,
                         'old': content,
@@ -8174,7 +8188,12 @@ class LoRATrainerGUI:
                 "Ctrl-click in the file dialog to select three. Three baselines average out "
                 "the angle/expression/lighting bias any single photo carries.")
             return
-        self._ff_baselines = list(paths)
+        # normpath BOTH here and in the scan's file list: filedialog returns forward
+        # slashes while the scan builds candidates with os.path.join (backslashes on
+        # Windows), so every `p in self._ff_baselines` test was False — baselines were
+        # never badged, embedded twice, and could be auto-suggested and MOVED OUT of the
+        # dataset by "Move Marked".
+        self._ff_baselines = [os.path.normpath(p) for p in paths]
         for slot, p in zip(self._ff_base_slots, paths):
             try:
                 with Image.open(p) as im:
@@ -8224,8 +8243,10 @@ class LoRATrainerGUI:
         if len(self._ff_baselines) != 3 or not all(os.path.exists(b) for b in self._ff_baselines):
             messagebox.showwarning("Look Filter", "Choose 3 baseline images first.")
             return
+        # normpath to match self._ff_baselines (see the baseline picker) — the folder string
+        # itself can carry forward slashes from a file dialog.
         files = sorted(
-            os.path.join(folder, f) for f in os.listdir(folder)
+            os.path.normpath(os.path.join(folder, f)) for f in os.listdir(folder)
             if os.path.isfile(os.path.join(folder, f))
             and os.path.splitext(f)[1].lower() in self._FF_EXTS)
         if not files:
@@ -8475,6 +8496,22 @@ class LoRATrainerGUI:
     # region Image Prep Helpers
 
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+
+    @staticmethod
+    def _atomic_png_save(img, output_path):
+        """Write the PNG to a temp file then os.replace into place. In-place mode saves
+        straight over the original — a crash, full disk or End Task mid-write used to
+        truncate the source photo beyond recovery."""
+        tmp = output_path + ".fizgig-tmp"
+        try:
+            img.save(tmp, "PNG")
+            os.replace(tmp, output_path)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def _safe_output_path(self, filepath, output_path):
         """Never overwrite a DIFFERENT existing file.
@@ -8825,7 +8862,7 @@ class LoRATrainerGUI:
                     continue
 
                 output_path = self._safe_output_path(filepath, output_path)
-                img.save(output_path, "PNG")
+                self._atomic_png_save(img, output_path)
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if resized else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]\n")
                 converted += 1
@@ -8884,7 +8921,7 @@ class LoRATrainerGUI:
                     continue
 
                 output_path = self._safe_output_path(filepath, output_path)
-                img.save(output_path, "PNG")
+                self._atomic_png_save(img, output_path)
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if (resized or cropped) else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]{crop_info}\n")
                 converted += 1
@@ -8965,7 +9002,7 @@ class LoRATrainerGUI:
                     continue
 
                 output_path = self._safe_output_path(filepath, output_path)
-                resized_img.save(output_path, "PNG")
+                self._atomic_png_save(resized_img, output_path)
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if resized else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]\n")
                 converted += 1
@@ -10599,20 +10636,27 @@ class LoRATrainerGUI:
         if not output_name.endswith(".safetensors"):
             output_name += ".safetensors"
 
-        prompt = self.extract_prompt_var.get().strip()
-        if not prompt:
-            messagebox.showerror("Error", "Please enter a prompt (trigger word recommended).")
-            return
+        # Fast (weight-only, samples=0) presets run entirely from the safetensors file:
+        # no pipeline is loaded, so don't demand a DiT/VAE/TE or a prompt they never use
+        # (the CLI already worked without them).
+        try:
+            _samples = int(self.extract_samples_var.get().strip() or 0)
+        except (ValueError, AttributeError):
+            _samples = 0
 
-        # Get paths from prefs
+        prompt = self.extract_prompt_var.get().strip()
         dit_path = self.prefs_vars["distilled_dit"].get()
         vae_path = self.prefs_vars["vae"].get()
         te_path = self.prefs_vars["text_encoder"].get()
 
-        for path, name in [(dit_path, "DiT"), (vae_path, "VAE"), (te_path, "Text Encoder")]:
-            if not path or not os.path.exists(path):
-                messagebox.showerror("Error", f"{name} not found:\n{path}\n\nCheck Preferences tab.")
+        if _samples > 0:
+            if not prompt:
+                messagebox.showerror("Error", "Please enter a prompt (trigger word recommended).")
                 return
+            for path, name in [(dit_path, "DiT"), (vae_path, "VAE"), (te_path, "Text Encoder")]:
+                if not path or not os.path.exists(path):
+                    messagebox.showerror("Error", f"{name} not found:\n{path}\n\nCheck Preferences tab.")
+                    return
 
         # Build block list from preset (or custom individual blocks)
         preset = self.extract_preset_var.get()
@@ -10636,6 +10680,14 @@ class LoRATrainerGUI:
         output_dir = self.prefs_vars["lora_output_dir"].get()
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, output_name)
+        # Never silently overwrite: the name is built from source+preset+rank only, so two
+        # different Custom selections at the same rank land on the same filename.
+        if os.path.exists(output_path):
+            _stem, _ext = os.path.splitext(output_path)
+            _n = 2
+            while os.path.exists(f"{_stem}_{_n}{_ext}"):
+                _n += 1
+            output_path = f"{_stem}_{_n}{_ext}"
 
         # Disable button, clear log
         self.extract_run_btn.configure(state="disabled")
@@ -10727,6 +10779,19 @@ class LoRATrainerGUI:
 
             if pipeline is not None:
                 pipeline.unload_models()
+
+            # A valid-but-empty artifact is a failure, not a success: a Details preset on a
+            # Style LoRA used to produce a ~340-byte tensorless file and "Extraction
+            # complete! Layers extracted: 0".
+            if result.num_layers_extracted == 0:
+                try:
+                    os.remove(result.output_path)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"Extraction produced 0 layers — the selected blocks ({blocks}) don't "
+                    f"exist in this LoRA. Run it through the Profiler to see which blocks "
+                    f"it actually trains, then pick a matching preset.")
 
             summary = f"\nExtraction complete!\n"
             summary += f"  Output: {result.output_path}\n"
@@ -10827,6 +10892,13 @@ class LoRATrainerGUI:
         output_dir = self.prefs_vars["lora_output_dir"].get()
         os.makedirs(output_dir, exist_ok=True)
         output_path = os.path.join(output_dir, output_name)
+        # Never silently overwrite (same rule as the Klein path).
+        if os.path.exists(output_path):
+            _stem, _ext = os.path.splitext(output_path)
+            _n = 2
+            while os.path.exists(f"{_stem}_{_n}{_ext}"):
+                _n += 1
+            output_path = f"{_stem}_{_n}{_ext}"
 
         self.extract_run_btn.configure(state="disabled")
         self.extract_open_btn.configure(state="disabled")
@@ -10871,6 +10943,15 @@ class LoRATrainerGUI:
             self.master.after(0, lambda: self._extract_log(
                 f"Krea 2 weight-only SVD (all blocks), rank={rank}\n"))
             result = LoRAExtractor.extract_weight_only(config, progress_callback=progress)
+
+            # Empty artifact = failure, not success (same rule as the Klein worker).
+            if result.num_layers_extracted == 0:
+                try:
+                    os.remove(result.output_path)
+                except OSError:
+                    pass
+                raise RuntimeError("Extraction produced 0 layers — the source file contains "
+                                   "no LoRA modules this extractor recognises.")
 
             summary = (f"\nExtraction complete!\n"
                        f"  Output: {result.output_path}\n"

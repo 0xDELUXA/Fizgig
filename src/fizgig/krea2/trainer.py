@@ -852,16 +852,22 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
                 if attempt >= 2:
                     loss_watch.mark_incorrigible(k)
         # Ack for the GUI (row badge "caption re-encoded @ epoch N" / "AI re-captioned").
+        # Per-fix HISTORY list per key — last-writer-wins lost every fix but the final one,
+        # so an image fixed twice replayed only its last reset on resume and the pre-first-fix
+        # records (the old caption's, usually the worst in the run) skewed the thresholds
+        # every other image is judged against. Older files carry a single dict per key.
         applied_path = os.path.join(output_dir, "loss_log", "caption_updates_applied.json")
         applied = {}
         try:
             if os.path.exists(applied_path):
                 with open(applied_path, encoding="utf-8") as f:
-                    applied = json.load(f)
+                    applied = {k: (v if isinstance(v, list) else [v])
+                               for k, v in json.load(f).items()}
         except Exception:
             applied = {}
         for k, _, cap, attempt in todo:
-            applied[k] = {"epoch": epoch, "caption": cap, "auto": attempt > 0, "attempt": attempt}
+            applied.setdefault(k, []).append(
+                {"epoch": epoch, "caption": cap, "auto": attempt > 0, "attempt": attempt})
         # Atomic write — the GUI polls this file for the row badges.
         with open(applied_path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(applied, f, indent=2)
@@ -1188,7 +1194,15 @@ def train_krea2(
         # where global_step calls to step() would have.
         if global_step > 0:
             # global_step counts micro-batches; the schedule's position is optimizer steps.
-            done_updates = global_step // accum
+            # The loop flushes a PARTIAL accumulation group at every epoch boundary (the
+            # scheduler steps there too), so updates/epoch = ceil(steps_per_epoch/accum) —
+            # a flat `global_step // accum` ignored those flushes and restored the schedule
+            # early, leaving the LR high for the whole remainder. Resume always lands on an
+            # epoch boundary; the leftover term covers a hand-rolled mid-epoch state anyway.
+            _epochs_done = global_step // steps_per_epoch
+            _leftover = global_step % steps_per_epoch
+            done_updates = (_epochs_done * math.ceil(steps_per_epoch / accum)
+                            + _leftover // accum)
             scheduler.last_epoch = done_updates - 1
             scheduler.step()
         logger.info(f"[lr_scheduler] {lr_scheduler} — warmup {int(lr_warmup_steps or 0)} / "
@@ -1265,8 +1279,13 @@ def train_krea2(
             auto_recaption = False
     loss_watch = None
     if watch_enabled:
+        # write_jsonl is ALWAYS on when the watch runs: the JSONL is the watch's persistence
+        # layer, not a detection feature. Binding it to the detect toggle meant per-image LR
+        # or auto-recaption without "Detect problem images" wrote no JSONL — and every resume
+        # of such a run silently discarded the entire watch history while `recaptioned` WAS
+        # restored from the ledger, pinning spent images on the stuck ladder with no way off.
         loss_watch = PerImageLossWatch(output_dir, apply_lr=per_image_lr,
-                                       write_jsonl=log_per_image_loss,
+                                       write_jsonl=True,
                                        dataset_dir=ar_image_dir, caption_ext=ar_caption_ext)
         # Reconcile persisted exclusions against the actual training set (prune entries for
         # images that left the dataset; refuse a file that would exclude everything).
@@ -1330,11 +1349,15 @@ def train_krea2(
                 with open(os.path.join(output_dir, "loss_log", "caption_updates_applied.json"),
                           encoding="utf-8") as _f:
                     for _k, _info in json.load(_f).items():
-                        _att = int(_info.get("attempt", 0) or 0)
-                        _auto = bool(_info.get("auto"))
-                        if _auto:
-                            recaptioned[_k] = max(recaptioned.get(_k, 0), _att)
-                        _resets[_k] = (int(_info.get("epoch", 0) or 0), _att, _auto)
+                        # Per-fix history list (older files: a single dict = last fix only).
+                        _entries = _info if isinstance(_info, list) else [_info]
+                        for _e in _entries:
+                            _att = int(_e.get("attempt", 0) or 0)
+                            _auto = bool(_e.get("auto"))
+                            if _auto:
+                                recaptioned[_k] = max(recaptioned.get(_k, 0), _att)
+                            _resets.setdefault(_k, []).append(
+                                (int(_e.get("epoch", 0) or 0), _att, _auto))
             except Exception:
                 pass
             loss_watch.resume_from_jsonl(up_to_epoch=start_epoch, resets=_resets)

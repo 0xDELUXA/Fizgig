@@ -405,7 +405,11 @@ class PerImageLossWatch:
         """Record one step's RAW (unscaled) loss. Never raises into the training loop."""
         try:
             keys = item_keys if isinstance(item_keys, (list, tuple)) else [item_keys]
-            if keys is not None and len(keys) > 1:
+            # Batch detection must also survive RESUME REPLAY, where a batched step's keys
+            # arrive as one composite string ("a|b|c" — "|" can't appear in a filename), not
+            # a list. Without this the latch came back clear after resume.
+            if keys is not None and (len(keys) > 1
+                                     or (len(keys) == 1 and "|" in str(keys[0]))):
                 self._batched = True
                 if self.apply_lr and not self._batched_warned:
                     self._batched_warned = True
@@ -798,15 +802,37 @@ class PerImageLossWatch:
 
         Replays observe() + epoch_boundary() exactly as the original run drove them (same
         records, same order, same votes — the state machines are deterministic). `resets` is
-        {key: (epoch, attempt, is_auto)} from caption_updates_applied.json: the original run
-        reset those images' histories at those boundaries (recaption / manual edit), so the
-        replay must too, or an image would be judged on records its caption fix invalidated.
+        {key: [(epoch, attempt, is_auto), ...]} (a bare tuple is accepted for one fix) from
+        caption_updates_applied.json: the original run reset those images' histories at those
+        boundaries (recaption / manual edit), so the replay must too, or an image would be
+        judged on records its caption fix invalidated. Incorrigibility (attempt 2 spent) is
+        applied AT its boundary, exactly as the live run did — applying it after the replay
+        made the replay take different branches than the original run and invent verdicts.
         Console chatter and the report write are muted for all but the FINAL replayed epoch,
         which announces the restored state once. Returns the number of replayed epochs."""
         path = os.path.join(self.output_dir, "loss_log", "per_image_loss.jsonl")
-        if not os.path.exists(path):
-            return 0
         resets = resets or {}
+        # Normalize: one fix may arrive as a bare tuple; sort each key's fixes by epoch.
+        resets = {str(k): sorted([tuple(e) for e in (v if isinstance(v, list) else [v])],
+                                 key=lambda e: e[0])
+                  for k, v in resets.items()}
+
+        def _apply_spent_attempts():
+            # Benefit-of-the-doubt state that must survive even when there is nothing to
+            # replay: an image whose 2nd (detailed) AI recaption was already spent goes back
+            # on the exclusion track rather than getting a free third life.
+            for k, entries in resets.items():
+                for (_r_ep, att, is_auto) in entries:
+                    if is_auto and att >= 2:
+                        self.mark_incorrigible(k)
+
+        if not os.path.exists(path):
+            if resets or self._excluded:
+                logger.warning("[loss-watch] resume: no per_image_loss.jsonl to replay — the "
+                               "watch restarts blind (trends, verdicts, healthy credit and "
+                               "stuck tenure re-warm from zero; persistent exclusions survive).")
+            _apply_spent_attempts()
+            return 0
         by_epoch: dict[int, list] = {}
         try:
             with open(path, encoding="utf-8") as f:
@@ -825,8 +851,10 @@ class PerImageLossWatch:
                         continue   # one mangled line must not kill the resume
         except Exception as e:
             logger.warning(f"[loss-watch] resume replay: could not read {path} ({e})")
+            _apply_spent_attempts()
             return 0
         if not by_epoch:
+            _apply_spent_attempts()
             return 0
         epochs = sorted(by_epoch)
         n_steps = sum(len(v) for v in by_epoch.values())
@@ -835,7 +863,9 @@ class PerImageLossWatch:
         # reset_key also pardons exclusions (that's right for LIVE caption edits) — but these
         # are HISTORICAL resets, and some of those images were excluded later in the original
         # timeline. Their exclusions are the more recent fact; never let a replayed reset undo
-        # one (or rewrite fizgig_excluded.json). Their verdicts are forced to "excluded" anyway.
+        # one (or rewrite fizgig_excluded.json). Their record PURGE still happened in the
+        # original run though — _purge_records_only reproduces it without the pardon, so the
+        # old caption's records can't skew every other image's thresholds.
         preserved = set(self._excluded)
         self._replaying = True
         try:
@@ -848,18 +878,22 @@ class PerImageLossWatch:
                     #                            or the last epoch's steps duplicate into the jsonl
                 self.epoch_boundary(ep)
                 # Reproduce the caption fixes the original run applied at this boundary — the
-                # records before a fix describe the OLD caption and must not convict the new one.
-                for k, (r_ep, _att, _auto) in resets.items():
-                    if r_ep == ep and k not in preserved:
-                        self.reset_key(k)
+                # records before a fix describe the OLD caption and must not convict the new
+                # one. Incorrigibility (2nd AI attempt spent) is applied HERE, at the same
+                # boundary the live run applied it (right after the reset), so later replayed
+                # boundaries take the same branches the original run took.
+                for k, entries in resets.items():
+                    for (r_ep, att, is_auto) in entries:
+                        if r_ep != ep:
+                            continue
+                        if k in preserved:
+                            self._purge_records_only(k)
+                        else:
+                            self.reset_key(k)
+                        if is_auto and att >= 2:
+                            self.mark_incorrigible(k)
         finally:
             self._replaying = False
-        # Benefit-of-the-doubt state: images whose 2nd (detailed) AI recaption was already spent
-        # go back on the exclusion track. A manual edit AFTER the AI attempts (is_auto False,
-        # last-writer-wins in the applied ledger) restores hope, exactly like in-run.
-        for k, (_r_ep, att, is_auto) in resets.items():
-            if is_auto and att >= 2:
-                self.mark_incorrigible(k)
         logger.info(f"[loss-watch] resume: verdict history restored through epoch {epochs[-1]}.")
         return len(epochs)
 

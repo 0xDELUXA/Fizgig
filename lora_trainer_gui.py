@@ -4073,9 +4073,14 @@ class LoRATrainerGUI:
             if key in queued_keys:
                 ui["badge"].config(text="  ✏ fix queued", fg="#F1C40F")
             elif key in applied_info:
-                _ai = applied_info[key].get("auto")
-                _att = int(applied_info[key].get("attempt", 1) or 1)
-                _ep = applied_info[key].get("epoch", "?")
+                # Ledger entries are per-fix history lists (older files carry a single dict);
+                # the badge shows the LATEST fix.
+                _entry = applied_info[key]
+                if isinstance(_entry, list):
+                    _entry = _entry[-1] if _entry else {}
+                _ai = _entry.get("auto")
+                _att = int(_entry.get("attempt", 1) or 1)
+                _ep = _entry.get("epoch", "?")
                 if _ai and _att >= 2:
                     _txt = f"  🤖 AI re-captioned ×2 (detailed) @ epoch {_ep} — last chance"
                 elif _ai:

@@ -8348,6 +8348,31 @@ class LoRATrainerGUI:
 
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
 
+    def _safe_output_path(self, filepath, output_path):
+        """Never overwrite a DIFFERENT existing file.
+
+        Every prep mode writes `<stem>.png`, so a folder holding photo.jpg AND an
+        unrelated photo.png would have the .jpg's output destroy the .png (and
+        _handle_original then deletes the .jpg — one photo gone, silently).
+        In-place re-save of the same file is fine; a genuine collision gets a
+        `_2`/`_3`... suffix instead, with a log line."""
+        if not os.path.exists(output_path):
+            return output_path
+        try:
+            if os.path.samefile(filepath, output_path):
+                return output_path  # in-place re-save of itself
+        except OSError:
+            pass
+        stem, ext = os.path.splitext(output_path)
+        n = 2
+        candidate = f"{stem}_{n}{ext}"
+        while os.path.exists(candidate):
+            n += 1
+            candidate = f"{stem}_{n}{ext}"
+        self._log(f"Name collision: {os.path.basename(output_path)} already exists — "
+                  f"writing {os.path.basename(candidate)} instead\n")
+        return candidate
+
     def _handle_original(self, filepath, output_path, output_folder, replace_originals):
         """Handle the original file: delete if replacing, move to subfolder if preserving."""
         if filepath == output_path:
@@ -8671,6 +8696,7 @@ class LoRATrainerGUI:
                     img.close()
                     continue
 
+                output_path = self._safe_output_path(filepath, output_path)
                 img.save(output_path, "PNG")
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if resized else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]\n")
@@ -8729,6 +8755,7 @@ class LoRATrainerGUI:
                     img.close()
                     continue
 
+                output_path = self._safe_output_path(filepath, output_path)
                 img.save(output_path, "PNG")
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if (resized or cropped) else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]{crop_info}\n")
@@ -8809,6 +8836,7 @@ class LoRATrainerGUI:
                     resized_img.close()
                     continue
 
+                output_path = self._safe_output_path(filepath, output_path)
                 resized_img.save(output_path, "PNG")
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if resized else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]\n")

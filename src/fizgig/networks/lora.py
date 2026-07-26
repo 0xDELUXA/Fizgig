@@ -1396,17 +1396,27 @@ def _convert_diffusers_flux_lora(weights_sd: Dict[str, torch.Tensor]) -> Dict[st
         fused_down = torch.cat(downs, dim=0)
 
         # All Q/K/V lora_up: (out_dim, rank) each → build block-diagonal
-        # so each slot's output lands in the right slice of the fused output
-        n_slots = len(ups)
-        ranks = [u.shape[1] for u in ups]
-        out_dims = [u.shape[0] for u in ups]
+        # so each slot's output lands in the right slice of the fused output.
+        # Each slot's own alpha/rank scale is baked into its columns here, and the
+        # fused module ships alpha = total_rank (scale 1.0) — so a source exporting
+        # e.g. alpha = rank/2 (OneTrainer, ai-toolkit) keeps its true strength
+        # instead of being inflated to scale 1.0.
+        slot_ups = [(s, slots[s]["lora_up.weight"]) for s in sorted_slots
+                    if "lora_up.weight" in slots[s]]
+        ranks = [u.shape[1] for _, u in slot_ups]
+        out_dims = [u.shape[0] for _, u in slot_ups]
         total_rank = sum(ranks)
         total_out = sum(out_dims)
 
-        fused_up = torch.zeros(total_out, total_rank, dtype=ups[0].dtype)
+        fused_up = torch.zeros(total_out, total_rank, dtype=slot_ups[0][1].dtype)
         r_offset = 0
         o_offset = 0
-        for i, up in enumerate(ups):
+        for i, (s, up) in enumerate(slot_ups):
+            alpha_t = slots[s].get("alpha")
+            # PEFT convention when alpha is absent: alpha = rank → scale 1.0
+            slot_scale = (float(alpha_t) / ranks[i]) if alpha_t is not None else 1.0
+            if slot_scale != 1.0:
+                up = (up.to(torch.float32) * slot_scale).to(up.dtype)
             fused_up[o_offset:o_offset + out_dims[i], r_offset:r_offset + ranks[i]] = up
             r_offset += ranks[i]
             o_offset += out_dims[i]

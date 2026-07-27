@@ -18,6 +18,7 @@ subtly inverted — not to missing kernels.
 | INT8 preview path | 1.02× vs bf16 (i.e. nothing) | **2.10×** |
 | Krea 2 1024 preview | 5.15 s | **4.40 s** |
 | Klein 1024 preview | 3.01 s | **2.74 s** |
+| Long-run step drift (near VRAM ceiling) | climbed ~2x over a run | **flat** (expandable_segments) |
 | Optimizer choice (Krea 2) | AdamW8bit, hardcoded | **7 families + any module path** |
 | Attention device syncs per step | 56 (every block, twice) | **1** |
 | Distinct attention shapes | 36 | **12** (a known perturbation — see below) |
@@ -196,6 +197,45 @@ benchmarks 3x FASTER loses end to end. The answer is in section 3: warm-up, not 
   grouping correlates consecutive gradients, and that is a real if modest risk for nothing.
 - **fp8 `_scaled_mm`** — 4.2× on the matmul, but requires fp8 activations, and NF4/int8 both beat
   fp8 end to end anyway.
+
+---
+
+## Allocator fragmentation on long runs (fixed)
+
+**Symptom:** per-step time climbed steadily through a long run and never recovered — reported
+on a rotating fine-tune, where it roughly doubled by ~70% of the way in.
+
+**Not the usual suspects.** Measured mid-run: 90% GPU utilisation, 2850 MHz steady, 73 C, 422 W
+of a 600 W limit, no throttle flags of any kind. The one anomalous number was **VRAM at 95.7%**
+(31.2 of 32.6 GB), i.e. ~1.4 GB of headroom.
+
+**Cause:** allocator fragmentation. PyTorch's default caching allocator carves blocks from
+fixed-size segments, so a workload that repeatedly allocates and frees *large, differently-sized*
+tensors near the VRAM ceiling progressively loses usable contiguous space and falls back to
+synchronising `cudaMalloc`/`cudaFree`. Rotating fine-tune is close to a worst case: every window
+switch frees the outgoing window's bf16 weights (~7 GB), allocates the incoming fp8 ones
+(~3.5 GB), and rebuilds a per-parameter optimizer over ~65 large tensors — every epoch.
+`rotate_to` already called `empty_cache()` between the halves, which returns blocks to the driver
+but cannot re-lay out the segments they came from.
+
+**Fix:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, which lets a segment grow and shrink
+instead of requiring fixed-size carving. **Confirmed to resolve the slowdown on a real run.**
+
+Set in three places, all with the same guard (respects an existing `PYTORCH_CUDA_ALLOC_CONF`,
+and `FIZGIG_NO_EXPANDABLE=1` opts out):
+
+| Where | Why it needs its own |
+|---|---|
+| `lora_trainer_gui.py`, at import | The workbench (Repair Studio, Explorer, Royale) runs **in** the GUI process. Must precede any torch import — the backend is fixed at CUDA init. |
+| `scripts/train.py`, `scripts/krea2_train.py` | Headless runs get nothing from the GUI. |
+| GUI-launched training | Already covered: `run_subprocess` passes `os.environ.copy()`. |
+
+**Worth remembering as a class of bug**, not just this instance: a *progressive* slowdown with a
+healthy GPU and high VRAM occupancy points at the allocator, and none of the obvious telemetry
+(utilisation, clocks, temperature, power) shows it. The diagnostic that made it visible was
+per-epoch step timing — the progress bar runs at `smoothing=0`, so its rate is a cumulative
+average that drifts upward on its own and cannot distinguish "steps got slower" from "time was
+spent not stepping".
 
 ---
 

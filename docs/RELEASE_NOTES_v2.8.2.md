@@ -35,6 +35,8 @@ If your steps were fine at the start and sluggish by the end, this was why.
 
 ---
 
-Full technical write-up — including the measurements that ruled out heat, clocks and power, and
-why the progress bar's own numbers couldn't detect it — is in
-[docs/PERF_ROADMAP.md](../docs/PERF_ROADMAP.md).
+**For the curious:** the reason this went unnoticed for so long is that nothing points at it. GPU
+utilisation, clock speed, temperature and power draw all look perfectly healthy while it happens
+— and the progress bar's own "s/it" is a running average over the whole run, so it drifts upward
+by itself and can't distinguish "steps got slower" from "time was spent not stepping". The only
+tell is memory occupancy sitting near the card's limit.

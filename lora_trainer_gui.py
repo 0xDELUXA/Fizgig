@@ -4698,7 +4698,16 @@ class LoRATrainerGUI:
                 _rk = int(self.entries["NETWORK_DIM"].get().strip() or 32)
             except (ValueError, KeyError, AttributeError):
                 _rk = 32
-            plan = recommend_krea2_strategy(caps=caps, mp=_mp, batch=_bs, rank=_rk)
+            # If the user pinned the 4-bit control, the plan must be built AROUND that choice —
+            # otherwise the swap count is sized for a quantisation that will not run. That
+            # exact mismatch (fp8 given NF4's swap-0 plan) OOM'd 16 GB cards; reproduced and
+            # fixed 28 Jul. "Off" means no quantisation at all, INT8 included.
+            _force = None
+            if hasattr(self, "quant_4bit_mode_var"):
+                _mode = self.quant_4bit_mode_var.get()
+                _force = {"On": "nf4", "Off": "fp8"}.get(_mode)
+            plan = recommend_krea2_strategy(caps=caps, mp=_mp, batch=_bs, rank=_rk,
+                                            force_quant=_force)
         except Exception:
             self._auto_quant_int8 = ""   # no strategy ran — a stale INT8 pick must not leak
             return self._auto_krea2_blocks_swap()
@@ -18123,6 +18132,19 @@ class LoRATrainerGUI:
         _cb = str(self.settings.get("COMPILE_BLOCKS", "auto") or "auto").lower()
         if _cb in ("auto", "on", "off"):
             cmd += ["--compile_blocks", _cb]
+        # torch.compile and block swap are mutually exclusive — compiled graphs assume their
+        # weights stay put, and swap moves them every step, so the trainer ignores compile
+        # whenever swap is active. It says so in its own log, but a user who set compile to On
+        # sees the GUI still reading "On" and reasonably believes it is running.
+        try:
+            _blocks_swap = int(self.settings.get("BLOCKS_SWAP", 0) or 0)
+        except (TypeError, ValueError):
+            _blocks_swap = 0
+        if _cb == "on" and _blocks_swap > 0:
+            self.update_console(
+                f"[compile] ignored this run — block swap is active ({_blocks_swap} blocks), and "
+                "compiled graphs can't tolerate weights moving between CPU and GPU each step. "
+                "Use 4-bit (NF4) instead of swapping if you want compile as well.\n")
         # Output metadata (Other Options → Metadata) — previously visible but never wired
         # for Krea 2; now recorded in the saved LoRA.
         for _mkey, _mflag in (("METADATA_TITLE", "--metadata_title"),

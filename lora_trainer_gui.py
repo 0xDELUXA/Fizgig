@@ -29,6 +29,18 @@ from PIL import Image, ImageTk
 if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF") and os.environ.get("FIZGIG_NO_EXPANDABLE") != "1":
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+# OpenMP wait policy, also before anything loads torch (which loads libiomp on Windows).
+# Intel OpenMP's default is to keep its whole thread pool ACTIVELY SPINNING for 200 ms
+# (KMP_BLOCKTIME) after every parallel region, "in case more work arrives". Training work is
+# on the GPU, but each step touches small CPU tensors (collate, noise, timestep bookkeeping),
+# so the pool — sized to every core — re-arms its spin constantly and burns 100% of every
+# core doing nothing (issue #18: 4080 Super pegged on all cores at CUDA 85%). Measured here:
+# simulated per-step CPU ops with GPU-sized gaps burn 14.8 cores spinning by default, 0.0
+# with BLOCKTIME=0, no step-time cost. Inherited by the training subprocess, which is the
+# point. Both vars set: KMP_* is Intel-runtime-specific, OMP_WAIT_POLICY is the portable one.
+os.environ.setdefault("KMP_BLOCKTIME", "0")
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+
 # Face detection imports (optional - graceful fallback if not installed)
 try:
     from face_utils import (FaceDetector, FaceEmbedder, crop_to_face, draw_face_boxes,

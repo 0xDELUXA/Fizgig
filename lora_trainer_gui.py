@@ -571,6 +571,10 @@ DEFAULT_PREFS = {
     "krea2_turbo_dit": "",
     "krea2_vae": "",
     "krea2_text_encoder": "",
+    # Turbo distillation LoRA (rank 64) — RAW + this at strength 1.0 behaves as the Turbo
+    # model, so samples can render on the resident training DiT instead of loading the
+    # separate Turbo checkpoint (saves the park-to-CPU shuffle during previews).
+    "krea2_turbo_lora": "",
     # Output directories — relative to repo root, portable across clones/moves.
     # Resolved to absolute in load_prefs(); in-memory pref values are absolute.
     # All three live as top-level folders inside the repo:
@@ -11332,6 +11336,14 @@ class LoRATrainerGUI:
             "Qwen3-VL-4B text encoder in bf16 — NOT the fp8 ComfyUI variant (not loadable for training)",
             download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors",
             download_note="~8GB bf16 — Comfy-Org/Krea-2 → text_encoders/qwen3vl_4b_bf16.safetensors",
+        )
+        kr = self._add_pref_row(
+            krea_card, kr, "Turbo LoRA (rank 64):", "krea2_turbo_lora",
+            "Turbo distillation as a LoRA — RAW + this at strength 1.0 samples like the Turbo model "
+            "(same 8-step CFG-free settings), letting previews run on the training DiT without loading "
+            "the separate Turbo checkpoint",
+            download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/loras/krea2_turbo_lora_rank_64_bf16.safetensors",
+            download_note="~470MB bf16 — Comfy-Org/Krea-2 → loras/krea2_turbo_lora_rank_64_bf16.safetensors",
         )
 
         # Card 2: Inference Performance

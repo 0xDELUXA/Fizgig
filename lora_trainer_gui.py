@@ -405,10 +405,22 @@ BUILT_IN_PRESETS = {
 KREA2_BUILT_IN_PRESETS = {
     "✨ Krea 2 Defaults (rank 32, full model)": {
         "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 10, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "MAX_TRAIN_EPOCHS": 30, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
         "OPTIMIZER_TYPE": "adamw8bit",
+        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
+        "DATASET_MEGAPIXELS": "0.25",
+        # Memory settings all auto — each resolves from the actual GPU at launch.
+        # BLOCKS_SWAP must be the combobox's exact label: _apply_preset_values matches a
+        # preset value against the offered options on its first token, case-sensitively,
+        # so a bare "auto" would not select "Auto (detect from GPU)".
+        "BLOCKS_SWAP": "Auto (detect from GPU)",
+        "QUANT_4BIT_MODE": "Auto", "COMPILE_BLOCKS": "Auto",
+        # Per-image loss watch: detection + the LR throttle on, the two interventions that
+        # rewrite captions or pre-judge images left off — those want a deliberate choice.
+        "KREA2_LOSS_WATCH": True, "KREA2_PER_IMAGE_LR": True,
+        "KREA2_AUTO_RECAPTION": False, "KREA2_WARMUP_LOOK": False,
     },
 }
 
@@ -2386,6 +2398,11 @@ class LoRATrainerGUI:
         # Seeded so _on_architecture_selected can tell a real family change from the user
         # re-picking the entry that's already selected (both fire <<ComboboxSelected>>).
         self._arch_last_selected = _saved_arch
+        # Per-family settings memory, session-scoped: architecture -> the Training-tab
+        # snapshot it had when you last switched away from it, and the preset label it was
+        # showing. First visit to a family falls back to that family's default preset.
+        self._arch_settings_memory = {}
+        self._arch_preset_name_memory = {}
 
         # === Base Model card (only shown when more than one architecture is available) ===
         if len(ARCHITECTURE_LIST) > 1:
@@ -3306,6 +3323,13 @@ class LoRATrainerGUI:
             elif "QUANT_4BIT" in preset:
                 self.quant_4bit_mode_var.set("On" if bool(preset["QUANT_4BIT"]) else "Off")
                 self._on_quant_4bit_mode_changed()
+
+        # torch.compile mode — collected by _collect_preset_values but, until now, never
+        # restored, so a preset's COMPILE_BLOCKS was silently dropped on load.
+        if "COMPILE_BLOCKS" in preset and hasattr(self, 'compile_blocks_var'):
+            _cb = str(preset["COMPILE_BLOCKS"]).capitalize()
+            if _cb in ("Auto", "On", "Off"):
+                self.compile_blocks_var.set(_cb)
 
         # Per-image loss watch toggles (krea2) — dedicated vars, same not-in-self.entries situation.
         if "KREA2_LOSS_WATCH" in preset and hasattr(self, 'krea2_loss_watch_var'):
@@ -6224,6 +6248,22 @@ class LoRATrainerGUI:
 
     def _on_architecture_selected(self, event=None):
         """Model-family selector changed — refresh sample defaults + presets + persist."""
+        # Snapshot the family we're LEAVING before anything reshapes the tab. The combobox
+        # has already moved to the new value by the time this fires, so the outgoing family
+        # is _arch_last_selected and the widgets still hold its values — but only until
+        # update_ui_for_architecture() runs below. Hence: first thing, before any UI work.
+        _arch_new = self.architecture_var.get()
+        _arch_old = getattr(self, "_arch_last_selected", None)
+        _arch_changed = _arch_new != _arch_old
+        if _arch_changed and _arch_old:
+            try:
+                self._arch_settings_memory[_arch_old] = self._collect_preset_values()
+                # Capture the preset LABEL here too — refresh_preset_combobox() below
+                # rewrites it, so this is the last moment it still names the old family's.
+                self._arch_preset_name_memory[_arch_old] = self.custom_preset_var.get()
+            except Exception:
+                pass
+
         try:
             self.update_samples_ui_for_architecture()
         except Exception:
@@ -6239,28 +6279,38 @@ class LoRATrainerGUI:
             self._refresh_training_buttons()
         except Exception:
             pass
-        # Swap the preset dropdown to this architecture's built-ins + user presets, and
-        # actually APPLY the new architecture's default preset.
+        # Swap the preset dropdown to this family's presets, and actually load values into
+        # the fields — either what this family last had, or its default preset.
         #
         # Naming a preset without applying it is a lie the user acts on: switching to Krea 2
         # left Klein's 55 epochs / rank 16 sitting in the fields while the dropdown read
         # "Krea 2 Defaults (rank 32, full model)". Those values don't transfer — Klein's
         # rank/epoch/block-targeting recipe is meaningless for Krea 2.
         #
-        # Applied on a REAL architecture change only: re-selecting the entry that's already
-        # active fires <<ComboboxSelected>> too, and that must not wipe hand-tuned settings.
+        # Per-family memory: first visit to a family gets its default preset, every later
+        # visit gets that family's own settings back, so flipping over to check something
+        # doesn't cost you your tuning. Session-scoped — a restart starts fresh.
+        #
+        # Only on a REAL family change: re-selecting the entry that's already active fires
+        # <<ComboboxSelected>> too, and that must not touch the fields at all.
         try:
-            arch = self.architecture_var.get()
-            arch_changed = arch != getattr(self, "_arch_last_selected", None)
-            self._arch_last_selected = arch
+            self._arch_last_selected = _arch_new
             self.refresh_preset_combobox()
-            builtins = self._builtins_for_arch(arch)
-            if builtins:
-                _name = next(iter(builtins))
-                self.custom_preset_var.set(_name)
-                if arch_changed:
-                    self._apply_preset_values(builtins[_name])
-                    self.update_console(f"[preset] {arch} selected — applied {_name}\n")
+            builtins = self._builtins_for_arch(_arch_new)
+            _default_name = next(iter(builtins)) if builtins else None
+            if _arch_changed:
+                _remembered = self._arch_settings_memory.get(_arch_new)
+                if _remembered:
+                    self._apply_preset_values(_remembered)
+                    self.custom_preset_var.set(self._arch_preset_name_memory.get(_arch_new, ""))
+                    self.update_console(f"[preset] {_arch_new} selected — restored your settings "
+                                        f"from earlier this session\n")
+                elif _default_name:
+                    self._apply_preset_values(builtins[_default_name])
+                    self.custom_preset_var.set(_default_name)
+                    self.update_console(f"[preset] {_arch_new} selected — applied {_default_name}\n")
+            elif _default_name and not self.custom_preset_var.get():
+                self.custom_preset_var.set(_default_name)
         except Exception:
             pass
         try:

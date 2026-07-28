@@ -1,6 +1,10 @@
 @echo off
 cd /d "%~dp0"
 echo Updating Fizgig...
+REM Older installers overwrote the tracked run_fizgig.bat with a console-attached version,
+REM which makes this git pull refuse to run (local changes). Restore the repo's launcher
+REM first — harmless when the file is already clean.
+git checkout -- run_fizgig.bat 2>nul
 git pull
 echo.
 echo Installing/updating dependencies...

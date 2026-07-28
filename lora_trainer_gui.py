@@ -434,6 +434,21 @@ KREA2_BUILT_IN_PRESETS = {
         "KREA2_LOSS_WATCH": True, "KREA2_PER_IMAGE_LR": True,
         "KREA2_AUTO_RECAPTION": False, "KREA2_WARMUP_LOOK": False,
     },
+    # Rank 8 + Adaptive LR at an aggressive floor: fewer epochs to a usable LoRA. Everything
+    # else identical to Krea 2 Defaults (which stays the preset applied on family switch).
+    "✨ Krea 2 Ultra Fast (rank 8, adaptive LR)": {
+        "NETWORK_DIM": 8, "NETWORK_ALPHA": 8, "LEARNING_RATE": 1e-4,
+        "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
+        "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
+        "OPTIMIZER_TYPE": "adamw8bit",
+        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
+        "DATASET_MEGAPIXELS": "0.25",
+        "BLOCKS_SWAP": "Auto (detect from GPU)",
+        "QUANT_4BIT_MODE": "Auto", "COMPILE_BLOCKS": "Auto",
+        "KREA2_LOSS_WATCH": True, "KREA2_PER_IMAGE_LR": True,
+        "KREA2_AUTO_RECAPTION": False, "KREA2_WARMUP_LOOK": False,
+    },
 }
 
 # LoRA Royale seed-travel presets — recipes of the *mechanics* knobs (reference /

@@ -23,6 +23,7 @@
 > - **Big step-rate boost.** A community bug report ([#18](https://github.com/shootthesound/Fizgig/issues/18) — thanks!) led to a fix that stops a hidden all-core CPU burn during training. It was meant to quiet the CPU; it turned out to **speed up training steps too** — up to **~1.6×** measured. Update and it's just on.
 > - **Long runs no longer slow down over time** — the gradual per-step slowdown on long runs is fixed (v2.8.2).
 > - **New Krea 2 preview engine.** In-training samples now render **on the training model itself** using the official **Turbo LoRA** — no more loading the 13 GB Turbo checkpoint and shuffling models between CPU and GPU every preview. Same look, same settings, far less memory traffic. The LoRA **auto-downloads** on update or first use; the classic Turbo-model mode is still there on the Samples tab.
+> - **New preset: ✨ Krea 2 Ultra Fast** — rank 8 with Adaptive LR at an aggressive floor, 20 epochs. Fewer epochs to a usable LoRA; the rank-32 **Krea 2 Defaults** preset remains the standard pick.
 
 > **🎉 New — Krea 2.** Fizgig now supports a **second, fully native model family**: **Krea 2 (12.9B)**. The whole workbench works with it — Repair Studio, Explorer, Royale, Profiler, Extract — plus Context LoRA, Adaptive LR, Pause/Resume, 4-bit (NF4) low-VRAM training, and the live sample override. [Details below ↓](#krea-2--second-model-family)
 
@@ -94,6 +95,8 @@ Everything works on Krea 2: **all five workbench tools** (Profiler, Extract, Rep
 - **Previews never crash a run** — if a preview can't fit, previews auto-disable and **training keeps going and saving**; evaluate the LoRA in ComfyUI.
 
 Krea 2 trains real, ComfyUI-compatible LoRAs, and its training recipe is verified against the reference implementation — same noised/target flow-matching, `krea2_shift` timestep sampling, and gradient clipping.
+
+**Two built-in presets:** **✨ Krea 2 Defaults** (rank 32, 30 epochs — the standard pick, applied automatically when you switch to Krea 2) and **✨ Krea 2 Ultra Fast** (rank 8, Adaptive LR at an aggressive 2e-4 floor, 20 epochs — fewer epochs to a usable LoRA when you want a quick result or a fast test of a dataset).
 
 ### The trainer curates your dataset while it trains (Krea 2, experimental)
 

@@ -2383,6 +2383,9 @@ class LoRATrainerGUI:
         except Exception:
             pass
         self.architecture_var = tk.StringVar(value=_saved_arch)
+        # Seeded so _on_architecture_selected can tell a real family change from the user
+        # re-picking the entry that's already selected (both fire <<ComboboxSelected>>).
+        self._arch_last_selected = _saved_arch
 
         # === Base Model card (only shown when more than one architecture is available) ===
         if len(ARCHITECTURE_LIST) > 1:
@@ -6236,12 +6239,28 @@ class LoRATrainerGUI:
             self._refresh_training_buttons()
         except Exception:
             pass
-        # Swap the preset dropdown to this architecture's built-ins + user presets.
+        # Swap the preset dropdown to this architecture's built-ins + user presets, and
+        # actually APPLY the new architecture's default preset.
+        #
+        # Naming a preset without applying it is a lie the user acts on: switching to Krea 2
+        # left Klein's 55 epochs / rank 16 sitting in the fields while the dropdown read
+        # "Krea 2 Defaults (rank 32, full model)". Those values don't transfer — Klein's
+        # rank/epoch/block-targeting recipe is meaningless for Krea 2.
+        #
+        # Applied on a REAL architecture change only: re-selecting the entry that's already
+        # active fires <<ComboboxSelected>> too, and that must not wipe hand-tuned settings.
         try:
+            arch = self.architecture_var.get()
+            arch_changed = arch != getattr(self, "_arch_last_selected", None)
+            self._arch_last_selected = arch
             self.refresh_preset_combobox()
-            builtins = self._builtins_for_arch(self.architecture_var.get())
+            builtins = self._builtins_for_arch(arch)
             if builtins:
-                self.custom_preset_var.set(next(iter(builtins)))
+                _name = next(iter(builtins))
+                self.custom_preset_var.set(_name)
+                if arch_changed:
+                    self._apply_preset_values(builtins[_name])
+                    self.update_console(f"[preset] {arch} selected — applied {_name}\n")
         except Exception:
             pass
         try:

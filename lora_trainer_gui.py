@@ -8278,19 +8278,35 @@ class LoRATrainerGUI:
         )
         self._prep_note_label.pack(anchor=tk.W)
 
-        # Card 4: Actions
-        action_card = self._start_section_card(outer, "Run", None)
+        # Card 5: Run it — one unmistakable primary action (label carries the live image count,
+        # set by _update_prep_note), with the face-detection test framed as the optional,
+        # nothing-is-written side step it actually is.
+        action_card = self._start_section_card(outer, "3 · Run it", None)
 
-        button_frame = tk.Frame(action_card, bg=COLORS["bg_surface"])
-        button_frame.pack(anchor=tk.W)
+        self.prepare_images_btn = tk.Button(
+            action_card, text="✨ Prepare Images Now", command=self.convert_images,
+            font=(FONT_FAMILY, 12, "bold"),
+            fg="#FFFFFF", bg=COLORS["accent"],
+            activeforeground="#FFFFFF", activebackground=COLORS["accent_hover"],
+            relief="flat", bd=0, padx=24, pady=8, cursor="hand2",
+        )
+        self.prepare_images_btn.pack(anchor=tk.W, pady=(4, 10))
+
+        test_row = tk.Frame(action_card, bg=COLORS["bg_surface"])
+        test_row.pack(anchor=tk.W)
+        tk.Label(test_row, text="Want to check first?",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"],
+                 bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(0, 8))
         self.preview_faces_btn = ttk.Button(
-            button_frame, text="Preview Faces", command=self.preview_faces,
+            test_row, text="Test face detection on one photo…", command=self.preview_faces,
             state="normal" if FACE_DETECTION_AVAILABLE else "disabled",
         )
-        self.preview_faces_btn.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(button_frame, text="Prepare Images", command=self.convert_images).pack(side=tk.LEFT)
+        self.preview_faces_btn.pack(side=tk.LEFT)
+        tk.Label(test_row, text="optional and safe — shows the crop, writes nothing",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_muted"],
+                 bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(8, 0))
 
-        # Apply initial visibility (may grid_remove face widgets in prep_card)
+        # Apply initial state (face-control greying + summary + button count)
         self._on_prep_mode_changed()
 
         # Card 5: Output Log
@@ -8426,6 +8442,12 @@ class LoRATrainerGUI:
             lines.append("Next: eyeball the face close-ups on the Captions tab and Remove any "
                          "blurry ones before captioning.")
         self._prep_note_var.set("\n".join(lines))
+
+        # The Run button carries the live count — "Prepare 34 Images Now" answers "run on what?"
+        if hasattr(self, "prepare_images_btn"):
+            self.prepare_images_btn.configure(
+                text=(f"✨ Prepare {n} Image{'s' if n != 1 else ''} Now" if n
+                      else "✨ Prepare Images Now"))
 
     def _get_face_selection_mode(self):
         """Parse face selection mode from Face Target dropdown."""

@@ -1081,7 +1081,6 @@ class LoRATrainerGUI:
         self.caption_thumbnails = {}
         self.current_caption_page = 0
         self.images_per_page = 12
-        self.selected_images = set()
 
         # Load architecture defaults first (populates optimizer / fp8 / timestep
         # fields that the built-in presets don't explicitly set), then overlay
@@ -5194,7 +5193,6 @@ class LoRATrainerGUI:
         action_row = tk.Frame(actions_card, bg=COLORS["bg_surface"])
         action_row.pack(anchor=tk.W)
         ttk.Button(action_row, text="Caption All Images (AI)", command=self.caption_all_florence).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(action_row, text="Caption Selected", command=self.caption_selected_florence).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(action_row, text="Static Caption All", command=self.generate_captions).pack(side=tk.LEFT, padx=(0, 8))
         self.caption_stop_btn = ttk.Button(action_row, text="Stop", command=self.stop_captioning, state=tk.DISABLED)
         self.caption_stop_btn.pack(side=tk.LEFT, padx=(0, 8))
@@ -5319,7 +5317,6 @@ class LoRATrainerGUI:
         for widget in self.caption_grid_frame.winfo_children():
             widget.destroy()
         self.caption_thumbnails.clear()
-        self.selected_images.clear()
 
         images = self.get_caption_image_files()
         total_images = len(images)
@@ -5385,16 +5382,6 @@ class LoRATrainerGUI:
         else:
             ttk.Label(card_frame, text="[No caption]", foreground=COLORS["warning"]).pack(pady=2)
 
-        # Selection checkbox
-        var = tk.BooleanVar(value=img_path in self.selected_images)
-        def on_select(path=img_path, v=var):
-            if v.get():
-                self.selected_images.add(path)
-            else:
-                self.selected_images.discard(path)
-        check = ttk.Checkbutton(card_frame, text="Select", variable=var, command=on_select)
-        check.pack()
-
         # Edit + Remove buttons
         btn_row = tk.Frame(card_frame)
         btn_row.pack(pady=2)
@@ -5428,7 +5415,6 @@ class LoRATrainerGUI:
         except OSError as e:
             messagebox.showerror("Remove failed", f"Could not move the file:\n{e}")
             return
-        self.selected_images.discard(img_path)
         self.refresh_caption_images()
 
     def caption_prev_page(self):
@@ -5845,40 +5831,6 @@ class LoRATrainerGUI:
 
         threading.Thread(target=caption_thread, daemon=True).start()
 
-    def caption_selected_florence(self):
-        """Caption only selected images"""
-        if not self.selected_images:
-            messagebox.showinfo("Info", "No images selected. Use checkboxes to select images.")
-            return
-
-        images = list(self.selected_images)
-        self.captioning_stop_flag = False
-        self._captioning_running = True
-        self.caption_stop_btn.configure(state=tk.NORMAL)
-
-        def caption_thread():
-            total = len(images)
-            self.update_caption_log(f"Captioning {total} selected images...\n")
-
-            for i, img_path in enumerate(images):
-                if self.captioning_stop_flag:
-                    self.master.after(0, lambda: self.update_caption_log("Captioning stopped by user\n"))
-                    break
-
-                progress = ((i + 1) / total) * 100
-                self.master.after(0, lambda p=progress, c=i+1, t=total: self.update_caption_progress(p, c, t))
-
-                caption = self.generate_florence_caption(img_path)
-                if caption:
-                    self.save_caption_with_trigger(img_path, caption)
-                    self.master.after(0, lambda f=os.path.basename(img_path): self.update_caption_log(f"✓ {f}\n"))
-
-            self._captioning_running = False
-            self.master.after(0, lambda: self.update_caption_log(f"\nCaptioning complete!\n"))
-            self.master.after(0, lambda: self.caption_stop_btn.configure(state=tk.DISABLED))
-            self.master.after(0, self.refresh_caption_images)
-
-        threading.Thread(target=caption_thread, daemon=True).start()
 
     def caption_single_image(self, img_path):
         """Caption a single image (for regenerate button)"""

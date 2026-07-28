@@ -246,8 +246,13 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
     # a quant, size the swap for it, and then have the caller discard the quant and keep the
     # swap. That shipped fp8 (17.7 GB) on NF4's swap-0 plan and OOM'd 16 GB cards (issue #18).
     if force_quant:
+        # A card without int8 tensor cores cannot run the INT8 path at all, so an explicit
+        # INT8 request degrades to fp8 rather than launching something that will fail.
+        if force_quant == "int8" and not caps.int8_matmul_train:
+            force_quant = "fp8"
         # "no_4bit" prices as fp8 up front, then the branch below upgrades it to INT8 when that
-        # fits — the fp8 figure is the fallback, not the decision.
+        # fits — the fp8 figure is the fallback, not the decision. (Legacy: the old 4-bit
+        # control's "Off". The Base-precision dropdown asks for int8/fp8 explicitly now.)
         _bases = {"nf4": _NF4_PEAK_GB, "int8": _INT8_PEAK_GB,
                   "fp8": _FP8_PEAK_GB, "no_4bit": _FP8_PEAK_GB}
         _base = _bases.get(force_quant)

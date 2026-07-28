@@ -428,7 +428,7 @@ KREA2_BUILT_IN_PRESETS = {
         # preset value against the offered options on its first token, case-sensitively,
         # so a bare "auto" would not select "Auto (detect from GPU)".
         "BLOCKS_SWAP": "Auto (detect from GPU)",
-        "QUANT_4BIT_MODE": "Auto", "COMPILE_BLOCKS": "Auto",
+        "QUANT_4BIT_MODE": "auto", "COMPILE_BLOCKS": "Auto",
         # Per-image loss watch: detection + the LR throttle on, the two interventions that
         # rewrite captions or pre-judge images left off — those want a deliberate choice.
         "KREA2_LOSS_WATCH": True, "KREA2_PER_IMAGE_LR": True,
@@ -445,7 +445,7 @@ KREA2_BUILT_IN_PRESETS = {
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.25",
         "BLOCKS_SWAP": "Auto (detect from GPU)",
-        "QUANT_4BIT_MODE": "Auto", "COMPILE_BLOCKS": "Auto",
+        "QUANT_4BIT_MODE": "auto", "COMPILE_BLOCKS": "Auto",
         "KREA2_LOSS_WATCH": True, "KREA2_PER_IMAGE_LR": True,
         "KREA2_AUTO_RECAPTION": False, "KREA2_WARMUP_LOOK": False,
     },
@@ -475,7 +475,7 @@ KREA2_BUILT_IN_PRESETS = {
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.25",
         "BLOCKS_SWAP": "Auto (detect from GPU)",
-        "QUANT_4BIT_MODE": "Auto", "COMPILE_BLOCKS": "Auto",
+        "QUANT_4BIT_MODE": "auto", "COMPILE_BLOCKS": "Auto",
         # Detection + throttle on as usual. Look-outlier warm-up stays off for an extra
         # reason here: it scores images by FACE embedding, which is meaningless on a style
         # set that may have no faces at all.
@@ -2971,8 +2971,11 @@ class LoRATrainerGUI:
         # Inline Attention / Logging / Memory / Metadata fields (formerly the Advanced tab)
         self._populate_other_options(scheduler_content, start_row=11)
 
-        # === Memory & FP8 / FP4 Section (Collapsed by default) ===
-        memory_section = CollapsibleFrame(outer,"Memory & FP8 / FP4", default_expanded=True)
+        # === Memory & precision section ===
+        # Header names every path the section now offers, INT8 included — it is the default on
+        # 20 GB+ cards and had no presence anywhere in the UI.
+        memory_section = CollapsibleFrame(outer, "Memory & Precision (INT8 / FP8 / NF4)",
+                                          default_expanded=True)
         memory_section.pack(fill=tk.X, padx=36, pady=(0, 16))
         self.collapsible_sections["memory"] = memory_section
 
@@ -3057,36 +3060,39 @@ class LoRATrainerGUI:
         self.fp8_text_encoder_check = ttk.Checkbutton(memory_content, text="Enable FP8 T5/LLM", variable=self.fp8_text_encoder_var, style="Surface.TCheckbutton")
         self.fp8_text_encoder_check.grid(row=4, column=1, sticky=tk.W, padx=5, pady=4)
 
-        # 4-bit (NF4) base — Auto / On / Off. quant_4bit_var stays the BooleanVar every
-        # downstream consumer reads; the mode combobox derives it. "Auto" hands the choice
-        # to the launch-time memory strategy (Krea 2 + Blocks Swap on Auto picks
-        # INT8/NF4/fp8 from free VRAM; Klein has no NF4 auto, so Auto = off there).
-        self._quant_4bit_label = tk.Label(memory_content, text="4-bit Base:", font=(FONT_FAMILY, 10),
+        # Base precision (Krea 2 only — hidden for Klein by _apply_training_arch_visibility).
+        #
+        # Was "4-bit Base: Auto / On / Off", which was actively misleading: "Off" meant "not
+        # NF4", and on a capable card you would then silently get INT8 — a quantisation the UI
+        # never named anywhere. Reading Off as "no quantisation" is what produced the v2.8.6
+        # regression; the UI invited that misreading. Every path is now named and selectable,
+        # INT8 included, and each one is planned for properly by the memory strategy.
+        #
+        # quant_4bit_var stays the BooleanVar every downstream consumer reads (True only for
+        # NF4); quant_4bit_mode_var holds the canonical key and the combobox shows its label.
+        self._quant_4bit_label = tk.Label(memory_content, text="Base precision:", font=(FONT_FAMILY, 10),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         self._quant_4bit_label.grid(row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         self.quant_4bit_var = tk.BooleanVar(value=False)
-        _q4_mode = str(self.settings.get("QUANT_4BIT_MODE", "") or
-                       ("On" if self.settings.get("QUANT_4BIT", False) else "Auto"))
-        if _q4_mode not in ("Auto", "On", "Off"):
-            _q4_mode = "Auto"
-        self.quant_4bit_mode_var = tk.StringVar(value=_q4_mode)
+        self.quant_4bit_mode_var = tk.StringVar(value=self._BASE_PRECISION_LABELS[
+            self._normalize_base_precision(
+                self.settings.get("QUANT_4BIT_MODE", "")
+                or ("On" if self.settings.get("QUANT_4BIT", False) else "auto"))])
         _q4_row = ttk.Frame(memory_content)
         _q4_row.grid(row=5, column=1, sticky=tk.W, padx=5, pady=4)
         self.quant_4bit_check = ttk.Combobox(
             _q4_row, textvariable=self.quant_4bit_mode_var,
-            values=["Auto", "On", "Off"], state="readonly", width=6)
+            values=list(self._BASE_PRECISION_LABELS.values()), state="readonly", width=34)
         self.quant_4bit_check.pack(side=tk.LEFT)
         self.quant_4bit_check.bind("<<ComboboxSelected>>",
                                    lambda e: self._on_quant_4bit_mode_changed())
-        tk.Label(_q4_row, text="NF4 quantized base (low VRAM)",
-                 font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"],
-                 bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(8, 0))
         self._quant_4bit_hint = tk.Label(memory_content,
-                 text="Auto (recommended): with Blocks Swap on Auto, the launch-time strategy picks the best "
-                      "of INT8 / NF4 4-bit / fp8 from your FREE VRAM (Krea 2; Klein has no NF4 auto). "
-                      "On forces the NF4 base — halves DiT VRAM (~9.6 → ~5.6 GB) for 10–12 GB cards, forces "
-                      "block swap off, supersedes FP8 Base; slight quality trade — check the LoRA in ComfyUI. "
-                      "Off never uses NF4 even if the strategy would pick it.",
+                 text="Auto (recommended) picks the fastest option that fits your FREE VRAM, and sizes block "
+                      "swap to match. INT8 is 8-bit — fastest, and ~7x more accurate than 4-bit, but needs "
+                      "~18 GB free. 4-bit NF4 is the smallest (~5.6 GB base) so it fits 10–12 GB cards with "
+                      "no swap, at a slight quality cost. fp8 is the least compressed of the three and needs "
+                      "the most VRAM, so it swaps blocks to fit. Anything you pick explicitly is planned "
+                      "for — swap is sized for the option that will actually run.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self._quant_4bit_hint.grid(row=6, column=1, sticky=tk.W, padx=5, pady=(0, 4))
@@ -3493,17 +3499,20 @@ class LoRATrainerGUI:
         if "SCALED" in preset:
             self.scaled_var.set(preset["SCALED"])
 
-        # 4-bit (NF4) base — dedicated mode var (not in self.entries), so the generic loop
-        # never restores it. New presets carry QUANT_4BIT_MODE (Auto/On/Off); legacy ones
-        # carry the old boolean, which maps to an explicit On/Off.
+        # Base precision — a dedicated var (not in self.entries), so the generic loop never
+        # restores it. _normalize_base_precision takes the canonical key, the display label,
+        # or a legacy Auto/On/Off alike, so old presets keep working.
         if hasattr(self, 'quant_4bit_mode_var'):
+            _key = None
             if "QUANT_4BIT_MODE" in preset:
-                _m = str(preset["QUANT_4BIT_MODE"])
-                if _m in ("Auto", "On", "Off"):
-                    self.quant_4bit_mode_var.set(_m)
-                    self._on_quant_4bit_mode_changed()
+                _key = self._normalize_base_precision(preset["QUANT_4BIT_MODE"])
             elif "QUANT_4BIT" in preset:
-                self.quant_4bit_mode_var.set("On" if bool(preset["QUANT_4BIT"]) else "Off")
+                # Legacy boolean. False means "4-bit not requested", i.e. no opinion — NOT an
+                # explicit demand for fp8, which would pin every old preset (including Klein's
+                # defaults, which carry QUANT_4BIT: False) away from Auto.
+                _key = "nf4" if bool(preset["QUANT_4BIT"]) else "auto"
+            if _key:
+                self.quant_4bit_mode_var.set(self._BASE_PRECISION_LABELS[_key])
                 self._on_quant_4bit_mode_changed()
 
         # torch.compile mode — collected by _collect_preset_values but, until now, never
@@ -3673,7 +3682,10 @@ class LoRATrainerGUI:
         _grab("fp8_var", "FP8")
         _grab("scaled_var", "SCALED")
         _grab("quant_4bit_var", "QUANT_4BIT")
-        _grab("quant_4bit_mode_var", "QUANT_4BIT_MODE")
+        # Store the canonical key, never the display label — the wording can change without
+        # invalidating everyone's saved presets.
+        if hasattr(self, "quant_4bit_mode_var"):
+            preset["QUANT_4BIT_MODE"] = self._base_precision()
         _grab("compile_blocks_var", "COMPILE_BLOCKS")
         _grab("krea2_loss_watch_var", "KREA2_LOSS_WATCH")
         _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
@@ -4048,8 +4060,6 @@ class LoRATrainerGUI:
         if not hasattr(self, "_adaptive_cb"):
             return
         # Per-widget groups across the Training Parameters + Memory & FP8 sections.
-        # NOTE: the 4-bit NF4 base toggle (_quant_4bit_*) is NOT hidden — it's wired into krea2_train
-        # (--quantize_4bit) and is where Krea 2's base precision is actually chosen.
         widgets = [
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
             # The whole Weight Optimization row: label, both checkboxes, and the hint under
@@ -4067,6 +4077,13 @@ class LoRATrainerGUI:
         ]
         for w in widgets:
             self._set_widget_visible(w, not is_krea2)
+
+        # Base precision is the inverse: Krea 2 ONLY. Its options (Auto / INT8 / NF4 / fp8) and
+        # the memory strategy behind them are entirely krea2_train's; Klein's trainer has no
+        # INT8 path and no auto strategy, so offering the dropdown there would list options
+        # Klein cannot run. (Klein's --quant_4bit still exists on its CLI.)
+        for w in (self._quant_4bit_label, self.quant_4bit_check, self._quant_4bit_hint):
+            self._set_widget_visible(w, is_krea2)
 
         # The two families resolve optimizer names differently, so the dropdown's contents follow
         # the selector. A name valid for one may not exist in the other (Klein takes module paths;
@@ -4721,10 +4738,7 @@ class LoRATrainerGUI:
             # it off is a vote against NF4, not against every quantisation. INT8 is 8-bit,
             # faster than NF4 and far more accurate, so it still applies where it fits —
             # briefly making Off mean plain fp8 cost 20 GB+ cards the fastest path for nothing.
-            _force = None
-            if hasattr(self, "quant_4bit_mode_var"):
-                _mode = self.quant_4bit_mode_var.get()
-                _force = {"On": "nf4", "Off": "no_4bit"}.get(_mode)
+            _force = self._krea2_force_quant() if hasattr(self, "quant_4bit_mode_var") else None
             plan = recommend_krea2_strategy(caps=caps, mp=_mp, batch=_bs, rank=_rk,
                                             force_quant=_force)
         except Exception:
@@ -4738,10 +4752,11 @@ class LoRATrainerGUI:
         # INT8 has no GUI toggle (it is newer than the 4-bit control) — carry it on the
         # instance so the krea2 command builder can pass --quant_int8.
         self._auto_quant_int8 = getattr(plan, "quant_int8", "") or ""
-        # The plan only drives the NF4 flag when the user left the 4-bit control on Auto —
-        # an explicit On/Off is their call and the strategy must not override it.
+        # The plan only drives the NF4 flag when Base precision is on Auto — an explicit
+        # choice is the user's call and the strategy must not override it. (Compared via the
+        # canonical key, not the display label, which is why the label can change freely.)
         _q4_auto = (not hasattr(self, "quant_4bit_mode_var")
-                    or self.quant_4bit_mode_var.get() == "Auto")
+                    or self._base_precision() == "auto")
         if (_q4_auto and hasattr(self, "quant_4bit_var")
                 and bool(self.quant_4bit_var.get()) != plan.quant_4bit):
             self.quant_4bit_var.set(plan.quant_4bit)
@@ -5049,11 +5064,46 @@ class LoRATrainerGUI:
             except Exception:
                 pass
 
+    # Base precision (Krea 2). Canonical key -> the label shown in the combobox. Stored as the
+    # KEY so the saved value stays stable if the wording changes.
+    _BASE_PRECISION_LABELS = {
+        "auto": "Auto (recommended)",
+        "int8": "INT8 — 8-bit, fastest",
+        "nf4":  "4-bit NF4 — smallest",
+        "fp8":  "fp8 — least compressed",
+    }
+
+    @classmethod
+    def _normalize_base_precision(cls, value) -> str:
+        """Canonical key from a stored value, a display label, or a legacy Auto/On/Off.
+
+        Legacy migration preserves BEHAVIOUR, not the old label's wording. "Off" meant "not
+        4-bit", which the strategy resolved to INT8 wherever it fits — so Off maps to int8,
+        and int8 degrades to fp8 by itself on a card that cannot run it or has too little
+        VRAM. Mapping Off to fp8 instead would silently drop 20 GB+ cards off the INT8 path,
+        which is precisely the regression v2.8.7 had to hotfix.
+        """
+        v = str(value or "").strip()
+        if v in cls._BASE_PRECISION_LABELS:
+            return v
+        for key, label in cls._BASE_PRECISION_LABELS.items():
+            if v == label:
+                return key
+        return {"Auto": "auto", "On": "nf4", "Off": "int8", "no_4bit": "int8"}.get(v, "auto")
+
+    def _base_precision(self) -> str:
+        """Canonical base-precision key currently selected."""
+        return self._normalize_base_precision(self.quant_4bit_mode_var.get())
+
+    def _krea2_force_quant(self):
+        """force_quant for recommend_krea2_strategy — None when Auto (let the ladder choose)."""
+        key = self._base_precision()
+        return None if key == "auto" else key
+
     def _on_quant_4bit_mode_changed(self):
-        """Derive quant_4bit_var from the Auto/On/Off mode. Auto rests at False — the
-        launch-time strategy sets it (Krea 2 + Blocks Swap on Auto) and only in Auto mode."""
-        mode = self.quant_4bit_mode_var.get()
-        self.quant_4bit_var.set(mode == "On")
+        """Derive quant_4bit_var from the selected base precision. Only NF4 sets it True; Auto
+        rests at False and the launch-time strategy sets it (Krea 2 + Blocks Swap on Auto)."""
+        self.quant_4bit_var.set(self._base_precision() == "nf4")
         self._on_quant_4bit_toggle()
 
     def _on_quant_4bit_toggle(self):

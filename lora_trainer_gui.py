@@ -306,7 +306,7 @@ ARCHITECTURES = {
         "sample_width_default": 768,
         "sample_height_default": 768,
     },
-    "Krea 2 (experimental)": {
+    "Krea 2": {
         # Krea 2 trains natively via fizgig.scripts.krea2_* (no accelerate launch — a
         # single-process script). The command builders branch on "is_krea2" and ignore
         # the Klein-shaped keys below; they're kept so start_training / the Samples tab /
@@ -580,7 +580,7 @@ DEFAULT_PREFS = {
     "distilled_dit": "",
     "vae": "",
     "text_encoder": "",
-    # Krea 2 model paths (experimental). RAW = training base; Turbo (pre-quant fp8) = previews/
+    # Krea 2 model paths. RAW = training base; Turbo (pre-quant fp8) = previews/
     # inference; Qwen-Image VAE; Qwen3-VL-4B text encoder (bf16 for training).
     "krea2_raw_dit": "",
     "krea2_turbo_dit": "",
@@ -2523,6 +2523,8 @@ class LoRATrainerGUI:
         _saved_arch = "Flux 2 Klein Base 9B"
         try:
             _candidate = self.last_used.get("architecture", _saved_arch)
+            if _candidate == "Krea 2 (experimental)":   # pre-rename saves (2026-07-28)
+                _candidate = "Krea 2"
             if _candidate in ARCHITECTURE_LIST:
                 _saved_arch = _candidate
         except Exception:
@@ -2541,8 +2543,8 @@ class LoRATrainerGUI:
         if len(ARCHITECTURE_LIST) > 1:
             model_card = self._start_section_card(
                 outer, "Base Model",
-                "Pick the model family to train. Krea 2 is experimental — set its four "
-                "model paths on the Preferences tab before training.",
+                "Pick the model family to train. Krea 2 needs its model paths set on the "
+                "Preferences tab before training.",
             )
             model_row = tk.Frame(model_card, bg=COLORS["bg_surface"])
             model_row.pack(anchor=tk.W)
@@ -3328,6 +3330,15 @@ class LoRATrainerGUI:
     def get_preset_dir_for_architecture(self, arch):
         """Get the preset directory for an architecture, creating if needed"""
         preset_dir = os.path.join(PRESETS_DIR, arch)
+        # One-shot folder rename from the pre-2026-07-28 arch name, or user-saved Krea 2
+        # presets would silently vanish from the dropdown.
+        if arch == "Krea 2" and not os.path.isdir(preset_dir):
+            _legacy = os.path.join(PRESETS_DIR, "Krea 2 (experimental)")
+            if os.path.isdir(_legacy):
+                try:
+                    os.rename(_legacy, preset_dir)
+                except OSError:
+                    pass
         os.makedirs(preset_dir, exist_ok=True)
         return preset_dir
 
@@ -9541,7 +9552,7 @@ class LoRATrainerGUI:
         _xf.pack(anchor=tk.W)
         ttk.Radiobutton(_xf, text="Klein 9B", variable=self.explorer_family_var, value="klein",
                         command=self._on_explorer_family_changed).pack(side=tk.LEFT, padx=(0, 20))
-        ttk.Radiobutton(_xf, text="Krea 2 (experimental)", variable=self.explorer_family_var, value="krea2",
+        ttk.Radiobutton(_xf, text="Krea 2", variable=self.explorer_family_var, value="krea2",
                         command=self._on_explorer_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Setup
@@ -10709,7 +10720,7 @@ class LoRATrainerGUI:
         _ef.pack(anchor=tk.W)
         ttk.Radiobutton(_ef, text="Klein 9B", variable=self.extract_family_var, value="klein",
                         command=self._on_extract_family_changed).pack(side=tk.LEFT, padx=(0, 20))
-        ttk.Radiobutton(_ef, text="Krea 2 (experimental)", variable=self.extract_family_var, value="krea2",
+        ttk.Radiobutton(_ef, text="Krea 2", variable=self.extract_family_var, value="krea2",
                         command=self._on_extract_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Source & Output
@@ -11532,9 +11543,9 @@ class LoRATrainerGUI:
             download_note="~15GB single-file safetensors — Qwen3-8B packaged for Klein 9B (Comfy-Org)",
         )
 
-        # Card 1b: Krea 2 model paths (experimental)
+        # Card 1b: Krea 2 model paths
         krea_card = self._start_section_card(
-            outer, "Model Paths (Krea 2 — experimental)",
+            outer, "Model Paths (Krea 2)",
             "Krea 2 LoRA training + inference. Train on RAW; previews and inference use the pre-quant fp8 Turbo "
             "(8-step, CFG-free). The text encoder must be the bf16 Qwen3-VL-4B — the fp8 ComfyUI variant is not "
             "loadable for training.",
@@ -11754,7 +11765,7 @@ class LoRATrainerGUI:
         _pf.pack(anchor=tk.W)
         ttk.Radiobutton(_pf, text="Klein 9B", variable=self.profiler_family_var, value="klein",
                         command=self._on_profiler_family_changed).pack(side=tk.LEFT, padx=(0, 20))
-        ttk.Radiobutton(_pf, text="Krea 2 (experimental)", variable=self.profiler_family_var, value="krea2",
+        ttk.Radiobutton(_pf, text="Krea 2", variable=self.profiler_family_var, value="krea2",
                         command=self._on_profiler_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Model selection
@@ -12417,7 +12428,7 @@ class LoRATrainerGUI:
         fam_frame.grid(row=r, column=1, columnspan=3, sticky=tk.W, padx=4, pady=2)
         ttk.Radiobutton(fam_frame, text="Klein 9B", variable=self.repair_family_var, value="klein",
                         style="Surface.TRadiobutton", command=self._on_repair_family_changed).pack(side=tk.LEFT, padx=(0, 12))
-        ttk.Radiobutton(fam_frame, text="Krea 2 (experimental)", variable=self.repair_family_var, value="krea2",
+        ttk.Radiobutton(fam_frame, text="Krea 2", variable=self.repair_family_var, value="krea2",
                         style="Surface.TRadiobutton", command=self._on_repair_family_changed).pack(side=tk.LEFT)
         r += 1
         # DiT toggle (relabelled per family — Distilled/Base for Klein, Turbo/RAW for Krea 2)
@@ -13196,7 +13207,7 @@ class LoRATrainerGUI:
         _rf.pack(anchor=tk.W)
         ttk.Radiobutton(_rf, text="Klein 9B", variable=self.royale_family_var, value="klein",
                         command=self._on_royale_family_changed).pack(side=tk.LEFT, padx=(0, 20))
-        ttk.Radiobutton(_rf, text="Krea 2 (experimental)", variable=self.royale_family_var, value="krea2",
+        ttk.Radiobutton(_rf, text="Krea 2", variable=self.royale_family_var, value="krea2",
                         command=self._on_royale_family_changed).pack(side=tk.LEFT)
 
         setup = self._start_section_card(outer, "Setup",

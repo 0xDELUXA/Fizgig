@@ -5348,9 +5348,11 @@ class LoRATrainerGUI:
         card_frame = ttk.Frame(self.caption_grid_frame, relief="solid", borderwidth=1)
         card_frame.grid(row=row, column=col, padx=5, pady=5, sticky=tk.NSEW)
 
-        # Create thumbnail
+        # Create thumbnail (original resolution captured before thumbnail() shrinks it)
+        img_res = None
         try:
             with Image.open(img_path) as img:
+                img_res = img.size
                 img.thumbnail((150, 150), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
                 self.caption_thumbnails[img_path] = photo  # Keep reference
@@ -5360,10 +5362,14 @@ class LoRATrainerGUI:
         except Exception as e:
             ttk.Label(card_frame, text="Error loading image").pack(padx=5, pady=5)
 
-        # Filename
+        # Filename + original resolution — the res is what you're eyeballing for (tiny face
+        # crops read as "(180×240)" here long before the blur is obvious in a 150px thumb).
         filename = os.path.basename(img_path)
         name_label = ttk.Label(card_frame, text=filename[:20] + "..." if len(filename) > 20 else filename)
         name_label.pack()
+        if img_res:
+            ttk.Label(card_frame, text=f"({img_res[0]}×{img_res[1]})",
+                      foreground=COLORS["text_muted"]).pack()
 
         # Load and display caption if exists
         caption_path = os.path.splitext(img_path)[0] + ".txt"
@@ -5443,17 +5449,27 @@ class LoRATrainerGUI:
         """Show dialog to edit caption for an image"""
         dialog = tk.Toplevel(self.master)
         dialog.title(f"Edit Caption - {os.path.basename(img_path)}")
-        dialog.geometry("600x500")
         dialog.configure(bg=BG_COLOR)
+        # No fixed geometry: content height varies (a portrait thumbnail is up to 300 px tall),
+        # and the old 600x500 clipped the buttons under exactly that case. The dialog sizes to
+        # its content; the button row is packed side=BOTTOM *first*, so pack gives it its space
+        # before anything else and it can never be pushed off the edge.
+        dialog.minsize(600, 360)
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(side=tk.BOTTOM, pady=10)
 
         # Image preview
         try:
             with Image.open(img_path) as img:
+                _w, _h = img.size
                 img.thumbnail((300, 300), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
                 img_label = ttk.Label(dialog, image=photo)
                 img_label.image = photo
-                img_label.pack(pady=10)
+                img_label.pack(pady=(10, 2))
+                ttk.Label(dialog, text=f"{_w}×{_h} px",
+                          foreground=COLORS["text_muted"]).pack()
         except Exception:
             ttk.Label(dialog, text="Could not load image preview").pack(pady=10)
 
@@ -5470,10 +5486,6 @@ class LoRATrainerGUI:
                     caption_text.insert("1.0", f.read())
             except Exception:
                 pass
-
-        # Buttons
-        btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(pady=10)
 
         def save_caption():
             text = caption_text.get("1.0", tk.END).strip()

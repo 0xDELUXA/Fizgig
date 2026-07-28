@@ -3010,15 +3010,17 @@ class LoRATrainerGUI:
 
         self._add_field_to_section(memory_content, "RESUME_TRAINING", "Resume Training", "directory", 1)
 
-        # FP8 Checkboxes
-        fp8_label = tk.Label(
+        # FP8 Checkboxes. Row label + hint are captured on self (not locals) so
+        # _apply_training_arch_visibility can hide them alongside the checkboxes for Krea 2 —
+        # otherwise hiding the controls leaves their label and explanation floating.
+        self._fp8_row_label = tk.Label(
             memory_content,
             text="Weight Optimization:",
             font=(FONT_FAMILY, 10),
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_surface"]
         )
-        fp8_label.grid(row=2, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self._fp8_row_label.grid(row=2, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
         fp8_frame = tk.Frame(memory_content, bg=COLORS["bg_surface"])
         fp8_frame.grid(row=2, column=1, sticky=tk.W, padx=5, pady=4)
@@ -3031,14 +3033,15 @@ class LoRATrainerGUI:
 
         self.scaled_check = ttk.Checkbutton(fp8_frame, text="FP8 Scaled", variable=self.scaled_var, state=tk.DISABLED if not self.fp8_var.get() else tk.NORMAL, style="Surface.TCheckbutton")
         self.scaled_check.pack(side=tk.LEFT)
-        tk.Label(memory_content,
-                 text="Converts a bf16 model to fp8 at load time. If your Base DiT is already fp8 "
-                      "(e.g. flux-2-klein-base-9b-fp8), leave this unchecked — Fizgig detects "
-                      "pre-quantised fp8 files automatically.",
-                 font=(FONT_FAMILY, 8, "italic"),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
-                 wraplength=600, justify=tk.LEFT).grid(
-            row=3, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        self._fp8_hint = tk.Label(
+            memory_content,
+            text="Converts a bf16 model to fp8 at load time. If your Base DiT is already fp8 "
+                 "(e.g. flux-2-klein-base-9b-fp8), leave this unchecked — Fizgig detects "
+                 "pre-quantised fp8 files automatically.",
+            font=(FONT_FAMILY, 8, "italic"),
+            fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+            wraplength=600, justify=tk.LEFT)
+        self._fp8_hint.grid(row=3, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         # FP8 Text Encoder
         self.fp8_text_encoder_label = tk.Label(
@@ -4049,8 +4052,10 @@ class LoRATrainerGUI:
         # (--quantize_4bit) and is where Krea 2's base precision is actually chosen.
         widgets = [
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
-            self.fp8_check,                                      # FP8 Base — see docstring
-            self.scaled_check,                                   # FP8 Scaled
+            # The whole Weight Optimization row: label, both checkboxes, and the hint under
+            # them. Hiding only the controls left an orphaned label and a paragraph of text
+            # explaining something no longer on screen.
+            self._fp8_row_label, self.fp8_check, self.scaled_check, self._fp8_hint,
             self.fp8_text_encoder_label, self.fp8_text_encoder_check,
             self._grad_checkpoint_label, self.grad_checkpoint_check, self._grad_checkpoint_hint,
             # LR Decay steps: Klein-only (warmup_stable_decay). LR Scheduler + Warmup ARE wired

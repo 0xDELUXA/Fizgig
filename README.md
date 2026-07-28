@@ -10,8 +10,12 @@
 </p>
 
 <p align="center">
-  <a href="https://youtu.be/sH-kGR8yzBU"><img src="assets/hero.png" alt="Fizgig LoRA Studio — now with Krea 2 support" width="600"></a><br>
-  <em>Watch the full walkthrough on YouTube</em>
+  <a href="https://www.youtube.com/watch?v=yrz0l6URGGk"><img src="assets/hero.png" alt="Fizgig LoRA Studio — watch the full video tutorial" width="600"></a>
+</p>
+
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=yrz0l6URGGk"><img src="https://img.shields.io/badge/▶%20Watch%20the%20full%20video%20tutorial-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="Watch the full video tutorial on YouTube"></a><br>
+  <sub>Start-to-finish walkthrough — install, prep, caption, train, and the workbench tools</sub>
 </p>
 
 <p align="center">

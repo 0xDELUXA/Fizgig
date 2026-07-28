@@ -812,9 +812,14 @@ class LoRATrainerGUI:
 
         # Image Converter variables — source is unified with self.image_folder_var
         # (the Start-tab picker); only the output folder is Image-Prep-specific.
+        # Always empty since the Output Folder UI was removed — prep always writes into the
+        # training folder. Kept because the convert pipeline reads it ("or source_folder").
         self.convert_output_var = tk.StringVar()
         self.max_size_var = tk.StringVar(value="1024")
-        self.delete_originals_var = tk.BooleanVar(value=True)
+        # Default flipped to KEEP (False) 2026-07-28 — safe-by-default like the Look Filter and
+        # the Captions Remove button; remembered across restarts now that it's a real choice.
+        self.delete_originals_var = tk.BooleanVar(
+            value=bool(self.last_used.get("prep_replace_originals", False)))
 
         # Prep Mode and Face Cropping variables
         self.prep_mode_var = tk.StringVar(value=self.last_used.get("prep_mode", "Auto Prep (Face Crops)"))
@@ -862,6 +867,11 @@ class LoRATrainerGUI:
         self.image_folder_var.trace_add("write", self._save_last_used_paths)
         self.caption_text_var.trace_add("write", self._save_last_used_paths)
         self.prep_mode_var.trace_add("write", self._save_last_used_paths)
+        self.delete_originals_var.trace_add("write", self._save_last_used_paths)
+        # The Image Prep summary shows a live image count + resolution check for the folder,
+        # so a folder change on the Start tab must refresh it. Guarded: fires before the
+        # Image Prep tab exists during startup, and _update_prep_note no-ops then.
+        self.image_folder_var.trace_add("write", self._update_prep_note)
         # Auto-save the dataset TOML on every relevant change (no Save button needed)
         def _auto_save_ds(*_a):
             if hasattr(self, "auto_save_dataset_config_silent"):
@@ -1383,6 +1393,7 @@ class LoRATrainerGUI:
         data = dict(self.last_used) if isinstance(getattr(self, "last_used", None), dict) else {}
         data.update({
             "prep_mode": self.prep_mode_var.get(),
+            "prep_replace_originals": bool(self.delete_originals_var.get()),
             "image_folder": self.image_folder_var.get(),
             "caption_trigger": self.caption_text_var.get(),
             "dataset_cache_dir": self.dataset_cache_dir_var.get(),
@@ -5378,8 +5389,41 @@ class LoRATrainerGUI:
         check = ttk.Checkbutton(card_frame, text="Select", variable=var, command=on_select)
         check.pack()
 
-        # Edit button
-        ttk.Button(card_frame, text="Edit", command=lambda p=img_path: self.show_edit_caption_dialog(p)).pack(pady=2)
+        # Edit + Remove buttons
+        btn_row = tk.Frame(card_frame)
+        btn_row.pack(pady=2)
+        ttk.Button(btn_row, text="Edit",
+                   command=lambda p=img_path: self.show_edit_caption_dialog(p)).pack(side=tk.LEFT, padx=(0, 4))
+        rm_btn = ttk.Button(btn_row, text="Remove",
+                            command=lambda p=img_path: self.remove_caption_image(p))
+        rm_btn.pack(side=tk.LEFT)
+        ToolTip(rm_btn, "Move this image + its caption to a 'removed' subfolder — nothing is\n"
+                        "deleted, so it's easy to undo. Use after Image Prep to cull face\n"
+                        "close-ups that came out soft or blurry.")
+
+    def remove_caption_image(self, img_path):
+        """Move an image + its caption .txt to <folder>/removed/ — the never-delete pattern
+        ('originals', 'excluded_by_look') applied to manual culling. Subfolders aren't globbed
+        by the dataset builder, so removed files simply stop being training data."""
+        folder = os.path.dirname(img_path)
+        dest_dir = os.path.join(folder, "removed")
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            for p in (img_path, os.path.splitext(img_path)[0] + ".txt"):
+                if not os.path.exists(p):
+                    continue
+                dest = os.path.join(dest_dir, os.path.basename(p))
+                stem, ext = os.path.splitext(dest)
+                n = 1
+                while os.path.exists(dest):
+                    dest = f"{stem}_{n}{ext}"
+                    n += 1
+                os.rename(p, dest)
+        except OSError as e:
+            messagebox.showerror("Remove failed", f"Could not move the file:\n{e}")
+            return
+        self.selected_images.discard(img_path)
+        self.refresh_caption_images()
 
     def caption_prev_page(self):
         """Go to previous page of images"""
@@ -8119,116 +8163,120 @@ class LoRATrainerGUI:
             "Optional — skip straight to Captions if your images are already prepared.",
         )
 
-        # Card 1: Folders
+        # Card 1: Training folder — display only. Everything happens IN this folder; the old
+        # optional Output Folder is gone (it silently diverged from the training source set on
+        # the Start tab, which is never what a training workflow wants).
         folders_card = self._start_section_card(
-            outer, "Folders",
-            "Source is the Training image folder from the Start tab. Output is where "
-            "prepared images land — leave blank to write next to the originals.",
+            outer, "Training Folder",
+            "Everything below happens inside the training folder from the Start tab — "
+            "prepared images land there, ready for the Captions tab and training.",
         )
         folders_card.grid_columnconfigure(1, weight=1)
-
-        ttk.Label(folders_card, text="Source Folder:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        ttk.Label(folders_card, text="Folder:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         tk.Label(folders_card, textvariable=self.image_folder_var,
                  font=(FONT_FAMILY, 10),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
-                 anchor="w").grid(row=0, column=1, columnspan=2, sticky=tk.W, pady=4)
+                 anchor="w").grid(row=0, column=1, sticky=tk.W, pady=4)
         tk.Label(folders_card, text="(set on the Start tab)",
                  font=(FONT_FAMILY, 9, "italic"),
                  fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
-            row=1, column=1, columnspan=2, sticky=tk.W, pady=(0, 8)
+            row=1, column=1, sticky=tk.W, pady=(0, 4)
         )
 
-        ttk.Label(folders_card, text="Output Folder:").grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        ttk.Entry(folders_card, textvariable=self.convert_output_var, width=40).grid(
-            row=2, column=1, sticky=tk.EW, pady=4
-        )
-        ttk.Button(folders_card, text="Browse", command=self.browse_convert_output).grid(
-            row=2, column=2, sticky=tk.W, padx=(8, 0), pady=4
-        )
-        tk.Label(folders_card, text="(leave empty to save in source folder)",
-                 font=(FONT_FAMILY, 9, "italic"),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
-            row=3, column=1, columnspan=2, sticky=tk.W
-        )
+        # Card 2: What to do — one radio per outcome, plain-language hint under each. The radio
+        # VALUES stay the historical mode strings so persistence and the convert pipeline are
+        # untouched; only the visible labels changed.
+        mode_card = self._start_section_card(outer, "1 · What to do", None)
 
-        # Card 2: Resize
-        resize_card = self._start_section_card(
-            outer, "Resize",
-            "Images larger than Max Size are downscaled on the longer edge; smaller images are left untouched.",
-        )
-        resize_card.grid_columnconfigure(1, weight=1)
+        def _mode_radio(text, value, hint, hint_fg=None):
+            rb = ttk.Radiobutton(mode_card, text=text, variable=self.prep_mode_var,
+                                 value=value, command=self._on_prep_mode_changed)
+            rb.pack(anchor=tk.W, pady=(6, 0))
+            lbl = tk.Label(mode_card, text=hint, font=(FONT_FAMILY, 9),
+                           fg=hint_fg or COLORS["text_muted"], bg=COLORS["bg_surface"],
+                           wraplength=680, justify=tk.LEFT)
+            lbl.pack(anchor=tk.W, padx=(24, 0))
+            return rb
 
-        ttk.Label(resize_card, text="Max Size (px):").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        ttk.Combobox(resize_card, textvariable=self.max_size_var,
-                     values=["256", "512", "640", "768", "1024", "1280", "1536", "2048"],
-                     state="readonly", width=10).grid(row=0, column=1, sticky=tk.W, pady=4)
+        _mode_radio(
+            "Resize + face close-ups — recommended for people",
+            "Auto Prep (Face Crops)",
+            "Every photo is resized and saved as PNG, PLUS a zoomed-in copy of the face saved "
+            "beside it — more detail shots for better likeness.\n"
+            "\U0001F4A1 Works best on high-res originals: if your photos are already shrunk to "
+            "training size, the face close-ups come out soft. Start from the biggest versions "
+            "you have.")
+        _mode_radio(
+            "Resize only",
+            "Resize Only",
+            "Just resize + convert to PNG. Use for styles, objects, or already-cropped sets.")
+        _mode_radio(
+            "Face close-ups only",
+            "Face Crop Only",
+            "Keep only the cropped face from each photo — the full shot is not kept.")
 
-        # Card 3: Prep Mode (face-related controls live here; _on_prep_mode_changed grid_removes them)
-        prep_card = self._start_section_card(
-            outer, "Prep Mode",
-            "Auto Prep generates face-cropped derivatives alongside resized originals. "
-            "Resize Only skips face detection; Face Crop Only replaces the original with the detected crop.",
-        )
-        prep_card.grid_columnconfigure(1, weight=1)
-
-        ttk.Label(prep_card, text="Mode:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.prep_mode_combo = ttk.Combobox(
-            prep_card, textvariable=self.prep_mode_var,
-            values=["Auto Prep (Face Crops)", "Resize Only", "Face Crop Only"],
-            state="readonly", width=24,
-        )
-        self.prep_mode_combo.grid(row=0, column=1, sticky=tk.W, pady=4)
-        self.prep_mode_combo.bind("<<ComboboxSelected>>", self._on_prep_mode_changed)
-
-        # Face Target (row 1 — hidden when Resize Only)
-        self._face_target_label = ttk.Label(prep_card, text="Face Target:")
-        self._face_target_label.grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        # Options row: max size always live; face options grey out in Resize Only (kept visible
+        # so the layout doesn't jump and users learn they exist).
+        opts_row = tk.Frame(mode_card, bg=COLORS["bg_surface"])
+        opts_row.pack(anchor=tk.W, pady=(12, 0))
+        ttk.Label(opts_row, text="Max size:").pack(side=tk.LEFT, padx=(0, 4))
+        _max_combo = ttk.Combobox(opts_row, textvariable=self.max_size_var,
+                                  values=["256", "512", "640", "768", "1024", "1280", "1536", "2048"],
+                                  state="readonly", width=6)
+        _max_combo.pack(side=tk.LEFT)
+        _max_combo.bind("<<ComboboxSelected>>", lambda e: self._update_prep_note())
+        tk.Label(opts_row, text="px  (larger images shrink to fit; smaller are left alone)",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(
+            side=tk.LEFT, padx=(4, 16))
+        self._face_target_label = ttk.Label(opts_row, text="Face:")
+        self._face_target_label.pack(side=tk.LEFT, padx=(0, 4))
         self._face_target_combo = ttk.Combobox(
-            prep_card, textvariable=self.face_selection_var,
+            opts_row, textvariable=self.face_selection_var,
             values=["Largest Face", "Largest Male Face", "Largest Female Face"],
-            state="readonly" if FACE_DETECTION_AVAILABLE else "disabled", width=20,
+            state="readonly" if FACE_DETECTION_AVAILABLE else "disabled", width=18,
         )
-        self._face_target_combo.grid(row=1, column=1, sticky=tk.W, pady=4)
-        self._face_target_row = 1
-
+        self._face_target_combo.pack(side=tk.LEFT, padx=(0, 12))
+        self._face_padding_label = ttk.Label(opts_row, text="Padding:")
+        self._face_padding_label.pack(side=tk.LEFT, padx=(0, 4))
+        self._face_padding_entry = ttk.Entry(opts_row, textvariable=self.face_padding_var, width=5)
+        self._face_padding_entry.pack(side=tk.LEFT)
+        self._face_pct_label = tk.Label(opts_row, text="% around the face",
+                                        font=(FONT_FAMILY, 9), fg=COLORS["text_muted"],
+                                        bg=COLORS["bg_surface"])
+        self._face_pct_label.pack(side=tk.LEFT, padx=(4, 0))
         if not FACE_DETECTION_AVAILABLE:
             self._face_unavail_label = ttk.Label(
-                prep_card, text="(Run install_fizgig.py to enable)",
+                opts_row, text="(Run install_fizgig.py to enable)",
                 foreground=COLORS["warning"],
             )
-            self._face_unavail_label.grid(row=1, column=2, sticky=tk.W, padx=(8, 0))
+            self._face_unavail_label.pack(side=tk.LEFT, padx=(8, 0))
         else:
             self._face_unavail_label = None
 
-        # Face Padding (row 2 — hidden when Resize Only)
-        self._face_padding_label = ttk.Label(prep_card, text="Face Padding (%):")
-        self._face_padding_label.grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self._face_padding_frame = tk.Frame(prep_card, bg=COLORS["bg_surface"])
-        self._face_padding_frame.grid(row=2, column=1, sticky=tk.W, pady=4)
-        ttk.Entry(self._face_padding_frame, textvariable=self.face_padding_var, width=8).pack(side=tk.LEFT)
-        tk.Label(self._face_padding_frame, text="(extra space around face)",
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(8, 0))
-        self._face_padding_row = 2
+        # Card 3: Your originals — the one real destination question, as an explicit choice
+        # (replaces the old inverted "Replace originals" checkbox). Keep-safe is the default.
+        orig_card = self._start_section_card(outer, "2 · Your originals", None)
+        ttk.Radiobutton(
+            orig_card, text="Keep them safe — moved to an 'originals' subfolder",
+            variable=self.delete_originals_var, value=False,
+            command=self._update_prep_note).pack(anchor=tk.W, pady=(4, 0))
+        ttk.Radiobutton(
+            orig_card, text="Replace them  ⚠ originals are gone after this",
+            variable=self.delete_originals_var, value=True,
+            command=self._update_prep_note).pack(anchor=tk.W, pady=(4, 2))
 
-        # Replace originals (row 3)
-        replace_frame = tk.Frame(prep_card, bg=COLORS["bg_surface"])
-        replace_frame.grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
-        ttk.Checkbutton(
-            replace_frame, text="Replace originals", variable=self.delete_originals_var,
-            command=self._update_prep_note,
-        ).pack(side=tk.LEFT)
-        tk.Label(replace_frame, text="(untick to keep originals in a subfolder)",
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(8, 0))
-
-        # Dynamic note (row 4)
+        # Card 4: What will happen — the single honest summary, computed from ALL the settings
+        # (the old one-line note ignored half of them). Accent border so it reads as the answer.
+        summary_card = self._start_section_card(outer, "\U0001F4CB What will happen", None,
+                                                accent_border=True)
         self._prep_note_var = tk.StringVar()
         self._prep_note_label = tk.Label(
-            prep_card, textvariable=self._prep_note_var,
-            font=(FONT_FAMILY, 9, "italic"),
-            fg=COLORS["accent_hover"], bg=COLORS["bg_surface"],
+            summary_card, textvariable=self._prep_note_var,
+            font=(FONT_FAMILY, 10),
+            fg=COLORS["text_primary"], bg=COLORS["bg_surface"],
             wraplength=700, justify=tk.LEFT,
         )
-        self._prep_note_label.grid(row=4, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+        self._prep_note_label.pack(anchor=tk.W)
 
         # Card 4: Actions
         action_card = self._start_section_card(outer, "Run", None)
@@ -8285,12 +8333,6 @@ class LoRATrainerGUI:
 
         self._add_youtube_help_button(outer, "image_prep")
 
-    def browse_convert_output(self):
-        """Browse for output folder"""
-        folder = filedialog.askdirectory()
-        if folder:
-            self.convert_output_var.set(folder)
-
     @property
     def face_detector(self):
         """Lazy-loaded face detector instance"""
@@ -8299,55 +8341,91 @@ class LoRATrainerGUI:
         return self._face_detector
 
     def _on_prep_mode_changed(self, *args):
-        """Show/hide face-related controls based on prep mode."""
+        """Grey out face-related controls in Resize Only (kept visible — layout doesn't jump,
+        and users learn the options exist)."""
         mode = self.prep_mode_var.get()
-        show_face = mode != "Resize Only"
-
-        if show_face:
-            self._face_target_label.grid()
-            self._face_target_combo.grid()
-            self._face_padding_label.grid()
-            self._face_padding_frame.grid()
-            if self._face_unavail_label:
-                self._face_unavail_label.grid()
-            self.preview_faces_btn.configure(state="normal" if FACE_DETECTION_AVAILABLE else "disabled")
-        else:
-            self._face_target_label.grid_remove()
-            self._face_target_combo.grid_remove()
-            self._face_padding_label.grid_remove()
-            self._face_padding_frame.grid_remove()
-            if self._face_unavail_label:
-                self._face_unavail_label.grid_remove()
-            self.preview_faces_btn.configure(state="disabled")
+        face_on = mode != "Resize Only"
+        muted, secondary = COLORS["text_muted"], COLORS["text_secondary"]
+        self._face_target_combo.configure(
+            state=("readonly" if (face_on and FACE_DETECTION_AVAILABLE) else "disabled"))
+        self._face_padding_entry.configure(state=("normal" if face_on else "disabled"))
+        for lbl in (self._face_target_label, self._face_padding_label):
+            try:
+                lbl.configure(foreground=(secondary if face_on else muted))
+            except tk.TclError:
+                pass
+        self._face_pct_label.configure(fg=(secondary if face_on else muted))
+        self.preview_faces_btn.configure(
+            state=("normal" if (face_on and FACE_DETECTION_AVAILABLE) else "disabled"))
 
         self._update_prep_note()
 
-    def _update_prep_note(self):
-        """Update the contextual note based on prep mode and replace originals setting."""
+    def _prep_source_stats(self, max_sample=40):
+        """(image_count, median_longest_edge) for the training folder's top-level images.
+
+        Edge read from image HEADERS only (PIL .size — no pixel decode), sampled at most
+        `max_sample` files, so it's cheap enough to run on every settings change. Returns
+        (0, None) when the folder is unset/empty."""
+        folder = self.image_folder_var.get().strip()
+        exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+        try:
+            files = [os.path.join(folder, f) for f in os.listdir(folder)
+                     if os.path.splitext(f)[1].lower() in exts]
+        except OSError:
+            return 0, None
+        edges = []
+        for p in files[:max_sample]:
+            try:
+                with Image.open(p) as im:
+                    edges.append(max(im.size))
+            except Exception:
+                pass
+        median = sorted(edges)[len(edges) // 2] if edges else None
+        return len(files), median
+
+    def _update_prep_note(self, *args):
+        """The 'What will happen' summary — computed from ALL the settings (mode, originals
+        choice, max size, live folder contents). The one-line note this replaces ignored the
+        output folder entirely and taught users the wrong answer to 'does this touch my
+        folder?'."""
         if not hasattr(self, '_prep_note_var'):
             return
         mode = self.prep_mode_var.get()
         replace = self.delete_originals_var.get()
+        try:
+            max_px = int(self.max_size_var.get())
+        except (ValueError, tk.TclError):
+            max_px = 1024
+        n, median_edge = self._prep_source_stats()
 
+        count = f"your {n} images" if n else "your images"
         if mode == "Auto Prep (Face Crops)":
-            if replace:
-                note = "Result: Your folder will contain resized originals + face crop derivatives. Images larger than max size will be shrunk in place."
-            else:
-                note = "Result: Your folder will contain resized copies + face crop derivatives. Original files will be moved to an 'originals' subfolder."
-        elif mode == "Resize Only":
-            if replace:
-                note = "Result: Images larger than max size will be shrunk in place and converted to PNG. Smaller images converted to PNG only."
-            else:
-                note = "Result: Resized PNG copies in your folder. Original files will be moved to an 'originals' subfolder."
+            what = (f"{count} → resized to fit {max_px} px and saved as PNG, plus one face "
+                    f"close-up each{f' (≈{n * 2} files)' if n else ''}")
         elif mode == "Face Crop Only":
-            if replace:
-                note = "Result: Your folder will contain ONLY face crops. Original images will be replaced."
-            else:
-                note = "Result: Face crops in your folder. Original files will be moved to an 'originals' subfolder."
+            what = (f"{count} → replaced by just the cropped face from each photo, "
+                    f"saved as PNG")
         else:
-            note = ""
+            what = f"{count} → resized to fit {max_px} px and saved as PNG"
 
-        self._prep_note_var.set(note)
+        where = "Everything lands in your training folder."
+        if replace:
+            originals = "Your original files are replaced ⚠ there is no undo."
+        else:
+            originals = ("Your originals are moved to the 'originals' subfolder — "
+                         "nothing is deleted.")
+
+        lines = [f"{what}. {where} {originals}"]
+        # Soft-crop warning: face modes cropping from images that are already training-size
+        # produce small, blurry faces. Header-read median across a sample of the folder.
+        if mode != "Resize Only" and median_edge is not None and median_edge <= max_px:
+            lines.append(f"⚠ Your images are already ≤ {max_px} px — face "
+                         f"close-ups cut from them will be soft. If you have higher-res "
+                         f"versions, prep from those instead.")
+        if mode != "Resize Only":
+            lines.append("Next: eyeball the face close-ups on the Captions tab and Remove any "
+                         "blurry ones before captioning.")
+        self._prep_note_var.set("\n".join(lines))
 
     def _get_face_selection_mode(self):
         """Parse face selection mode from Face Target dropdown."""

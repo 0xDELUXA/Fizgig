@@ -4701,11 +4701,16 @@ class LoRATrainerGUI:
             # If the user pinned the 4-bit control, the plan must be built AROUND that choice —
             # otherwise the swap count is sized for a quantisation that will not run. That
             # exact mismatch (fp8 given NF4's swap-0 plan) OOM'd 16 GB cards; reproduced and
-            # fixed 28 Jul. "Off" means no quantisation at all, INT8 included.
+            # fixed 28 Jul.
+            #
+            # "Off" maps to no_4bit, not fp8: the control is labelled *4-bit Base*, so turning
+            # it off is a vote against NF4, not against every quantisation. INT8 is 8-bit,
+            # faster than NF4 and far more accurate, so it still applies where it fits —
+            # briefly making Off mean plain fp8 cost 20 GB+ cards the fastest path for nothing.
             _force = None
             if hasattr(self, "quant_4bit_mode_var"):
                 _mode = self.quant_4bit_mode_var.get()
-                _force = {"On": "nf4", "Off": "fp8"}.get(_mode)
+                _force = {"On": "nf4", "Off": "no_4bit"}.get(_mode)
             plan = recommend_krea2_strategy(caps=caps, mp=_mp, batch=_bs, rank=_rk,
                                             force_quant=_force)
         except Exception:

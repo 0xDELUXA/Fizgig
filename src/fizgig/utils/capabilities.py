@@ -246,7 +246,10 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
     # a quant, size the swap for it, and then have the caller discard the quant and keep the
     # swap. That shipped fp8 (17.7 GB) on NF4's swap-0 plan and OOM'd 16 GB cards (issue #18).
     if force_quant:
-        _bases = {"nf4": _NF4_PEAK_GB, "int8": _INT8_PEAK_GB, "fp8": _FP8_PEAK_GB}
+        # "no_4bit" prices as fp8 up front, then the branch below upgrades it to INT8 when that
+        # fits — the fp8 figure is the fallback, not the decision.
+        _bases = {"nf4": _NF4_PEAK_GB, "int8": _INT8_PEAK_GB,
+                  "fp8": _FP8_PEAK_GB, "no_4bit": _FP8_PEAK_GB}
         _base = _bases.get(force_quant)
         if _base is not None:
             need = estimate_krea2_peak(_base, mp, batch, rank)
@@ -259,6 +262,21 @@ def recommend_krea2_strategy(vram_gb: Optional[float] = None,
                     f"NF4 4-bit as you set it (~{need:.0f} GB needed, {vram:.1f} GB free)"
                     + ("" if fits else " — this does NOT fit, and NF4 cannot block-swap; "
                                        "switch the 4-bit control to Auto or free some VRAM"))
+            # "no_4bit" = the user turned the *4-bit* control off. That is a vote against NF4,
+            # NOT against all quantisation: INT8 is 8-bit, faster than NF4 and ~7x more
+            # accurate, so it still leads wherever it fits. Only when INT8 doesn't fit (or the
+            # card lacks int8 cores) does this fall through to fp8.
+            if force_quant == "no_4bit":
+                _i8 = estimate_krea2_peak(_INT8_PEAK_GB, mp, batch, rank)
+                if caps.int8_matmul_train and vram >= _i8 + _HEADROOM_GB:
+                    return MemoryStrategy(
+                        False, 0,
+                        f"INT8 W8A8, no block swap (~{_i8:.0f} GB needed at this run shape, "
+                        f"{vram:.1f} GB free) — 4-bit is off as you set it, and INT8 is the "
+                        "fastest thing that fits (8-bit, exact gradients)",
+                        quant_int8="bf16")
+                need = estimate_krea2_peak(_FP8_PEAK_GB, mp, batch, rank)
+
             swap = swap_for_budget(need, vram)
             label = "INT8 W8A8" if force_quant == "int8" else "fp8"
             reason = (f"{label} as you set it (~{need:.0f} GB needed at this run shape, "

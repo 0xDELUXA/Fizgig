@@ -10386,6 +10386,14 @@ class LoRATrainerGUI:
         """Send the current Explorer baseline to the Repair Studio for manual editing."""
         if self._explorer_engine is None or self._explorer_baseline_state is None:
             return
+        # Mid-generation handoff hard-hangs: the unload below no-ops (its own worker guard),
+        # then Repair Studio loads a SECOND pipeline on the GUI thread while the Explorer
+        # worker is mid-CUDA on the first — two pipelines, two threads, one GPU, and the GUI
+        # thread blocks inside a CUDA call. Same guard every other Explorer action uses.
+        if getattr(self, "_explorer_generating", False):
+            self.explorer_status_var.set(
+                "Still generating variants — wait for them to finish, then Refine.")
+            return
         lora_path = self._explorer_engine.primary_path
         if not lora_path:
             return
@@ -16210,6 +16218,14 @@ class LoRATrainerGUI:
         """Send current Repair Studio slider state to the Explorer for evolutionary discovery."""
         if self.repair_engine is None or self.repair_engine.primary_network is None:
             messagebox.showerror("Error", "Load a primary LoRA first.")
+            return
+        # Mirror of the Explorer-side guard: _reset_repair_session below refuses to tear down
+        # mid-preview, but it returns into THIS method which would then build the Explorer
+        # pipeline alongside the still-rendering preview — two pipelines, two threads, one
+        # GPU, GUI thread stuck in a CUDA call. Stop the whole handoff instead.
+        if getattr(self, "_repair_preview_in_flight", False):
+            self.repair_status_var.set(
+                "A preview is still rendering — wait for it to finish, then Explore.")
             return
 
         # Warn if LyCORIS — saving from Explorer will require SVD

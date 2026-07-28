@@ -2096,7 +2096,9 @@ class LoRATrainerGUI:
         `tab_key` selects the URL from help.json's `youtube_urls` dict.
         `prominent=True` uses a larger button with a hint about per-tab help (for the Start tab).
         """
-        fallback = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        # Used only when help.json is missing or unreadable — point it at the real guide
+        # rather than the old joke URL, since that path fires on a genuine error.
+        fallback = "https://www.youtube.com/watch?v=yrz0l6URGGk"
         try:
             with open(HELP_FILE, "r", encoding="utf-8") as f:
                 urls = json.load(f).get("youtube_urls", {})

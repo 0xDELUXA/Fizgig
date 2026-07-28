@@ -449,6 +449,39 @@ KREA2_BUILT_IN_PRESETS = {
         "KREA2_LOSS_WATCH": True, "KREA2_PER_IMAGE_LR": True,
         "KREA2_AUTO_RECAPTION": False, "KREA2_WARMUP_LOOK": False,
     },
+    # Style. Two deliberate departures from the identity-shaped presets above:
+    #
+    #   Rank 16 — style is a broad global direction (palette, texture, rendering), not the
+    #   fine detail identity memorises. The only style-specific parameter advice published
+    #   for Krea 2 is about rank, not LR ("rank 16 for simple styles, 64 for complex
+    #   subjects" — Krea2Trainer), so 16 follows the one datapoint that exists.
+    #
+    #   LR ceiling 2e-4, not 4e-4 — this matters MORE than the floor. The adaptive watcher
+    #   probes UP x1.25 on steady descent, and style loss descends steadily early, so it
+    #   climbs toward whatever ceiling it's given; 4e-4 is where style overbake lives. The
+    #   geometric-midpoint start rule puts min 5e-5 / max 2e-4 at exactly 1e-4 — the LR the
+    #   whole Krea 2 ecosystem defaults to (Krea's own docs, Krea2Trainer, RunComfy) — while
+    #   the watcher keeps its protection in both directions.
+    #
+    # Fewer epochs (15) because style overbakes fast, and on Krea 2 that shows up as
+    # generations dragging toward the training set's COMPOSITIONS, not just its look —
+    # so save every epoch and scrub for the sweet spot in LoRA Royale.
+    "✨ Krea 2 Style (rank 16, gentle LR)": {
+        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "LEARNING_RATE": 1e-4,
+        "MAX_TRAIN_EPOCHS": 15, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "5e-5", "ADAPTIVE_LR_MAX": "2e-4",
+        "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
+        "OPTIMIZER_TYPE": "adamw8bit",
+        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
+        "DATASET_MEGAPIXELS": "0.25",
+        "BLOCKS_SWAP": "Auto (detect from GPU)",
+        "QUANT_4BIT_MODE": "Auto", "COMPILE_BLOCKS": "Auto",
+        # Detection + throttle on as usual. Look-outlier warm-up stays off for an extra
+        # reason here: it scores images by FACE embedding, which is meaningless on a style
+        # set that may have no faces at all.
+        "KREA2_LOSS_WATCH": True, "KREA2_PER_IMAGE_LR": True,
+        "KREA2_AUTO_RECAPTION": False, "KREA2_WARMUP_LOOK": False,
+    },
 }
 
 # LoRA Royale seed-travel presets — recipes of the *mechanics* knobs (reference /

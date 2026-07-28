@@ -4027,20 +4027,29 @@ class LoRATrainerGUI:
           • FP8 Scaled (in Memory & FP8)                        — krea2's fp8 path is always scaled
           • FP8 Text Encoder (in Memory & FP8)                  — krea2 caches the TE in bf16
           • Gradient Checkpointing (in Memory & FP8)            — krea2_train hardcodes it ON
-        Kept (model-agnostic / wired): FP8 Base (-> --no_fp8), and the full live "Override next
-        sample" status-bar panel including its Reference image — krea2 reads the override sentinel
-        for previews (prompt/seed/resolution) and routes the reference through the Qwen3-VL vision
-        path.
+          • FP8 Base (in Memory & FP8)                          — see below; an OOM trap on krea2
+        Kept (model-agnostic / wired): the full live "Override next sample" status-bar panel
+        including its Reference image — krea2 reads the override sentinel for previews
+        (prompt/seed/resolution) and routes the reference through the Qwen3-VL vision path.
+
+        FP8 Base is hidden for Krea 2 (29 Jul) because unticking it was a guaranteed OOM, not a
+        useful option. It sends --no_fp8, i.e. a bf16 base: 25.8 GB of weights alone, ~28 GB in
+        total, which no consumer card can hold. The auto swap planner never saw it — the plan is
+        identical ticked or unticked — so the run got a swap count sized for fp8/INT8/NF4 and
+        then loaded something twice that size. The command builder's elif chain also meant
+        unticking it silently dropped the INT8 flag the planner had just chosen. Krea 2's real
+        base-precision choices all live on the 4-bit control (Auto / On / Off -> NF4 / INT8 /
+        fp8), which the planner does see.
         """
         # Guard: this may run via update_ui_for_architecture before the Training tab is built.
         if not hasattr(self, "_adaptive_cb"):
             return
-        # Per-widget groups across the Training Parameters + Memory & FP8 sections. FP8 Base
-        # stays visible (wired -> --no_fp8); only the unwired Memory controls are hidden.
+        # Per-widget groups across the Training Parameters + Memory & FP8 sections.
         # NOTE: the 4-bit NF4 base toggle (_quant_4bit_*) is NOT hidden — it's wired into krea2_train
-        # (--quantize_4bit) as the low-VRAM path for 10-12 GB cards.
+        # (--quantize_4bit) and is where Krea 2's base precision is actually chosen.
         widgets = [
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
+            self.fp8_check,                                      # FP8 Base — see docstring
             self.scaled_check,                                   # FP8 Scaled
             self.fp8_text_encoder_label, self.fp8_text_encoder_check,
             self._grad_checkpoint_label, self.grad_checkpoint_check, self._grad_checkpoint_hint,
@@ -18167,11 +18176,14 @@ class LoRATrainerGUI:
         # Explicit user choices FIRST — the auto branch used to be tested before them, so
         # unticking "FP8 Base" (an explicit bf16 request) did nothing when auto had chosen
         # INT8.
+        # FP8 Base is hidden for Krea 2 and deliberately ignored here: --no_fp8 means a bf16
+        # base (~28 GB) that no consumer card holds, the swap planner never accounted for it,
+        # and this elif chain used to let it silently cancel the INT8 the planner had chosen.
+        # A value persisted from Klein (or from before it was hidden) must not leak into a
+        # Krea 2 run through a control the user can no longer see.
         _auto_i8 = getattr(self, "_auto_quant_int8", "")
         if self.settings.get("QUANT_4BIT", False):
             cmd.append("--quantize_4bit")
-        elif not self.settings.get("FP8", True):
-            cmd.append("--no_fp8")
         elif _auto_i8:
             # Chosen by the auto strategy when there is VRAM for it: faster than NF4 and ~7x
             # more accurate, with exact gradients.

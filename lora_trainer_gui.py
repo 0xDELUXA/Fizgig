@@ -3347,6 +3347,22 @@ class LoRATrainerGUI:
             if hasattr(self, '_on_adaptive_lr_toggle'):
                 self._on_adaptive_lr_toggle()
 
+        # LEARNING_RATE is state-gated: the adaptive checkbox greys the LR box, and a tk
+        # Entry silently DROPS delete/insert while disabled — so the generic loop above
+        # lost the preset's LR whenever adaptive was on at that moment (e.g. Old Reliable
+        # active, then loading Identity kept 1e-4 instead of 4e-4). Re-apply after the
+        # adaptive toggle has settled, forcing the widget writable for the write.
+        if "LEARNING_RATE" in preset and "LEARNING_RATE" in self.entries:
+            _lr_ent = self.entries["LEARNING_RATE"]
+            try:
+                _prev_state = str(_lr_ent.cget("state"))
+                _lr_ent.config(state="normal")
+                _lr_ent.delete(0, tk.END)
+                _lr_ent.insert(0, str(preset["LEARNING_RATE"]))
+                _lr_ent.config(state=_prev_state)
+            except (AttributeError, tk.TclError):
+                pass
+
         # Model Area to Train (training preset dropdown)
         if "TARGET_LAYERS" in preset and hasattr(self, 'training_preset_var'):
             legacy_map = {

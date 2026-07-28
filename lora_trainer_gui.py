@@ -1059,6 +1059,9 @@ class LoRATrainerGUI:
         self.create_lora_royale_tab()
         self.create_extract_tab()
         self.create_prefs_tab()
+        # Restore remembered Repair Studio / Explorer Setup fields + attach save traces.
+        # After ALL tabs exist: restoring fires their traces, which touch other tabs' widgets.
+        self._restore_workbench_setup_fields()
 
         # Florence model state (lazy loaded)
         self.florence_model = None
@@ -1314,6 +1317,61 @@ class LoRATrainerGUI:
         except Exception as e:
             messagebox.showerror("Open Failed", f"Could not open:\n{path}\n\n{e}")
 
+    # Setup-area fields remembered across restarts for the two hands-on workbench tabs.
+    # (attr, last_used key) — one table drives restore, the save stanza, and the traces.
+    _WORKBENCH_REMEMBER = [
+        ("repair_primary_var", "repair_primary"),
+        ("repair_donor_var", "repair_donor"),
+        ("repair_prompt_var", "repair_prompt"),
+        ("repair_seed_var", "repair_seed"),
+        ("repair_res_var", "repair_res"),
+        ("repair_turbo_var", "repair_turbo"),
+        ("repair_ref_path_var", "repair_ref_path"),
+        ("repair_ref_mp_var", "repair_ref_mp"),
+        ("repair_ref_strength_var", "repair_ref_strength"),
+        ("explorer_lora_var", "explorer_lora"),
+        ("explorer_prompt_var", "explorer_prompt"),
+        ("explorer_ref_path_var", "explorer_ref_path"),
+        ("explorer_ref_mp_var", "explorer_ref_mp"),
+        ("explorer_ref_strength_var", "explorer_ref_strength"),
+        ("explorer_seed_var", "explorer_seed"),
+        ("explorer_res_var", "explorer_res"),
+        ("explorer_intensity_var", "explorer_intensity"),
+        ("explorer_mutations_var", "explorer_mutations"),
+        ("explorer_structure_var", "explorer_structure"),
+    ]
+
+    def _restore_workbench_setup_fields(self):
+        """Restore remembered Repair Studio / Explorer Setup values, then attach debounced
+        save traces so edits persist without needing a clean app close. Restore is safe at
+        startup: every var trace on these fields no-ops while its engine is unloaded."""
+        for attr, key in self._WORKBENCH_REMEMBER:
+            var = getattr(self, attr, None)
+            if var is None or key not in self.last_used:
+                continue
+            try:
+                var.set(self.last_used[key])
+            except Exception:
+                pass
+        # Traces AFTER restore, so restoring doesn't immediately rewrite the file N times.
+        self._workbench_save_after = None
+
+        def _debounced_save(*_):
+            if self._workbench_save_after is not None:
+                try:
+                    self.master.after_cancel(self._workbench_save_after)
+                except Exception:
+                    pass
+            self._workbench_save_after = self.master.after(600, self._save_last_used_paths)
+
+        for attr, _key in self._WORKBENCH_REMEMBER:
+            var = getattr(self, attr, None)
+            if var is not None:
+                try:
+                    var.trace_add("write", _debounced_save)
+                except Exception:
+                    pass
+
     def _save_last_used_paths(self, *args):
         """Save last-used folder paths and settings to config file"""
         if _persist_disabled():
@@ -1341,6 +1399,14 @@ class LoRATrainerGUI:
         # Krea 2 preview engine (Samples tab) — stored canonical, not the display label
         if hasattr(self, 'krea2_preview_engine_var'):
             data["krea2_preview_engine"] = self._krea2_preview_engine()
+        # Repair Studio / Explorer Setup fields (one shared table drives restore + save)
+        for _attr, _key in self._WORKBENCH_REMEMBER:
+            _var = getattr(self, _attr, None)
+            if _var is not None:
+                try:
+                    data[_key] = _var.get()
+                except Exception:
+                    pass
         # Save LoRA output directory if entry exists
         if "LORA_OUTPUT_DIR" in self.entries:
             data["lora_output_dir"] = self.entries["LORA_OUTPUT_DIR"].get()
@@ -6030,35 +6096,6 @@ class LoRATrainerGUI:
         )
         self.sample_enabled_check.pack(anchor=tk.W, padx=20, pady=14)
 
-        # Krea 2 preview engine (shown only for Krea 2 via update_samples_ui_for_architecture).
-        # raw_lora: previews render on the resident training DiT with the Turbo LoRA @1.0 —
-        # identical 8-step CFG-free settings, no ~13 GB Turbo load, no parking the trainer to
-        # CPU per preview. turbo_model: the classic load-the-Turbo-checkpoint path.
-        self._KREA2_ENGINE_LABELS = {
-            "raw_lora": "RAW + Turbo LoRA (no model swapping — recommended)",
-            "turbo_model": "Turbo model (classic — loads the fp8 Turbo each preview)",
-        }
-        _eng_saved = str(self.last_used.get("krea2_preview_engine", "raw_lora"))
-        if _eng_saved not in self._KREA2_ENGINE_LABELS:
-            _eng_saved = "raw_lora"
-        self.krea2_preview_engine_var = tk.StringVar(value=self._KREA2_ENGINE_LABELS[_eng_saved])
-        # Parent is enable_card_outer, NOT enable_card: update_samples_ui_for_architecture
-        # re-manages sample_enabled_check with .grid(), and mixing grid- and pack-managed
-        # children in one container is the classic Tk geometry deadlock.
-        self.krea2_engine_frame = tk.Frame(enable_card_outer, bg=COLORS["bg_deep"])
-        tk.Label(self.krea2_engine_frame, text="Preview engine:", font=(FONT_FAMILY, 10),
-                 fg=COLORS["text_secondary"], bg=COLORS["bg_deep"]).pack(side=tk.LEFT, padx=(0, 8))
-        _eng_combo = ttk.Combobox(self.krea2_engine_frame, textvariable=self.krea2_preview_engine_var,
-                                  state="readonly", width=52,
-                                  values=list(self._KREA2_ENGINE_LABELS.values()))
-        _eng_combo.pack(side=tk.LEFT)
-        _eng_combo.bind("<<ComboboxSelected>>", lambda e: self._save_last_used_paths())
-        ToolTip(_eng_combo,
-                "RAW + Turbo LoRA renders previews on the training model itself with the Turbo\n"
-                "distillation LoRA applied at 1.0 — same 8-step CFG-free settings as the Turbo\n"
-                "model, but nothing is loaded or moved between epochs. Needs the Turbo LoRA path\n"
-                "set in Preferences. The classic mode loads the fp8 Turbo checkpoint per preview.")
-        # pack/pack_forget driven by architecture; hidden by default (Klein).
 
         # --- Sample settings container (the 4 cards live inside this) ---
         self.sample_settings_frame = tk.Frame(grid_holder, bg=COLORS["bg_deep"])
@@ -6193,6 +6230,41 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self.cache_sample_model_note.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
+
+        # Krea 2 preview engine — lives HERE with the other sample-model choices (the Distilled
+        # toggle above is Klein's equivalent choice). Shown only in Krea 2 mode, via
+        # _apply_samples_klein_only. raw_lora: previews render on the resident training DiT
+        # with the Turbo LoRA @1.0 — identical 8-step CFG-free settings, no ~13 GB Turbo load,
+        # no parking the trainer to CPU per preview. turbo_model: classic checkpoint path.
+        self._KREA2_ENGINE_LABELS = {
+            "raw_lora": "RAW + Turbo LoRA (no model swapping — recommended)",
+            "turbo_model": "Turbo model (classic — loads the fp8 Turbo each preview)",
+        }
+        _eng_saved = str(self.last_used.get("krea2_preview_engine", "raw_lora"))
+        if _eng_saved not in self._KREA2_ENGINE_LABELS:
+            _eng_saved = "raw_lora"
+        self.krea2_preview_engine_var = tk.StringVar(value=self._KREA2_ENGINE_LABELS[_eng_saved])
+        self.krea2_engine_frame = tk.Frame(freq_card, bg=COLORS["bg_surface"])
+        tk.Label(self.krea2_engine_frame, text="Krea 2 preview engine:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(0, 8))
+        _eng_combo = ttk.Combobox(self.krea2_engine_frame, textvariable=self.krea2_preview_engine_var,
+                                  state="readonly", width=52,
+                                  values=list(self._KREA2_ENGINE_LABELS.values()))
+        _eng_combo.pack(side=tk.LEFT)
+        _eng_combo.bind("<<ComboboxSelected>>", lambda e: self._save_last_used_paths())
+        ToolTip(_eng_combo,
+                "RAW + Turbo LoRA renders previews on the training model itself with the Turbo\n"
+                "distillation LoRA applied at 1.0 — same 8-step CFG-free settings as the Turbo\n"
+                "model, but nothing is loaded or moved between epochs. The LoRA auto-downloads\n"
+                "(~470 MB) if missing. The classic mode loads the fp8 Turbo checkpoint per preview.")
+        self.krea2_engine_note = tk.Label(
+            freq_card,
+            text="Renders previews on the model already training, with the official Turbo LoRA "
+                 "switched on just for the render — nothing loaded or moved between epochs. The "
+                 "classic mode loads the ~13 GB Turbo checkpoint per preview instead.",
+            font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+            wraplength=600, justify=tk.LEFT)
+        # Gridded (rows 6-7) / removed by _apply_samples_klein_only; hidden by default (Klein).
 
         # Card 3: Architecture-Specific (Flow Shift / Guidance / Negative / CFG)
         arch_card = self._start_section_card(
@@ -6416,14 +6488,6 @@ class LoRATrainerGUI:
             self.sample_enabled_check.grid()
             self.sample_settings_frame.grid()
 
-            # Krea 2 preview-engine picker: only meaningful for Krea 2 (Klein previews always
-            # use the Distilled model).
-            if hasattr(self, "krea2_engine_frame"):
-                if config.get("is_krea2", False):
-                    self.krea2_engine_frame.pack(anchor=tk.W, pady=(6, 0))
-                else:
-                    self.krea2_engine_frame.pack_forget()
-
             # Apply this architecture's sample defaults ONLY when the architecture actually
             # changed. This method fires on every Base Model combobox event — including
             # re-picking the same family — and unconditionally overwriting CFG/flow-shift/
@@ -6507,20 +6571,30 @@ class LoRATrainerGUI:
         secondary = COLORS["text_secondary"]
         label_fg = muted if is_krea2 else secondary
 
-        # "Use Distilled model for samples" checkbox
+        # "Use Distilled model for samples" checkbox — Klein's sample-model choice. Krea 2's
+        # equivalent choice is the Preview engine dropdown, shown right below in Krea 2 mode.
         if hasattr(self, "use_distilled_check"):
             self.use_distilled_check.configure(
                 state=(tk.DISABLED if is_krea2 else tk.NORMAL),
-                text=("Use Distilled model for samples — Klein only (Krea 2 always uses the fp8 Turbo)"
+                text=("Use Distilled model for samples — Klein only (Krea 2: pick a preview engine below)"
                       if is_krea2 else
                       "Use Distilled model for samples (4-step, matches ComfyUI)"))
 
         # Steps note
         if hasattr(self, "sample_steps_note"):
             self.sample_steps_note.configure(
-                text=("Klein only — Krea 2 previews always use the 8-step fp8 Turbo"
+                text=("Klein only — Krea 2 previews are 8-step either way (engine choice below)"
                       if is_krea2 else
                       "Base samples only — Distilled is locked at 4 steps"))
+
+        # Krea 2 preview engine dropdown + note (rows 6-7 of the cadence card) — Krea 2 only.
+        if hasattr(self, "krea2_engine_frame"):
+            if is_krea2:
+                self.krea2_engine_frame.grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
+                self.krea2_engine_note.grid(row=7, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
+            else:
+                self.krea2_engine_frame.grid_remove()
+                self.krea2_engine_note.grid_remove()
 
         # Reference image — supported by BOTH families now (Klein: edit conditioning; Krea 2:
         # Qwen3-VL vision path). Always enabled; only the note differs. No strength dial on this
@@ -18279,6 +18353,12 @@ class LoRATrainerGUI:
                 self.stop_training()
             except Exception:
                 pass
+        # Final settings snapshot — some fields only persist via debounced traces or other
+        # tabs' events, so closing mid-edit would otherwise drop the last change.
+        try:
+            self._save_last_used_paths()
+        except Exception:
+            pass
         try:
             self.master.destroy()
         except Exception:

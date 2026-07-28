@@ -2400,21 +2400,44 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 10),
                  fg=COLORS["text_primary"], bg="#2A2200",
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 4))
-        ttk.Button(setup_inner, text="Open Preferences",
-                   command=lambda: self.notebook.select(self.prefs_tab)).pack(
-            anchor=tk.W, padx=20, pady=(4, 12))
+        _setup_btn_row = tk.Frame(setup_inner, bg="#2A2200")
+        _setup_btn_row.pack(anchor=tk.W, padx=20, pady=(4, 12))
+        ttk.Button(_setup_btn_row, text="Open Preferences",
+                   command=lambda: self.notebook.select(self.prefs_tab)).pack(side=tk.LEFT)
+
+        def _dismiss_setup_prompt():
+            # Permanent, by request: a Krea-only user never fills the Klein paths (or vice
+            # versa, or skips the Turbo checkpoint entirely) and shouldn't be nagged forever.
+            self.prefs["setup_prompt_dismissed"] = True
+            save_prefs(self.prefs)
+            self._setup_prompt_frame.pack_forget()
+
+        _dismiss_lbl = tk.Label(_setup_btn_row, text="Don't show this again",
+                                font=(FONT_FAMILY, 9, "underline"),
+                                fg=COLORS["text_secondary"], bg="#2A2200", cursor="hand2")
+        _dismiss_lbl.pack(side=tk.LEFT, padx=(16, 0))
+        _dismiss_lbl.bind("<Button-1>", lambda e: _dismiss_setup_prompt())
 
         def _check_model_paths(*_args):
-            model_keys = ["base_dit", "distilled_dit", "vae", "text_encoder"]
-            any_empty = any(not self.prefs_vars[k].get().strip() for k in model_keys)
-            if any_empty:
+            # Hidden forever once dismissed; otherwise satisfied by EITHER family being
+            # usable — Klein's four paths, or Krea 2's training trio (the Turbo checkpoint
+            # is optional now that previews default to the Turbo LoRA).
+            if self.prefs.get("setup_prompt_dismissed"):
+                self._setup_prompt_frame.pack_forget()
+                return
+            klein_ok = all(self.prefs_vars[k].get().strip()
+                           for k in ("base_dit", "distilled_dit", "vae", "text_encoder"))
+            krea_ok = all(self.prefs_vars[k].get().strip()
+                          for k in ("krea2_raw_dit", "krea2_vae", "krea2_text_encoder"))
+            if klein_ok or krea_ok:
+                self._setup_prompt_frame.pack_forget()
+            else:
                 self._setup_prompt_frame.pack(fill=tk.X, pady=(20, 0),
                                                before=tools_card)
-            else:
-                self._setup_prompt_frame.pack_forget()
 
-        # Re-check whenever a model path changes
-        for _mk in ("base_dit", "distilled_dit", "vae", "text_encoder"):
+        # Re-check whenever a model path (either family) changes
+        for _mk in ("base_dit", "distilled_dit", "vae", "text_encoder",
+                    "krea2_raw_dit", "krea2_vae", "krea2_text_encoder"):
             self.prefs_vars[_mk].trace_add("write", _check_model_paths)
 
         # Initial check (deferred so tools_card exists)

@@ -16934,12 +16934,11 @@ class LoRATrainerGUI:
                 ("krea2_text_encoder", "Qwen3-VL-4B text encoder"),
             ]
             if self.sample_enabled_var.get():
-                # raw_lora engine renders previews on the training DiT + Turbo LoRA, so the
-                # Turbo checkpoint isn't needed — the LoRA path stands in for it. Any other
-                # engine (or no LoRA path set) still requires the Turbo checkpoint.
-                if self._krea2_preview_engine() == "raw_lora" and self._krea2_pref("krea2_turbo_lora"):
-                    krea2_required.append(("krea2_turbo_lora", "Krea 2 Turbo LoRA — needed for previews"))
-                else:
+                # raw_lora engine renders previews on the training DiT + Turbo LoRA — the LoRA
+                # is auto-downloaded at training start if missing, so nothing is hard-required
+                # here (a failed download degrades to no previews, with console messages, never
+                # a blocked run). The classic engine still needs the Turbo checkpoint.
+                if self._krea2_preview_engine() != "raw_lora":
                     krea2_required.append(("krea2_turbo_dit", "Krea 2 Turbo DiT (fp8) — needed for previews"))
             for pref_key, label in krea2_required:
                 path = self._krea2_pref(pref_key)
@@ -17998,13 +17997,29 @@ class LoRATrainerGUI:
                 # back to the Turbo checkpoint by itself if the LoRA file has gone missing.
                 if self._krea2_preview_engine() == "raw_lora":
                     _tlora = self._krea2_pref("krea2_turbo_lora")
+                    if not _tlora or not os.path.isfile(_tlora):
+                        # First use after an update: fetch it now (~470 MB, idempotent — the
+                        # update script usually gets there first) and populate the pref.
+                        try:
+                            import sys as _sys
+                            _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+                            from fizgig.scripts.fetch_turbo_lora import ensure_turbo_lora
+                            self.update_console("[preview] Turbo LoRA not set — downloading it "
+                                                "now (one-time, ~470 MB)...\n")
+                            _tlora = ensure_turbo_lora(
+                                log=lambda m: self.update_console(f"[preview] {m}\n"),
+                                require=True)
+                            if _tlora and "krea2_turbo_lora" in self.prefs_vars:
+                                self.prefs_vars["krea2_turbo_lora"].set(_tlora)
+                        except Exception:
+                            _tlora = None
                     if _tlora:
                         cmd += ["--turbo_lora", _tlora]
                     else:
                         self.update_console(
-                            "[preview] Preview engine is 'RAW + Turbo LoRA' but no Turbo LoRA "
-                            "path is set in Preferences — using the classic Turbo model for "
-                            "previews this run.\n")
+                            "[preview] Turbo LoRA unavailable (download failed?) — using the "
+                            "classic Turbo model for previews this run. Set the path in "
+                            "Preferences or re-run update_fizgig.bat.\n")
                 # Steps / CFG / Negative / Sample-at-Start — previously visible on the Samples
                 # tab but never wired into krea2_train.
                 _st = self.sample_steps_var.get().strip()

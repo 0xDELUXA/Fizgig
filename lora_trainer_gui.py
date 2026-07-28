@@ -5345,6 +5345,20 @@ class LoRATrainerGUI:
         card_frame = ttk.Frame(self.caption_grid_frame, relief="solid", borderwidth=1)
         card_frame.grid(row=row, column=col, padx=5, pady=5, sticky=tk.NSEW)
 
+        # Edit + Remove pinned to the card's BOTTOM edge, packed first for priority. Cards in
+        # a grid row share the tallest card's height (sticky=NSEW), so pinning puts every
+        # row's buttons on the same level regardless of thumbnail shape.
+        btn_row = tk.Frame(card_frame)
+        btn_row.pack(side=tk.BOTTOM, pady=(2, 6))
+        ttk.Button(btn_row, text="Edit",
+                   command=lambda p=img_path: self.show_edit_caption_dialog(p)).pack(side=tk.LEFT, padx=(0, 4))
+        rm_btn = ttk.Button(btn_row, text="Remove",
+                            command=lambda p=img_path: self.remove_caption_image(p))
+        rm_btn.pack(side=tk.LEFT)
+        ToolTip(rm_btn, "Move this image + its caption to a 'removed' subfolder — nothing is\n"
+                        "deleted, so it's easy to undo. Use after Image Prep to cull face\n"
+                        "close-ups that came out soft or blurry.")
+
         # Create thumbnail (original resolution captured before thumbnail() shrinks it)
         img_res = None
         try:
@@ -5362,37 +5376,26 @@ class LoRATrainerGUI:
         # Filename + original resolution — the res is what you're eyeballing for (tiny face
         # crops read as "(180×240)" here long before the blur is obvious in a 150px thumb).
         filename = os.path.basename(img_path)
-        name_label = ttk.Label(card_frame, text=filename[:20] + "..." if len(filename) > 20 else filename)
+        name_label = ttk.Label(card_frame, text=filename[:30] + "..." if len(filename) > 30 else filename)
         name_label.pack()
         if img_res:
             ttk.Label(card_frame, text=f"({img_res[0]}×{img_res[1]})",
                       foreground=COLORS["text_muted"]).pack()
 
-        # Load and display caption if exists
+        # Load and display caption if exists — wrapped to the cell's usable width
         caption_path = os.path.splitext(img_path)[0] + ".txt"
         if os.path.exists(caption_path):
             try:
                 with open(caption_path, 'r', encoding='utf-8') as f:
                     caption = f.read().strip()
-                caption_preview = caption[:50] + "..." if len(caption) > 50 else caption
-                caption_label = ttk.Label(card_frame, text=caption_preview, wraplength=140, foreground=COLORS["text_secondary"])
-                caption_label.pack(pady=2)
+                caption_preview = caption[:110] + "..." if len(caption) > 110 else caption
+                caption_label = ttk.Label(card_frame, text=caption_preview, wraplength=270,
+                                          justify=tk.LEFT, foreground=COLORS["text_secondary"])
+                caption_label.pack(fill=tk.X, padx=8, pady=2)
             except Exception:
                 pass
         else:
             ttk.Label(card_frame, text="[No caption]", foreground=COLORS["warning"]).pack(pady=2)
-
-        # Edit + Remove buttons
-        btn_row = tk.Frame(card_frame)
-        btn_row.pack(pady=2)
-        ttk.Button(btn_row, text="Edit",
-                   command=lambda p=img_path: self.show_edit_caption_dialog(p)).pack(side=tk.LEFT, padx=(0, 4))
-        rm_btn = ttk.Button(btn_row, text="Remove",
-                            command=lambda p=img_path: self.remove_caption_image(p))
-        rm_btn.pack(side=tk.LEFT)
-        ToolTip(rm_btn, "Move this image + its caption to a 'removed' subfolder — nothing is\n"
-                        "deleted, so it's easy to undo. Use after Image Prep to cull face\n"
-                        "close-ups that came out soft or blurry.")
 
     def remove_caption_image(self, img_path):
         """Move an image + its caption .txt to <folder>/removed/ — the never-delete pattern

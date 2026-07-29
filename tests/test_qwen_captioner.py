@@ -272,6 +272,58 @@ ck("  survives a restart: the other model's task too", _g.caption_task_var.get()
    _g.caption_task_var.get())
 _r.destroy()
 
+# --- 7d. concurrency guards: no phantom "resumed" job ------------------------------------
+# Reported symptom: after Stop/Unload the job appeared to carry on. Two causes, both here.
+import types as _types
+
+_popups = []
+_real_showinfo = G.messagebox.showinfo
+G.messagebox.showinfo = lambda *a, **k: _popups.append(a[0] if a else "")
+
+
+class _FakeModel2:
+    pass
+
+
+# (a) Unloading mid-job used to free the model; the worker's next image then found no model and
+#     silently RELOADED it, which reads exactly as the job resuming after you pressed Unload.
+g.qwen_captioner = _FakeModel2()
+g._captioning_running = True
+g.unload_florence_model(silent=True)
+ck("Unload refuses while a job is running", g.qwen_captioner is not None)
+g._captioning_running = False
+g.unload_florence_model(silent=True)
+ck("  and unloads normally once it has stopped", g.qwen_captioner is None)
+
+# (b) Caption All was never disabled, so a second click started a SECOND worker over the same
+#     files — doubled work and doubled log lines, i.e. "did I queue a job up?"
+g.get_caption_image_files = lambda: ["a.png"]
+g.image_folder_var.set(os.environ["TEMP"])
+_started = []
+_real_thread = G.threading.Thread
+G.threading.Thread = lambda *a, **k: _started.append(1) or _types.SimpleNamespace(
+    start=lambda: None, daemon=True)
+
+g._captioning_running = True
+_popups.clear()
+g.caption_all_florence()
+ck("a second Caption All is refused", not _started and _popups == ["Already running"], _popups)
+
+_popups.clear()
+g.caption_single_image("x.png")
+ck("Regenerate is refused mid-job", not _started and _popups == ["Captioning in progress"], _popups)
+
+G.threading.Thread = _real_thread
+G.messagebox.showinfo = _real_showinfo
+g._captioning_running = False
+
+g._set_caption_buttons_running(True)
+ck("job buttons grey out while running",
+   str(g.caption_all_btn.cget("state")) == "disabled"
+   and str(g.caption_static_btn.cget("state")) == "disabled")
+g._set_caption_buttons_running(False)
+ck("  and come back afterwards", str(g.caption_all_btn.cget("state")) == "normal")
+
 # --- 8. persistence ----------------------------------------------------------------------
 g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
 g.caption_task_var.set(CAPTION_TASKS["exhaustive"][0])

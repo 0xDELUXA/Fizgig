@@ -5429,8 +5429,14 @@ class LoRATrainerGUI:
         actions_card = self._start_section_card(outer, "Generate Captions", None)
         action_row = tk.Frame(actions_card, bg=COLORS["bg_surface"])
         action_row.pack(anchor=tk.W)
-        ttk.Button(action_row, text="Caption All Images (AI)", command=self.caption_all_florence).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(action_row, text="Static Caption All", command=self.generate_captions).pack(side=tk.LEFT, padx=(0, 8))
+        # Kept on self so a running job can grey them out — clicking Caption All twice used to
+        # start a SECOND worker over the same files, which reads as the job having been queued.
+        self.caption_all_btn = ttk.Button(action_row, text="Caption All Images (AI)",
+                                          command=self.caption_all_florence)
+        self.caption_all_btn.pack(side=tk.LEFT, padx=(0, 8))
+        self.caption_static_btn = ttk.Button(action_row, text="Static Caption All",
+                                             command=self.generate_captions)
+        self.caption_static_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.caption_stop_btn = ttk.Button(action_row, text="Stop", command=self.stop_captioning, state=tk.DISABLED)
         self.caption_stop_btn.pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(action_row, text="Unload Model", command=self.unload_florence_model).pack(side=tk.LEFT)
@@ -6060,6 +6066,20 @@ class LoRATrainerGUI:
 
         Name kept for the existing button and the pre-training hook. The Qwen3-VL captioner is
         ~8 GB, so leaving it resident would OOM the training run this is called before."""
+        # Refuse while a captioning job is running. Without this, unloading mid-job freed the
+        # model and the worker's very next image called _generate_ai_caption, found no model,
+        # and quietly RELOADED it — which looks exactly like the job resuming after you pressed
+        # Unload. _release_qwen_captioner_if_idle already had this guard; the button did not.
+        if getattr(self, "_captioning_running", False):
+            self.update_caption_log(
+                "Captioning is still running — press Stop first, then Unload.\n")
+            if not silent:
+                messagebox.showinfo(
+                    "Captioning in progress",
+                    "A captioning job is still running.\n\nPress Stop and wait for it to finish, "
+                    "then unload. (Unloading now would just make the job reload the model and "
+                    "carry on.)")
+            return
         import gc
         import torch
         freed = []
@@ -6416,10 +6436,18 @@ class LoRATrainerGUI:
                 messagebox.showinfo("Info", "All images already have captions. Enable 'Overwrite' to regenerate.")
                 return
 
+        # Guard against a second job over the same files — the previous behaviour was two worker
+        # threads writing the same .txt files, which looks like the job restarting itself.
+        if getattr(self, "_captioning_running", False):
+            messagebox.showinfo("Already running",
+                                "A captioning job is already running. Press Stop to end it first.")
+            return
+
         # Run in thread
         self.captioning_stop_flag = False
         self._captioning_running = True
         self.caption_stop_btn.configure(state=tk.NORMAL)
+        self._set_caption_buttons_running(True)
 
         def caption_thread():
             total = len(images)
@@ -6444,6 +6472,7 @@ class LoRATrainerGUI:
             self._captioning_running = False
             self.master.after(0, lambda: self.update_caption_log(f"\nCaptioning complete!\n"))
             self.master.after(0, lambda: self.caption_stop_btn.configure(state=tk.DISABLED))
+            self.master.after(0, lambda: self._set_caption_buttons_running(False))
             self.master.after(0, self.refresh_caption_images)
             # A finished batch is a finished job — give the ~8 GB back rather than holding it
             # until the user thinks to press Unload. Florence (~1 GB) keeps its old behaviour:
@@ -6455,6 +6484,13 @@ class LoRATrainerGUI:
 
     def caption_single_image(self, img_path):
         """Caption a single image (for regenerate button)"""
+        if getattr(self, "_captioning_running", False):
+            # Two threads generating on one model at once is asking for trouble, and the bulk
+            # job would overwrite this caption moments later anyway.
+            messagebox.showinfo("Captioning in progress",
+                                "A captioning job is running — wait for it to finish (or press "
+                                "Stop) before regenerating a single image.")
+            return
         if self._caption_model_blocked_by_training():
             return
         self.update_caption_log(f"Captioning {os.path.basename(img_path)}...\n")
@@ -6474,10 +6510,26 @@ class LoRATrainerGUI:
 
         threading.Thread(target=caption_thread, daemon=True).start()
 
+    def _set_caption_buttons_running(self, running: bool):
+        """Grey the job-starting buttons while a captioning job is in flight."""
+        state = tk.DISABLED if running else tk.NORMAL
+        for attr in ("caption_all_btn", "caption_static_btn"):
+            btn = getattr(self, attr, None)
+            if btn is not None:
+                try:
+                    btn.configure(state=state)
+                except tk.TclError:
+                    pass
+
     def stop_captioning(self):
-        """Stop the captioning process"""
+        """Stop the captioning process.
+
+        The flag is only read between images, so the one being generated right now still
+        finishes — with Qwen3-VL that can be several seconds, which looks like Stop being
+        ignored unless we say so."""
         self.captioning_stop_flag = True
         self.caption_stop_btn.configure(state=tk.DISABLED)
+        self.update_caption_log("Stopping — finishing the current image first...\n")
 
     def update_caption_progress(self, progress, current, total):
         """Update caption progress bar and label"""

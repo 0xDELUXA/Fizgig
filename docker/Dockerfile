@@ -53,9 +53,33 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       git curl ca-certificates \
       xvfb x11vnc openbox novnc websockify x11-utils wmctrl \
       libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
-      fonts-dejavu-core fonts-liberation \
+      fonts-dejavu-core fonts-liberation fontconfig unzip \
       xdg-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Fizgig's whole layout is measured in Segoe UI, which does not exist on Linux — Tk silently
+# substitutes DejaVu Sans, which renders the same string ~20% wider (321px vs 268px measured).
+# That is not cosmetic: every wraplength, column width and window geometry in the app is tuned to
+# the narrower metrics, which is why the tab strip truncated "Preferences" before this.
+#
+# Selawik is Microsoft's own metric-compatible open substitute for Segoe UI (SIL OFL), so aliasing
+# it fixes the measurements everywhere at once with no changes to Fizgig itself.
+RUN curl -fsSL https://github.com/microsoft/Selawik/releases/download/1.01/Selawik_Release.zip \
+      -o /tmp/selawik.zip \
+    && mkdir -p /usr/share/fonts/truetype/selawik \
+    && unzip -j -o /tmp/selawik.zip '*.ttf' -d /usr/share/fonts/truetype/selawik \
+    && rm /tmp/selawik.zip \
+    && printf '%s\n' \
+      '<?xml version="1.0"?>' \
+      '<!DOCTYPE fontconfig SYSTEM "fonts.dtd">' \
+      '<fontconfig>' \
+      '  <alias binding="same">' \
+      '    <family>Segoe UI</family>' \
+      '    <accept><family>Selawik</family></accept>' \
+      '  </alias>' \
+      '</fontconfig>' \
+      > /etc/fonts/conf.d/99-segoe-selawik.conf \
+    && fc-cache -f
 # python3-tk is the one that is easy to miss and fatal: without it Tkinter is absent and the GUI
 # cannot start at all. The libgl/libglib set is what opencv needs on a headless box. No
 # build-essential here — it was only ever needed to compile insightface in the builder.

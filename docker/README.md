@@ -18,7 +18,7 @@ your browser  ──HTTP :6080──▶  noVNC  ──▶  x11vnc  ──▶  Xv
 | Container image | `ghcr.io/shootthesound/fizgig:latest` |
 | Container disk | 25 GB |
 | Volume disk | **100 GB+**, mounted at `/workspace` |
-| Expose HTTP ports | `6080` |
+| Expose HTTP ports | `6080, 8080` |
 | Expose TCP ports | *(none)* |
 
 **Use a network volume.** Without one, every pod start re-downloads tens of GB of models and you
@@ -30,11 +30,30 @@ region-locked, which limits which GPUs you can rent.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `VNC_PASSWORD` | *generated* | Password for the browser session. If unset, one is generated and printed to the pod log — **set your own**. |
+| `VNC_PASSWORD` | *generated* | Password for the browser session **and** the file manager. If unset, one is generated and printed to the pod log — **set your own**. Use **12+ characters**: the file manager rejects anything shorter, and a short password gets silently padded with `0`s (the pod log tells you what it ended up as). |
 | `FETCH_MODELS` | *(empty)* | Comma-separated families to download before launch, e.g. `tools,krea2`. Left empty on purpose: pulling tens of GB unasked spends your money, possibly on the family you didn't want. Use the button in Preferences instead. |
 | `HF_TOKEN` | — | Only needed for Klein. Krea 2's files aren't gated. |
 | `FIZGIG_REF` | `master` | Branch or tag to run. Pin it if you want a fixed version. |
 | `SCREEN_SIZE` | `1600x1400x24` | Virtual screen size. Shaped for Fizgig, not for a monitor: its content wraps at 760px so width past ~1400 is wasted, while **height is what reduces in-app scrolling**. Raise the height if you want to scroll less (`1600x1800x24`); noVNC shows the desktop 1:1 by default, so taller means more content at full size. |
+
+### Getting files in and out
+
+Port **8080** is a drag-and-drop file manager ([filebrowser](https://filebrowser.org/)) rooted at
+`/workspace`. Log in as **`admin`** with your `VNC_PASSWORD`. Drag a dataset folder from your desktop
+into a browser tab, and download finished LoRAs from `output_loras/` the same way — no terminal, no
+SSH keys, no CLI.
+
+If you'd rather use a terminal, **`runpodctl`** is preinstalled:
+
+```bash
+# on the pod, to send a finished LoRA to your machine
+runpodctl send /workspace/output_loras/mylora.safetensors
+# then on your machine, with the code it prints
+runpodctl receive <code>
+```
+
+`scp` and `rsync` over RunPod's SSH also work, and rsync is the better choice for a large dataset
+since it resumes and syncs incrementally.
 
 **First run**
 

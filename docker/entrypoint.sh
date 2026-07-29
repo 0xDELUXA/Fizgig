@@ -127,15 +127,32 @@ websockify --web=/usr/share/novnc 6080 localhost:5900 &
 # the desktop already does, so a separate password would be security theatre, and one fewer
 # thing to lose. Non-fatal: file transfer failing must not stop training.
 if command -v filebrowser >/dev/null 2>&1; then
-    filebrowser config init --database /workspace/.filebrowser.db >/dev/null 2>&1 || true
-    filebrowser config set --database /workspace/.filebrowser.db \
+    FB_DB=/workspace/.filebrowser.db
+    # filebrowser rejects passwords under 12 characters. A shorter VNC_PASSWORD therefore creates
+    # NO user at all, and the login just 403s — so pad rather than fail, and print what the
+    # padded password actually is. (Found the hard way: the first version wrapped these commands
+    # in `|| true`, so the log said "File manager on :8080" while the account did not exist.)
+    FB_PW="$VNC_PASSWORD"
+    while [ ${#FB_PW} -lt 12 ]; do FB_PW="${FB_PW}0"; done
+
+    filebrowser config init --database "$FB_DB" >/dev/null 2>&1 || true
+    filebrowser config set --database "$FB_DB" \
         --address 0.0.0.0 --port 8080 --root /workspace >/dev/null 2>&1 || true
-    filebrowser users add admin "$VNC_PASSWORD" --database /workspace/.filebrowser.db \
-        --perm.admin >/dev/null 2>&1 \
-      || filebrowser users update admin --password "$VNC_PASSWORD" \
-           --database /workspace/.filebrowser.db >/dev/null 2>&1 || true
-    filebrowser --database /workspace/.filebrowser.db >/dev/null 2>&1 &
-    log "File manager on :8080 (user 'admin', same password as VNC)"
+    # Errors are logged, not swallowed: a file manager nobody can log into is worse than one
+    # that says why.
+    if ! _fb_out=$(filebrowser users add admin "$FB_PW" --perm.admin --database "$FB_DB" 2>&1); then
+        if ! _fb_out=$(filebrowser users update admin --password "$FB_PW" \
+                          --database "$FB_DB" 2>&1); then
+            log "WARN: file manager login not set up: $(echo "$_fb_out" | tail -1)"
+        fi
+    fi
+    filebrowser --database "$FB_DB" >/dev/null 2>&1 &
+    if [ "$FB_PW" = "$VNC_PASSWORD" ]; then
+        log "File manager on :8080 — user 'admin', same password as VNC"
+    else
+        log "File manager on :8080 — user 'admin', password '${FB_PW}'"
+        log "  (padded: filebrowser needs 12+ characters and VNC_PASSWORD is shorter)"
+    fi
 fi
 
 cat <<EOF

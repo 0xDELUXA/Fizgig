@@ -5310,7 +5310,7 @@ class LoRATrainerGUI:
             outer,
             "Captions",
             "Write trigger-word captions or generate them with AI. "
-            "Skip this tab if your images already have .txt caption files.",
+            "You can optionally skip this tab if your images already have .txt caption files.",
         )
 
         # Card 1: Captioning Settings

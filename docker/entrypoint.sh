@@ -10,9 +10,16 @@ log() { echo "[fizgig] $*"; }
 REPO_URL="${FIZGIG_REPO:-https://github.com/shootthesound/Fizgig.git}"
 REPO_REF="${FIZGIG_REF:-master}"
 APP_DIR="/workspace/Fizgig"
-# 1200 rather than 1080 on purpose: Fizgig asks for 1360x1124, so a 1080-tall screen clips the
-# bottom of the window (status bar included) before anything else gets a say.
-SCREEN="${SCREEN_SIZE:-1920x1200x24}"
+# Shaped for Fizgig rather than for a monitor. Its window is 1360x1124 and its content wraps at
+# 760px, so width past ~1400 is dead space — 1600 is enough for the window plus a dialog beside
+# it (the Repair Studio pop-out preview is the case that wants room). Height is the axis that
+# matters: every extra pixel is one less pixel of in-app scrolling, and 1400 gives ~280 more
+# than the window was designed around. A 16:9 desktop spends that budget on width nobody uses.
+#
+# Set SCREEN_SIZE to taste — taller means less scrolling. Worth knowing: noVNC shows the desktop
+# 1:1 by default, so a tall desktop shows more at full size; only if you turn scaling on does it
+# shrink to fit, at which point height costs you legibility.
+SCREEN="${SCREEN_SIZE:-1600x1400x24}"
 
 mkdir -p /workspace/.cache /workspace/.insightface
 

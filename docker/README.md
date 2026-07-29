@@ -34,7 +34,7 @@ region-locked, which limits which GPUs you can rent.
 | `FETCH_MODELS` | *(empty)* | Comma-separated families to download before launch, e.g. `tools,krea2`. Left empty on purpose: pulling tens of GB unasked spends your money, possibly on the family you didn't want. Use the button in Preferences instead. |
 | `HF_TOKEN` | — | Only needed for Klein. Krea 2's files aren't gated. |
 | `FIZGIG_REF` | `master` | Branch or tag to run. Pin it if you want a fixed version. |
-| `SCREEN_SIZE` | `1920x1080x24` | Virtual screen size. |
+| `SCREEN_SIZE` | `1600x1400x24` | Virtual screen size. Shaped for Fizgig, not for a monitor: its content wraps at 760px so width past ~1400 is wasted, while **height is what reduces in-app scrolling**. Raise the height if you want to scroll less (`1600x1800x24`); noVNC shows the desktop 1:1 by default, so taller means more content at full size. |
 
 **First run**
 

@@ -12495,6 +12495,98 @@ class LoRATrainerGUI:
                  ).grid(row=row + 1, column=0, columnspan=3, sticky=tk.W, pady=(0, 2))
         return row + 2
 
+    _HF_GATED_URLS = [
+        ("Base DiT — accept the licence",
+         "https://huggingface.co/black-forest-labs/FLUX.2-klein-base-9b-fp8"),
+        ("Distilled DiT — accept the licence",
+         "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8"),
+        ("VAE — accept the licence",
+         "https://huggingface.co/black-forest-labs/FLUX.2-dev"),
+        ("Then create a READ token here",
+         "https://huggingface.co/settings/tokens"),
+    ]
+
+    def _ask_hf_token(self):
+        """Modal token prompt. Returns the token, or '' if cancelled.
+
+        Not simpledialog.askstring: its prompt is a Label, so the four URLs you have to visit
+        would be un-selectable — readable but not copyable, which is useless when the whole
+        point is to go to them. Each URL here is a readonly Entry (selectable, Ctrl+C works)
+        with Copy and Open buttons."""
+        result = {"token": ""}
+        dlg = tk.Toplevel(self.master)
+        dlg.title("HuggingFace token — Klein downloads")
+        dlg.configure(bg=BG_COLOR)
+        dlg.transient(self.master)
+        dlg.resizable(True, False)
+
+        # Buttons packed BOTTOM first so they can never be pushed off the edge (the v2.8.5
+        # caption-dialog fix — same reasoning applies to any dialog with variable content).
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack(side=tk.BOTTOM, pady=(6, 12))
+
+        tk.Label(dlg, text="Black Forest Labs gate the Klein downloads",
+                 font=(FONT_FAMILY, 11, "bold"), fg=COLORS["text_primary"], bg=BG_COLOR
+                 ).pack(anchor=tk.W, padx=14, pady=(14, 2))
+        tk.Label(dlg,
+                 text="They require every user to accept the licence themselves — which is also why "
+                      "Fizgig can't download these for you without a token of your own. Sign in to "
+                      "HuggingFace, accept on all three pages, then paste a read token below. "
+                      "Krea 2 needs none of this; those files aren't gated.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 10))
+
+        rows = tk.Frame(dlg, bg=BG_COLOR)
+        rows.pack(fill=tk.X, padx=14)
+        rows.columnconfigure(0, weight=1)
+
+        def copy(url, btn):
+            self.master.clipboard_clear()
+            self.master.clipboard_append(url)
+            btn.config(text="copied")
+            btn.after(1200, lambda: btn.config(text="Copy"))
+
+        for i, (label, url) in enumerate(self._HF_GATED_URLS):
+            tk.Label(rows, text=label, font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"],
+                     bg=BG_COLOR).grid(row=i * 2, column=0, columnspan=3, sticky=tk.W,
+                                       pady=(6 if i else 0, 0))
+            e = ttk.Entry(rows, width=62)
+            e.insert(0, url)
+            e.config(state="readonly")           # selectable and copyable; not editable
+            e.grid(row=i * 2 + 1, column=0, sticky=tk.EW)
+            cb = ttk.Button(rows, text="Copy", width=8)
+            cb.config(command=lambda u=url, b=cb: copy(u, b))
+            cb.grid(row=i * 2 + 1, column=1, padx=(6, 0))
+            ttk.Button(rows, text="Open", width=8,
+                       command=lambda u=url: webbrowser.open(u)
+                       ).grid(row=i * 2 + 1, column=2, padx=(6, 0))
+
+        ttk.Button(dlg, text="Open all three licence pages",
+                   command=lambda: [webbrowser.open(u) for _, u in self._HF_GATED_URLS[:3]]
+                   ).pack(anchor=tk.W, padx=14, pady=(12, 0))
+
+        tk.Label(dlg, text="Paste your token:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=BG_COLOR).pack(anchor=tk.W, padx=14, pady=(14, 2))
+        tok = ttk.Entry(dlg, width=62, show="*")
+        tok.pack(anchor=tk.W, padx=14, fill=tk.X)
+        tk.Label(dlg, text="Starts with hf_… Stored only for this download — never written to disk.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=BG_COLOR
+                 ).pack(anchor=tk.W, padx=14, pady=(2, 0))
+
+        def ok():
+            result["token"] = tok.get().strip()
+            dlg.destroy()
+
+        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_row, text="Download", command=ok).pack(side=tk.LEFT, padx=5)
+        tok.bind("<Return>", lambda e: ok())
+
+        dlg.update_idletasks()
+        tok.focus_set()
+        dlg.grab_set()
+        self.master.wait_window(dlg)
+        return result["token"]
+
     def _start_fetch_models(self, family):
         """Run the fetcher in a worker thread, streaming progress into the status label."""
         if getattr(self, "_fetch_running", False):
@@ -12504,17 +12596,8 @@ class LoRATrainerGUI:
         if family == "klein":
             # Klein's repos are gated: BFL require each user to accept the licence themselves,
             # which is exactly why these can't be bundled or pre-fetched on anyone's behalf.
-            token = simpledialog.askstring(
-                "HuggingFace token",
-                "Black Forest Labs gate the Klein downloads.\n\n"
-                "1. Sign in at huggingface.co and accept the licence on:\n"
-                "     black-forest-labs/FLUX.2-klein-base-9b-fp8\n"
-                "     black-forest-labs/FLUX.2-klein-9b-fp8\n"
-                "     black-forest-labs/FLUX.2-dev\n"
-                "2. Create a READ token at huggingface.co/settings/tokens\n"
-                "3. Paste it here:",
-                parent=self.master, show="*") or ""
-            if not token.strip():
+            token = self._ask_hf_token()
+            if not token:
                 return
 
         include_optional = (family == "krea2"

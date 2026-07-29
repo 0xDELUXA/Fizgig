@@ -76,13 +76,46 @@ for key, (label, instr, tok) in CAPTION_TASKS.items():
     ck(f"  task '{key}' resolves to its own instruction",
        g._resolve_caption_instruction() == instr)
 
-g.prefs["caption_qwen_instruction"] = "MY CUSTOM INSTRUCTION"
+g.prefs["caption_qwen_instructions"] = {"custom": "MY CUSTOM INSTRUCTION"}
 g.caption_task_var.set(G.QWEN_CUSTOM_TASK)
 ck("Custom… resolves to the saved prefs instruction",
    g._resolve_caption_instruction() == "MY CUSTOM INSTRUCTION")
-g.prefs.pop("caption_qwen_instruction", None)
+g.prefs.pop("caption_qwen_instructions", None)
 ck("Custom… with nothing saved falls back to the default task's text",
    g._resolve_caption_instruction() == CAPTION_TASKS[DEFAULT_CAPTION_TASK][1])
+
+# --- 3b. each preset is independently editable -------------------------------------------
+_TR, _SH, _EX = (CAPTION_TASKS["training"][0], CAPTION_TASKS["short"][0],
+                 CAPTION_TASKS["exhaustive"][0])
+g.prefs["caption_qwen_instructions"] = {"training": "MY TRAINING", "exhaustive": "MY EXHAUSTIVE"}
+ck("two presets hold different edits at once",
+   g._caption_instruction_for_task(_TR) == "MY TRAINING"
+   and g._caption_instruction_for_task(_EX) == "MY EXHAUSTIVE")
+ck("  an unedited preset keeps its shipped text",
+   g._caption_instruction_for_task(_SH) == CAPTION_TASKS["short"][1])
+ck("  edited flag is per preset",
+   g._caption_task_is_edited(_TR) and not g._caption_task_is_edited(_SH))
+ck("  builtin_only always returns the shipped text",
+   g._caption_instruction_for_task(_TR, builtin_only=True) == CAPTION_TASKS["training"][1])
+
+# auto-recaption takes the TRAINING preset only — never whatever the tab is set to
+ck("trainer uses the training override", g._caption_overrides().get("training") == "MY TRAINING")
+g.caption_task_var.set(_SH)
+ck("  selecting another task doesn't change what the trainer gets",
+   g._caption_overrides().get("training") == "MY TRAINING")
+g.prefs["caption_qwen_instructions"] = {"short": "ONLY SHORT EDITED"}
+ck("  editing only a non-training preset sends nothing to the trainer",
+   not g._caption_overrides().get("training"))
+
+# legacy single-slot pref migrates into Custom and doesn't leak into the presets
+g.prefs.pop("caption_qwen_instructions", None)
+g.prefs["caption_qwen_instruction"] = "OLD SINGLE SLOT"
+ck("legacy single slot migrates into Custom",
+   g._caption_instruction_for_task(G.QWEN_CUSTOM_TASK) == "OLD SINGLE SLOT")
+ck("  and does not leak into the presets",
+   g._caption_instruction_for_task(_TR) == CAPTION_TASKS["training"][1])
+g.prefs.pop("caption_qwen_instruction", None)
+g.caption_task_var.set(_TR)
 
 # --- 4. router picks the right generator -------------------------------------------------
 calls = []

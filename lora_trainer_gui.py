@@ -5764,18 +5764,46 @@ class LoRATrainerGUI:
             pass
         self._save_last_used_paths()
 
-    def _caption_instruction_for_task(self, label: str, *, builtin_only: bool = False) -> str:
-        """The instruction text for a Qwen task label. 'Custom…' resolves to the user's saved
-        instruction (prefs), falling back to the default task's text if they never saved one."""
-        from fizgig.krea2.embedder import CAPTION_TASKS, DEFAULT_CAPTION_TASK
-        for _key, (lbl, instr, _tok) in CAPTION_TASKS.items():
+    def _caption_task_key(self, label: str) -> str:
+        """Canonical key for a task label — 'custom' for the free-slot entry."""
+        from fizgig.krea2.embedder import CAPTION_TASKS
+        for key, (lbl, _instr, _tok) in CAPTION_TASKS.items():
             if lbl == label:
-                return instr
+                return key
+        return "custom"
+
+    def _caption_overrides(self) -> dict:
+        """{task_key: instruction} — every preset the user has edited.
+
+        Each preset is independently editable and keeps its own default, so a tuned Training
+        caption and a tuned Exhaustive one can coexist. Migrates the older single-slot pref
+        (one shared instruction) into the 'custom' entry."""
+        raw = self.prefs.get("caption_qwen_instructions")
+        out = dict(raw) if isinstance(raw, dict) else {}
+        legacy = str(self.prefs.get("caption_qwen_instruction", "") or "").strip()
+        if legacy and "custom" not in out:
+            out["custom"] = legacy
+        return out
+
+    def _caption_builtin_for_key(self, key: str) -> str:
+        """The shipped text for a task key. 'custom' has none, so it borrows the default task's."""
+        from fizgig.krea2.embedder import CAPTION_TASKS, DEFAULT_CAPTION_TASK
+        if key in CAPTION_TASKS:
+            return CAPTION_TASKS[key][1]
+        return CAPTION_TASKS[DEFAULT_CAPTION_TASK][1]
+
+    def _caption_instruction_for_task(self, label: str, *, builtin_only: bool = False) -> str:
+        """The instruction for a task label — the user's edited version if there is one."""
+        key = self._caption_task_key(label)
         if not builtin_only:
-            saved = str(self.prefs.get("caption_qwen_instruction", "") or "").strip()
+            saved = str(self._caption_overrides().get(key, "") or "").strip()
             if saved:
                 return saved
-        return CAPTION_TASKS[DEFAULT_CAPTION_TASK][1]
+        return self._caption_builtin_for_key(key)
+
+    def _caption_task_is_edited(self, label: str) -> bool:
+        key = self._caption_task_key(label)
+        return bool(str(self._caption_overrides().get(key, "") or "").strip())
 
     def _resolve_caption_instruction(self) -> str:
         """The instruction that will actually be sent for the current selection."""
@@ -5786,10 +5814,10 @@ class LoRATrainerGUI:
 
         Saving stores it in prefs and switches the task to 'Custom…', so what you edited is what
         runs — here AND in the trainer's auto-recaption."""
-        from fizgig.krea2.embedder import CAPTION_TASKS, DEFAULT_CAPTION_TASK
         opened_from = self.caption_task_var.get()
+        edited = self._caption_task_is_edited(opened_from)
         dialog = tk.Toplevel(self.master)
-        dialog.title("Captioning instruction")
+        dialog.title(f"Captioning instruction — {opened_from}")
         dialog.configure(bg=BG_COLOR)
         dialog.minsize(660, 420)
 
@@ -5798,13 +5826,14 @@ class LoRATrainerGUI:
         btn_frame = ttk.Frame(dialog)
         btn_frame.pack(side=tk.BOTTOM, pady=10)
 
-        tk.Label(dialog, text=f"Instruction sent to the vision model — {opened_from}",
+        tk.Label(dialog,
+                 text=f"{opened_from}{'  (edited)' if edited else ''}",
                  font=(FONT_FAMILY, 11, "bold"), fg=COLORS["text_primary"],
                  bg=BG_COLOR).pack(anchor=tk.W, padx=14, pady=(14, 2))
         tk.Label(dialog,
-                 text="This is the whole prompt the model is given, alongside the image. Edit it to "
-                      "change what your captions describe — saving keeps your wording for future "
-                      "runs, including the trainer's auto-recaption of stuck images.",
+                 text="This is the whole prompt the model is given, alongside the image. Saving "
+                      "edits THIS preset — each one keeps its own wording, and Restore default "
+                      "puts the shipped text back.",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=BG_COLOR,
                  wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 8))
 
@@ -5833,10 +5862,9 @@ class LoRATrainerGUI:
                  wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(2, 10))
 
         def restore_default():
-            base = opened_from if opened_from != QWEN_CUSTOM_TASK \
-                else CAPTION_TASKS[DEFAULT_CAPTION_TASK][0]
             instr_text.delete("1.0", tk.END)
-            instr_text.insert("1.0", self._caption_instruction_for_task(base, builtin_only=True))
+            instr_text.insert("1.0", self._caption_instruction_for_task(opened_from,
+                                                                       builtin_only=True))
 
         def save_instruction():
             text = instr_text.get("1.0", tk.END).strip()
@@ -5844,13 +5872,21 @@ class LoRATrainerGUI:
                 messagebox.showerror("Empty instruction",
                                      "The instruction can't be empty — use Restore default.")
                 return
-            self.prefs["caption_qwen_instruction"] = text
+            key = self._caption_task_key(opened_from)
+            overrides = self._caption_overrides()
+            if text == self._caption_builtin_for_key(key):
+                # Saving the shipped text back = "no override" rather than a redundant copy, so
+                # Restore default + Save genuinely returns the preset to stock.
+                overrides.pop(key, None)
+                msg = f"'{opened_from}' restored to its default instruction.\n"
+            else:
+                overrides[key] = text
+                msg = f"'{opened_from}' saved — this preset now uses your instruction.\n"
+            self.prefs["caption_qwen_instructions"] = overrides
+            self.prefs.pop("caption_qwen_instruction", None)   # retire the old single slot
             save_prefs(self.prefs)
-            labels = self._qwen_task_labels()
-            self.caption_task_combo.configure(values=labels)
-            self.caption_task_var.set(QWEN_CUSTOM_TASK)
             self._save_last_used_paths()
-            self.update_caption_log("Captioning instruction saved — task set to 'Custom…'.\n")
+            self.update_caption_log(msg)
             dialog.destroy()
 
         ttk.Button(btn_frame, text="Restore default", command=restore_default).pack(side=tk.LEFT, padx=5)
@@ -18583,11 +18619,12 @@ class LoRATrainerGUI:
                     if hasattr(self, "caption_trigger_var") else "")
             if trig and trig.lower() != "trigger_word":
                 cmd += ["--trigger_word", trig]
-            # If the user edited the captioning instruction on the Captions tab, auto-recaption
-            # should honour it too — otherwise the prompt they tuned is ignored by the one place
-            # that captions unattended. Attempt 2 still escalates to the built-in exhaustive
-            # instruction (that escalation is the point of a second attempt).
-            _instr = str(self.prefs.get("caption_qwen_instruction", "") or "").strip()
+            # Auto-recaption uses the TRAINING CAPTION preset's instruction — yours if you edited
+            # that preset, the built-in otherwise. Deliberately not "whatever the Captions tab is
+            # set to": auto-recaption's job is fixed (write a training caption for a stuck image),
+            # and leaving the tab on "Short caption" must not silently change what a training run
+            # writes. Attempt 2 still escalates to the built-in exhaustive instruction.
+            _instr = str(self._caption_overrides().get("training", "") or "").strip()
             if _instr:
                 cmd += ["--recaption_instruction", _instr]
         # Caption repair (manual edits from the Problem Images window AND auto-recaption)

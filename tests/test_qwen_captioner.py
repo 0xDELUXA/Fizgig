@@ -169,7 +169,8 @@ class _FakeModel:
 g._captioning_running = False
 g.qwen_captioner = _FakeModel()
 g._release_qwen_captioner_if_idle()
-ck("released when idle", g.qwen_captioner is None)
+ck("released when idle (batch end / tab leave / Unload button)",
+   g.qwen_captioner is None)
 
 g.qwen_captioner = _FakeModel()
 g._captioning_running = True

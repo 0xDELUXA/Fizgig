@@ -6243,13 +6243,13 @@ class LoRATrainerGUI:
         return self.generate_florence_caption(img_path)
 
     def _release_qwen_captioner_if_idle(self):
-        """Free the Qwen3-VL captioner as soon as a captioning job finishes.
+        """Free the Qwen3-VL captioner (~8 GB) when a captioning job is finished with it.
 
-        ~8 GB is too much to hold on a machine that also runs ComfyUI and the workbench, so it
-        goes back after EVERY job — a whole batch or a single regenerate from a thumbnail alike.
-        The trade is a reload (~30 s) on the next caption; predictable VRAM is worth more than
-        saving that. Guarded on _captioning_running so a job still in flight never has the model
-        pulled out from under it."""
+        Called after a bulk batch, on leaving the Captions tab, and from the Unload button — but
+        NOT after a single regenerate, which is an iterative loop where a ~30 s reload per click
+        would hurt and nothing is at risk: training lives on another tab, so leaving this one
+        (which releases) is unavoidable before a run starts. Guarded on _captioning_running so a
+        job still in flight never has the model pulled out from under it."""
         if getattr(self, "_captioning_running", False):
             return
         if getattr(self, "qwen_captioner", None) is None:
@@ -6369,8 +6369,10 @@ class LoRATrainerGUI:
                 self.master.after(0, self.refresh_caption_images)
             else:
                 self.master.after(0, lambda: self.update_caption_log(f"✗ Failed\n"))
-            # Same rule as a batch: the job is done, so give the ~8 GB back.
-            self.master.after(0, self._release_qwen_captioner_if_idle)
+            # Deliberately NOT released here. Regenerating from a thumbnail is an iterative
+            # loop — you click it on several images in a row — and freeing each time would cost
+            # a ~30 s reload per click. Nothing is at risk by holding it: training lives on
+            # another tab, and leaving this one releases it.
 
         threading.Thread(target=caption_thread, daemon=True).start()
 

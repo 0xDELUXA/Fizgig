@@ -6326,11 +6326,10 @@ class LoRATrainerGUI:
             self.update_caption_log(f"Qwen3-VL captioner ready on {device}.\n")
             return True
         except Exception as e:
-            # Most likely cause is the fp8 ComfyUI variant, whose vision tower can't run.
             self.update_caption_log(
                 f"Could not load the Qwen3-VL captioner: {type(e).__name__}: {e}\n"
-                "It must be the bf16 Qwen3-VL-4B file — the fp8 ComfyUI variant has no usable "
-                "vision path.\n")
+                "Check the Krea 2 text-encoder path in Preferences — Fizgig reads the bf16 and "
+                "fp8_scaled Qwen3-VL-4B files from Comfy-Org/Krea-2.\n")
             self.qwen_captioner = None
             return False
 
@@ -12254,8 +12253,8 @@ class LoRATrainerGUI:
         krea_card = self._start_section_card(
             outer, "Model Paths (Krea 2)",
             "Krea 2 LoRA training + inference. Train on RAW; previews and inference use the pre-quant fp8 Turbo "
-            "(8-step, CFG-free). The text encoder must be the bf16 Qwen3-VL-4B — the fp8 ComfyUI variant is not "
-            "loadable for training.",
+            "(8-step, CFG-free). The text encoder can be either Qwen3-VL-4B file — bf16, or the smaller "
+            "fp8_scaled (~3.6 GB less VRAM; its vision tower is bf16 either way).",
         )
         krea_card.columnconfigure(1, weight=1)
         kr = 0
@@ -12278,10 +12277,13 @@ class LoRATrainerGUI:
             download_note="~250MB — Comfy-Org/Krea-2 → vae/qwen_image_vae.safetensors",
         )
         kr = self._add_pref_row(
-            krea_card, kr, "Qwen3-VL TE (bf16):", "krea2_text_encoder",
-            "Qwen3-VL-4B text encoder in bf16 — NOT the fp8 ComfyUI variant (not loadable for training)",
+            krea_card, kr, "Qwen3-VL TE:", "krea2_text_encoder",
+            "Qwen3-VL-4B text encoder — bf16 (8.9 GB) or fp8_scaled (5.2 GB). Both carry the full "
+            "bf16 vision tower, so reference images and captioning work either way; fp8 only "
+            "quantises the language layers",
             download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors",
-            download_note="~8GB bf16 — Comfy-Org/Krea-2 → text_encoders/qwen3vl_4b_bf16.safetensors",
+            download_note="~8.9GB bf16 (best quality) — or qwen3vl_4b_fp8_scaled.safetensors (~5.2GB) "
+                          "from the same text_encoders folder to save VRAM",
         )
         kr = self._add_pref_row(
             krea_card, kr, "Turbo LoRA (rank 64):", "krea2_turbo_lora",

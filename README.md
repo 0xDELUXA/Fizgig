@@ -224,7 +224,7 @@ All four files live in the one [**Comfy-Org/Krea-2**](https://huggingface.co/Com
 | Qwen-Image VAE | `qwen_image_vae.safetensors` | ~250 MB | [Comfy-Org/Krea-2 → vae](https://huggingface.co/Comfy-Org/Krea-2/blob/main/vae/qwen_image_vae.safetensors) |
 | Text Encoder (bf16) | `qwen3vl_4b_bf16.safetensors` | ~8 GB bf16 | [Comfy-Org/Krea-2 → text_encoders](https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors) |
 
-Training and its previews run on the **RAW DiT** (the Turbo LoRA auto-downloads — no need to grab it by hand); the **fp8 Turbo checkpoint** powers the workbench tools (Repair Studio / Explorer / Royale) and the classic preview mode, so grab it if you'll use those. The text encoder must be the **bf16** Qwen3-VL-4B (the fp8 ComfyUI variant can't run the vision path used for reference images, or training). On smaller cards, the **4-bit (NF4)** toggle shrinks the RAW base to ~5.6 GB so it fits 10–12 GB GPUs.
+Training and its previews run on the **RAW DiT** (the Turbo LoRA auto-downloads — no need to grab it by hand); the **fp8 Turbo checkpoint** powers the workbench tools (Repair Studio / Explorer / Royale) and the classic preview mode, so grab it if you'll use those. The text encoder can be **either** Qwen3-VL-4B file — bf16 (8.9 GB) or fp8_scaled (5.2 GB, ~3.6 GB less VRAM). Both ship the full bf16 vision tower, so reference images and AI captioning work with either; fp8_scaled quantises only the language layers. On smaller cards, the **4-bit (NF4)** toggle shrinks the RAW base to ~5.6 GB so it fits 10–12 GB GPUs.
 
 ---
 

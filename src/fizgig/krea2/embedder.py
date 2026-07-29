@@ -130,8 +130,43 @@ def _load_qwen3_vl_model(
         model = Qwen3VLForConditionalGeneration._from_config(config)
 
     logger.info(f"Loading Krea 2 text encoder (Qwen3-VL) weights from {model_path}")
-    sd = load_split_weights(model_path, device=str(device), disable_mmap=disable_mmap, dtype=dtype)
+    # ComfyUI's fp8_scaled variant quantises ONLY the language Linears — its 315 vision-tower
+    # tensors are bf16, so reference images and captioning work exactly as on the bf16 file.
+    # (An earlier comment here claimed the vision tower "can't run in fp8"; that was wrong, and
+    # the real blocker was simply that this loader had no fp8 path.) Keeping the weights fp8 and
+    # dequantising per matmul is what actually saves the ~3.6 GB — converting to bf16 at load
+    # would load fine and save nothing.
+    from fizgig.krea2.utils import (is_prequantized_fp8, _FP8_SCALE_SUFFIX,
+                                    _COMFY_FP8_MARKER_SUFFIX, _reshape_prequant_fp8_scale)
+    prequant = is_prequantized_fp8(model_path)
+
+    # dtype=None on the fp8 path: passing a dtype converts the fp8 weights on load and there is
+    # nothing left to be resident about.
+    sd = load_split_weights(model_path, device=str(device), disable_mmap=disable_mmap,
+                            dtype=(None if prequant else dtype))
     sd = _convert_comfyui_qwen3vl_state_dict(sd)
+
+    if prequant:
+        # Comfy stores `.weight_scale`; the monkey patch looks for `.scale_weight` (and wants it
+        # broadcastable against [out, in]). Same normalisation the DiT does — reusing its helpers
+        # so the two can't drift. Dropping these keys WITHOUT applying them is the bug that once
+        # left the Klein DiT with weights ~1230x too large, so they are renamed, never discarded.
+        fixed = {}
+        for k, v in sd.items():
+            if k.endswith(_COMFY_FP8_MARKER_SUFFIX):
+                continue
+            if k.endswith(_FP8_SCALE_SUFFIX):
+                fixed[k[: -len(_FP8_SCALE_SUFFIX)] + ".scale_weight"] = \
+                    _reshape_prequant_fp8_scale(v).to(dtype)
+            else:
+                fixed[k] = v
+        sd = fixed
+        # Registers a scale_weight buffer on each quantised Linear and swaps in the dequantising
+        # forward. Must run BEFORE load_state_dict, or the scale keys have nowhere to land and
+        # come back as "unexpected". Only the language Linears carry scales, so the bf16 vision
+        # tower is untouched by design.
+        from fizgig.krea2.fp8_optimization_utils import apply_fp8_monkey_patch
+        apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
 
     info = model.load_state_dict(sd, strict=False, assign=True)
     # Qwen3-VL-4B ties the LM head to the input embeddings (tie_word_embeddings=true), so the
@@ -146,7 +181,10 @@ def _load_qwen3_vl_model(
         )
 
     model.to(device)
-    if dtype is not None:
+    # Never cast an fp8 model to dtype — that would convert the weights straight back to bf16 and
+    # throw away the whole point. The unquantised parts (vision tower, norms, embeddings) are
+    # already stored in the target dtype anyway.
+    if dtype is not None and not prequant:
         model.to(dtype)
     return model.eval().requires_grad_(False)
 
@@ -372,8 +410,12 @@ class Qwen3VLConditioner(torch.nn.Module):
         list of PIL.Image references (or None). When any prompt has references they are fed
         through Qwen3-VL's *vision* path under the same descriptor template, so the conditioning
         becomes "visually aware" of the image (a prompt-from-a-picture effect — Krea 2's DiT has
-        no reference-latent slot, so this is the only reference mechanism). Requires the bf16 TE:
-        ComfyUI's Qwen3-VL vision tower can't run in fp8.
+        no reference-latent slot, so this is the only reference mechanism).
+
+        Works with either checkpoint. An earlier version of this docstring claimed the vision
+        tower "can't run in fp8" — that was wrong: ComfyUI's fp8_scaled file quantises only the
+        language Linears and ships all 315 vision-tower tensors in bf16. The real constraint was
+        that this loader had no fp8 dequantisation path; see _load_qwen3_vl_model.
         """
         has_imgs = bool(images) and any(images[i] for i in range(min(len(images), len(text))))
         if has_imgs:

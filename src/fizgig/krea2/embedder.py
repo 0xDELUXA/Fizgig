@@ -13,6 +13,7 @@ instead of requiring a separate transformers/Diffusers checkpoint.
 """
 
 import logging
+import re
 from dataclasses import dataclass
 
 import torch
@@ -180,14 +181,34 @@ def load_qwen3_vl_conditioner(
 # bake in, unnamed CONTRADICTIONS fight, and the salient unnamed deviation is exactly the poison the
 # per-image loss watch keeps flagging. Naming a thing doesn't stop the model learning it; it binds
 # it to a token you can then steer. Hence "name anything prominent", not "omit what's constant".
+#
+# Two rules earned from real output (29 Jul):
+#   SUBJECT_RULE — the 4B model hedged to "a person" in roughly a third of captions. That is a
+#   worse token than "a woman": the dataset then teaches the trigger against an inconsistent
+#   subject noun, and the noun is the one word every caption shares.
+#   NO_PREAMBLE_RULE — it opened with "This image shows…" constantly on the longer tasks. The
+#   preamble is pure noise in a training caption and, prepended after the trigger, reads as
+#   "<trigger>, this image shows…". Belt and braces: the instruction asks, and
+#   _strip_caption_preamble removes it deterministically afterwards.
+SUBJECT_RULE = (
+    "Name the subject with the specific term that is visually apparent — 'a woman', 'a man', "
+    "'a girl', 'a boy' — and not the vague 'a person'. Use 'a person' only when the image "
+    "genuinely does not show enough to tell. "
+)
+NO_PREAMBLE_RULE = (
+    "Begin directly with the subject. Never open with 'This image shows', 'The image depicts', "
+    "'In this image', 'Here we see', 'The photo shows' or any similar preamble. "
+)
+
 CAPTION_INSTRUCTION = (
     "Write one factual training caption for this image as a single sentence, covering these in "
     "order: the subject and what they are doing; the camera viewpoint (e.g. 'viewed from behind', "
     "'side profile', 'close-up') and whether the face is visible; their pose; their clothing; the "
-    "setting; the lighting. Use the same order and the same plain phrasing every time. Name "
-    "anything prominent a viewer would notice, especially anything unusual about the angle, the "
-    "framing, or what is hidden or cropped. State only what is visible — no speculation, no proper "
-    "names, no style or quality commentary."
+    "setting; the lighting. Use the same order and the same plain phrasing every time. "
+    + SUBJECT_RULE + NO_PREAMBLE_RULE +
+    "Name anything prominent a viewer would notice, especially anything unusual about the angle, "
+    "the framing, or what is hidden or cropped. State only what is visible — no speculation, no "
+    "proper names, no style or quality commentary."
 )
 
 # Second-attempt instruction: if the standard caption didn't unstick the image, the miss is
@@ -199,7 +220,8 @@ DETAILED_CAPTION_INSTRUCTION = (
     "the face is visible or hidden), their pose and body position, every visible clothing item "
     "with colors, hair style and color, any objects they hold or touch, anything partially "
     "blocking or cropping the subject, the lighting, and the background/setting with its main "
-    "objects. State only what is visible — no speculation, no names, no style commentary."
+    "objects. " + SUBJECT_RULE + NO_PREAMBLE_RULE +
+    "State only what is visible — no speculation, no names, no style commentary."
 )
 
 
@@ -214,14 +236,15 @@ ENCODE_SYSTEM_DESCRIPTOR = (
 
 SHORT_CAPTION_INSTRUCTION = (
     "Write one short factual caption for this image — a single clause naming the subject, what "
-    "they are doing, and the setting. State only what is visible. No speculation, no names, no "
-    "style commentary."
+    "they are doing, and the setting. " + SUBJECT_RULE + NO_PREAMBLE_RULE +
+    "State only what is visible. No speculation, no names, no style commentary."
 )
 
 DETAILED_DESCRIPTION_INSTRUCTION = (
-    "Describe this image in 2-3 factual sentences: the subject, their pose and clothing, the "
-    "camera viewpoint, the lighting, and the setting. State only what is visible — no "
-    "speculation, no names, no style commentary."
+    "Describe this image in 2-3 factual sentences, starting with the subject: their pose and "
+    "clothing, the camera viewpoint, the lighting, and the setting. "
+    + SUBJECT_RULE + NO_PREAMBLE_RULE +
+    "State only what is visible — no speculation, no names, no style commentary."
 )
 
 # The task menu the Captions tab offers for this model. Lives here rather than in the GUI so the
@@ -238,6 +261,37 @@ CAPTION_TASKS = {
     "exhaustive": ("Exhaustive detail", DETAILED_CAPTION_INSTRUCTION, 240),
 }
 DEFAULT_CAPTION_TASK = "training"
+
+
+_PREAMBLE_RE = re.compile(
+    r"^\s*(?:"
+    r"(?:in|within)\s+th(?:is|e)\s+(?:image|photo|photograph|picture|shot)\s*,?\s*|"
+    r"th(?:is|e)\s+(?:image|photo|photograph|picture|shot)\s+"
+    r"(?:shows?|depicts?|features?|captures?|presents?|displays?|is\s+of)\s+|"
+    r"here\s+(?:is|we\s+see)\s+|"
+    r"we\s+see\s+|"
+    r"the\s+(?:image|photo)\s+is\s+a\s+"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _strip_caption_preamble(text: str) -> str:
+    """Remove a leading 'This image shows…' style preamble.
+
+    Instructing the model not to produce one is unreliable at 4B and temperature 0.5, and the
+    preamble is pure noise in a training caption — worse once the trigger word is prepended, where
+    it reads "<trigger>, this image shows a woman…". Applied repeatedly because the model
+    occasionally stacks them ("In this image, we see …"). Never returns empty: if stripping would
+    consume everything, the original is kept."""
+    out = text
+    for _ in range(3):
+        stripped = _PREAMBLE_RE.sub("", out, count=1)
+        if stripped == out:
+            break
+        out = stripped
+    out = out.strip()
+    return out if out else text.strip()
 
 
 def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
@@ -283,7 +337,7 @@ def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
         if cuda_states is not None:
             torch.cuda.set_rng_state_all(cuda_states)
     text = proc.batch_decode(out[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True)[0]
-    return " ".join(text.split()).strip()
+    return _strip_caption_preamble(" ".join(text.split()).strip())
 
 
 class Qwen3VLConditioner(torch.nn.Module):

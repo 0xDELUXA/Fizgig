@@ -167,6 +167,37 @@ from fizgig.krea2.embedder import generate_caption
 ck("generate_caption takes instruction",
    "instruction" in inspect.signature(generate_caption).parameters)
 
+# --- 10. caption hygiene: preamble stripping + the two instruction rules -----------------
+from fizgig.krea2.embedder import (_strip_caption_preamble, SUBJECT_RULE, NO_PREAMBLE_RULE,
+                                   SHORT_CAPTION_INSTRUCTION, DETAILED_DESCRIPTION_INSTRUCTION,
+                                   DETAILED_CAPTION_INSTRUCTION)
+
+_preamble_cases = [
+    ("This image shows a woman standing on a beach.", "a woman standing on a beach."),
+    ("The image depicts a man viewed from behind.", "a man viewed from behind."),
+    ("In this image, a woman sits on a chair.", "a woman sits on a chair."),
+    ("In this image we see a girl running.", "a girl running."),
+    ("Here we see a woman laughing.", "a woman laughing."),
+    ("The photo shows a bride walking.", "a bride walking."),
+    ("This photograph captures a couple dancing.", "a couple dancing."),
+    ("This image is of a woman.", "a woman."),
+    # must survive untouched
+    ("a woman viewed from behind, wearing a red coat", "a woman viewed from behind, wearing a red coat"),
+    ("A photo of a woman on a beach.", "A photo of a woman on a beach."),
+    ("The image on the wall shows a landscape.", "The image on the wall shows a landscape."),
+    ("This image shows", "This image shows"),   # stripping to empty keeps the original
+]
+_bad = [(s, _strip_caption_preamble(s), w) for s, w in _preamble_cases
+        if _strip_caption_preamble(s) != w]
+ck("preamble stripper: 12 cases incl. negatives", not _bad, _bad[:2])
+
+for _name, _instr in (("training", CAPTION_INSTRUCTION),
+                      ("short", SHORT_CAPTION_INSTRUCTION),
+                      ("detailed", DETAILED_DESCRIPTION_INSTRUCTION),
+                      ("exhaustive", DETAILED_CAPTION_INSTRUCTION)):
+    ck(f"  '{_name}' instruction carries the subject + no-preamble rules",
+       SUBJECT_RULE in _instr and NO_PREAMBLE_RULE in _instr)
+
 shutil.rmtree(TMP, ignore_errors=True)
 shutil.rmtree(imgdir, ignore_errors=True)
 print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILURE(S)"))

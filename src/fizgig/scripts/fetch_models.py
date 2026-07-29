@@ -30,6 +30,10 @@ import sys
 
 REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
+# Machine-readable progress for the GUI. Off by default so a terminal user keeps
+# huggingface_hub's own progress bar, which is nicer to watch than our polled byte counts.
+EMIT_PROGRESS = False
+
 
 class Weight:
     """One .safetensors file: where it lives on HF, where it goes, which pref points at it."""
@@ -125,6 +129,74 @@ def _save_prefs(prefs_file, prefs):
     os.replace(tmp, prefs_file)
 
 
+def _incomplete_bytes(models_dir):
+    """Bytes written so far, read off huggingface_hub's partial-download file.
+
+    Polling the file beats parsing hf_hub_download's tqdm: tqdm redraws with carriage returns
+    rather than newlines, so a caller reading the stream line-by-line sees nothing at all for
+    the entire transfer — which is exactly how a 9.5 GB download looks like a frozen app.
+    """
+    best = 0
+    cache = os.path.join(models_dir, ".cache", "huggingface", "download")
+    for root, _dirs, files in os.walk(cache):
+        for f in files:
+            if f.endswith(".incomplete"):
+                try:
+                    best = max(best, os.path.getsize(os.path.join(root, f)))
+                except OSError:
+                    pass
+    return best
+
+
+def _remote_size(w, token):
+    """Exact byte size from HuggingFace, so the progress bar is honest. None if unavailable."""
+    try:
+        from huggingface_hub import get_hf_file_metadata, hf_hub_url
+        md = get_hf_file_metadata(
+            hf_hub_url(repo_id=w.repo, filename=w.path_in_repo),
+            token=token or os.environ.get("HF_TOKEN") or None)
+        return md.size or None
+    except Exception:
+        return None
+
+
+def _download_with_progress(w, models_dir, token, log):
+    """hf_hub_download on a worker thread, emitting [progress] lines while it runs.
+
+    The GUI parses those to drive a real progress bar. Structured output rather than tqdm
+    scraping keeps the parsing in one place and survives huggingface_hub changing its display.
+    """
+    import threading
+    from huggingface_hub import hf_hub_download
+
+    total = _remote_size(w, token) or int(w.gb * 1024 ** 3)
+    held = {}
+
+    def run():
+        try:
+            held["path"] = hf_hub_download(
+                repo_id=w.repo, filename=w.path_in_repo, local_dir=models_dir,
+                token=token or os.environ.get("HF_TOKEN") or None)
+        except BaseException as e:      # re-raised on the calling thread below
+            held["err"] = e
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    log(f"  [progress] 0 {total} {w.filename}")
+    # High-water mark: the .incomplete file is renamed away the moment the transfer finishes,
+    # while the thread is still verifying and moving it — so a naive poll reads 0 and the bar
+    # snaps back to empty in the last second of a 26 GB download. Never go backwards.
+    seen = 0
+    while t.is_alive():
+        t.join(1.5)
+        seen = max(seen, _incomplete_bytes(models_dir))
+        log(f"  [progress] {seen} {total} {w.filename}")
+    if "err" in held:
+        raise held["err"]
+    log(f"  [progress] {total} {total} {w.filename}")
+    return held["path"]
+
+
 def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
     """Download one weight if needed and point its pref at it. Returns True if usable."""
     dest = os.path.join(models_dir, w.filename)
@@ -157,11 +229,12 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
 
     log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
     try:
-        from huggingface_hub import hf_hub_download
-        got = hf_hub_download(
-            repo_id=w.repo, filename=w.path_in_repo, local_dir=models_dir,
-            token=token or os.environ.get("HF_TOKEN") or None,
-        )
+        if EMIT_PROGRESS:
+            got = _download_with_progress(w, models_dir, token, log)
+        else:
+            from huggingface_hub import hf_hub_download
+            got = hf_hub_download(repo_id=w.repo, filename=w.path_in_repo, local_dir=models_dir,
+                                  token=token or os.environ.get("HF_TOKEN") or None)
     except Exception as e:
         name = type(e).__name__
         if "Gated" in name or "401" in str(e) or "403" in str(e):
@@ -292,7 +365,21 @@ def main():
     p.add_argument("--models-dir", default=None, help="Default: <repo>/models")
     p.add_argument("--token", default=None, help="HuggingFace token for gated repos (or HF_TOKEN).")
     p.add_argument("--dry-run", action="store_true", help="Show what would be fetched.")
+    p.add_argument("--progress", action="store_true",
+                   help="Emit machine-readable '[progress] done total name' lines instead of "
+                        "huggingface_hub's progress bar. Used by the GUI.")
     a = p.parse_args()
+
+    if a.progress:
+        global EMIT_PROGRESS
+        EMIT_PROGRESS = True
+        try:
+            # Otherwise tqdm's carriage-return redraws interleave with our lines and the GUI
+            # sees one enormous unparseable blob.
+            from huggingface_hub.utils import disable_progress_bars
+            disable_progress_bars()
+        except Exception:
+            pass
 
     families = ["krea2", "klein", "tools"] if a.all else (a.family or [])
     if not families:

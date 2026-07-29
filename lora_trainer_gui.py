@@ -12616,7 +12616,7 @@ class LoRATrainerGUI:
             # / the translator sooner or later. Fetching them up front means the Captions tab and
             # Look Filter work immediately, and they survive abandoning the big download.
             # Re-running is cheap — everything here is a no-op once present.
-            cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models",
+            cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress",
                    "--family", "tools", "--family", family]
             if include_optional:
                 cmd.append("--include-optional")
@@ -12632,6 +12632,7 @@ class LoRATrainerGUI:
                                      encoding="utf-8", errors="replace",
                                      creationflags=(subprocess.CREATE_NO_WINDOW
                                                     if os.name == "nt" else 0))
+                self._fetch_proc = p
                 for line in p.stdout:
                     line = line.rstrip()
                     if line:
@@ -12642,18 +12643,119 @@ class LoRATrainerGUI:
                     family, f"failed: {type(e).__name__}: {e}"))
             self.master.after(0, lambda: self._on_fetch_done(family, ok))
 
+        self._open_fetch_progress_window(family)
         threading.Thread(target=worker, daemon=True).start()
         if status:
-            status.config(text="starting…", fg=COLORS["text_secondary"])
+            status.config(text="downloading…", fg=COLORS["text_secondary"])
+
+    def _open_fetch_progress_window(self, family):
+        """Unmissable progress for a multi-GB download.
+
+        A status label beside the button was the only feedback, and hf_hub_download's own
+        progress never reached it (tqdm redraws with carriage returns, so a line-reader sees
+        nothing until the transfer ends). The result was an app that looked frozen for ten
+        minutes and then popped up 'done'."""
+        win = tk.Toplevel(self.master)
+        self._fetch_win = win
+        win.title("Downloading models")
+        win.configure(bg=BG_COLOR)
+        win.transient(self.master)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)   # closing must go through Cancel
+        win.resizable(False, False)
+
+        tk.Label(win, text="Downloading models", font=(FONT_FAMILY, 12, "bold"),
+                 fg=COLORS["text_primary"], bg=BG_COLOR).pack(anchor=tk.W, padx=18, pady=(16, 2))
+        self._fetch_file_lbl = tk.Label(win, text="starting…", font=(FONT_FAMILY, 10),
+                                        fg=COLORS["text_secondary"], bg=BG_COLOR,
+                                        wraplength=460, justify=tk.LEFT, anchor="w")
+        self._fetch_file_lbl.pack(anchor=tk.W, padx=18, pady=(0, 8), fill=tk.X)
+
+        self._fetch_bar = ttk.Progressbar(win, length=460, mode="indeterminate")
+        self._fetch_bar.pack(padx=18)
+        self._fetch_bar.start(12)
+        self._fetch_bar_mode = "indeterminate"
+
+        self._fetch_bytes_lbl = tk.Label(win, text="", font=(FONT_FAMILY, 9),
+                                         fg=COLORS["text_muted"], bg=BG_COLOR, anchor="w")
+        self._fetch_bytes_lbl.pack(anchor=tk.W, padx=18, pady=(6, 0), fill=tk.X)
+        tk.Label(win, text="You can leave this running and keep using other tabs. Interrupted "
+                           "downloads resume where they left off.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 wraplength=460, justify=tk.LEFT).pack(anchor=tk.W, padx=18, pady=(8, 0))
+
+        row = ttk.Frame(win)
+        row.pack(pady=(12, 14))
+        ttk.Button(row, text="Cancel", command=self._cancel_fetch_models).pack()
+        win.update_idletasks()
+
+    def _cancel_fetch_models(self):
+        """Stop the download. Safe: partial files are resumable, prefs are only written on success."""
+        p = getattr(self, "_fetch_proc", None)
+        if p is not None and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        if getattr(self, "_fetch_file_lbl", None) is not None:
+            try:
+                self._fetch_file_lbl.config(text="cancelling…")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _fmt_gb(n):
+        return f"{n / 1024 ** 3:.2f} GB"
 
     def _on_fetch_progress(self, family, line):
+        stripped = line.strip()
+        if stripped.startswith("[progress]"):
+            try:
+                _tag, done, total, name = stripped.split(None, 3)
+                done, total = int(done), int(total)
+            except (ValueError, IndexError):
+                return
+            bar = getattr(self, "_fetch_bar", None)
+            if bar is not None and bar.winfo_exists():
+                if total > 0:
+                    if self._fetch_bar_mode != "determinate":
+                        bar.stop()
+                        bar.config(mode="determinate", maximum=100)
+                        self._fetch_bar_mode = "determinate"
+                    bar["value"] = max(0, min(100, done * 100 / total))
+                self._fetch_file_lbl.config(text=name)
+                self._fetch_bytes_lbl.config(
+                    text=f"{self._fmt_gb(done)} of {self._fmt_gb(total)}"
+                         f"   ({done * 100 // total if total else 0}%)")
+            return
+
+        # Non-progress lines: the [get]/[ok]/[keep]/[gated] narration.
         status = getattr(self, f"_fetch_status_{family}", None)
         if status:
-            status.config(text=line[:110])
+            status.config(text=stripped[:110])
+        lbl = getattr(self, "_fetch_file_lbl", None)
+        if lbl is not None and lbl.winfo_exists() and stripped:
+            lbl.config(text=stripped)
+            bar = getattr(self, "_fetch_bar", None)
+            # A new item that isn't a download (a cache warm, a skip) — back to the pulsing bar
+            # rather than leaving the previous file's percentage sitting there looking stalled.
+            if bar is not None and bar.winfo_exists() and self._fetch_bar_mode == "determinate" \
+                    and not stripped.startswith("[progress]"):
+                bar.config(mode="indeterminate")
+                bar.start(12)
+                self._fetch_bar_mode = "indeterminate"
+                self._fetch_bytes_lbl.config(text="")
         self.update_console(f"[models] {line}\n")
 
     def _on_fetch_done(self, family, ok):
         self._fetch_running = False
+        self._fetch_proc = None
+        win = getattr(self, "_fetch_win", None)
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._fetch_win = None
         btn = getattr(self, f"_fetch_btn_{family}", None)
         if btn:
             btn.config(state="normal")

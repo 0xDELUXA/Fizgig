@@ -6193,7 +6193,9 @@ class LoRATrainerGUI:
         """Background worker: load Qwen3, walk folder, translate each .txt, write back."""
         self._translating = True
         import glob
-        files = sorted(glob.glob(os.path.join(folder, "*.txt")))
+        # glob.escape: a dataset folder containing [brackets] is a glob character class,
+        # so an unescaped pattern silently matches nothing.
+        files = sorted(glob.glob(os.path.join(glob.escape(folder), "*.txt")))
         if not files:
             self.master.after(0, lambda: self.update_caption_log(f"No .txt files in {folder}\n"))
             return
@@ -6582,7 +6584,7 @@ class LoRATrainerGUI:
             return []
 
         results = []
-        txt_files = glob.glob(os.path.join(folder, "*.txt"))
+        txt_files = glob.glob(os.path.join(glob.escape(folder), "*.txt"))
 
         # Compile case-insensitive pattern
         pattern = re.compile(re.escape(find_text), re.IGNORECASE)
@@ -9815,7 +9817,7 @@ class LoRATrainerGUI:
     def _get_next_facecrop_index(self, folder):
         """Find next available FaceCrop_NNN index in a folder."""
         import glob as glob_module
-        existing = glob_module.glob(os.path.join(folder, "FaceCrop_*.png"))
+        existing = glob_module.glob(os.path.join(glob_module.escape(folder), "FaceCrop_*.png"))
         max_idx = 0
         for f in existing:
             basename = os.path.splitext(os.path.basename(f))[0]
@@ -12278,12 +12280,17 @@ class LoRATrainerGUI:
         )
         kr = self._add_pref_row(
             krea_card, kr, "Qwen3-VL TE:", "krea2_text_encoder",
-            "Qwen3-VL-4B text encoder — bf16 (8.9 GB) or fp8_scaled (5.2 GB). Both carry the full "
-            "bf16 vision tower, so reference images and captioning work either way; fp8 only "
-            "quantises the language layers",
-            download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors",
-            download_note="~8.9GB bf16 (best quality) — or qwen3vl_4b_fp8_scaled.safetensors (~5.2GB) "
-                          "from the same text_encoders folder to save VRAM",
+            "Qwen3-VL-4B text encoder. fp8_scaled is recommended: it quantises only the language "
+            "layers and ships the same full bf16 vision tower, so reference images and AI "
+            "captioning are unaffected — measured 4.9 GB resident vs 8.3 GB, for captions we "
+            "could not tell apart",
+            download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors",
+            download_label="Download fp8 (recommended)",
+            download_note="~5.2GB fp8_scaled — 3.4 GB less VRAM than bf16, virtually identical output",
+            download_url2="https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors",
+            download_label2="bf16",
+            download_note2="~8.9GB bf16 — the full-precision original, if you would rather not "
+                           "quantise at all",
         )
         kr = self._add_pref_row(
             krea_card, kr, "Turbo LoRA (rank 64):", "krea2_turbo_lora",
@@ -17987,7 +17994,10 @@ class LoRATrainerGUI:
         caption_ext = self.dataset_caption_ext_var.get().strip()
         if image_dir and os.path.isdir(image_dir) and caption_ext:
             import glob as _glob
-            caption_files = _glob.glob(os.path.join(image_dir, "*" + caption_ext))
+            # glob.escape is load-bearing here: a folder like "[subject] photos" made this
+            # find zero captions and block training with "No caption files found", while the
+            # Captions tab (os.listdir) read and wrote that same folder perfectly happily.
+            caption_files = _glob.glob(os.path.join(_glob.escape(image_dir), "*" + caption_ext))
             if not caption_files:
                 errors.append(
                     f"No caption files (*{caption_ext}) found in {image_dir}. "

@@ -69,6 +69,12 @@ ck("Florence selected -> task tokens back",
 ck("  Edit instructions button hidden", not g.caption_edit_instr_btn.winfo_manager())
 
 # --- 3. instruction resolution -----------------------------------------------------------
+# Isolate from the real prefs.json. FIZGIG_NO_PERSIST stops the GUI WRITING prefs, but it still
+# READS them at startup — so a developer who has edited these presets in the app would see this
+# section fail against their own instructions rather than the shipped ones.
+g.prefs.pop("caption_qwen_instructions", None)
+g.prefs.pop("caption_qwen_instruction", None)
+
 g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
 g._on_caption_model_changed()
 for key, (label, instr, tok) in CAPTION_TASKS.items():

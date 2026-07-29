@@ -1453,6 +1453,10 @@ class LoRATrainerGUI:
                     data[_key] = _v.get()
                 except Exception:
                     pass
+        # Per-model task memory. The flat "caption_task" above is still written so an older
+        # build (or a downgrade) finds something sensible rather than nothing.
+        if getattr(self, "_caption_task_memory", None):
+            data["caption_tasks"] = dict(self._caption_task_memory)
         data.update({
             "prep_mode": self.prep_mode_var.get(),
             "prep_replace_originals": bool(self.delete_originals_var.get()),
@@ -2394,7 +2398,7 @@ class LoRATrainerGUI:
         steps = [
             ("1", "Start",      "Choose your training image folder below.",                     False),
             ("2", "Image Prep", "Resize, convert to PNG, or face-crop.",                        True),   # optional
-            ("3", "Captions",   "Write trigger-word captions or generate with Florence AI.",    False),
+            ("3", "Captions",   "Write trigger-word captions or generate them with AI.",        False),
             ("4", "Samples",    "Configure in-training preview prompts.",                       False),
             ("5", "Training",   "Pick a preset, tune settings, click Start Training.",          False),
         ]
@@ -5305,15 +5309,18 @@ class LoRATrainerGUI:
         self._add_tab_banner(
             outer,
             "Captions",
-            "Write trigger-word captions or generate them with Florence-2 AI. "
+            "Write trigger-word captions or generate them with AI. "
             "Skip this tab if your images already have .txt caption files.",
         )
 
         # Card 1: Captioning Settings
         settings_card = self._start_section_card(
             outer, "Captioning Settings",
-            "Trigger word is prepended to every caption. Florence produces detailed image descriptions; "
-            "Static Caption writes the trigger word only.",
+            "Trigger word is prepended to every caption. Qwen3-VL follows a captioning instruction "
+            "you can read and edit, and is the better fit for training data — it needs the Krea 2 "
+            "text encoder set in Preferences, and captions any dataset, Klein included. Florence-2 "
+            "is smaller and downloads itself on first use. Static Caption writes the trigger word "
+            "only.",
         )
         settings_card.grid_columnconfigure(1, weight=1)
 
@@ -5338,9 +5345,10 @@ class LoRATrainerGUI:
         )
 
         ttk.Label(settings_card, text="Model:").grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.caption_model_var = tk.StringVar(
-            value=self.last_used.get("caption_model",
-                                     self.settings.get("CAPTION_MODEL", FLORENCE_DEFAULT_MODEL)))
+        # Populated properly by _restore_caption_selection() once both vars exist.
+        self.caption_model_var = tk.StringVar(value=self._initial_caption_model())
+        self._caption_task_memory = {}
+        self._caption_model_last = None
         self.caption_model_combo = ttk.Combobox(
             settings_card, textvariable=self.caption_model_var,
             values=self._caption_model_values(), state="readonly", width=37,
@@ -5358,9 +5366,7 @@ class LoRATrainerGUI:
             pass
 
         ttk.Label(settings_card, text="Task:").grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.caption_task_var = tk.StringVar(
-            value=self.last_used.get("caption_task",
-                                     self.settings.get("CAPTION_TASK", "<DETAILED_CAPTION>")))
+        self.caption_task_var = tk.StringVar(value="<DETAILED_CAPTION>")
         _task_row = tk.Frame(settings_card, bg=COLORS["bg_surface"])
         _task_row.grid(row=4, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.caption_task_combo = ttk.Combobox(
@@ -5384,6 +5390,9 @@ class LoRATrainerGUI:
             value=str(self.last_used.get("caption_max_tokens",
                                          self.settings.get("CAPTION_MAX_TOKENS", 256))))
         ttk.Entry(settings_card, textvariable=self.caption_max_tokens_var, width=10).grid(row=5, column=1, sticky=tk.W, pady=4)
+        # Without this the value only reached disk when some OTHER control happened to trigger a
+        # save, so a hand-typed budget was usually lost on restart.
+        self.caption_max_tokens_var.trace_add("write", lambda *_: self._save_last_used_paths())
 
         ttk.Checkbutton(
             settings_card, text="Overwrite existing caption files", variable=self.overwrite_captions_var,
@@ -5484,8 +5493,8 @@ class LoRATrainerGUI:
         )
         self.caption_log.pack(fill=tk.BOTH, expand=True)
 
-        # Sync the task list / editor button to the restored model choice.
-        self._on_caption_model_changed()
+        # Apply the saved model + per-model task, then sync the task list / editor button.
+        self._restore_caption_selection()
 
         self._add_youtube_help_button(outer, "captions")
 
@@ -5710,6 +5719,24 @@ class LoRATrainerGUI:
         .txt like Florence does, so it serves Klein datasets just as well as Krea 2 ones."""
         return FLORENCE_MODELS + ([QWEN_CAPTION_MODEL] if self._qwen_captioner_path() else [])
 
+    def _default_caption_model(self) -> str:
+        """What to select when there is no usable saved choice.
+
+        Qwen3-VL wherever its file exists: it follows an editable instruction written to the
+        captioning doctrine, so it produces better training data than Florence out of the box.
+        Florence is the fallback for anyone without that file."""
+        return QWEN_CAPTION_MODEL if self._qwen_captioner_path() else FLORENCE_DEFAULT_MODEL
+
+    def _initial_caption_model(self) -> str:
+        """Startup selection: the saved choice if it is still offered, else the default.
+
+        Validating against the live values list is what stops a saved 'Qwen3-VL …' from being
+        displayed after its file has been deleted — the combobox would otherwise show a value
+        absent from its own options, since _refresh_caption_model_values only runs from the
+        Preferences write-trace and never at startup."""
+        saved = str(self.last_used.get("caption_model", "") or "").strip()
+        return saved if saved in self._caption_model_values() else self._default_caption_model()
+
     def _refresh_caption_model_values(self):
         """Re-read the Preferences path and rebuild the dropdown (bound to that pref's trace)."""
         if not hasattr(self, "caption_model_combo"):
@@ -5725,6 +5752,28 @@ class LoRATrainerGUI:
         except tk.TclError:
             pass
 
+    def _restore_caption_selection(self):
+        """Apply the saved caption model and its remembered task to the live vars.
+
+        Each captioner remembers its OWN task: their task lists have nothing in common (Florence
+        takes task tokens, Qwen an instruction preset), so a single shared value meant flipping
+        models threw away whichever task you had picked. Same snapshot-on-leave /
+        restore-on-return shape as the Training tab's per-family memory.
+
+        Called at startup and by the tests, so both exercise the identical path."""
+        self._caption_task_memory = dict(self.last_used.get("caption_tasks", {}) or {})
+        model = self._initial_caption_model()
+        # Upgrade path: the old flat caption_task belongs to whichever model is selected now.
+        legacy = str(self.last_used.get("caption_task", "") or "").strip()
+        if legacy and model not in self._caption_task_memory:
+            self._caption_task_memory[model] = legacy
+        self._caption_model_last = model
+        self.caption_model_var.set(model)
+        remembered = self._caption_task_memory.get(model)
+        if remembered:
+            self.caption_task_var.set(remembered)
+        self._on_caption_model_changed()
+
     def _is_qwen_captioner(self) -> bool:
         return self.caption_model_var.get() == QWEN_CAPTION_MODEL
 
@@ -5734,19 +5783,34 @@ class LoRATrainerGUI:
 
     def _on_caption_model_changed(self):
         """Swap the Task dropdown between Florence's task tokens and Qwen3-VL's instruction menu,
-        and show the instruction editor only for the model that has one."""
+        restore that model's remembered task, and show the instruction editor only for the model
+        that has one."""
         try:
+            new_model = self.caption_model_var.get()
+            prev_model = getattr(self, "_caption_model_last", None)
+            model_changed = bool(prev_model) and prev_model != new_model
+            if model_changed:
+                # Snapshot the model we're leaving before its task list is replaced.
+                self._caption_task_memory[prev_model] = self.caption_task_var.get()
+            self._caption_model_last = new_model
+
             if self._is_qwen_captioner():
                 from fizgig.krea2.embedder import CAPTION_TASKS, DEFAULT_CAPTION_TASK
                 labels = self._qwen_task_labels()
-                self.caption_task_combo.configure(values=labels)
-                if self.caption_task_var.get() not in labels:
-                    self.caption_task_var.set(CAPTION_TASKS[DEFAULT_CAPTION_TASK][0])
+                default_task = CAPTION_TASKS[DEFAULT_CAPTION_TASK][0]
+            else:
+                labels = list(FLORENCE_TASKS)
+                default_task = "<DETAILED_CAPTION>"
+            self.caption_task_combo.configure(values=labels)
+            remembered = self._caption_task_memory.get(new_model)
+            # On a real model change ALWAYS prefer this model's remembered task. Only correcting
+            # an out-of-range value would restore it merely by luck — it works today because the
+            # two task lists share nothing, and would quietly stop working the moment they did.
+            if model_changed or self.caption_task_var.get() not in labels:
+                self.caption_task_var.set(remembered if remembered in labels else default_task)
+            if self._is_qwen_captioner():
                 self.caption_edit_instr_btn.pack(side=tk.LEFT, padx=(8, 0))
             else:
-                self.caption_task_combo.configure(values=FLORENCE_TASKS)
-                if self.caption_task_var.get() not in FLORENCE_TASKS:
-                    self.caption_task_var.set("<DETAILED_CAPTION>")
                 self.caption_edit_instr_btn.pack_forget()
             self._on_caption_task_changed()
         except (tk.TclError, AttributeError):
@@ -5756,7 +5820,14 @@ class LoRATrainerGUI:
     def _on_caption_task_changed(self):
         """Seed Max Tokens from the task's suggested length, so each Qwen task gets a sensible
         budget without a second control. Florence keeps whatever is in the box."""
+        # Record against the current model whether or not it's Qwen, so the memory is right even
+        # when the task changes without a model switch.
+        try:
+            self._caption_task_memory[self.caption_model_var.get()] = self.caption_task_var.get()
+        except (tk.TclError, AttributeError):
+            pass
         if not self._is_qwen_captioner():
+            self._save_last_used_paths()
             return
         try:
             from fizgig.krea2.embedder import CAPTION_TASKS

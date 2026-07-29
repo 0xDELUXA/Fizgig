@@ -206,6 +206,72 @@ g.florence_model = None
 g.unload_florence_model(silent=True)
 ck("  Unload Model button frees Qwen too", g.qwen_captioner is None)
 
+# --- 7c. default model + per-model task memory --------------------------------------------
+def _boot(last_used, te=True):
+    """A fresh GUI with a given last_used, restored through the same path startup uses."""
+    _r = tk.Tk()
+    _r.withdraw()
+    _g = G.LoRATrainerGUI(_r)
+    _g.prefs_vars["krea2_text_encoder"].set(FAKE_TE if te else "")
+    _g.last_used = dict(last_used)
+    _g._restore_caption_selection()
+    return _r, _g
+
+
+_TRAIN = CAPTION_TASKS["training"][0]
+_EXHV = CAPTION_TASKS["exhaustive"][0]
+
+_r, _g = _boot({})
+ck("default: no saved choice + TE present -> Qwen3-VL, its default task",
+   _g.caption_model_var.get() == G.QWEN_CAPTION_MODEL and _g.caption_task_var.get() == _TRAIN,
+   (_g.caption_model_var.get(), _g.caption_task_var.get()))
+_r.destroy()
+
+_r, _g = _boot({}, te=False)
+ck("  no text encoder -> Florence", _g.caption_model_var.get() == G.FLORENCE_DEFAULT_MODEL)
+_r.destroy()
+
+_r, _g = _boot({"caption_model": G.FLORENCE_DEFAULT_MODEL})
+ck("  an explicit saved Florence beats the Qwen default",
+   _g.caption_model_var.get() == G.FLORENCE_DEFAULT_MODEL)
+_r.destroy()
+
+_r, _g = _boot({"caption_model": G.QWEN_CAPTION_MODEL}, te=False)
+ck("  saved Qwen whose file is gone falls back to Florence",
+   _g.caption_model_var.get() == G.FLORENCE_DEFAULT_MODEL
+   and _g.caption_model_var.get() in list(_g.caption_model_combo.cget("values")))
+_r.destroy()
+
+_r, _g = _boot({"caption_model": G.QWEN_CAPTION_MODEL, "caption_task": _EXHV})
+ck("  legacy flat caption_task migrates onto the selected model",
+   _g.caption_task_var.get() == _EXHV, _g.caption_task_var.get())
+
+_g.caption_model_var.set(G.FLORENCE_DEFAULT_MODEL)
+_g._on_caption_model_changed()
+ck("per-model memory: Florence's first visit uses its own default",
+   _g.caption_task_var.get() == "<DETAILED_CAPTION>")
+_g.caption_task_var.set("<CAPTION>")
+_g._on_caption_task_changed()
+_g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
+_g._on_caption_model_changed()
+ck("  switching back restores the Qwen task", _g.caption_task_var.get() == _EXHV,
+   _g.caption_task_var.get())
+_g.caption_model_var.set(G.FLORENCE_DEFAULT_MODEL)
+_g._on_caption_model_changed()
+ck("  and the Florence task", _g.caption_task_var.get() == "<CAPTION>", _g.caption_task_var.get())
+_mem = dict(_g._caption_task_memory)
+_r.destroy()
+
+_r, _g = _boot({"caption_model": G.FLORENCE_DEFAULT_MODEL, "caption_tasks": _mem})
+ck("  survives a restart: model + its task",
+   _g.caption_model_var.get() == G.FLORENCE_DEFAULT_MODEL
+   and _g.caption_task_var.get() == "<CAPTION>")
+_g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
+_g._on_caption_model_changed()
+ck("  survives a restart: the other model's task too", _g.caption_task_var.get() == _EXHV,
+   _g.caption_task_var.get())
+_r.destroy()
+
 # --- 8. persistence ----------------------------------------------------------------------
 g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
 g.caption_task_var.set(CAPTION_TASKS["exhaustive"][0])

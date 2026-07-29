@@ -2079,21 +2079,27 @@ class LoRATrainerGUI:
             bordercolor=[("focus", COLORS["border_focus"])]
         )
 
-        # Scrollbar
-        style.configure(
-            "Vertical.TScrollbar",
-            background=COLORS["bg_header"],
-            troughcolor=COLORS["bg_deep"],
-            bordercolor=COLORS["border"],
-            arrowcolor=COLORS["text_secondary"],
-            darkcolor=COLORS["bg_deep"],
-            lightcolor=COLORS["bg_deep"],
-            width=12
-        )
-        style.map(
-            "Vertical.TScrollbar",
-            background=[("active", COLORS["border"]), ("pressed", COLORS["border"])]
-        )
+        # Scrollbar. `background` is the thumb — the part you drag — and it used to be bg_header
+        # on a bg_deep trough, which is 1.06:1. Not "subtle": indistinguishable from the track,
+        # so on a tall tab there was no visible clue that the panel scrolled at all. It now uses
+        # the same accent blue as the selected tab, brightening on hover, so the one control
+        # that tells you there is more content below actually looks like a control.
+        for _orient in ("Vertical", "Horizontal"):
+            style.configure(
+                f"{_orient}.TScrollbar",
+                background=COLORS["accent"],
+                troughcolor=COLORS["bg_deep"],
+                bordercolor=COLORS["border"],
+                arrowcolor=COLORS["text_primary"],
+                darkcolor=COLORS["bg_deep"],
+                lightcolor=COLORS["bg_deep"],
+                width=12
+            )
+            style.map(
+                f"{_orient}.TScrollbar",
+                background=[("active", COLORS["accent_hover"]),
+                            ("pressed", COLORS["accent_hover"])]
+            )
 
         # LabelFrame
         style.configure("TLabelframe",

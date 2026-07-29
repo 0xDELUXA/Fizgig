@@ -76,11 +76,11 @@ COLORS = {
     "border": "#3A4555",         # Borders, dividers
     "border_focus": "#3B82F6",   # Focus rings
 
-    # Scrollbar thumb. Warm rather than another blue: the accent blue already means "selected
-    # tab" and "link", and a scrollbar is furniture, not an action. 4.68:1 against the trough —
-    # unmistakably there without shouting.
-    "scrollbar_thumb": "#C97B3C",
-    "scrollbar_thumb_hover": "#E09A5C",
+    # Scrollbar thumb — the accent blue, matching the selected tab. Named entries rather than
+    # pointing straight at "accent" so this stays tunable without dragging tabs and links along
+    # with it. 4.19:1 against the trough, up from the 1.06:1 it used to be.
+    "scrollbar_thumb": "#3B82F6",
+    "scrollbar_thumb_hover": "#60A5FA",
 
     "success": "#10B981",        # Success states
     "warning": "#F59E0B",        # Warnings
@@ -2089,10 +2089,8 @@ class LoRATrainerGUI:
         # on a bg_deep trough, which is 1.06:1. Not "subtle": indistinguishable from the track,
         # so on a tall tab there was no visible clue that the panel scrolled at all.
         #
-        # Warm amber rather than the accent blue: at full saturation the blue read as stark, and
-        # it also competes with the selected tab and the link colours, which are genuinely
-        # actionable. Warm keeps the thumb legible without pulling the eye the way a second blue
-        # did, and it sits with the workshop palette in the logo.
+        # The accent blue, same as the selected tab. Colour lives in COLORS as its own entry so
+        # the scrollbar can be retuned without touching what "accent" means everywhere else.
         for _orient in ("Vertical", "Horizontal"):
             style.configure(
                 f"{_orient}.TScrollbar",

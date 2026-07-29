@@ -54,8 +54,58 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       xvfb x11vnc openbox novnc websockify x11-utils wmctrl \
       libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
       fonts-dejavu-core fonts-liberation fontconfig unzip \
-      xdg-utils \
+      xdg-utils pcmanfm dbus-x11 \
     && rm -rf /var/lib/apt/lists/*
+# pcmanfm is what makes the "Open folder" buttons work: _open_in_file_manager shells out to
+# xdg-open, which needs something to hand the folder to.
+#
+# dbus-x11 is not optional decoration. Firefox hands a URL to an already-running instance over the
+# session bus; with no bus, the second webbrowser.open() of a session starts a SECOND firefox,
+# hits the profile lock, and puts up a "Close Firefox" error instead of the page. The first link
+# you click works and every one after it fails — which is exactly the kind of bug that looks like
+# it works when you only test it once.
+
+# A browser, because without one every "Get help on YouTube", "Buy me a coffee" and Download link
+# in Fizgig calls webbrowser.open() into the void — the button depresses and nothing happens, with
+# no error. It also fixes the things that are NOT external links and could never be worked around
+# client-side: the samples gallery serves on 127.0.0.1 inside this container (likeness scoring and
+# the Run Visualiser live there), and the Profiler and Repair Studio open local HTML reports.
+#
+# NOT `apt-get install firefox`: on Ubuntu 22.04 that is a snap transition stub, and snaps need
+# systemd so they cannot run in a container. It would build cleanly and fail silently at runtime —
+# precisely the bug being fixed here. Same for chromium-browser. Mozilla publishes a real .deb
+# repo for this, and the APT pin is load-bearing: without it Ubuntu's stub outranks the Mozilla
+# package and the snap wins anyway.
+RUN install -d -m 0755 /etc/apt/keyrings \
+    && curl -fsSL https://packages.mozilla.org/apt/repo-signing-key.gpg \
+         -o /etc/apt/keyrings/packages.mozilla.org.asc \
+    && echo "deb [signed-by=/etc/apt/keyrings/packages.mozilla.org.asc] https://packages.mozilla.org/apt mozilla main" \
+         > /etc/apt/sources.list.d/mozilla.list \
+    && printf 'Package: *\nPin: origin packages.mozilla.org\nPin-Priority: 1000\n' \
+         > /etc/apt/preferences.d/mozilla \
+    && apt-get update && apt-get install -y --no-install-recommends firefox \
+    && rm -rf /var/lib/apt/lists/* \
+    && firefox --version
+# Firefox runs as root here (the container has no other user) and its content sandbox objects to
+# that; disabling it is safe in a single-user throwaway container and is the difference between
+# the browser opening and silently dying.
+ENV MOZ_DISABLE_CONTENT_SANDBOX=1
+
+# Getting datasets in and LoRAs out — the two things that make a rented pod usable at all.
+#
+# runpodctl is RunPod's own transfer CLI (one-time codes, no ports to open, no SSH keys). It ships
+# preinstalled on RunPod's base images but NOT on a custom one like this, so users would otherwise
+# lose the transfer method the RunPod docs tell them to use.
+#
+# filebrowser is the GUI answer, and the one that matters for Fizgig's audience: a browser tab you
+# drag a dataset folder into and download finished LoRAs from. Everything else on offer — runpodctl,
+# scp, rsync — is a terminal, and the entire point of this image is that people get a GUI instead.
+RUN curl -fsSL https://github.com/runpod/runpodctl/releases/latest/download/runpodctl-linux-amd64 \
+      -o /usr/local/bin/runpodctl \
+    && chmod +x /usr/local/bin/runpodctl \
+    && runpodctl version \
+    && curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash \
+    && filebrowser version
 
 # Fizgig's whole layout is measured in Segoe UI, which does not exist on Linux — Tk silently
 # substitutes DejaVu Sans, which renders the same string ~20% wider (321px vs 268px measured).
@@ -101,6 +151,6 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # noVNC over HTTP — the only port that needs exposing. 5900 stays internal on purpose: raw VNC
 # is unencrypted, and the host's HTTPS proxy is what makes this safe to reach over the internet.
-EXPOSE 6080
+EXPOSE 6080 8080
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

@@ -96,6 +96,23 @@ log "Starting virtual display ($SCREEN)"
 Xvfb :1 -screen 0 "$SCREEN" -nolisten tcp &
 for _ in $(seq 1 50); do xdpyinfo -display :1 >/dev/null 2>&1 && break; sleep 0.2; done
 
+# Session bus, started before anything that might open a link. Firefox passes a URL to an
+# already-running instance over this bus; without it the second link you click in a session
+# starts a second firefox, hits the profile lock, and shows "Close Firefox" instead of the page.
+# Exported here so Fizgig and everything it spawns inherits it — the GUI is exec'd below and its
+# children are what actually call webbrowser.open().
+# Deliberately non-fatal: set -e is on, and a bus that fails to start must not take the whole
+# container down with it. Without the bus you lose the second-and-later link click, which is a
+# nuisance; a container that will not boot is not.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    if eval "$(dbus-launch --sh-syntax 2>/dev/null)" 2>/dev/null; then
+        export DBUS_SESSION_BUS_ADDRESS
+        log "session bus up"
+    else
+        log "WARN: no session bus — links may only open once per session"
+    fi
+fi
+
 # Tkinter draws Toplevels without decoration and mishandles focus if nothing is managing the
 # screen — Fizgig leans on dialogs (Repair Studio pop-out, the token prompt, Problem Images),
 # so a window manager is required, not cosmetic.
@@ -104,6 +121,22 @@ x11vnc -display :1 -forever -shared -rfbauth /root/.vnc/passwd -rfbport 5900 -qu
 
 log "Serving noVNC on :6080"
 websockify --web=/usr/share/novnc 6080 localhost:5900 &
+
+# Drag-and-drop file transfer on its own port: datasets in, trained LoRAs out, no terminal.
+# Shares VNC_PASSWORD rather than inventing a second credential — it exposes the same /workspace
+# the desktop already does, so a separate password would be security theatre, and one fewer
+# thing to lose. Non-fatal: file transfer failing must not stop training.
+if command -v filebrowser >/dev/null 2>&1; then
+    filebrowser config init --database /workspace/.filebrowser.db >/dev/null 2>&1 || true
+    filebrowser config set --database /workspace/.filebrowser.db \
+        --address 0.0.0.0 --port 8080 --root /workspace >/dev/null 2>&1 || true
+    filebrowser users add admin "$VNC_PASSWORD" --database /workspace/.filebrowser.db \
+        --perm.admin >/dev/null 2>&1 \
+      || filebrowser users update admin --password "$VNC_PASSWORD" \
+           --database /workspace/.filebrowser.db >/dev/null 2>&1 || true
+    filebrowser --database /workspace/.filebrowser.db >/dev/null 2>&1 &
+    log "File manager on :8080 (user 'admin', same password as VNC)"
+fi
 
 cat <<EOF
 [fizgig] ------------------------------------------------------------

@@ -18770,10 +18770,14 @@ class LoRATrainerGUI:
         if config.get("is_krea2"):
             return self._build_krea2_train_command()
         arch = self.settings["ARCHITECTURE"]
-        if os.name == 'nt':
-            accelerate_path = os.path.join(FIZGIG_DIR, "venv", "Scripts", "accelerate.exe")
-        else:
-            accelerate_path = os.path.join(FIZGIG_DIR, "venv", "bin", "accelerate")
+        # Same reasoning as _venv_python: fall back to whatever is on PATH when the bundled venv
+        # is not a sibling of the repo, rather than pointing at a file that is not there.
+        accelerate_path = (os.path.join(FIZGIG_DIR, "venv", "Scripts", "accelerate.exe")
+                           if os.name == 'nt'
+                           else os.path.join(FIZGIG_DIR, "venv", "bin", "accelerate"))
+        if not os.path.isfile(accelerate_path):
+            import shutil as _shutil
+            accelerate_path = _shutil.which("accelerate") or accelerate_path
         train_script_path = self._resolve_script(config, "train_script")
 
         # Auto-detect mixed precision from DiT model filename
@@ -19087,10 +19091,7 @@ class LoRATrainerGUI:
             return self._build_krea2_cache_command("krea2_cache_latents.py",
                                                    "--vae", self._krea2_pref("krea2_vae"))
         arch = self.settings["ARCHITECTURE"]
-        if os.name == 'nt':
-            python_path = os.path.join(FIZGIG_DIR, "venv", "Scripts", "python.exe")
-        else:
-            python_path = os.path.join(FIZGIG_DIR, "venv", "bin", "python")
+        python_path = self._venv_python()
         cache_script_path = self._resolve_script(config, "cache_latents_script")
 
         command = [
@@ -19116,10 +19117,7 @@ class LoRATrainerGUI:
             return self._build_krea2_cache_command("krea2_cache_text.py",
                                                    "--text_encoder", self._krea2_pref("krea2_text_encoder"))
         arch = self.settings["ARCHITECTURE"]
-        if os.name == 'nt':
-            python_path = os.path.join(FIZGIG_DIR, "venv", "Scripts", "python.exe")
-        else:
-            python_path = os.path.join(FIZGIG_DIR, "venv", "bin", "python")
+        python_path = self._venv_python()
         cache_script_path = self._resolve_script(config, "cache_text_script")
 
         command = [
@@ -19149,10 +19147,17 @@ class LoRATrainerGUI:
     # === Krea 2 native command builders ===
 
     def _venv_python(self) -> str:
-        """Absolute path to the bundled venv python."""
-        if os.name == 'nt':
-            return os.path.join(FIZGIG_DIR, "venv", "Scripts", "python.exe")
-        return os.path.join(FIZGIG_DIR, "venv", "bin", "python")
+        """Python to launch training/caching subprocesses with.
+
+        The bundled venv when it exists, otherwise whatever interpreter is running us. Without
+        the fallback, any install where the venv is not a sibling of the repo — conda, a system
+        install, the Docker image (venv lives at /opt/venv) — builds a command pointing at a
+        file that is not there. The subprocess then fails to launch and the run dies silently
+        right after "starting cache preparation", with nothing in the console to say why.
+        """
+        candidate = (os.path.join(FIZGIG_DIR, "venv", "Scripts", "python.exe") if os.name == 'nt'
+                     else os.path.join(FIZGIG_DIR, "venv", "bin", "python"))
+        return candidate if os.path.isfile(candidate) else sys.executable
 
     def _krea2_pref(self, key: str) -> str:
         """Read a Krea 2 model path from Preferences (krea2_raw_dit / krea2_turbo_dit / krea2_vae / krea2_text_encoder)."""

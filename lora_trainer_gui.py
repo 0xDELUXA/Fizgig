@@ -59,8 +59,15 @@ COLORS = {
     "bg_header": "#1A2028",      # Collapsible section headers
 
     "text_primary": "#F0F4F8",   # Main text
-    "text_secondary": "#8A9BAE", # Labels, hints
-    "text_muted": "#5A6B7E",     # Disabled, placeholders
+    "text_secondary": "#8A9BAE", # Labels
+    # Explanatory prose — card descriptions, row hints, fine print. Its own tier because the
+    # muted grey below reads at 2.54:1 on a card, which fails WCAG even for large text, and this
+    # is the copy that actually explains the app. 8.64:1, still a step down from text_primary so
+    # a card title stays visibly louder than its explanation.
+    "text_explain": "#C3CDD9",
+    # Genuinely de-emphasised UI only: disabled controls, placeholders, and the one-word captions
+    # beside widgets ("seed", "W", "H"). NOT for prose — that is text_explain above.
+    "text_muted": "#5A6B7E",
 
     "accent": "#3B82F6",         # Primary actions, links
     "accent_hover": "#60A5FA",   # Accent hover
@@ -2150,9 +2157,12 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 22, "bold"),
                  fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(anchor=tk.W)
         if subtitle:
+            # Colour only — 11pt is already comfortable, and this passed contrast before. Moved
+            # onto text_explain so every piece of explanatory copy is one colour, rather than the
+            # subtitle being a shade apart from the card descriptions directly beneath it.
             tk.Label(banner, text=subtitle,
                      font=(FONT_FAMILY, 11),
-                     fg=COLORS["text_secondary"], bg=COLORS["bg_deep"],
+                     fg=COLORS["text_explain"], bg=COLORS["bg_deep"],
                      wraplength=1050, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
         return banner
 
@@ -2239,7 +2249,7 @@ class LoRATrainerGUI:
 
         heading("Fizgig", 22)
         tk.Label(pad, text="Klein 9B & Krea 2 LoRA Studio — by Peter Neill",
-                 font=(FONT_FAMILY, 11), fg=COLORS["text_secondary"],
+                 font=(FONT_FAMILY, 11), fg=COLORS["text_explain"],
                  bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 14))
 
         para("By trade I'm a photographer and videographer — mostly live music, portraits, and a "
@@ -2301,8 +2311,8 @@ class LoRATrainerGUI:
             )
         if description:
             tk.Label(card, text=description,
-                     font=(FONT_FAMILY, 9),
-                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                     font=(FONT_FAMILY, 10),
+                     fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                      wraplength=760, justify=tk.LEFT).pack(
                 anchor=tk.W, padx=20, pady=(0, 10)
             )
@@ -2475,8 +2485,8 @@ class LoRATrainerGUI:
         tk.Label(picker_card,
                  text="This is the single place you set your dataset folder. Image Prep, Captions, "
                       "and Training all read from it automatically.",
-                 font=(FONT_FAMILY, 9),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 12))
 
         row = tk.Frame(picker_card, bg=COLORS["bg_surface"])
@@ -2556,8 +2566,8 @@ class LoRATrainerGUI:
         tk.Label(tools_card,
                  text="Fizgig is more than a trainer — these tabs let you understand and tune any Klein LoRA "
                       "you've made (or downloaded).",
-                 font=(FONT_FAMILY, 9),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 12))
 
         tools = [
@@ -2913,7 +2923,7 @@ class LoRATrainerGUI:
             training_content,
             text="Per-image features need Batch Size 1 (Dataset section) — a batch-mean loss "
                  "isn't a per-image signal, so these are disabled at the current batch size.",
-            font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+            font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             wraplength=680, justify=tk.LEFT)
         self._krea2_perimage_batch_note.grid(row=24, column=0, columnspan=2, sticky=tk.W,
                                              padx=5, pady=(2, 0))
@@ -3089,7 +3099,7 @@ class LoRATrainerGUI:
                       "— otherwise there are no epochs left to run. Pausing writes one of these for you, and "
                       "the Resume button fills this in automatically; you only need Browse for an older "
                       "checkpoint or a run from a previous session.",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT).grid(row=2, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         # FP8 Checkboxes. Row label + hint are captured on self (not locals) so
@@ -3120,8 +3130,8 @@ class LoRATrainerGUI:
             text="Converts a bf16 model to fp8 at load time. If your Base DiT is already fp8 "
                  "(e.g. flux-2-klein-base-9b-fp8), leave this unchecked — Fizgig detects "
                  "pre-quantised fp8 files automatically.",
-            font=(FONT_FAMILY, 8, "italic"),
-            fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+            font=(FONT_FAMILY, 9, "italic"),
+            fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             wraplength=600, justify=tk.LEFT)
         self._fp8_hint.grid(row=4, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3172,7 +3182,7 @@ class LoRATrainerGUI:
                       "no swap, at a slight quality cost. fp8 is the least compressed of the three and needs "
                       "the most VRAM, so it swaps blocks to fit. Anything you pick explicitly is planned "
                       "for — swap is sized for the option that will actually run.",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self._quant_4bit_hint.grid(row=7, column=1, sticky=tk.W, padx=5, pady=(0, 4))
         self._on_quant_4bit_mode_changed()  # derive the boolean + sync dependent locks
@@ -3192,7 +3202,7 @@ class LoRATrainerGUI:
                       "a 9B LoRA fit on a 16 GB card. Turning it OFF makes training ~20–30% faster but uses far more "
                       "VRAM, so it's only for big cards (24 GB+, ideally 32 GB) with Blocks Swap at 0. On 16 GB, or "
                       "with block swap on, leave it ON.",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self._grad_checkpoint_hint.grid(row=9, column=1, sticky=tk.W, padx=5, pady=(0, 4))
         # torch.compile (Krea 2 only — hidden under Klein by _apply_training_arch_visibility).
@@ -3216,7 +3226,7 @@ class LoRATrainerGUI:
                       "card (verified under a 13.5 GB cap); INT8 + compile needs ~24 GB. Requires Triton and, on "
                       "Windows, a C++ compiler (VS Build Tools) — both located automatically. Never used with "
                       "Blocks Swap, since swapping moves weights and compiled graphs assume they stay put.",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self._compile_blocks_hint.grid(row=11, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3242,7 +3252,7 @@ class LoRATrainerGUI:
                       "left off — after a crash, or to train a finished LoRA further by raising Max Train "
                       "Epochs and resuming. \"At each checkpoint\" follows Save Every N Epochs. Pause always "
                       "saves state whether these are ticked or not.",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT).grid(row=13, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         tk.Label(memory_content, text="Keep Last:", font=(FONT_FAMILY, 10),
@@ -3255,7 +3265,7 @@ class LoRATrainerGUI:
                  text="States are big — roughly 470 MB at rank 32, 240 MB at rank 16 — so older ones are "
                       "deleted as new ones are written. Only state dirs for THIS LoRA name are touched, and "
                       "the newest is always kept.",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT).grid(row=15, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         # Re-sync now that the GC checkbox exists: the earlier _on_quant_4bit_toggle
@@ -4709,7 +4719,7 @@ class LoRATrainerGUI:
         btns.pack(side=tk.BOTTOM, fill=tk.X, padx=14, pady=(6, 12))
         status = tk.Label(win, text="Tip: caption what the image actually shows — viewpoint "
                                     "(“from behind”, “side profile”), pose, occlusions.",
-                          font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
+                          font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=COLORS["bg_deep"],
                           wraplength=520, justify=tk.LEFT)
         status.pack(side=tk.BOTTOM, fill=tk.X, padx=14)
 
@@ -6012,7 +6022,7 @@ class LoRATrainerGUI:
                  text="This is the whole prompt the model is given, alongside the image. Saving "
                       "edits THIS preset — each one keeps its own wording, and Restore default "
                       "puts the shipped text back.",
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=BG_COLOR,
                  wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 8))
 
         instr_text = tk.Text(dialog, height=9, wrap="word", bg=COLORS["bg_surface"],
@@ -6030,13 +6040,13 @@ class LoRATrainerGUI:
         tk.Label(dialog, text="For reference — the encoder's own system prompt (not editable):",
                  font=(FONT_FAMILY, 9, "bold"), fg=COLORS["text_secondary"],
                  bg=BG_COLOR).pack(anchor=tk.W, padx=14, pady=(10, 2))
-        tk.Label(dialog, text=sys_prompt, font=(FONT_FAMILY, 8, "italic"),
-                 fg=COLORS["text_muted"], bg=BG_COLOR, wraplength=620,
+        tk.Label(dialog, text=sys_prompt, font=(FONT_FAMILY, 9, "italic"),
+                 fg=COLORS["text_explain"], bg=BG_COLOR, wraplength=620,
                  justify=tk.LEFT).pack(anchor=tk.W, padx=14)
         tk.Label(dialog,
                  text="That one conditions training and inference and must match ComfyUI exactly, "
                       "so Fizgig keeps it fixed. It is not the captioning instruction above.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=BG_COLOR,
                  wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(2, 10))
 
         def restore_default():
@@ -6930,7 +6940,7 @@ class LoRATrainerGUI:
                  text="Optional — Klein is an edit model, so samples can be conditioned on a real image (they edit "
                       "it rather than generate from scratch). Auto-resized to ~0.20 MP so any size is safe. Leave "
                       "empty for normal samples.",
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=560, justify=tk.LEFT)
         self.sample_ref_note.grid(row=6, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
 
@@ -7019,7 +7029,7 @@ class LoRATrainerGUI:
             text="Renders previews on the model already training, with the official Turbo LoRA "
                  "switched on just for the render — nothing loaded or moved between epochs. The "
                  "classic mode loads the ~13 GB Turbo checkpoint per preview instead.",
-            font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+            font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             wraplength=600, justify=tk.LEFT)
         # Gridded (rows 6-7) / removed by _apply_samples_klein_only; hidden by default (Klein).
 
@@ -8956,8 +8966,8 @@ class LoRATrainerGUI:
             rb = ttk.Radiobutton(mode_card, text=text, variable=self.prep_mode_var,
                                  value=value, command=self._on_prep_mode_changed)
             rb.pack(anchor=tk.W, pady=(6, 0))
-            lbl = tk.Label(mode_card, text=hint, font=(FONT_FAMILY, 9),
-                           fg=hint_fg or COLORS["text_muted"], bg=COLORS["bg_surface"],
+            lbl = tk.Label(mode_card, text=hint, font=(FONT_FAMILY, 10),
+                           fg=hint_fg or COLORS["text_explain"], bg=COLORS["bg_surface"],
                            wraplength=680, justify=tk.LEFT)
             lbl.pack(anchor=tk.W, padx=(24, 0))
             return rb
@@ -9400,7 +9410,7 @@ class LoRATrainerGUI:
                                              "bias any single photo carries. Same person typically lands "
                                              "30–70% (even the baselines themselves — each is scored "
                                              "against the other two as well as itself).",
-                                   font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_deep"],
+                                   font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=COLORS["bg_deep"],
                                    justify=tk.LEFT, anchor="w", wraplength=820)
         self._ff_status.pack(fill=tk.X, padx=14)
 
@@ -11539,8 +11549,8 @@ class LoRATrainerGUI:
                  fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(anchor=tk.W, padx=20, pady=(16, 2))
         tk.Label(custom_card,
                  text="Pick individual blocks to target. Only shown when preset = Custom.",
-                 font=(FONT_FAMILY, 9),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, padx=20, pady=(0, 10))
 
         custom_content = tk.Frame(custom_card, bg=COLORS["bg_surface"])
@@ -11670,7 +11680,7 @@ class LoRATrainerGUI:
         # Family-aware "how long this takes" note (set by _apply_extract_family_ui).
         self.extract_time_note_var = tk.StringVar(value="")
         tk.Label(run_card, textvariable=self.extract_time_note_var,
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
 
         # Card 7: Output Log
@@ -12490,7 +12500,7 @@ class LoRATrainerGUI:
                           fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         status.pack(side=tk.LEFT, padx=(12, 0))
         setattr(self, f"_fetch_status_{family}", status)
-        tk.Label(frame, text=blurb, font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"],
+        tk.Label(frame, text=blurb, font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=760, justify=tk.LEFT
                  ).grid(row=row + 1, column=0, columnspan=3, sticky=tk.W, pady=(0, 2))
         return row + 2
@@ -12533,7 +12543,7 @@ class LoRATrainerGUI:
                       "Fizgig can't download these for you without a token of your own. Sign in to "
                       "HuggingFace, accept on all three pages, then paste a read token below. "
                       "Krea 2 needs none of this; those files aren't gated.",
-                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=BG_COLOR,
                  wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 10))
 
         rows = tk.Frame(dlg, bg=BG_COLOR)
@@ -12680,7 +12690,7 @@ class LoRATrainerGUI:
         self._fetch_bytes_lbl.pack(anchor=tk.W, padx=18, pady=(6, 0), fill=tk.X)
         tk.Label(win, text="You can leave this running and keep using other tabs. Interrupted "
                            "downloads resume where they left off.",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=BG_COLOR,
                  wraplength=460, justify=tk.LEFT).pack(anchor=tk.W, padx=18, pady=(8, 0))
 
         row = ttk.Frame(win)
@@ -12811,8 +12821,8 @@ class LoRATrainerGUI:
         if _notes:
             hint_text = hint + "  ·  " + "  ·  ".join(_notes)
         tk.Label(frame, text=hint_text,
-                 font=(FONT_FAMILY, 9, "italic"),
-                 fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 10, "italic"),
+                 fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).grid(
             row=row, column=1, columnspan=2, sticky=tk.W, pady=(0, 6)
         )
@@ -14529,7 +14539,7 @@ class LoRATrainerGUI:
                        "More journey waypoints want more frames to stay smooth.")
         tk.Label(trav, text="Waypoints = seeds in the journey; 🎲 rerolls Start/End. With a reference holding "
                             "the subject, more waypoints = a longer tour through compositions.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
 
         _trr = tk.Frame(trav, bg=_sbg); _trr.pack(fill=tk.X, pady=(0, 4))
@@ -14583,7 +14593,7 @@ class LoRATrainerGUI:
         tk.Label(trav, text="Sequential: frame 1 uses your reference, each frame after edits the previous one "
                             "(a feedback chain — compounds and evolves, but can drift over a long run, especially "
                             "at high Strength). Off = every frame uses the same reference: cleaner and more predictable.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
         for _v in (self.royale_travel_ref_var, self.royale_travel_use_epoch_ref_var,
                    self.royale_travel_ref_strength_var, self.royale_travel_ref_mp_var,
@@ -14691,7 +14701,7 @@ class LoRATrainerGUI:
         ttk.Button(_pp, text="Insert {x}", command=self._royale_pt_insert_slot).pack(side=tk.LEFT, padx=(6, 0))
         tk.Label(ptrav, text="Type {x} where the travel word goes — e.g.  a portrait of sks man, {x} light. "
                              "No {x}? the word is appended to the end.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 8))
 
         # — Travel definition: what the clip morphs through (sits right under the prompt) —
@@ -14703,7 +14713,7 @@ class LoRATrainerGUI:
         self.royale_pt_custom_var = tk.StringVar(value=self.last_used.get("royale_pt_custom", ""))
         ttk.Entry(_pcr, textvariable=self.royale_pt_custom_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
         tk.Label(ptrav, text="Comma-separated — only used when Preset = Custom words.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 6))
 
         _prg = tk.Frame(ptrav, bg=_sbg); _prg.pack(fill=tk.X, pady=(0, 0))
@@ -14729,7 +14739,7 @@ class LoRATrainerGUI:
         tk.Label(ptrav, text="Start/End pick which waypoints to span — e.g. start Age at the subject's current age so "
                              "it matches the reference, then travel onward (the loop ping-pongs back). Frames spread "
                              "across that span.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 4))
         for _v in (self.royale_pt_start_var, self.royale_pt_end_var):
             _v.trace_add("write", lambda *a: (self._royale_pt_refresh_words(), self._save_last_used_paths()))
@@ -14807,7 +14817,7 @@ class LoRATrainerGUI:
                              "(a feedback chain — the subject smoothly evolves). Anchor to original keeps the "
                              "pristine reference in every frame to stop drift. Recommended: strength ~0.7, "
                              "Max MP ~0.5, anchor 1.0.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
         for _v in (self.royale_pt_ref_mp_var, self.royale_pt_seq_ref_var,
                    self.royale_pt_anchor_var, self.royale_pt_anchor_str_var):
@@ -14940,7 +14950,7 @@ class LoRATrainerGUI:
         ToolTip(_lfcb, "Each frame is a fresh 4-step render — more frames = smoother ramp but slower.")
         tk.Label(ltrav, text="0 = base model (no LoRA); 1.0 = trained strength; >1 over-drives it. Uses the Setup "
                              "prompt and seed, fixed — only the LoRA strength changes.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 6))
 
         _lsf = tk.Frame(ltrav, bg=_sbg); _lsf.pack(anchor=tk.W, pady=(0, 6))
@@ -14997,7 +15007,7 @@ class LoRATrainerGUI:
                          deflicker=self.royale_lora_deflicker_var.get()))
         tk.Label(ltrav, text="Render once, scrub to review, then save — Speed / Loop / Strength badge / Fizgig tag / "
                              "Deflicker all apply at save, so you can re-save in either format without re-rendering.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
 
         # ----- Comparison sheet (before/after grid) -----
@@ -15093,7 +15103,7 @@ class LoRATrainerGUI:
         tk.Label(cmpc, text="Every cell is a fresh render — rows x columns images — so 3 prompts across 5 epochs "
                             "is 15 renders. Keep the prompt list short the first time. The finished sheet opens "
                             "in a window to review, then you choose whether to save it.",
-                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=_sbg,
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=_sbg,
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 0))
         for _v in (self.royale_cmp_mode_var, self.royale_cmp_trigger_var, self.royale_cmp_seed_var,
                    self.royale_cmp_w_var, self.royale_cmp_h_var, self.royale_cmp_epochs_var):

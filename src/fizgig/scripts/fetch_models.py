@@ -131,9 +131,19 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
     # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
     min_bytes = int(w.gb * 0.8 * 1024 ** 3)
 
+    # A pref the user already set, pointing at a file that exists, is LEFT ALONE — existence is
+    # the only test. Deliberately not the size check below: that exists to catch a transfer WE
+    # just made being truncated, and applying it here would second-guess legitimate choices.
+    # Plenty are smaller than the file this manifest names — the fp8_scaled RAW DiT instead of
+    # bf16, Klein's fp8mixed text encoder instead of the full one, a community fine-tune — and
+    # every one of those would have been "too small", silently re-downloaded, and the user's
+    # path overwritten with ours.
     current = str(prefs.get(w.pref_key) or "").strip()
-    if current and os.path.isfile(current) and _valid_safetensors(current, min_bytes):
-        log(f"  [ok]   {w.filename} — already set up")
+    if current and os.path.isfile(current):
+        if os.path.basename(current) != w.filename:
+            log(f"  [keep] {w.pref_key} -> {os.path.basename(current)} (your own choice, not replacing it)")
+        else:
+            log(f"  [ok]   {w.filename} — already set up")
         return True
 
     if os.path.isfile(dest) and _valid_safetensors(dest, min_bytes):

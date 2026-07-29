@@ -10,7 +10,9 @@ log() { echo "[fizgig] $*"; }
 REPO_URL="${FIZGIG_REPO:-https://github.com/shootthesound/Fizgig.git}"
 REPO_REF="${FIZGIG_REF:-master}"
 APP_DIR="/workspace/Fizgig"
-SCREEN="${SCREEN_SIZE:-1920x1080x24}"
+# 1200 rather than 1080 on purpose: Fizgig asks for 1360x1124, so a 1080-tall screen clips the
+# bottom of the window (status bar included) before anything else gets a say.
+SCREEN="${SCREEN_SIZE:-1920x1200x24}"
 
 mkdir -p /workspace/.cache /workspace/.insightface
 
@@ -99,6 +101,21 @@ cat <<EOF
 [fizgig]          Krea 2 needs no HuggingFace account; Klein needs a token.
 [fizgig] ------------------------------------------------------------
 EOF
+
+# Maximise Fizgig once it appears. Its geometry is tuned for a Windows desktop with Segoe UI;
+# under DejaVu the tab strip is wider, so "Preferences" truncates at the designed width. Filling
+# the screen fixes that and stops a browser-sized viewport being mostly empty desktop. Runs in
+# the background because the GUI has to exist first, and the launch below never returns.
+(
+  for _ in $(seq 1 90); do
+    if wmctrl -l 2>/dev/null | grep -q "Fizgig"; then
+      wmctrl -r "Fizgig" -b add,maximized_vert,maximized_horz 2>/dev/null && \
+        log "window maximised"
+      break
+    fi
+    sleep 1
+  done
+) &
 
 cd "$APP_DIR"
 export PYTHONPATH="$APP_DIR/src"

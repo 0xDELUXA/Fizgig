@@ -18619,14 +18619,17 @@ class LoRATrainerGUI:
                     if hasattr(self, "caption_trigger_var") else "")
             if trig and trig.lower() != "trigger_word":
                 cmd += ["--trigger_word", trig]
-            # Auto-recaption uses the TRAINING CAPTION preset's instruction — yours if you edited
-            # that preset, the built-in otherwise. Deliberately not "whatever the Captions tab is
-            # set to": auto-recaption's job is fixed (write a training caption for a stuck image),
-            # and leaving the tab on "Short caption" must not silently change what a training run
-            # writes. Attempt 2 still escalates to the built-in exhaustive instruction.
-            _instr = str(self._caption_overrides().get("training", "") or "").strip()
-            if _instr:
-                cmd += ["--recaption_instruction", _instr]
+            # Auto-recaption maps its two attempts onto two Captions-tab presets: attempt 1 uses
+            # TRAINING CAPTION, attempt 2 uses EXHAUSTIVE DETAIL — your edited version of each
+            # where you have one, the built-in otherwise. Deliberately not "whatever the tab is
+            # set to": auto-recaption's job is fixed, so leaving the tab on "Short caption" must
+            # not silently change what a training run writes mid-run.
+            _ovr = self._caption_overrides()
+            for _key, _flag in (("training", "--recaption_instruction"),
+                                ("exhaustive", "--recaption_instruction_detailed")):
+                _instr = str(_ovr.get(_key, "") or "").strip()
+                if _instr:
+                    cmd += [_flag, _instr]
         # Caption repair (manual edits from the Problem Images window AND auto-recaption)
         # re-encodes with the Qwen3-VL text encoder. --text_encoder used to be emitted only
         # inside the samples block, so with previews off the trainer had no TE path and every

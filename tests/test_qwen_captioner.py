@@ -98,14 +98,18 @@ ck("  edited flag is per preset",
 ck("  builtin_only always returns the shipped text",
    g._caption_instruction_for_task(_TR, builtin_only=True) == CAPTION_TASKS["training"][1])
 
-# auto-recaption takes the TRAINING preset only — never whatever the tab is set to
-ck("trainer uses the training override", g._caption_overrides().get("training") == "MY TRAINING")
+# auto-recaption maps attempt 1 -> Training caption, attempt 2 -> Exhaustive detail.
+# Never "whatever the tab is set to".
+ck("attempt 1 uses the training override", g._caption_overrides().get("training") == "MY TRAINING")
+ck("attempt 2 uses the exhaustive override",
+   g._caption_overrides().get("exhaustive") == "MY EXHAUSTIVE")
 g.caption_task_var.set(_SH)
 ck("  selecting another task doesn't change what the trainer gets",
-   g._caption_overrides().get("training") == "MY TRAINING")
+   g._caption_overrides().get("training") == "MY TRAINING"
+   and g._caption_overrides().get("exhaustive") == "MY EXHAUSTIVE")
 g.prefs["caption_qwen_instructions"] = {"short": "ONLY SHORT EDITED"}
-ck("  editing only a non-training preset sends nothing to the trainer",
-   not g._caption_overrides().get("training"))
+ck("  editing only a non-recaption preset sends nothing to the trainer",
+   not g._caption_overrides().get("training") and not g._caption_overrides().get("exhaustive"))
 
 # legacy single-slot pref migrates into Custom and doesn't leak into the presets
 g.prefs.pop("caption_qwen_instructions", None)

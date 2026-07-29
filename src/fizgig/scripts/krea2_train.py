@@ -126,9 +126,11 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--trigger_word", default=None,
                    help="Trigger word appended (', <trigger>') to auto-generated captions")
     p.add_argument("--recaption_instruction", default=None,
-                   help="Custom instruction for auto-recaption (the Captions tab writes this when "
-                        "you edit the captioning instruction). Applies to attempt 1; attempt 2 "
-                        "still escalates to the built-in exhaustive instruction")
+                   help="Instruction for auto-recaption attempt 1 (the Captions tab's edited "
+                        "Training-caption preset). Omit to use the built-in")
+    p.add_argument("--recaption_instruction_detailed", default=None,
+                   help="Instruction for auto-recaption attempt 2 (the Captions tab's edited "
+                        "Exhaustive-detail preset). Omit to use the built-in")
     return p
 
 
@@ -181,6 +183,7 @@ def main():
         warmup_look_outliers=args.warmup_look_outliers,
         trigger_word=args.trigger_word,
         recaption_instruction=args.recaption_instruction,
+        recaption_instruction_detailed=args.recaption_instruction_detailed,
     )
 
 

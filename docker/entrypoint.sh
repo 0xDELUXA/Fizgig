@@ -86,6 +86,12 @@ if [ -n "${FETCH_MODELS:-}" ]; then
 fi
 
 # ---------------------------------------------------------------- the screen
+# A restarted container keeps /tmp, so the previous run's X lock survives and Xvfb refuses to
+# start with "Server is already active for display 1" — even though nothing is running. x11vnc
+# then has no display, exits, and the container dies with no obvious cause. Stopping and
+# starting a pod is routine, so this has to be cleared every boot, not just on first run.
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+
 log "Starting virtual display ($SCREEN)"
 Xvfb :1 -screen 0 "$SCREEN" -nolisten tcp &
 for _ in $(seq 1 50); do xdpyinfo -display :1 >/dev/null 2>&1 && break; sleep 0.2; done

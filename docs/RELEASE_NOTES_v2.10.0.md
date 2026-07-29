@@ -7,12 +7,17 @@ Preferences, the Captions tab can now use it to caption your dataset, and it bec
 captioner. It is a substantially better captioner than Florence, and it is the same model that will
 read those captions during training.
 
-- **Four task presets** — Training caption, Short caption, Detailed description, Exhaustive detail —
-  and **every one of them is editable**. Click ✎ next to the dropdown to rewrite the instruction the
-  model is given. Your edits persist, and there's a Reset if you want the built-in back.
+- **Four task presets, and every one of them is editable** — Training caption, Short caption,
+  Detailed description, Exhaustive detail. **Edit instructions…** next to the dropdown opens the
+  whole prompt the model is given alongside the image. Rewrite it in plain English and **Save**:
+  that preset now uses your wording, every time. Each preset keeps its **own** instruction, so you
+  can tune one for products and another for portraits and just switch between them. Edits persist
+  between sessions, and **Restore default** puts the shipped text back whenever you want it.
+- **Your edited instructions drive auto-recaption too.** If you've rewritten the Training-caption
+  preset, mid-run recaptions follow your wording rather than the built-in — so the caption style
+  you settle on is the style the run keeps writing. (Attempt two always escalates to Exhaustive
+  detail, edited or not.)
 - **Your trigger word is respected**, exactly as with Florence.
-- **Auto-recaption during training uses your edited instructions too.** If you've rewritten the
-  Training-caption preset, mid-run recaptions follow your wording rather than the built-in.
 - **The captioner is released from VRAM** when a job finishes and when you leave the Captions tab.
 - Your captioner and task choice are remembered between sessions.
 

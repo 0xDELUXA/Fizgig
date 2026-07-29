@@ -5409,8 +5409,9 @@ class LoRATrainerGUI:
         self.caption_edit_instr_btn.pack(side=tk.LEFT, padx=(8, 0))
         ToolTip(self.caption_edit_instr_btn,
                 "See and edit the exact instruction sent to the vision model for this task.\n"
-                "Saving switches the task to 'Custom…' and keeps your wording for future runs —\n"
-                "including the trainer's auto-recaption. 'Restore default' undoes it.")
+                "Saving edits THIS preset — each of the four keeps its own wording, and your\n"
+                "edit persists between sessions, including for the trainer's auto-recaption.\n"
+                "'Restore default' puts the shipped text back.")
 
         ttk.Label(settings_card, text="Max Tokens:").grid(row=5, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.caption_max_tokens_var = tk.StringVar(
@@ -5921,8 +5922,9 @@ class LoRATrainerGUI:
     def _open_caption_instruction_editor(self):
         """Show (and allow editing of) the instruction sent to Qwen3-VL for the current task.
 
-        Saving stores it in prefs and switches the task to 'Custom…', so what you edited is what
-        runs — here AND in the trainer's auto-recaption."""
+        Saving stores it in prefs against THIS preset's key (each of the four keeps its own
+        wording), so what you edited is what runs — here AND in the trainer's auto-recaption.
+        Saving the shipped text back drops the override rather than storing a redundant copy."""
         opened_from = self.caption_task_var.get()
         edited = self._caption_task_is_edited(opened_from)
         dialog = tk.Toplevel(self.master)

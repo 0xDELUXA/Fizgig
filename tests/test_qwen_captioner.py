@@ -161,6 +161,50 @@ src = open(os.path.join(REPO, "lora_trainer_gui.py"), encoding="utf-8").read()
 ck("GUI imports the encode system prompt rather than copying it",
    "ENCODE_SYSTEM_DESCRIPTOR" in src and "Describe the image by detailing" not in src)
 
+# --- 7b. the ~8 GB captioner is released after every job ---------------------------------
+class _FakeModel:
+    pass
+
+
+g._captioning_running = False
+g.qwen_captioner = _FakeModel()
+g._release_qwen_captioner_if_idle()
+ck("released when idle", g.qwen_captioner is None)
+
+g.qwen_captioner = _FakeModel()
+g._captioning_running = True
+g._release_qwen_captioner_if_idle()
+ck("  kept while a captioning job is in flight", g.qwen_captioner is not None)
+g._captioning_running = False
+
+
+class _Ev:
+    pass
+
+
+g.notebook.select(g.caption_gen_tab)
+root.update()
+g.qwen_captioner = _FakeModel()
+g.notebook.select(g.image_converter_tab)
+root.update()
+g.on_tab_changed(_Ev())
+ck("  released on leaving the Captions tab", g.qwen_captioner is None)
+
+g.qwen_captioner = _FakeModel()
+g._captioning_running = True
+g.on_tab_changed(_Ev())
+ck("  kept on tab switch while a batch runs", g.qwen_captioner is not None)
+g._captioning_running = False
+
+g.qwen_captioner = None
+g._release_qwen_captioner_if_idle()
+ck("  no-op when nothing is loaded", g.qwen_captioner is None)
+
+g.qwen_captioner = _FakeModel()
+g.florence_model = None
+g.unload_florence_model(silent=True)
+ck("  Unload Model button frees Qwen too", g.qwen_captioner is None)
+
 # --- 8. persistence ----------------------------------------------------------------------
 g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
 g.caption_task_var.set(CAPTION_TASKS["exhaustive"][0])

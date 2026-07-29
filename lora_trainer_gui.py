@@ -1350,6 +1350,11 @@ class LoRATrainerGUI:
             self._unload_explorer_models()
         if tab_text != "LoRA Royale" and not self._royale_is_busy():
             self._royale_unload()
+        # Same rule for the ~8 GB Qwen3-VL captioner: leaving the Captions tab means you're done
+        # with it. Guarded on the in-flight flag like the others — a batch running in the
+        # background must not have its model pulled out from under it.
+        if tab_text != "3. Captions" and not getattr(self, '_captioning_running', False):
+            self._release_qwen_captioner_if_idle()
 
     def remove_focus(self, event):
         """Remove focus from active widget when clicking background"""
@@ -6237,6 +6242,26 @@ class LoRATrainerGUI:
             return self.generate_qwen_caption(img_path)
         return self.generate_florence_caption(img_path)
 
+    def _release_qwen_captioner_if_idle(self):
+        """Free the Qwen3-VL captioner as soon as a captioning job finishes.
+
+        ~8 GB is too much to hold on a machine that also runs ComfyUI and the workbench, so it
+        goes back after EVERY job — a whole batch or a single regenerate from a thumbnail alike.
+        The trade is a reload (~30 s) on the next caption; predictable VRAM is worth more than
+        saving that. Guarded on _captioning_running so a job still in flight never has the model
+        pulled out from under it."""
+        if getattr(self, "_captioning_running", False):
+            return
+        if getattr(self, "qwen_captioner", None) is None:
+            return
+        import gc
+        import torch
+        del self.qwen_captioner
+        self.qwen_captioner = None
+        gc.collect()
+        torch.cuda.empty_cache()
+        self.update_caption_log("Qwen3-VL unloaded — ~8 GB of VRAM released.\n")
+
     def _caption_model_blocked_by_training(self) -> bool:
         """True (with a message) if a training run is live and the chosen captioner won't co-fit.
 
@@ -6322,6 +6347,10 @@ class LoRATrainerGUI:
             self.master.after(0, lambda: self.update_caption_log(f"\nCaptioning complete!\n"))
             self.master.after(0, lambda: self.caption_stop_btn.configure(state=tk.DISABLED))
             self.master.after(0, self.refresh_caption_images)
+            # A finished batch is a finished job — give the ~8 GB back rather than holding it
+            # until the user thinks to press Unload. Florence (~1 GB) keeps its old behaviour:
+            # it's small, and reloading it for the next batch costs more than it saves.
+            self.master.after(0, self._release_qwen_captioner_if_idle)
 
         threading.Thread(target=caption_thread, daemon=True).start()
 
@@ -6340,6 +6369,8 @@ class LoRATrainerGUI:
                 self.master.after(0, self.refresh_caption_images)
             else:
                 self.master.after(0, lambda: self.update_caption_log(f"✗ Failed\n"))
+            # Same rule as a batch: the job is done, so give the ~8 GB back.
+            self.master.after(0, self._release_qwen_captioner_if_idle)
 
         threading.Thread(target=caption_thread, daemon=True).start()
 

@@ -1008,6 +1008,11 @@ class LoRATrainerGUI:
             "COMPILE_BLOCKS": "auto",  # torch.compile the DiT blocks (krea2): auto | on | off
                 "GRADIENT_CHECKPOINTING": True,  # ON by default — recompute activations to fit 9B on most cards
             "FP8_TEXT_ENCODER": True,  # FP8 for text encoder (T5/LLM)
+            # Resumable state dirs. Pause/Resume writes state regardless — these only govern the
+            # automatic saves. Keep-N matters: a state is LoRA + optimizer (~470 MB at rank 32).
+            "SAVE_STATE": True,
+            "SAVE_STATE_ON_TRAIN_END": True,
+            "KEEP_LAST_N_STATES": 2,
             "KREA2_LOSS_WATCH": False,   # per-image loss tracking + stuck-image detection (krea2)
             "KREA2_PER_IMAGE_LR": False,  # per-image adaptive LR (throttle stuck images) — experimental
             "KREA2_AUTO_RECAPTION": False,  # Qwen3-VL rewrites stuck images' captions mid-run — experimental
@@ -3073,6 +3078,19 @@ class LoRATrainerGUI:
             self.entries["BLOCKS_SWAP"].set(blocks_swap_options[0])
 
         self._add_field_to_section(memory_content, "RESUME_TRAINING", "Resume Training", "directory", 1)
+        # The field had no explanation at all, which made the whole resume feature invisible
+        # unless you already knew a state dir was a folder (not a .safetensors) and where it lived.
+        tk.Label(memory_content,
+                 text="Leave empty for a normal run. To carry on from a saved state, Browse to a folder named "
+                      "like myLora-000012-state in your LoRA output folder — the number is the epoch it "
+                      "finished. Training continues at the next epoch with the optimizer, learning rate and "
+                      "seed exactly as they were, so it picks up mid-run rather than starting over. To train a "
+                      "FINISHED LoRA further, pick its highest-numbered state and raise Max Train Epochs first "
+                      "— otherwise there are no epochs left to run. Pausing writes one of these for you, and "
+                      "the Resume button fills this in automatically; you only need Browse for an older "
+                      "checkpoint or a run from a previous session.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT).grid(row=2, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         # FP8 Checkboxes. Row label + hint are captured on self (not locals) so
         # _apply_training_arch_visibility can hide them alongside the checkboxes for Krea 2 —
@@ -3084,10 +3102,10 @@ class LoRATrainerGUI:
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_surface"]
         )
-        self._fp8_row_label.grid(row=2, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self._fp8_row_label.grid(row=3, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
         fp8_frame = tk.Frame(memory_content, bg=COLORS["bg_surface"])
-        fp8_frame.grid(row=2, column=1, sticky=tk.W, padx=5, pady=4)
+        fp8_frame.grid(row=3, column=1, sticky=tk.W, padx=5, pady=4)
 
         self.fp8_var = tk.BooleanVar(value=self.settings["FP8"])
         self.scaled_var = tk.BooleanVar(value=self.settings["SCALED"])
@@ -3105,7 +3123,7 @@ class LoRATrainerGUI:
             font=(FONT_FAMILY, 8, "italic"),
             fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
             wraplength=600, justify=tk.LEFT)
-        self._fp8_hint.grid(row=3, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        self._fp8_hint.grid(row=4, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         # FP8 Text Encoder
         self.fp8_text_encoder_label = tk.Label(
@@ -3115,11 +3133,11 @@ class LoRATrainerGUI:
             fg=COLORS["text_secondary"],
             bg=COLORS["bg_surface"]
         )
-        self.fp8_text_encoder_label.grid(row=4, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.fp8_text_encoder_label.grid(row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
 
         self.fp8_text_encoder_var = tk.BooleanVar(value=self.settings["FP8_TEXT_ENCODER"])
         self.fp8_text_encoder_check = ttk.Checkbutton(memory_content, text="Enable FP8 T5/LLM", variable=self.fp8_text_encoder_var, style="Surface.TCheckbutton")
-        self.fp8_text_encoder_check.grid(row=4, column=1, sticky=tk.W, padx=5, pady=4)
+        self.fp8_text_encoder_check.grid(row=5, column=1, sticky=tk.W, padx=5, pady=4)
 
         # Base precision (Krea 2 only — hidden for Klein by _apply_training_arch_visibility).
         #
@@ -3133,14 +3151,14 @@ class LoRATrainerGUI:
         # NF4); quant_4bit_mode_var holds the canonical key and the combobox shows its label.
         self._quant_4bit_label = tk.Label(memory_content, text="Base precision:", font=(FONT_FAMILY, 10),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
-        self._quant_4bit_label.grid(row=5, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self._quant_4bit_label.grid(row=6, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         self.quant_4bit_var = tk.BooleanVar(value=False)
         self.quant_4bit_mode_var = tk.StringVar(value=self._BASE_PRECISION_LABELS[
             self._normalize_base_precision(
                 self.settings.get("QUANT_4BIT_MODE", "")
                 or ("On" if self.settings.get("QUANT_4BIT", False) else "auto"))])
         _q4_row = ttk.Frame(memory_content)
-        _q4_row.grid(row=5, column=1, sticky=tk.W, padx=5, pady=4)
+        _q4_row.grid(row=6, column=1, sticky=tk.W, padx=5, pady=4)
         self.quant_4bit_check = ttk.Combobox(
             _q4_row, textvariable=self.quant_4bit_mode_var,
             values=list(self._BASE_PRECISION_LABELS.values()), state="readonly", width=34)
@@ -3156,19 +3174,19 @@ class LoRATrainerGUI:
                       "for — swap is sized for the option that will actually run.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
-        self._quant_4bit_hint.grid(row=6, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        self._quant_4bit_hint.grid(row=7, column=1, sticky=tk.W, padx=5, pady=(0, 4))
         self._on_quant_4bit_mode_changed()  # derive the boolean + sync dependent locks
 
         # Gradient checkpointing — trades compute for VRAM.
         self._grad_checkpoint_label = tk.Label(memory_content, text="Grad Checkpoint:", font=(FONT_FAMILY, 10),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
-        self._grad_checkpoint_label.grid(row=7, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self._grad_checkpoint_label.grid(row=8, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         self.grad_checkpoint_var = tk.BooleanVar(value=self.settings.get("GRADIENT_CHECKPOINTING", True))
         self.grad_checkpoint_check = ttk.Checkbutton(
             memory_content, text="Gradient checkpointing (recommended — lower VRAM)",
             variable=self.grad_checkpoint_var, command=self._on_grad_checkpoint_toggle,
             style="Surface.TCheckbutton")
-        self.grad_checkpoint_check.grid(row=7, column=1, sticky=tk.W, padx=5, pady=4)
+        self.grad_checkpoint_check.grid(row=8, column=1, sticky=tk.W, padx=5, pady=4)
         self._grad_checkpoint_hint = tk.Label(memory_content,
                  text="On (default) recomputes activations during the backward pass to save VRAM — it's what lets "
                       "a 9B LoRA fit on a 16 GB card. Turning it OFF makes training ~20–30% faster but uses far more "
@@ -3176,11 +3194,11 @@ class LoRATrainerGUI:
                       "with block swap on, leave it ON.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
-        self._grad_checkpoint_hint.grid(row=8, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        self._grad_checkpoint_hint.grid(row=9, column=1, sticky=tk.W, padx=5, pady=(0, 4))
         # torch.compile (Krea 2 only — hidden under Klein by _apply_training_arch_visibility).
         self._compile_blocks_label = tk.Label(memory_content, text="Compile Blocks:", font=(FONT_FAMILY, 10),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
-        self._compile_blocks_label.grid(row=9, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self._compile_blocks_label.grid(row=10, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         # Auto / On / Off rather than a checkbox: compile is a long-run win and a short-run loss,
         # so the right default is a judgement the trainer makes from the actual run length, the
         # same way Blocks Swap defaults to "Auto (detect from GPU)".
@@ -3188,7 +3206,7 @@ class LoRATrainerGUI:
         self.compile_blocks_check = ttk.Combobox(
             memory_content, textvariable=self.compile_blocks_var, state="readonly", width=36,
             values=["Auto", "On", "Off"])
-        self.compile_blocks_check.grid(row=9, column=1, sticky=tk.W, padx=5, pady=4)
+        self.compile_blocks_check.grid(row=10, column=1, sticky=tk.W, padx=5, pady=4)
         self._compile_blocks_hint = tk.Label(memory_content,
                  text="Auto (recommended) turns torch.compile on only when this run is long enough to repay it. "
                       "It fuses the per-matmul quantise/dequantise work that bounds the INT8 and NF4 paths — "
@@ -3200,7 +3218,45 @@ class LoRATrainerGUI:
                       "Blocks Swap, since swapping moves weights and compiled graphs assume they stay put.",
                  font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
-        self._compile_blocks_hint.grid(row=10, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+        self._compile_blocks_hint.grid(row=11, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+
+        # --- Save State ------------------------------------------------------------------
+        # Deliberately next to Resume Training (row 1): what writes state and what reads it back
+        # belong together. Both families, so NOT added to either list in
+        # _apply_training_arch_visibility.
+        tk.Label(memory_content, text="Save State:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]
+                 ).grid(row=12, column=0, sticky=tk.NW, padx=(12, 8), pady=(10, 4))
+        _state_frame = tk.Frame(memory_content, bg=COLORS["bg_surface"])
+        _state_frame.grid(row=12, column=1, sticky=tk.W, padx=5, pady=(10, 4))
+        self.save_state_var = tk.BooleanVar(value=self.settings.get("SAVE_STATE", True))
+        ttk.Checkbutton(_state_frame, text="At each checkpoint", variable=self.save_state_var,
+                        style="Surface.TCheckbutton").pack(anchor=tk.W)
+        self.save_state_on_train_end_var = tk.BooleanVar(
+            value=self.settings.get("SAVE_STATE_ON_TRAIN_END", True))
+        ttk.Checkbutton(_state_frame, text="At end of training",
+                        variable=self.save_state_on_train_end_var,
+                        style="Surface.TCheckbutton").pack(anchor=tk.W)
+        tk.Label(memory_content,
+                 text="A state dir holds the LoRA plus the optimizer, so a run can pick up exactly where it "
+                      "left off — after a crash, or to train a finished LoRA further by raising Max Train "
+                      "Epochs and resuming. \"At each checkpoint\" follows Save Every N Epochs. Pause always "
+                      "saves state whether these are ticked or not.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT).grid(row=13, column=1, sticky=tk.W, padx=5, pady=(0, 4))
+
+        tk.Label(memory_content, text="Keep Last:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]
+                 ).grid(row=14, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.entries["KEEP_LAST_N_STATES"] = ttk.Entry(memory_content, width=40)
+        self.entries["KEEP_LAST_N_STATES"].insert(0, str(self.settings.get("KEEP_LAST_N_STATES", 2)))
+        self.entries["KEEP_LAST_N_STATES"].grid(row=14, column=1, sticky=tk.W, padx=5, pady=4)
+        tk.Label(memory_content,
+                 text="States are big — roughly 470 MB at rank 32, 240 MB at rank 16 — so older ones are "
+                      "deleted as new ones are written. Only state dirs for THIS LoRA name are touched, and "
+                      "the newest is always kept.",
+                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 wraplength=600, justify=tk.LEFT).grid(row=15, column=1, sticky=tk.W, padx=5, pady=(0, 4))
 
         # Re-sync now that the GC checkbox exists: the earlier _on_quant_4bit_toggle
         # call ran before it was created, so this applies the NF4→force-GC-on lock
@@ -3583,6 +3639,13 @@ class LoRATrainerGUI:
             if _cb in ("Auto", "On", "Off"):
                 self.compile_blocks_var.set(_cb)
 
+        # Save-state toggles — dedicated vars, same not-in-self.entries situation. Presets saved
+        # before these existed simply don't carry the keys, so they keep the current setting.
+        if "SAVE_STATE" in preset and hasattr(self, 'save_state_var'):
+            self.save_state_var.set(bool(preset["SAVE_STATE"]))
+        if "SAVE_STATE_ON_TRAIN_END" in preset and hasattr(self, 'save_state_on_train_end_var'):
+            self.save_state_on_train_end_var.set(bool(preset["SAVE_STATE_ON_TRAIN_END"]))
+
         # Per-image loss watch toggles (krea2) — dedicated vars, same not-in-self.entries situation.
         if "KREA2_LOSS_WATCH" in preset and hasattr(self, 'krea2_loss_watch_var'):
             self.krea2_loss_watch_var.set(bool(preset["KREA2_LOSS_WATCH"]))
@@ -3748,6 +3811,10 @@ class LoRATrainerGUI:
         if hasattr(self, "quant_4bit_mode_var"):
             preset["QUANT_4BIT_MODE"] = self._base_precision()
         _grab("compile_blocks_var", "COMPILE_BLOCKS")
+        # BooleanVars aren't in self.entries, so they need grabbing explicitly — unlike
+        # KEEP_LAST_N_STATES, which is an Entry and is captured by the generic sweep above.
+        _grab("save_state_var", "SAVE_STATE")
+        _grab("save_state_on_train_end_var", "SAVE_STATE_ON_TRAIN_END")
         _grab("krea2_loss_watch_var", "KREA2_LOSS_WATCH")
         _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
         _grab("krea2_auto_recaption_var", "KREA2_AUTO_RECAPTION")
@@ -17841,6 +17908,8 @@ class LoRATrainerGUI:
         _check_num("Max Grad Norm", self.entries["MAX_GRAD_NORM"].get(), float, 0)
         _check_num("Network Dropout", self.entries["NETWORK_DROPOUT"].get(), float, 0)
         _check_num("Batch Size (Dataset)", self.dataset_batch_size_var.get(), int, 1)
+        if "KEEP_LAST_N_STATES" in self.entries:
+            _check_num("Keep Last (states)", self.entries["KEEP_LAST_N_STATES"].get(), int, 1)
 
         # Check required paths exist (sources: prefs_vars for model paths, hidden var for dataset)
         dataset_config = self._get_path("DATASET_CONFIG")
@@ -18096,6 +18165,12 @@ class LoRATrainerGUI:
         if not self.validate_inputs():
             return
 
+        # Resuming a state that's already at the final epoch trains nothing — the trainer's epoch
+        # loop is empty and it just rewrites the final LoRA. A warning rather than a block,
+        # because that fall-through is exactly how a run paused ON its last epoch gets completed.
+        if not self._confirm_resume_has_epochs_left():
+            return
+
         # Clear a stale pause sentinel from a previous session (window close / crash after
         # Pause left it on disk; the trainer would read it at epoch 1 and exit "cleanly").
         try:
@@ -18252,6 +18327,9 @@ class LoRATrainerGUI:
             "COMPILE_BLOCKS": self.compile_blocks_var.get(),
             "GRADIENT_CHECKPOINTING": self.grad_checkpoint_var.get(),
             "FP8_TEXT_ENCODER": self.fp8_text_encoder_var.get(),
+            "SAVE_STATE": self.save_state_var.get(),
+            "SAVE_STATE_ON_TRAIN_END": self.save_state_on_train_end_var.get(),
+            "KEEP_LAST_N_STATES": self.entries["KEEP_LAST_N_STATES"].get(),
             "ENABLE_BUCKET": self.dataset_enable_bucket_var.get(),
             "BUCKET_NO_UPSCALE": self.dataset_no_upscale_var.get(),
         })
@@ -18292,6 +18370,52 @@ class LoRATrainerGUI:
         # Mark as running for the pause/resume state machine
         self.training_state = "running"
         self._refresh_training_buttons()
+
+    def _confirm_resume_has_epochs_left(self):
+        """True to proceed. Warns when the resume state is already at/past Max Train Epochs.
+
+        Deliberately a warning, not a validation error: pausing on the final epoch exits before
+        the final LoRA is written, and resuming that state — with zero epochs left to run — is
+        precisely what completes it. Blocking would break that recovery."""
+        resume_path = (self.entries["RESUME_TRAINING"].get() or "").strip()
+        if not resume_path:
+            return True
+        m = re.search(r"-(\d{6})-state$", os.path.basename(resume_path.rstrip("/\\")))
+        if not m:
+            return True
+        state_epoch = int(m.group(1))
+        try:
+            max_epochs = int(self.entries["MAX_TRAIN_EPOCHS"].get())
+        except (TypeError, ValueError):
+            return True
+        if state_epoch < max_epochs:
+            return True
+        return messagebox.askyesno(
+            "Nothing left to train",
+            f"That state is already at epoch {state_epoch}, and Max Train Epochs is {max_epochs}.\n\n"
+            f"Resuming it will not train anything — it will just write the final LoRA from the "
+            f"restored state. That is what you want if you paused on the last epoch and are "
+            f"finishing the run.\n\n"
+            f"To train further, cancel and raise Max Train Epochs above {state_epoch} first.\n\n"
+            f"Continue anyway?")
+
+    def _state_flags(self):
+        """Save-state CLI flags, shared by both families (the flag names are identical).
+
+        Keep-N is clamped to >= 1 here as well as in the trainer: a blank or zero box must never
+        reach a prune that would take the state just written with it."""
+        flags = []
+        if self.settings.get("SAVE_STATE", True):
+            flags.append("--save_state")
+        if self.settings.get("SAVE_STATE_ON_TRAIN_END", True):
+            flags.append("--save_state_on_train_end")
+        if flags:
+            try:
+                keep_n = max(1, int(str(self.settings.get("KEEP_LAST_N_STATES", 2)).strip()))
+            except (TypeError, ValueError):
+                keep_n = 2
+            flags += ["--keep_last_n_states", str(keep_n)]
+        return flags
 
     def build_training_command(self, config):
         """Build the training command based on architecture configuration"""
@@ -18434,12 +18558,16 @@ class LoRATrainerGUI:
         command.extend([
             "--max_train_epochs", str(self.settings["MAX_TRAIN_EPOCHS"]),
             "--save_every_n_epochs", str(self.settings["SAVE_EVERY_N_EPOCHS"]),
-            "--save_state",
             "--seed", str(self.settings["SEED"]),
             "--output_dir", self.settings["LORA_OUTPUT_DIR"],
             "--output_name", self.settings["LORA_NAME"],
             "--pause_flag_path", os.path.join(self.settings["LORA_OUTPUT_DIR"], ".pause_requested"),
         ])
+
+        # State saving. --save_state used to be passed unconditionally with no UI behind it, which
+        # meant a 55-epoch run silently left 54 state dirs (hundreds of MB each) and never pruned.
+        # Pause still saves state either way — the trainer forces it via --pause_flag_path.
+        command.extend(self._state_flags())
 
         # Optional parameters
         if self.settings["OPTIMIZER_ARGS"]:
@@ -18754,6 +18882,9 @@ class LoRATrainerGUI:
             "--seed", str(self.settings["SEED"]),
             "--discrete_flow_shift", "2.5",
         ]
+        # State saving. Krea 2 previously wrote state ONLY on Pause, so a crash or a run that
+        # finished too early meant starting over. Pause still saves regardless of these flags.
+        cmd += self._state_flags()
         # Resume from a saved <name>-NNNNNN-state dir (set by the Resume button / pause flow).
         resume_path = (self.settings.get("RESUME_TRAINING") or "").strip()
         if resume_path:

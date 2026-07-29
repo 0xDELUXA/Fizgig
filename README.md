@@ -197,7 +197,17 @@ Three small models auto-download on first use: InsightFace `buffalo_l` (~300 MB,
 
 ## Model downloads (you provide)
 
-Fizgig doesn't bundle weights — they're large and licensing varies. Each row in the **Preferences** tab has a **Download** link to the right HuggingFace page. You only need the family you're using.
+Fizgig doesn't bundle weights — they're large and licensing varies. You only need the family you're using.
+
+> **Or let Fizgig fetch them.** Preferences has a **⬇ Download models for me** button under each model card: it downloads that family's files, verifies them, and fills in the paths for you. **Krea 2 needs no HuggingFace account** — those files aren't gated. Klein does (Black Forest Labs require you to accept their licence), so Fizgig asks for a free read token and tells you which pages to accept on. Interrupted downloads resume rather than restart. There's a CLI too:
+>
+> ```bash
+> python -m fizgig.scripts.fetch_models --family krea2   # ~32 GB, no account needed
+> python -m fizgig.scripts.fetch_models --family klein   # ~34 GB, needs a token
+> python -m fizgig.scripts.fetch_models --family tools   # Florence-2, face model, translator
+> ```
+
+Prefer to do it by hand? Each row in **Preferences** also has a **Download** link to the right HuggingFace page.
 
 ### Klein 9B
 

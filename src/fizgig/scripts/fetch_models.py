@@ -1,0 +1,284 @@
+"""Download the model files Fizgig needs and wire them into Preferences.
+
+Replaces the hand-download: five files across four HuggingFace repos, then five paths pasted
+into Preferences by hand. Run this instead and it fetches what's missing, verifies it, and
+writes the paths into prefs.json for you.
+
+    python -m fizgig.scripts.fetch_models --family krea2      # ~32 GB, no HF account needed
+    python -m fizgig.scripts.fetch_models --family klein      # ~34 GB, needs an HF token
+    python -m fizgig.scripts.fetch_models --family tools      # ~1.6 GB helper models
+    python -m fizgig.scripts.fetch_models --all --include-optional
+
+Two kinds of asset, handled differently:
+
+  * WEIGHTS  — single .safetensors files. Downloaded into <repo>/models/ (or --models-dir)
+               and written into prefs.json against the pref key the GUI reads.
+  * TOOLS    — Florence-2, the InsightFace face model, and the EN->ZH translator. These are
+               loaded BY NAME at runtime, not by path, so there's nothing to put in prefs —
+               "fetching" them means warming the cache they'll be loaded from, which turns a
+               mid-workflow stall into a one-off up-front download.
+
+Idempotent throughout: anything already present and valid is skipped, so it's safe to re-run
+and safe to call at container start. Resumable too — hf_hub_download picks a broken 26 GB
+transfer back up rather than starting over.
+"""
+import argparse
+import json
+import os
+import struct
+import sys
+
+REPO_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+
+
+class Weight:
+    """One .safetensors file: where it lives on HF, where it goes, which pref points at it."""
+
+    def __init__(self, pref_key, repo, path_in_repo, gb, note, optional=False, gated=False):
+        self.pref_key = pref_key
+        self.repo = repo
+        self.path_in_repo = path_in_repo
+        self.filename = os.path.basename(path_in_repo)
+        self.gb = gb
+        self.note = note
+        self.optional = optional
+        self.gated = gated
+
+
+# Paths verified against the HuggingFace API, not the README — the two can drift.
+FAMILIES = {
+    "krea2": [
+        Weight("krea2_raw_dit", "Comfy-Org/Krea-2",
+               "diffusion_models/krea2_raw_bf16.safetensors", 26.0,
+               "RAW DiT — what training runs on"),
+        Weight("krea2_text_encoder", "Comfy-Org/Krea-2",
+               "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", 5.2,
+               "Qwen3-VL text encoder (fp8 — recommended; also writes your captions)"),
+        Weight("krea2_vae", "Comfy-Org/Krea-2",
+               "vae/qwen_image_vae.safetensors", 0.25, "Qwen-Image VAE"),
+        Weight("krea2_turbo_lora", "Comfy-Org/Krea-2",
+               "loras/krea2_turbo_lora_rank_64_bf16.safetensors", 0.47,
+               "Turbo LoRA — in-training previews"),
+        Weight("krea2_turbo_dit", "Comfy-Org/Krea-2",
+               "diffusion_models/krea2_turbo_fp8_scaled.safetensors", 13.0,
+               "Turbo DiT — only for the workbench tools and classic previews",
+               optional=True),
+    ],
+    "klein": [
+        Weight("base_dit", "black-forest-labs/FLUX.2-klein-base-9b-fp8",
+               "flux-2-klein-base-9b-fp8.safetensors", 9.5,
+               "Base DiT (fp8) — what training runs on", gated=True),
+        Weight("text_encoder", "Comfy-Org/vae-text-encorder-for-flux-klein-9b",
+               "split_files/text_encoders/qwen_3_8b.safetensors", 15.0,
+               "Qwen3-8B text encoder"),
+        Weight("vae", "black-forest-labs/FLUX.2-dev",
+               "ae.safetensors", 0.32,
+               "VAE — the one from the repo ROOT, not the vae/ subfolder", gated=True),
+        Weight("distilled_dit", "black-forest-labs/FLUX.2-klein-9b-fp8",
+               "flux-2-klein-9b-fp8.safetensors", 9.0,
+               "Distilled DiT — 4-step previews and the workbench", gated=True),
+    ],
+}
+
+# Loaded by name at runtime, so there is no pref to write — see the module docstring.
+TOOLS = [
+    ("MiaoshouAI/Florence-2-base-PromptGen", 1.0, "Florence-2 captioner"),
+    ("Helsinki-NLP/opus-mt-en-zh", 0.3, "EN->ZH translator (bilingual captions)"),
+    ("insightface:buffalo_l", 0.3, "Face model — Look Filter + likeness scoring"),
+]
+
+
+def _valid_safetensors(path, min_bytes):
+    """Header parses and the file is a plausible size. Reads no tensor data.
+
+    Catches the classic failure where an HTML error page or a truncated transfer lands at the
+    destination filename and everything downstream fails with something incomprehensible.
+    """
+    try:
+        if os.path.getsize(path) < min_bytes:
+            return False
+        with open(path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            if n > 100 * 1024 * 1024:          # a real header is a few hundred KB
+                return False
+            json.loads(f.read(n))
+        return True
+    except Exception:
+        return False
+
+
+def _load_prefs(prefs_file):
+    if os.path.exists(prefs_file):
+        try:
+            with open(prefs_file, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_prefs(prefs_file, prefs):
+    """Atomic — a half-written prefs.json would take the GUI down on next launch."""
+    tmp = prefs_file + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(prefs, f, indent=2)
+    os.replace(tmp, prefs_file)
+
+
+def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
+    """Download one weight if needed and point its pref at it. Returns True if usable."""
+    dest = os.path.join(models_dir, w.filename)
+    # 80% of the nominal size — generous enough for rounding, tight enough to catch a truncation.
+    min_bytes = int(w.gb * 0.8 * 1024 ** 3)
+
+    current = str(prefs.get(w.pref_key) or "").strip()
+    if current and os.path.isfile(current) and _valid_safetensors(current, min_bytes):
+        log(f"  [ok]   {w.filename} — already set up")
+        return True
+
+    if os.path.isfile(dest) and _valid_safetensors(dest, min_bytes):
+        log(f"  [have] {w.filename} — on disk, linking into Preferences")
+        prefs[w.pref_key] = dest
+        return True
+
+    if dry_run:
+        log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
+        return True
+
+    log(f"  [get]  {w.filename} (~{w.gb:g} GB) — {w.note}")
+    try:
+        from huggingface_hub import hf_hub_download
+        got = hf_hub_download(
+            repo_id=w.repo, filename=w.path_in_repo, local_dir=models_dir,
+            token=token or os.environ.get("HF_TOKEN") or None,
+        )
+    except Exception as e:
+        name = type(e).__name__
+        if "Gated" in name or "401" in str(e) or "403" in str(e):
+            log(f"  [gated] {w.repo} needs you to accept its licence first:")
+            log(f"          https://huggingface.co/{w.repo}")
+            log(f"          Then re-run with --token hf_... (or set HF_TOKEN).")
+        else:
+            log(f"  [fail] {w.filename}: {name}: {e}")
+        return False
+
+    # hf_hub_download preserves the repo's folder structure under local_dir; the GUI just wants
+    # a file, so flatten it into models/ and leave no stray nested dirs behind.
+    got = os.path.abspath(got)
+    if got != dest:
+        os.replace(got, dest)
+        d = os.path.dirname(got)
+        while os.path.normpath(d) != os.path.normpath(models_dir):
+            try:
+                os.rmdir(d)
+            except OSError:
+                break
+            d = os.path.dirname(d)
+
+    if not _valid_safetensors(dest, min_bytes):
+        log(f"  [fail] {w.filename} downloaded but failed verification — leaving it for a re-run")
+        return False
+
+    prefs[w.pref_key] = dest
+    log(f"  [done] {w.filename}")
+    return True
+
+
+def fetch_tool(spec, log=print, dry_run=False):
+    """Warm a by-name model's cache. Never fatal — these all re-download on demand anyway."""
+    model_id, gb, note = spec
+    log(f"  [get]  {model_id} (~{gb:g} GB) — {note}")
+    if dry_run:
+        return True
+    try:
+        if model_id.startswith("insightface:"):
+            # No public download API — instantiating is what actually populates ~/.insightface,
+            # and it proves onnxruntime can load the model rather than just that bytes arrived.
+            from insightface.app import FaceAnalysis
+            app = FaceAnalysis(name=model_id.split(":", 1)[1],
+                               allowed_modules=["detection", "genderage"],
+                               providers=["CPUExecutionProvider"])
+            app.prepare(ctx_id=-1)
+        else:
+            from huggingface_hub import snapshot_download
+            snapshot_download(repo_id=model_id)
+        log(f"  [done] {model_id}")
+        return True
+    except Exception as e:
+        log(f"  [skip] {model_id}: {type(e).__name__}: {e}")
+        log("         Not fatal — it will download by itself the first time you use it.")
+        return False
+
+
+def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_optional=False,
+          log=print, dry_run=False):
+    """Fetch every asset for the named families. Returns True if nothing failed."""
+    models_dir = os.path.abspath(models_dir or os.path.join(repo_dir, "models"))
+    prefs_file = os.path.join(repo_dir, "prefs.json")
+    if not dry_run:
+        os.makedirs(models_dir, exist_ok=True)
+    prefs = _load_prefs(prefs_file)
+
+    planned = [w for fam in families if fam in FAMILIES for w in FAMILIES[fam]
+               if include_optional or not w.optional]
+    total = sum(w.gb for w in planned) + (
+        sum(g for _, g, _ in TOOLS) if "tools" in families else 0)
+    log(f"Fetching: {', '.join(families)}  (~{total:.1f} GB)")
+    log(f"Into: {models_dir}")
+    if any(w.gated for w in planned) and not (token or os.environ.get("HF_TOKEN")):
+        log("Note: some of these need a HuggingFace token — accept the licence on the model page,")
+        log("      then pass --token hf_... or set HF_TOKEN.")
+    log("")
+
+    ok = True
+    for fam in families:
+        if fam == "tools":
+            log("Helper models (Florence-2, face model, translator):")
+            for spec in TOOLS:
+                fetch_tool(spec, log=log, dry_run=dry_run)   # never fails the run
+            log("")
+            continue
+        if fam not in FAMILIES:
+            log(f"Unknown family: {fam}")
+            ok = False
+            continue
+        log(f"{fam}:")
+        for w in FAMILIES[fam]:
+            if w.optional and not include_optional:
+                log(f"  [skip] {w.filename} (~{w.gb:g} GB) — optional: {w.note}")
+                continue
+            if not fetch_weight(w, models_dir, prefs, token=token, log=log, dry_run=dry_run):
+                ok = False
+        log("")
+
+    if not dry_run:
+        _save_prefs(prefs_file, prefs)
+        log(f"Preferences updated: {prefs_file}")
+    log("Done." if ok else "Finished with some items missing — re-run to retry just those.")
+    return ok
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Download Fizgig's model files and write them into Preferences.")
+    p.add_argument("--family", action="append", choices=["krea2", "klein", "tools"],
+                   help="Repeatable. Krea 2 needs no HF account; Klein is gated.")
+    p.add_argument("--all", action="store_true", help="Every family, including the helper models.")
+    p.add_argument("--include-optional", action="store_true",
+                   help="Also fetch workbench-only files (Krea 2 Turbo DiT, ~13 GB).")
+    p.add_argument("--models-dir", default=None, help="Default: <repo>/models")
+    p.add_argument("--token", default=None, help="HuggingFace token for gated repos (or HF_TOKEN).")
+    p.add_argument("--dry-run", action="store_true", help="Show what would be fetched.")
+    a = p.parse_args()
+
+    families = ["krea2", "klein", "tools"] if a.all else (a.family or [])
+    if not families:
+        p.error("pick --family krea2|klein|tools (repeatable), or --all")
+
+    ok = fetch(families, models_dir=a.models_dir, token=a.token,
+               include_optional=a.include_optional, dry_run=a.dry_run)
+    sys.exit(0 if ok else 1)
+
+
+if __name__ == "__main__":
+    main()

@@ -12319,6 +12319,12 @@ class LoRATrainerGUI:
             wraplength=760, justify=tk.LEFT)
         _qwen_tip.grid(row=next_row, column=0, columnspan=3, sticky=tk.W, pady=(12, 2))
         next_row += 1
+        self._add_fetch_models_row(
+            models_card, next_row, "klein",
+            "Fetches the four files above (~34 GB) and fills in these paths for you. Black Forest "
+            "Labs gate their downloads, so you'll need a free HuggingFace token — Fizgig asks for "
+            "it and tells you which pages to accept the licence on.")
+        next_row += 1
 
         # Card 1b: Krea 2 model paths
         krea_card = self._start_section_card(
@@ -12369,6 +12375,11 @@ class LoRATrainerGUI:
             download_url="https://huggingface.co/Comfy-Org/Krea-2/blob/main/loras/krea2_turbo_lora_rank_64_bf16.safetensors",
             download_note="~470MB bf16 — Comfy-Org/Krea-2 → loras/krea2_turbo_lora_rank_64_bf16.safetensors",
         )
+        self._add_fetch_models_row(
+            krea_card, kr + 1, "krea2",
+            "Fetches everything above except the Turbo DiT (~32 GB) and fills in these paths for "
+            "you. No HuggingFace account needed — these files aren't gated. Tick Turbo DiT to add "
+            "it (+13 GB); it's only used by the workbench tools and the classic preview mode.")
 
         # Card 2: Inference Performance
         inf_card = self._start_section_card(
@@ -12453,6 +12464,125 @@ class LoRATrainerGUI:
         ttk.Button(action_row, text="Open prefs.json", command=self._open_prefs_file).pack(side=tk.LEFT)
 
         self._add_youtube_help_button(outer, "preferences")
+
+    def _add_fetch_models_row(self, frame, row, family, blurb):
+        """'Download them all for me' row at the foot of a model-paths card.
+
+        The per-row Download links open a browser and leave you to save the file and paste the
+        path back — five times over, ~32 GB, before Fizgig does anything at all. This does the
+        same job unattended and writes the paths into prefs itself."""
+        bar = tk.Frame(frame, bg=COLORS["bg_surface"])
+        bar.grid(row=row, column=0, columnspan=3, sticky=tk.EW, pady=(14, 2))
+        btn = ttk.Button(bar, text="⬇ Download models for me",
+                         command=lambda f=family: self._start_fetch_models(f))
+        btn.pack(side=tk.LEFT)
+        setattr(self, f"_fetch_btn_{family}", btn)
+        if family == "krea2":
+            self._fetch_krea2_turbo_var = tk.BooleanVar(value=False)
+            ttk.Checkbutton(bar, text="also the Turbo DiT (+13 GB)",
+                            variable=self._fetch_krea2_turbo_var,
+                            style="Surface.TCheckbutton").pack(side=tk.LEFT, padx=(12, 0))
+        status = tk.Label(bar, text="", font=(FONT_FAMILY, 9),
+                          fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
+        status.pack(side=tk.LEFT, padx=(12, 0))
+        setattr(self, f"_fetch_status_{family}", status)
+        tk.Label(frame, text=blurb, font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"],
+                 bg=COLORS["bg_surface"], wraplength=760, justify=tk.LEFT
+                 ).grid(row=row + 1, column=0, columnspan=3, sticky=tk.W, pady=(0, 2))
+        return row + 2
+
+    def _start_fetch_models(self, family):
+        """Run the fetcher in a worker thread, streaming progress into the status label."""
+        if getattr(self, "_fetch_running", False):
+            messagebox.showinfo("Already downloading", "A model download is already running.")
+            return
+        token = ""
+        if family == "klein":
+            # Klein's repos are gated: BFL require each user to accept the licence themselves,
+            # which is exactly why these can't be bundled or pre-fetched on anyone's behalf.
+            token = simpledialog.askstring(
+                "HuggingFace token",
+                "Black Forest Labs gate the Klein downloads.\n\n"
+                "1. Sign in at huggingface.co and accept the licence on:\n"
+                "     black-forest-labs/FLUX.2-klein-base-9b-fp8\n"
+                "     black-forest-labs/FLUX.2-klein-9b-fp8\n"
+                "     black-forest-labs/FLUX.2-dev\n"
+                "2. Create a READ token at huggingface.co/settings/tokens\n"
+                "3. Paste it here:",
+                parent=self.master, show="*") or ""
+            if not token.strip():
+                return
+
+        include_optional = (family == "krea2"
+                            and getattr(self, "_fetch_krea2_turbo_var", None) is not None
+                            and self._fetch_krea2_turbo_var.get())
+        btn = getattr(self, f"_fetch_btn_{family}", None)
+        status = getattr(self, f"_fetch_status_{family}", None)
+        if btn:
+            btn.config(state="disabled")
+        self._fetch_running = True
+
+        def worker():
+            import subprocess
+            cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--family", family]
+            if include_optional:
+                cmd.append("--include-optional")
+            env = dict(os.environ)
+            env["PYTHONPATH"] = os.path.join(FIZGIG_DIR, "src")
+            env["PYTHONUNBUFFERED"] = "1"
+            if token.strip():
+                env["HF_TOKEN"] = token.strip()
+            ok = False
+            try:
+                p = subprocess.Popen(cmd, cwd=FIZGIG_DIR, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True, env=env,
+                                     encoding="utf-8", errors="replace",
+                                     creationflags=(subprocess.CREATE_NO_WINDOW
+                                                    if os.name == "nt" else 0))
+                for line in p.stdout:
+                    line = line.rstrip()
+                    if line:
+                        self.master.after(0, lambda l=line: self._on_fetch_progress(family, l))
+                ok = (p.wait() == 0)
+            except Exception as e:
+                self.master.after(0, lambda e=e: self._on_fetch_progress(
+                    family, f"failed: {type(e).__name__}: {e}"))
+            self.master.after(0, lambda: self._on_fetch_done(family, ok))
+
+        threading.Thread(target=worker, daemon=True).start()
+        if status:
+            status.config(text="starting…", fg=COLORS["text_secondary"])
+
+    def _on_fetch_progress(self, family, line):
+        status = getattr(self, f"_fetch_status_{family}", None)
+        if status:
+            status.config(text=line[:110])
+        self.update_console(f"[models] {line}\n")
+
+    def _on_fetch_done(self, family, ok):
+        self._fetch_running = False
+        btn = getattr(self, f"_fetch_btn_{family}", None)
+        if btn:
+            btn.config(state="normal")
+        # The fetcher wrote prefs.json from another process, so re-read it — otherwise the
+        # entry boxes keep showing the paths from before the download and saving from this
+        # window would write the stale ones straight back over the new ones.
+        try:
+            fresh = load_prefs()
+            for key, var in self.prefs_vars.items():
+                if key in fresh and str(fresh[key]).strip():
+                    var.set(fresh[key])
+            self.prefs.update(fresh)
+        except Exception:
+            pass
+        status = getattr(self, f"_fetch_status_{family}", None)
+        if status:
+            status.config(text="done — paths filled in" if ok else "finished with items missing (see console)",
+                          fg=COLORS["success"] if ok else COLORS["warning"])
+        if ok:
+            messagebox.showinfo("Models ready",
+                                "Downloaded and wired into Preferences.\n\n"
+                                "The paths above are filled in — nothing else to set up.")
 
     def _add_pref_row(self, frame, row, label, pref_key, hint, is_dir=False, download_url=None, download_note=None,
                       download_label="Download", download_url2=None, download_label2="Download", download_note2=None):

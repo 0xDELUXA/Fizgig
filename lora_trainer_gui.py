@@ -305,6 +305,9 @@ ARCHITECTURES = {
         "sample_steps_default": 40,  # Base is not step-distilled — BFL spec is ~50 steps; 40 balances quality vs sample time. Distilled path overrides to 4.
         "sample_width_default": 768,
         "sample_height_default": 768,
+        # Trailing tag on the default LoRA name, so a file says which family made it. Swapped
+        # when the family changes — see _apply_lora_name_suffix.
+        "lora_name_suffix": "k9b",
     },
     "Krea 2": {
         # Krea 2 trains natively via fizgig.scripts.krea2_* (no accelerate launch — a
@@ -341,10 +344,24 @@ ARCHITECTURES = {
         "sample_steps_default": 8,
         "sample_width_default": 1024,
         "sample_height_default": 1024,
+        "lora_name_suffix": "krea2",
     },
 }
 
 ARCHITECTURE_LIST = list(ARCHITECTURES.keys())
+
+# Every family suffix we recognise on a LoRA name. Used to swap ONE tag for another when the
+# model family changes — matching this set (never "the last underscore segment") is what stops
+# a name like portrait_v2 being mangled into portrait_krea2.
+LORA_NAME_SUFFIXES = {c["lora_name_suffix"] for c in ARCHITECTURES.values()
+                      if c.get("lora_name_suffix")}
+
+# Preview resolutions offered by BOTH the Samples tab and the live "Override next sample" panel.
+# They used to be two hardcoded lists that had drifted — the Samples tab reached 1536 while the
+# override stopped at 1024, so a run previewing at 1280+ could not be reproduced by the override,
+# which silently downgraded it. Nothing downstream caps the value (Krea 2 rounds up to alignment,
+# Klein floors to a multiple of 16), so the ceiling was purely this list.
+SAMPLE_RESOLUTIONS = ["512", "768", "1024", "1280", "1536"]
 
 # Fizgig installation directory (where this GUI lives)
 FIZGIG_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1117,6 +1134,13 @@ class LoRATrainerGUI:
         # Restore remembered Repair Studio / Explorer Setup fields + attach save traces.
         # After ALL tabs exist: restoring fires their traces, which touch other tabs' widgets.
         self._restore_workbench_setup_fields()
+        # Retag the LoRA name for the restored family. The settings dict is built long before
+        # architecture_var exists, so its default is hardcoded Klein-shaped — without this, a
+        # user whose last session was Krea 2 reopens to a name ending _k9b.
+        try:
+            self._apply_lora_name_suffix(self.architecture_var.get())
+        except Exception:
+            pass
 
         # Caption model state (lazy loaded, one at a time — see unload_florence_model)
         self.florence_model = None
@@ -1614,7 +1638,9 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(16, 3))
         self.sample_override_seed_var = tk.StringVar(value="1234")
         ttk.Entry(r1, textvariable=self.sample_override_seed_var, width=8).pack(side=tk.LEFT)
-        _res_vals = ["512", "640", "768", "896", "1024"]
+        # Same list as the Samples tab (SAMPLE_RESOLUTIONS) — these two had drifted, and
+        # the override's lower ceiling silently downgraded a 1280/1536 preview.
+        _res_vals = SAMPLE_RESOLUTIONS
         tk.Label(r1, text="W", bg=_sbg, fg=COLORS["text_muted"],
                  font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
         self.sample_override_w_var = tk.StringVar(value="768")
@@ -1625,9 +1651,10 @@ class LoRATrainerGUI:
         self.sample_override_h_var = tk.StringVar(value="768")
         ttk.Combobox(r1, textvariable=self.sample_override_h_var, values=_res_vals,
                      state="readonly", width=6).pack(side=tk.LEFT)
-        # Reference image (Klein edit conditioning) — auto-capped to ~0.20 MP by
-        # the trainer so a big image can't OOM the sample. Hidden in Krea 2 mode (Krea 2
-        # isn't an edit model, so samples generate from scratch — no reference image).
+        # Reference image — auto-capped to ~0.20 MP by the trainer so a big image can't OOM the
+        # sample. Shown for BOTH families: Klein uses it as edit conditioning, Krea 2 routes it
+        # through the Qwen3-VL vision path. (This comment used to claim it was hidden under
+        # Krea 2 — it never was; there is no hide call for these widgets anywhere.)
         self._override_ref_caption = tk.Label(r1, text="Ref", bg=_sbg, fg=COLORS["text_muted"],
                  font=(FONT_FAMILY, 8))
         self._override_ref_caption.pack(side=tk.LEFT, padx=(14, 3))
@@ -6731,7 +6758,7 @@ class LoRATrainerGUI:
         self.sample_width_var = tk.StringVar(value=str(self.settings["SAMPLE_WIDTH"]))
         self.sample_width_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_width_var,
-            values=["512", "768", "1024", "1280", "1536"], state="readonly", width=10,
+            values=SAMPLE_RESOLUTIONS, state="readonly", width=10,
         )
         self.sample_width_combo.grid(row=1, column=1, sticky=tk.W, pady=4)
 
@@ -6739,7 +6766,7 @@ class LoRATrainerGUI:
         self.sample_height_var = tk.StringVar(value=str(self.settings["SAMPLE_HEIGHT"]))
         self.sample_height_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_height_var,
-            values=["512", "768", "1024", "1280", "1536"], state="readonly", width=10,
+            values=SAMPLE_RESOLUTIONS, state="readonly", width=10,
         )
         self.sample_height_combo.grid(row=2, column=1, sticky=tk.W, pady=4)
 
@@ -7006,6 +7033,49 @@ class LoRATrainerGUI:
         self.sample_cfg_scale_entry.configure(state=state)
         self.sample_cfg_label.configure(foreground=grey)
 
+    def _lora_name_rename_blocked(self) -> bool:
+        """True when the LoRA name must not be touched: a run is live, or one is paused.
+
+        The name is a filename PREFIX, not a label — _detect_latest_state_dir rebuilds
+        f'{name}-NNNNNN-state' from it to find a resumable run, and checkpoint discovery
+        rebuilds '{name}-NNNNNN.safetensors'. Renaming the box would orphan a paused run in a
+        way the user wouldn't notice until they tried to resume it."""
+        proc = getattr(self, "current_process", None)
+        try:
+            if proc is not None and proc.poll() is None:
+                return True
+        except Exception:
+            pass
+        try:
+            return os.path.exists(self._paused_sidecar_path())
+        except Exception:
+            return False
+
+    def _apply_lora_name_suffix(self, arch: str):
+        """Retag the LoRA name for `arch` — myface_k9b -> myface_krea2 and back.
+
+        Only rewrites a trailing tag that is itself a known family suffix, so names that don't
+        follow the convention (bobs_dog, portrait_v2) are never touched. Idempotent: a name that
+        already carries the right suffix is left alone, which is what makes it safe to call both
+        at startup and after every family switch."""
+        entry = self.entries.get("LORA_NAME") if hasattr(self, "entries") else None
+        want = ARCHITECTURES.get(arch, {}).get("lora_name_suffix")
+        if entry is None or not want or self._lora_name_rename_blocked():
+            return
+        try:
+            name = entry.get().strip()
+        except (AttributeError, tk.TclError):
+            return
+        for suffix in LORA_NAME_SUFFIXES:
+            if suffix != want and name.endswith("_" + suffix):
+                new = name[: -len(suffix)] + want
+                try:
+                    entry.delete(0, tk.END)
+                    entry.insert(0, new)
+                except (AttributeError, tk.TclError):
+                    pass
+                return
+
     def _on_architecture_selected(self, event=None):
         """Model-family selector changed — refresh sample defaults + presets + persist."""
         # Snapshot the family we're LEAVING before anything reshapes the tab. The combobox
@@ -7071,6 +7141,14 @@ class LoRATrainerGUI:
                     self.update_console(f"[preset] {_arch_new} selected — applied {_default_name}\n")
             elif _default_name and not self.custom_preset_var.get():
                 self.custom_preset_var.set(_default_name)
+        except Exception:
+            pass
+        # Retag the LoRA name LAST — _apply_preset_values above rewrites every field including
+        # LORA_NAME, so doing this earlier would just be clobbered. On a return visit the
+        # restored name already carries the right suffix and this is a no-op; on a first visit
+        # it converts the outgoing family's name (which the built-in presets don't set).
+        try:
+            self._apply_lora_name_suffix(_arch_new)
         except Exception:
             pass
         try:

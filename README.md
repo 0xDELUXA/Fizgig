@@ -28,6 +28,7 @@
 > - **Long runs no longer slow down over time** — the gradual per-step slowdown on long runs is fixed (v2.8.2).
 > - **New Krea 2 preview engine.** In-training samples now render **on the training model itself** using the official **Turbo LoRA** — no more loading the 13 GB Turbo checkpoint and shuffling models between CPU and GPU every preview. Same look, same settings, far less memory traffic. The LoRA **auto-downloads** on update or first use; the classic Turbo-model mode is still there on the Samples tab.
 > - **New preset: ✨ Krea 2 Ultra Fast** — rank 8 with Adaptive LR at an aggressive floor, 20 epochs. Fewer epochs to a usable LoRA; the rank-32 **Krea 2 Defaults** preset remains the standard pick.
+> - **Caption with the model that trains your LoRA.** The Captions tab can now use **Qwen3-VL** — the same vision-language model that conditions Krea 2 training — instead of Florence-2, and picks it by default when you have that text encoder. Four tasks, and the exact instruction is **yours to read and edit**. Works for Klein datasets too: captions are just `.txt`.
 
 > **🎉 New — Krea 2.** Fizgig now supports a **second, fully native model family**: **Krea 2 (12.9B)**. The whole workbench works with it — Repair Studio, Explorer, Royale, Profiler, Extract — plus Context LoRA, Adaptive LR, Pause/Resume, 4-bit (NF4) low-VRAM training, and the live sample override. [Details below ↓](#krea-2--second-model-family)
 
@@ -147,7 +148,7 @@ The browser gallery of training samples now *measures* the run instead of just s
 - **Training Run Visualiser** — scrub the current run epoch by epoch, Royale-style: a slider carousel per sample prompt, play/pause with ping-pong looping, likeness score inline, and share-ready export — a WebM clip with the epoch ticker and Fizgig tag burned in, or full-res PNG frames. It's a taste of the **LoRA Royale** tab, right in the browser.
 
 ### Dataset prep
-- **Florence-2 AI captioning** — bulk-generate detailed captions in one click.
+- **AI captioning, with the captioner that trains your model** — if you have Krea 2's Qwen3-VL text encoder, the Captions tab uses it by default. It's the same vision-language model that conditions training, so it captions to the doctrine that actually matters for LoRAs: name the camera viewpoint, say whether the face is visible, describe what's there instead of hedging. Four tasks (training caption / short / detailed / exhaustive), and you can **read and edit the exact instruction** sent to the model — the trainer's mid-run auto-recaption then uses your wording too. **Florence-2** remains the zero-setup option, downloading itself on first use. Either way it's bulk-generate in one click, with your trigger word prepended.
 - **Bilingual captions** — optionally append Chinese via Helsinki-NLP. Klein's Qwen3 text encoder has deep Chinese training, so bilingual captions act as text-level data augmentation, improving visual quality without changing loss. In a controlled A/B (same data, seed, and hyperparameters — captions the only change) the loss curves stayed within ±0.001/epoch, yet the bilingual run produced visibly more skin detail and faster visual convergence.
 - **Image Prep** — batch resize, PNG conversion, and InsightFace face-crop derivatives, with optional **gender targeting** (largest male/female face) so it locks onto your subject in group shots. Pairing a tight crop with a full shot adds a lot to a character dataset. Training defaults to ~512² (0.25 MP) and resizes in-cache, so any resolution or aspect ratio just works — nothing has to be square or pre-sized.
 - **Look Consistency Filter** — the final prep stage, built for **synthetic-heavy datasets**: the subtly off-look near-misses that drag a likeness down are *easy* for the model to reconstruct, so a loss curve never sees them — but face-embedding distance does. Pick the **3 images that best nail the look** and every image is scored against all three, averaged (close-up faces included — detection pads-and-retries). Worst matches surface first with colour-coded verdicts; mark drifters by click or let **Auto-Suggest** flag the statistical outliers, then move them out of the dataset in one go (to a subfolder — nothing is deleted, and moving them back re-admits them). The scores save with your dataset and drive the trainer's **look-outlier warm-up**.
@@ -274,7 +275,7 @@ Launch Fizgig and work left-to-right through the numbered tabs:
 
 1. **Start** — set your training image folder. If model paths aren't configured, a prompt points you to Preferences.
 2. **Image Prep** (optional) — resize, PNG-convert, or face-crop your images; finish with the **Look Consistency Filter** to weed out off-look images before they train.
-3. **Captions** — write trigger-word captions or generate with Florence-2; optionally translate to bilingual English + Chinese.
+3. **Captions** — write trigger-word captions or generate them with AI (Qwen3-VL or Florence-2); optionally translate to bilingual English + Chinese.
 4. **Samples** — configure the preview prompts that render during training (Distilled 4-step on by default).
 5. **Training** — pick a preset, tune, click **Start Training**.
 

@@ -12321,9 +12321,11 @@ class LoRATrainerGUI:
         next_row += 1
         self._add_fetch_models_row(
             models_card, next_row, "klein",
-            "Fetches the four files above (~34 GB) and fills in these paths for you. Black Forest "
-            "Labs gate their downloads, so you'll need a free HuggingFace token — Fizgig asks for "
-            "it and tells you which pages to accept the licence on.")
+            "Fetches the four files above (~34 GB) and fills in these paths for you, plus the "
+            "small helper models (Florence-2 captioner, face model for the Look Filter and "
+            "likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to download later. "
+            "Black Forest Labs gate their downloads, so you'll need a free HuggingFace token — "
+            "Fizgig asks for it and tells you which pages to accept the licence on.")
         next_row += 1
 
         # Card 1b: Krea 2 model paths
@@ -12378,8 +12380,10 @@ class LoRATrainerGUI:
         self._add_fetch_models_row(
             krea_card, kr + 1, "krea2",
             "Fetches everything above except the Turbo DiT (~32 GB) and fills in these paths for "
-            "you. No HuggingFace account needed — these files aren't gated. Tick Turbo DiT to add "
-            "it (+13 GB); it's only used by the workbench tools and the classic preview mode.")
+            "you, plus the small helper models (Florence-2 captioner, face model for the Look "
+            "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
+            "download later. No HuggingFace account needed — none of these are gated. Tick Turbo "
+            "DiT to add it (+13 GB); it's only used by the workbench tools and classic previews.")
 
         # Card 2: Inference Performance
         inf_card = self._start_section_card(
@@ -12524,7 +12528,13 @@ class LoRATrainerGUI:
 
         def worker():
             import subprocess
-            cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--family", family]
+            # Helper models come first and with BOTH families: they're ~1.6 GB against tens of
+            # GB of weights, and whichever button you press you'll hit Florence / the face model
+            # / the translator sooner or later. Fetching them up front means the Captions tab and
+            # Look Filter work immediately, and they survive abandoning the big download.
+            # Re-running is cheap — everything here is a no-op once present.
+            cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models",
+                   "--family", "tools", "--family", family]
             if include_optional:
                 cmd.append("--include-optional")
             env = dict(os.environ)

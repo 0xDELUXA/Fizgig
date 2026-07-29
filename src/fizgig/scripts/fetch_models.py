@@ -187,6 +187,16 @@ def fetch_weight(w, models_dir, prefs, token=None, log=print, dry_run=False):
 def fetch_tool(spec, log=print, dry_run=False):
     """Warm a by-name model's cache. Never fatal — these all re-download on demand anyway."""
     model_id, gb, note = spec
+    if model_id.startswith("insightface:"):
+        # Cheap presence check first. Unlike the HF downloads, warming this one means actually
+        # constructing FaceAnalysis and letting onnxruntime load the models — several seconds of
+        # console noise. Both family buttons fetch the tools, so that would otherwise happen
+        # twice for anyone who trains with both families.
+        name = model_id.split(":", 1)[1]
+        home = os.environ.get("INSIGHTFACE_HOME") or os.path.expanduser("~/.insightface")
+        if os.path.isdir(os.path.join(home, "models", name)):
+            log(f"  [ok]   {model_id} — already present")
+            return True
     log(f"  [get]  {model_id} (~{gb:g} GB) — {note}")
     if dry_run:
         return True
@@ -218,6 +228,7 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
     if not dry_run:
         os.makedirs(models_dir, exist_ok=True)
     prefs = _load_prefs(prefs_file)
+    prefs_before = json.dumps(prefs, sort_keys=True)
 
     planned = [w for fam in families if fam in FAMILIES for w in FAMILIES[fam]
                if include_optional or not w.optional]
@@ -251,7 +262,9 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
                 ok = False
         log("")
 
-    if not dry_run:
+    # Only rewrite prefs.json if we actually changed something — a tools-only run has no paths
+    # to record, and there's no reason to touch a user's settings file to say so.
+    if not dry_run and json.dumps(prefs, sort_keys=True) != prefs_before:
         _save_prefs(prefs_file, prefs)
         log(f"Preferences updated: {prefs_file}")
     log("Done." if ok else "Finished with some items missing — re-run to retry just those.")

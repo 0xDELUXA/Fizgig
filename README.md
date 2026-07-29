@@ -49,7 +49,7 @@ Every trainer makes LoRAs. Fizgig is built around what you do with them **afterw
 
 Under that workbench sits a fast, light trainer tuned for its models — and tuned to **fit your GPU**, not a datacenter's. Because everything is built natively for Klein 9B and Krea 2 instead of bolted onto a dozen models, Fizgig can do things the generalists can't:
 
-- **Big models on modest cards.** A full **Klein 9B** LoRA trains on a **16 GB card** — and the 12.9B **Krea 2** trains on a **10–12 GB card** thanks to the 4-bit (NF4) base (~8 GB resident, QLoRA-style: the base is 4-bit, your LoRA still trains in bf16 on top). Block swap and previews **size themselves to your VRAM automatically** — nothing to configure — and if a preview can't fit, it steps aside so **training keeps running and saving**. You don't need a 4090 to train on the newest 12.9B model.
+- **Big models on modest cards.** A full **Klein 9B** LoRA trains on a **16 GB card** — and the 12.9B **Krea 2** trains on **8 GB**, confirmed by users running nothing but the stock preset defaults at batch size 1 with everything on Auto. That's the 4-bit (NF4) base doing the work (~8 GB resident, QLoRA-style: the base is 4-bit, your LoRA still trains in bf16 on top). Block swap, quantisation and previews **size themselves to your VRAM automatically** — nothing to configure — and if a preview can't fit, it steps aside so **training keeps running and saving**. You don't need a 4090 to train on the newest 12.9B model.
 - **A workbench nobody else has.** Repair broken LoRAs block-by-block, evolve new ones like a game, and crossfade every epoch of a run to find the sweet spot — then the tools **read each other's output** (profile → repair → explore → compare, one closed loop).
 - **It just works on your files.** Loads kohya / PEFT / OneTrainer / AI-Toolkit / LyCORIS, auto-converted; saves kohya `.safetensors` that drop straight into ComfyUI.
 
@@ -92,11 +92,13 @@ Everything works on Krea 2: **all five workbench tools** (Profiler, Extract, Rep
 
 > **📣 Help map Krea 2's blocks — [open an issue](https://github.com/shootthesound/Fizgig/issues).** The colour-coded sliders, Model-Area targeting, and block-aware presets are Klein-only right now because Krea 2's per-block roles (which blocks carry **identity**, **style**, and **detail**) aren't mapped yet. The **Profiler**'s weight-only report is the instrument for discovering them. If you find patterns — a block that clearly drives identity, a range that governs style — please share your findings in the **[GitHub Issues](https://github.com/shootthesound/Fizgig/issues)**. Community block-discovery is what will drive the colour-coding and finer layer targeting coming to the Krea 2 presets and Repair Studio.
 
-**Runs on smaller cards, and adapts to yours.** Krea 2 is a bigger model than Klein, but the low-VRAM paths are wired — and with everything on **Auto**, Fizgig plans the whole run for you:
+**Runs on smaller cards, and adapts to yours.** Krea 2 is a bigger model than Klein, but the low-VRAM paths are wired — and with everything on **Auto**, Fizgig plans the whole run for you.
+
+> **8 GB is enough.** Users have trained full Krea 2 LoRAs on **8 GB** cards with everything left on **Auto**, batch size **1**, and the stock defaults of any of the Krea 2 presets — no hand-tuning. **10–12 GB** cards do the same with more headroom to spare, so there's room to raise batch size or resolution before anything gets tight. On 8 GB, leave batch size at 1 and let Auto do its thing.
 
 - **Auto memory strategy** — leave Blocks Swap and 4-bit Base on **Auto** and Fizgig picks the best of **INT8 W8A8** (fastest, near-exact — the default wherever it fits), **NF4 4-bit**, or fp8 from your *free* VRAM — budgeted for your actual run shape (batch size is the big cost: ~2.4 GB per extra image, measured). The console explains what it chose and why.
 - **torch.compile speedup** — on longer runs the transformer blocks compile automatically (needs the MSVC C++ Build Tools on Windows; triton installs with the requirements). Roughly 2× faster steady-state steps on the INT8 path after a one-off warm-up — putting per-step speed **approximately on a par with OneTrainer**. Combine that with the real-time dataset intelligence below (which showed faster likeness and a higher ceiling in matched-epoch A/Bs) and time-to-a-*good*-LoRA should now favour Fizgig: same step speed, smarter steps.
-- **4-bit (NF4) base** — the base trains frozen at ~5.6 GB (base + LoRA ~8.3 GB), so a full Krea 2 LoRA fits a **10–12 GB card with no block swap** — QLoRA-style, the LoRA still trains in bf16 on top. Auto picks it when it's the right call; the *4-bit Base* dropdown forces it On/Off.
+- **4-bit (NF4) base** — the base trains frozen at ~5.6 GB (base + LoRA ~8.3 GB), so a full Krea 2 LoRA fits a **10–12 GB card with no block swap at all**, and an **8 GB** card with the swap Auto sizes for it — QLoRA-style, the LoRA still trains in bf16 on top. Auto picks it when it's the right call; the *4-bit Base* dropdown forces it On/Off.
 - **Previews with no model swapping** — the default **RAW + Turbo LoRA** preview engine renders samples on the model that's already training, so nothing big is loaded or moved between epochs. The Samples tab keeps the classic mode (load the fp8 Turbo checkpoint per preview) if you prefer it; the workbench tools (Repair Studio / Explorer / Royale) still use the Turbo checkpoint, auto-sizing its block swap to your GPU.
 - **Previews never crash a run** — if a preview can't fit, previews auto-disable and **training keeps going and saving**; evaluate the LoRA in ComfyUI.
 
@@ -163,7 +165,7 @@ Loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / Lo
 
 ## Requirements
 
-- **GPU** — NVIDIA RTX 30 / 40 / 50-series. **16 GB+ VRAM** recommended (24 GB+ comfortable). The fp8 Base's VRAM savings apply on every supported card.
+- **GPU** — NVIDIA RTX 30 / 40 / 50-series. **16 GB+ VRAM** recommended (24 GB+ comfortable), but the floor is lower than that suggests: **Klein 9B** needs 16 GB, while **Krea 2** trains on **8 GB** with everything on Auto and batch size 1 — see [VRAM guidance](#vram-guidance). The fp8 Base's VRAM savings apply on every supported card.
 - **NVIDIA driver** — 555+ on Windows, 550+ on Linux (for the CUDA 12.8 PyTorch wheels).
 - **OS** — Windows 10 / 11 or Linux. macOS handles captioning and image prep, but training needs CUDA.
 - **Python** — 3.10, 3.11, 3.12, or 3.13.
@@ -228,7 +230,7 @@ All four files live in the one [**Comfy-Org/Krea-2**](https://huggingface.co/Com
 | **Text Encoder — recommended** | `qwen3vl_4b_fp8_scaled.safetensors` | ~5.2 GB fp8 | [Comfy-Org/Krea-2 → text_encoders](https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors) |
 | Text Encoder — full precision | `qwen3vl_4b_bf16.safetensors` | ~8.9 GB bf16 | [Comfy-Org/Krea-2 → text_encoders](https://huggingface.co/Comfy-Org/Krea-2/blob/main/text_encoders/qwen3vl_4b_bf16.safetensors) |
 
-Training and its previews run on the **RAW DiT** (the Turbo LoRA auto-downloads — no need to grab it by hand); the **fp8 Turbo checkpoint** powers the workbench tools (Repair Studio / Explorer / Royale) and the classic preview mode, so grab it if you'll use those. On smaller cards, the **4-bit (NF4)** toggle shrinks the RAW base to ~5.6 GB so it fits 10–12 GB GPUs.
+Training and its previews run on the **RAW DiT** (the Turbo LoRA auto-downloads — no need to grab it by hand); the **fp8 Turbo checkpoint** powers the workbench tools (Repair Studio / Explorer / Royale) and the classic preview mode, so grab it if you'll use those. On smaller cards, the **4-bit (NF4)** toggle shrinks the RAW base to ~5.6 GB — which is how Krea 2 fits 10–12 GB GPUs, and 8 GB ones at batch size 1. Leave it on Auto and Fizgig decides.
 
 **The text encoder slot is open.** Fizgig loads any Qwen3-VL-4B checkpoint you point it at, so you have real choice here:
 
@@ -262,9 +264,15 @@ Nothing else about Krea 2 is needed to use it as a captioner — Klein-only data
 
 ### Krea 2
 
-Krea 2 is a bigger model, so the numbers differ — but Fizgig **auto-sizes block swap to your card** for both training and the workbench, so there's nothing to tune:
+Krea 2 is a bigger model, so the numbers differ — but Fizgig **auto-sizes block swap and quantisation to your card** for both training and the workbench, so there's nothing to tune:
 
-- **Training** runs on the RAW fp8 base (~14 GB resident); block swap auto-detects from VRAM (32 GB → none, scaling up to maximum on sub-16 GB cards). The **4-bit (NF4)** toggle drops the base to ~5.6 GB (base + LoRA ~8.3 GB), fitting a **10–12 GB card with no swap**.
+| Your card | What to do | What to expect |
+|---|---|---|
+| **8 GB** | Everything on **Auto**, **batch size 1**, stock preset defaults | Trains full Krea 2 LoRAs — reported working by users on real runs. Keep batch size at 1; that's the one setting worth leaving alone |
+| **10–12 GB** | Same — everything on Auto | Same, with headroom to spare. Room to raise batch size or resolution before it gets tight |
+| **16 GB+** | Same | Comfortable; Auto will usually pick the faster INT8 path over 4-bit |
+
+- **Training** runs on the RAW fp8 base (~14 GB resident); block swap auto-detects from VRAM (32 GB → none, scaling up to maximum on sub-16 GB cards). The **4-bit (NF4)** toggle drops the base to ~5.6 GB (base + LoRA ~8.3 GB), fitting a **10–12 GB card with no swap** and an 8 GB card with the swap Auto sizes for it. You don't need to pick: Auto budgets from your *free* VRAM and the console explains its choice.
 - **In-training previews** default to the **RAW + Turbo LoRA** engine: they render on the model already training, so previews add almost nothing on top of the training footprint — no checkpoint load, no CPU↔GPU shuffling between epochs. The **workbench** (Repair Studio / Explorer / Royale) and the classic preview mode run on the fp8 Turbo checkpoint, which peaks ~22.6 GB unswapped — Fizgig auto-swaps it to fit your GPU (≈17 GB at swap 12; 16 GB cards swap enough to fit). If a preview still can't fit, it **auto-disables and training keeps running and saving** — evaluate the LoRA in ComfyUI.
 
 ---

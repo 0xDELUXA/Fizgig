@@ -560,6 +560,18 @@ PREFS_FILE = os.path.join(os.path.dirname(__file__), "prefs.json")
 HELP_FILE = os.path.join(os.path.dirname(__file__), "help.json")
 _FIZGIG_DIR = os.path.dirname(os.path.abspath(__file__))
 
+# --- Captioning models -----------------------------------------------------
+# Florence-2 downloads itself from HuggingFace on first use; the Qwen3-VL entry appears only when
+# the Krea 2 text-encoder file is present in Preferences. That file is a full vision-language
+# model with a real LM head, so it can genuinely describe an image — and the captions it writes
+# are plain .txt, so it is useful for ANY dataset, Klein runs included. The label names where the
+# file comes from, not who it is for.
+FLORENCE_DEFAULT_MODEL = "MiaoshouAI/Florence-2-base-PromptGen"
+FLORENCE_MODELS = [FLORENCE_DEFAULT_MODEL, "microsoft/Florence-2-base", "microsoft/Florence-2-large"]
+FLORENCE_TASKS = ["<CAPTION>", "<DETAILED_CAPTION>", "<MORE_DETAILED_CAPTION>"]
+QWEN_CAPTION_MODEL = "Qwen3-VL 4B (Krea 2 text encoder)"
+QWEN_CUSTOM_TASK = "Custom…"
+
 # Prefs whose VALUE is a directory we want to keep portable across repo
 # clones/moves. When saved to disk, paths inside _FIZGIG_DIR are stored as
 # relative strings (with forward slashes); when loaded, they're resolved back
@@ -1106,10 +1118,11 @@ class LoRATrainerGUI:
         # After ALL tabs exist: restoring fires their traces, which touch other tabs' widgets.
         self._restore_workbench_setup_fields()
 
-        # Florence model state (lazy loaded)
+        # Caption model state (lazy loaded, one at a time — see unload_florence_model)
         self.florence_model = None
         self.florence_processor = None
         self.florence_device = None
+        self.qwen_captioner = None      # Krea 2 Qwen3-VL, ~8 GB when resident
         self.captioning_stop_flag = False
         self.caption_thumbnails = {}
         self.current_caption_page = 0
@@ -1423,6 +1436,18 @@ class LoRATrainerGUI:
         # instance) have no widget stanza below, so building `data` from scratch silently dropped
         # them on the very next save — the setting looked persisted until you restarted.
         data = dict(self.last_used) if isinstance(getattr(self, "last_used", None), dict) else {}
+        # Caption model / task / token budget — these were read at widget-creation time and never
+        # written back, so every restart reset them. Now that the model choice matters (Florence
+        # vs Qwen3-VL), losing it silently would be a real annoyance.
+        for _attr, _key in (("caption_model_var", "caption_model"),
+                            ("caption_task_var", "caption_task"),
+                            ("caption_max_tokens_var", "caption_max_tokens")):
+            _v = getattr(self, _attr, None)
+            if _v is not None:
+                try:
+                    data[_key] = _v.get()
+                except Exception:
+                    pass
         data.update({
             "prep_mode": self.prep_mode_var.get(),
             "prep_replace_originals": bool(self.delete_originals_var.get()),
@@ -5308,27 +5333,51 @@ class LoRATrainerGUI:
         )
 
         ttk.Label(settings_card, text="Model:").grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.caption_model_var = tk.StringVar(value=self.settings.get("CAPTION_MODEL", "MiaoshouAI/Florence-2-base-PromptGen"))
+        self.caption_model_var = tk.StringVar(
+            value=self.last_used.get("caption_model",
+                                     self.settings.get("CAPTION_MODEL", FLORENCE_DEFAULT_MODEL)))
         self.caption_model_combo = ttk.Combobox(
             settings_card, textvariable=self.caption_model_var,
-            values=["MiaoshouAI/Florence-2-base-PromptGen",
-                    "microsoft/Florence-2-base",
-                    "microsoft/Florence-2-large"],
-            state="readonly", width=37,
+            values=self._caption_model_values(), state="readonly", width=37,
         )
         self.caption_model_combo.grid(row=3, column=1, sticky=tk.W, pady=4)
+        self.caption_model_combo.bind("<<ComboboxSelected>>",
+                                      lambda e: self._on_caption_model_changed())
+        # The Qwen3-VL entry appears as soon as the Krea 2 text encoder path is filled in on
+        # Preferences — no restart. It's a captioner for ANY dataset, Klein included; the file
+        # just happens to ship with the Krea 2 models.
+        try:
+            self.prefs_vars["krea2_text_encoder"].trace_add(
+                "write", lambda *_: self._refresh_caption_model_values())
+        except Exception:
+            pass
 
         ttk.Label(settings_card, text="Task:").grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.caption_task_var = tk.StringVar(value=self.settings.get("CAPTION_TASK", "<DETAILED_CAPTION>"))
+        self.caption_task_var = tk.StringVar(
+            value=self.last_used.get("caption_task",
+                                     self.settings.get("CAPTION_TASK", "<DETAILED_CAPTION>")))
+        _task_row = tk.Frame(settings_card, bg=COLORS["bg_surface"])
+        _task_row.grid(row=4, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.caption_task_combo = ttk.Combobox(
-            settings_card, textvariable=self.caption_task_var,
-            values=["<CAPTION>", "<DETAILED_CAPTION>", "<MORE_DETAILED_CAPTION>"],
-            state="readonly", width=37,
+            _task_row, textvariable=self.caption_task_var,
+            values=FLORENCE_TASKS, state="readonly", width=37,
         )
-        self.caption_task_combo.grid(row=4, column=1, sticky=tk.W, pady=4)
+        self.caption_task_combo.pack(side=tk.LEFT)
+        self.caption_task_combo.bind("<<ComboboxSelected>>",
+                                     lambda e: self._on_caption_task_changed())
+        self.caption_edit_instr_btn = ttk.Button(
+            _task_row, text="Edit instructions…",
+            command=self._open_caption_instruction_editor)
+        self.caption_edit_instr_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ToolTip(self.caption_edit_instr_btn,
+                "See and edit the exact instruction sent to the vision model for this task.\n"
+                "Saving switches the task to 'Custom…' and keeps your wording for future runs —\n"
+                "including the trainer's auto-recaption. 'Restore default' undoes it.")
 
         ttk.Label(settings_card, text="Max Tokens:").grid(row=5, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        self.caption_max_tokens_var = tk.StringVar(value=str(self.settings.get("CAPTION_MAX_TOKENS", 256)))
+        self.caption_max_tokens_var = tk.StringVar(
+            value=str(self.last_used.get("caption_max_tokens",
+                                         self.settings.get("CAPTION_MAX_TOKENS", 256))))
         ttk.Entry(settings_card, textvariable=self.caption_max_tokens_var, width=10).grid(row=5, column=1, sticky=tk.W, pady=4)
 
         ttk.Checkbutton(
@@ -5429,6 +5478,9 @@ class LoRATrainerGUI:
             highlightbackground=COLORS["border"], highlightcolor=COLORS["border_focus"],
         )
         self.caption_log.pack(fill=tk.BOTH, expand=True)
+
+        # Sync the task list / editor button to the restored model choice.
+        self._on_caption_model_changed()
 
         self._add_youtube_help_button(outer, "captions")
 
@@ -5641,6 +5693,172 @@ class LoRATrainerGUI:
         ttk.Button(btn_frame, text="Regenerate (AI)", command=regenerate).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
 
+    # region Caption model selection (Florence-2 / Qwen3-VL)
+
+    def _qwen_captioner_path(self) -> str:
+        """The Krea 2 text-encoder file, if it's set AND actually on disk — else ""."""
+        p = self._krea2_pref("krea2_text_encoder") if hasattr(self, "prefs_vars") else ""
+        return p if (p and os.path.isfile(p)) else ""
+
+    def _caption_model_values(self):
+        """Model dropdown contents. Qwen3-VL is offered whenever its file exists — it captions to
+        .txt like Florence does, so it serves Klein datasets just as well as Krea 2 ones."""
+        return FLORENCE_MODELS + ([QWEN_CAPTION_MODEL] if self._qwen_captioner_path() else [])
+
+    def _refresh_caption_model_values(self):
+        """Re-read the Preferences path and rebuild the dropdown (bound to that pref's trace)."""
+        if not hasattr(self, "caption_model_combo"):
+            return
+        try:
+            vals = self._caption_model_values()
+            self.caption_model_combo.configure(values=vals)
+            if self.caption_model_var.get() not in vals:
+                # The path was cleared while Qwen3-VL was selected — fall back rather than leave a
+                # selection that no longer resolves to anything loadable.
+                self.caption_model_var.set(FLORENCE_DEFAULT_MODEL)
+                self._on_caption_model_changed()
+        except tk.TclError:
+            pass
+
+    def _is_qwen_captioner(self) -> bool:
+        return self.caption_model_var.get() == QWEN_CAPTION_MODEL
+
+    def _qwen_task_labels(self):
+        from fizgig.krea2.embedder import CAPTION_TASKS
+        return [label for (label, _instr, _tok) in CAPTION_TASKS.values()] + [QWEN_CUSTOM_TASK]
+
+    def _on_caption_model_changed(self):
+        """Swap the Task dropdown between Florence's task tokens and Qwen3-VL's instruction menu,
+        and show the instruction editor only for the model that has one."""
+        try:
+            if self._is_qwen_captioner():
+                from fizgig.krea2.embedder import CAPTION_TASKS, DEFAULT_CAPTION_TASK
+                labels = self._qwen_task_labels()
+                self.caption_task_combo.configure(values=labels)
+                if self.caption_task_var.get() not in labels:
+                    self.caption_task_var.set(CAPTION_TASKS[DEFAULT_CAPTION_TASK][0])
+                self.caption_edit_instr_btn.pack(side=tk.LEFT, padx=(8, 0))
+            else:
+                self.caption_task_combo.configure(values=FLORENCE_TASKS)
+                if self.caption_task_var.get() not in FLORENCE_TASKS:
+                    self.caption_task_var.set("<DETAILED_CAPTION>")
+                self.caption_edit_instr_btn.pack_forget()
+            self._on_caption_task_changed()
+        except (tk.TclError, AttributeError):
+            pass
+        self._save_last_used_paths()
+
+    def _on_caption_task_changed(self):
+        """Seed Max Tokens from the task's suggested length, so each Qwen task gets a sensible
+        budget without a second control. Florence keeps whatever is in the box."""
+        if not self._is_qwen_captioner():
+            return
+        try:
+            from fizgig.krea2.embedder import CAPTION_TASKS
+            label = self.caption_task_var.get()
+            for _key, (lbl, _instr, tok) in CAPTION_TASKS.items():
+                if lbl == label:
+                    self.caption_max_tokens_var.set(str(tok))
+                    break
+        except Exception:
+            pass
+        self._save_last_used_paths()
+
+    def _caption_instruction_for_task(self, label: str, *, builtin_only: bool = False) -> str:
+        """The instruction text for a Qwen task label. 'Custom…' resolves to the user's saved
+        instruction (prefs), falling back to the default task's text if they never saved one."""
+        from fizgig.krea2.embedder import CAPTION_TASKS, DEFAULT_CAPTION_TASK
+        for _key, (lbl, instr, _tok) in CAPTION_TASKS.items():
+            if lbl == label:
+                return instr
+        if not builtin_only:
+            saved = str(self.prefs.get("caption_qwen_instruction", "") or "").strip()
+            if saved:
+                return saved
+        return CAPTION_TASKS[DEFAULT_CAPTION_TASK][1]
+
+    def _resolve_caption_instruction(self) -> str:
+        """The instruction that will actually be sent for the current selection."""
+        return self._caption_instruction_for_task(self.caption_task_var.get())
+
+    def _open_caption_instruction_editor(self):
+        """Show (and allow editing of) the instruction sent to Qwen3-VL for the current task.
+
+        Saving stores it in prefs and switches the task to 'Custom…', so what you edited is what
+        runs — here AND in the trainer's auto-recaption."""
+        from fizgig.krea2.embedder import CAPTION_TASKS, DEFAULT_CAPTION_TASK
+        opened_from = self.caption_task_var.get()
+        dialog = tk.Toplevel(self.master)
+        dialog.title("Captioning instruction")
+        dialog.configure(bg=BG_COLOR)
+        dialog.minsize(660, 420)
+
+        # Buttons packed BOTTOM first so a long instruction can never push them off the edge
+        # (the v2.8.5 caption-dialog fix).
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(side=tk.BOTTOM, pady=10)
+
+        tk.Label(dialog, text=f"Instruction sent to the vision model — {opened_from}",
+                 font=(FONT_FAMILY, 11, "bold"), fg=COLORS["text_primary"],
+                 bg=BG_COLOR).pack(anchor=tk.W, padx=14, pady=(14, 2))
+        tk.Label(dialog,
+                 text="This is the whole prompt the model is given, alongside the image. Edit it to "
+                      "change what your captions describe — saving keeps your wording for future "
+                      "runs, including the trainer's auto-recaption of stuck images.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(0, 8))
+
+        instr_text = tk.Text(dialog, height=9, wrap="word", bg=COLORS["bg_surface"],
+                             fg=COLORS["text_primary"], insertbackground=COLORS["text_primary"],
+                             font=(FONT_FAMILY, 10), relief="flat", highlightthickness=1,
+                             highlightbackground=COLORS["border"])
+        instr_text.pack(fill=tk.BOTH, expand=True, padx=14)
+        instr_text.insert("1.0", self._caption_instruction_for_task(opened_from))
+
+        # The encoder's own system prompt, shown for context and deliberately NOT editable: it is
+        # what conditions training and inference, and must stay byte-identical to ComfyUI's
+        # Text-Encode-(Krea2) node. Editing it would silently change every cached embedding.
+        # Read from the module constant so this can never drift from what actually runs.
+        from fizgig.krea2.embedder import ENCODE_SYSTEM_DESCRIPTOR as sys_prompt
+        tk.Label(dialog, text="For reference — the encoder's own system prompt (not editable):",
+                 font=(FONT_FAMILY, 9, "bold"), fg=COLORS["text_secondary"],
+                 bg=BG_COLOR).pack(anchor=tk.W, padx=14, pady=(10, 2))
+        tk.Label(dialog, text=sys_prompt, font=(FONT_FAMILY, 8, "italic"),
+                 fg=COLORS["text_muted"], bg=BG_COLOR, wraplength=620,
+                 justify=tk.LEFT).pack(anchor=tk.W, padx=14)
+        tk.Label(dialog,
+                 text="That one conditions training and inference and must match ComfyUI exactly, "
+                      "so Fizgig keeps it fixed. It is not the captioning instruction above.",
+                 font=(FONT_FAMILY, 8), fg=COLORS["text_muted"], bg=BG_COLOR,
+                 wraplength=620, justify=tk.LEFT).pack(anchor=tk.W, padx=14, pady=(2, 10))
+
+        def restore_default():
+            base = opened_from if opened_from != QWEN_CUSTOM_TASK \
+                else CAPTION_TASKS[DEFAULT_CAPTION_TASK][0]
+            instr_text.delete("1.0", tk.END)
+            instr_text.insert("1.0", self._caption_instruction_for_task(base, builtin_only=True))
+
+        def save_instruction():
+            text = instr_text.get("1.0", tk.END).strip()
+            if not text:
+                messagebox.showerror("Empty instruction",
+                                     "The instruction can't be empty — use Restore default.")
+                return
+            self.prefs["caption_qwen_instruction"] = text
+            save_prefs(self.prefs)
+            labels = self._qwen_task_labels()
+            self.caption_task_combo.configure(values=labels)
+            self.caption_task_var.set(QWEN_CUSTOM_TASK)
+            self._save_last_used_paths()
+            self.update_caption_log("Captioning instruction saved — task set to 'Custom…'.\n")
+            dialog.destroy()
+
+        ttk.Button(btn_frame, text="Restore default", command=restore_default).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Save", command=save_instruction).pack(side=tk.LEFT, padx=5)
+
+    # endregion
+
     def load_florence_model(self):
         """Load Florence model (lazy loading)"""
         if self.florence_model is not None:
@@ -5699,18 +5917,31 @@ class LoRATrainerGUI:
             return False
 
     def unload_florence_model(self, silent=False):
-        """Unload Florence model to free memory"""
-        if self.florence_model is not None:
-            import torch
+        """Unload whichever caption model is resident (Florence-2 or Qwen3-VL) to free VRAM.
+
+        Name kept for the existing button and the pre-training hook. The Qwen3-VL captioner is
+        ~8 GB, so leaving it resident would OOM the training run this is called before."""
+        import gc
+        import torch
+        freed = []
+        if getattr(self, "florence_model", None) is not None:
             del self.florence_model
             del self.florence_processor
             self.florence_model = None
             self.florence_processor = None
             self.florence_device = None
+            freed.append("Florence-2")
+        if getattr(self, "qwen_captioner", None) is not None:
+            del self.qwen_captioner
+            self.qwen_captioner = None
+            freed.append("Qwen3-VL")
+        if freed:
+            gc.collect()
             torch.cuda.empty_cache()
-            self.update_caption_log("Model unloaded\n")
+            self.update_caption_log(f"{' + '.join(freed)} unloaded\n")
             if not silent:
-                messagebox.showinfo("Model Unloaded", "Florence model unloaded. VRAM freed.")
+                messagebox.showinfo("Model Unloaded",
+                                    f"{' + '.join(freed)} unloaded. VRAM freed.")
         elif not silent:
             messagebox.showinfo("Info", "No model loaded")
 
@@ -5915,6 +6146,81 @@ class LoRATrainerGUI:
             self.update_caption_log(f"Error captioning {os.path.basename(img_path)}: {e}\n")
             return None
 
+    def load_qwen_captioner(self):
+        """Load the Krea 2 Qwen3-VL text encoder for captioning (lazy, ~8 GB bf16)."""
+        if getattr(self, "qwen_captioner", None) is not None:
+            return True
+        path = self._qwen_captioner_path()
+        if not path:
+            self.update_caption_log("Qwen3-VL captioner: the Krea 2 text encoder path isn't set "
+                                    "(Preferences tab), or the file is missing.\n")
+            return False
+        try:
+            self.update_caption_log(f"Loading Qwen3-VL captioner (~8 GB) from "
+                                    f"{os.path.basename(path)}...\n")
+            self.master.update_idletasks()
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+            import torch
+            from fizgig.krea2.utils import load_krea2_text_encoder
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.qwen_captioner = load_krea2_text_encoder(path, dtype=torch.bfloat16, device=device)
+            self.update_caption_log(f"Qwen3-VL captioner ready on {device}.\n")
+            return True
+        except Exception as e:
+            # Most likely cause is the fp8 ComfyUI variant, whose vision tower can't run.
+            self.update_caption_log(
+                f"Could not load the Qwen3-VL captioner: {type(e).__name__}: {e}\n"
+                "It must be the bf16 Qwen3-VL-4B file — the fp8 ComfyUI variant has no usable "
+                "vision path.\n")
+            self.qwen_captioner = None
+            return False
+
+    def generate_qwen_caption(self, img_path):
+        """Caption one image with Qwen3-VL, using the currently-selected task's instruction."""
+        if getattr(self, "qwen_captioner", None) is None:
+            if not self.load_qwen_captioner():
+                return None
+        try:
+            from fizgig.krea2.embedder import generate_caption
+            try:
+                max_tokens = int(self.caption_max_tokens_var.get())
+            except (ValueError, tk.TclError):
+                max_tokens = 120
+            return generate_caption(self.qwen_captioner, img_path,
+                                    max_new_tokens=max_tokens,
+                                    instruction=self._resolve_caption_instruction())
+        except Exception as e:
+            self.update_caption_log(f"Error captioning {os.path.basename(img_path)}: {e}\n")
+            return None
+
+    def _generate_ai_caption(self, img_path):
+        """Route to whichever caption model is selected. Both bulk captioning and the Edit
+        dialog's Regenerate (AI) go through here, which is what keeps them in step — and why
+        trigger-word handling (save_caption_with_trigger) stays identical for both models."""
+        if self._is_qwen_captioner():
+            return self.generate_qwen_caption(img_path)
+        return self.generate_florence_caption(img_path)
+
+    def _caption_model_blocked_by_training(self) -> bool:
+        """True (with a message) if a training run is live and the chosen captioner won't co-fit.
+
+        Qwen3-VL is ~8 GB — loading it alongside a resident training DiT is an OOM either for the
+        captioner or, worse, for the run. Florence-2 is small enough to leave alone."""
+        if not self._is_qwen_captioner():
+            return False
+        proc = getattr(self, "current_process", None)
+        try:
+            running = proc is not None and proc.poll() is None
+        except Exception:
+            running = False
+        if running:
+            messagebox.showwarning(
+                "Training is running",
+                "The Qwen3-VL captioner needs about 8 GB of VRAM, which won't fit alongside a "
+                "training run — and trying would risk the run itself.\n\n"
+                "Wait for training to finish, or switch the Model dropdown to Florence-2.")
+        return running
+
     def save_caption_with_trigger(self, img_path, caption):
         """Save caption with trigger word prepended"""
         trigger = self.caption_trigger_var.get().strip()
@@ -5938,6 +6244,8 @@ class LoRATrainerGUI:
         images = self.get_caption_image_files()
         if not images:
             messagebox.showinfo("Info", "No images found in folder")
+            return
+        if self._caption_model_blocked_by_training():
             return
 
         overwrite = self.overwrite_captions_var.get()
@@ -5967,7 +6275,7 @@ class LoRATrainerGUI:
                 progress = ((i + 1) / total) * 100
                 self.master.after(0, lambda p=progress, c=i+1, t=total: self.update_caption_progress(p, c, t))
 
-                caption = self.generate_florence_caption(img_path)
+                caption = self._generate_ai_caption(img_path)
                 if caption:
                     self.save_caption_with_trigger(img_path, caption)
                     self.master.after(0, lambda f=os.path.basename(img_path): self.update_caption_log(f"✓ {f}\n"))
@@ -5984,10 +6292,12 @@ class LoRATrainerGUI:
 
     def caption_single_image(self, img_path):
         """Caption a single image (for regenerate button)"""
+        if self._caption_model_blocked_by_training():
+            return
         self.update_caption_log(f"Captioning {os.path.basename(img_path)}...\n")
 
         def caption_thread():
-            caption = self.generate_florence_caption(img_path)
+            caption = self._generate_ai_caption(img_path)
             if caption:
                 self.save_caption_with_trigger(img_path, caption)
                 self.master.after(0, lambda: self.update_caption_log(f"✓ Done\n"))
@@ -18273,6 +18583,13 @@ class LoRATrainerGUI:
                     if hasattr(self, "caption_trigger_var") else "")
             if trig and trig.lower() != "trigger_word":
                 cmd += ["--trigger_word", trig]
+            # If the user edited the captioning instruction on the Captions tab, auto-recaption
+            # should honour it too — otherwise the prompt they tuned is ignored by the one place
+            # that captions unattended. Attempt 2 still escalates to the built-in exhaustive
+            # instruction (that escalation is the point of a second attempt).
+            _instr = str(self.prefs.get("caption_qwen_instruction", "") or "").strip()
+            if _instr:
+                cmd += ["--recaption_instruction", _instr]
         # Caption repair (manual edits from the Problem Images window AND auto-recaption)
         # re-encodes with the Qwen3-VL text encoder. --text_encoder used to be emitted only
         # inside the samples block, so with previews off the trainer had no TE path and every

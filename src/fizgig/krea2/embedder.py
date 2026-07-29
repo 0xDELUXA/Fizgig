@@ -170,11 +170,24 @@ def load_qwen3_vl_conditioner(
     return conditioner.eval().requires_grad_(False)
 
 
+# Ordering comes from the community's structured-caption template (trigger, features, clothing,
+# pose, expression, setting, lighting, camera angle) — a fixed order is what makes a whole dataset's
+# captions structurally consistent, which is the part a per-image VLM otherwise gets wrong.
+#
+# What is deliberately NOT taken from that template: its advice to OMIT invariant features ("if your
+# character always has blue eyes, don't mention it"). That is SD1.5/SDXL-era guidance and it is
+# wrong here. On LLM-conditioned models the omit-to-bake-in trick is dead — unnamed features don't
+# bake in, unnamed CONTRADICTIONS fight, and the salient unnamed deviation is exactly the poison the
+# per-image loss watch keeps flagging. Naming a thing doesn't stop the model learning it; it binds
+# it to a token you can then steer. Hence "name anything prominent", not "omit what's constant".
 CAPTION_INSTRUCTION = (
-    "Write one factual training caption for this image as a single sentence. Describe the subject, "
-    "their pose and clothing, the camera viewpoint (e.g. 'viewed from behind', 'side profile', "
-    "'close-up'), whether the face is visible, and the setting. State only what is visible — no "
-    "speculation, no names, no style commentary."
+    "Write one factual training caption for this image as a single sentence, covering these in "
+    "order: the subject and what they are doing; the camera viewpoint (e.g. 'viewed from behind', "
+    "'side profile', 'close-up') and whether the face is visible; their pose; their clothing; the "
+    "setting; the lighting. Use the same order and the same plain phrasing every time. Name "
+    "anything prominent a viewer would notice, especially anything unusual about the angle, the "
+    "framing, or what is hidden or cropped. State only what is visible — no speculation, no proper "
+    "names, no style or quality commentary."
 )
 
 # Second-attempt instruction: if the standard caption didn't unstick the image, the miss is
@@ -190,9 +203,47 @@ DETAILED_CAPTION_INSTRUCTION = (
 )
 
 
+# The system prompt used when ENCODING text for training and inference — NOT a captioning
+# instruction. It must stay byte-identical to ComfyUI's Text-Encode-(Krea2) node: changing it
+# would silently alter every cached embedding and desync training from ComfyUI. Module-level so
+# the GUI can display it read-only without duplicating the string.
+ENCODE_SYSTEM_DESCRIPTOR = (
+    "Describe the image by detailing the color, shape, size, texture, "
+    "quantity, text, spatial relationships of the objects and background:"
+)
+
+SHORT_CAPTION_INSTRUCTION = (
+    "Write one short factual caption for this image — a single clause naming the subject, what "
+    "they are doing, and the setting. State only what is visible. No speculation, no names, no "
+    "style commentary."
+)
+
+DETAILED_DESCRIPTION_INSTRUCTION = (
+    "Describe this image in 2-3 factual sentences: the subject, their pose and clothing, the "
+    "camera viewpoint, the lighting, and the setting. State only what is visible — no "
+    "speculation, no names, no style commentary."
+)
+
+# The task menu the Captions tab offers for this model. Lives here rather than in the GUI so the
+# trainer's auto-recaption and the GUI read the same text — the instruction is part of the
+# captioning contract, not a piece of UI.
+#   key -> (menu label, instruction, suggested max_new_tokens)
+# "training" is the default: it is the doctrine-aligned instruction auto-recaption already uses
+# (name the viewpoint, say whether the face is visible), which is what makes a caption safe to
+# train on rather than merely accurate.
+CAPTION_TASKS = {
+    "training":   ("Training caption (viewpoint-aware)", CAPTION_INSTRUCTION, 120),
+    "short":      ("Short caption", SHORT_CAPTION_INSTRUCTION, 60),
+    "detailed":   ("Detailed description", DETAILED_DESCRIPTION_INSTRUCTION, 160),
+    "exhaustive": ("Exhaustive detail", DETAILED_CAPTION_INSTRUCTION, 240),
+}
+DEFAULT_CAPTION_TASK = "training"
+
+
 def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
                      max_new_tokens: int = 120, megapixels: float = 1.0,
-                     detailed: bool = False, seed: int = None) -> str:
+                     detailed: bool = False, seed: int = None,
+                     instruction: str = None) -> str:
     """Caption an image with the SAME Qwen3-VL the trainer conditions on (its LM head is
     legitimately tied to the embeddings — unlike Klein's stripped Qwen3-8B — so generation is
     real). Used by auto-recaption to rewrite a stuck image's caption from what's actually in it,
@@ -209,7 +260,10 @@ def generate_caption(conditioner: "Qwen3VLConditioner", image_path: str, *,
 
     proc = conditioner._get_image_processor()
     im = conditioner._cap_image(Image.open(image_path), megapixels)
-    instruction = DETAILED_CAPTION_INSTRUCTION if detailed else CAPTION_INSTRUCTION
+    # An explicit instruction wins (the Captions tab's task menu, or a user-edited one); otherwise
+    # the historical detailed/standard pair, so existing callers are unaffected.
+    if instruction is None:
+        instruction = DETAILED_CAPTION_INSTRUCTION if detailed else CAPTION_INSTRUCTION
     if detailed:
         max_new_tokens = max(max_new_tokens, 240)
     messages = [{"role": "user", "content": [{"type": "image"},
@@ -250,8 +304,7 @@ class Qwen3VLConditioner(torch.nn.Module):
         self._image_processor = None  # lazily-loaded full Qwen3-VL processor (for image refs)
         self.max_length = max_length
         self.select_layers = select_layers
-        self.system_descriptor = ("Describe the image by detailing the color, shape, size, texture, "
-                                  "quantity, text, spatial relationships of the objects and background:")
+        self.system_descriptor = ENCODE_SYSTEM_DESCRIPTOR
         self.prompt_template_encode_prefix = "<|im_start|>system\n" + self.system_descriptor + "<|im_end|>\n<|im_start|>user\n"
         self.prompt_template_encode_suffix = "<|im_end|>\n<|im_start|>assistant\n"
         self.prompt_template_encode_start_idx = 34

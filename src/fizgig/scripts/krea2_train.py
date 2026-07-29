@@ -125,6 +125,10 @@ def setup_parser() -> argparse.ArgumentParser:
                         "(reads <dataset>/fizgig_look_scores.json from the Image Prep Look Filter)")
     p.add_argument("--trigger_word", default=None,
                    help="Trigger word appended (', <trigger>') to auto-generated captions")
+    p.add_argument("--recaption_instruction", default=None,
+                   help="Custom instruction for auto-recaption (the Captions tab writes this when "
+                        "you edit the captioning instruction). Applies to attempt 1; attempt 2 "
+                        "still escalates to the built-in exhaustive instruction")
     return p
 
 
@@ -176,6 +180,7 @@ def main():
         auto_recaption=args.auto_recaption,
         warmup_look_outliers=args.warmup_look_outliers,
         trigger_word=args.trigger_word,
+        recaption_instruction=args.recaption_instruction,
     )
 
 

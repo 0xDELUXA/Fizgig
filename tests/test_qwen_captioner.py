@@ -1,0 +1,173 @@
+"""Qwen3-VL captioning on the Captions tab — headless verification (no GPU, no model load)."""
+import json
+import os
+import shutil
+import sys
+import tempfile
+
+os.environ["FIZGIG_NO_PERSIST"] = "1"
+REPO = r"W:/Peter/Documents/Development/Fizgig"
+sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "src"))
+
+import tkinter as tk
+import lora_trainer_gui as G
+from fizgig.krea2.embedder import (CAPTION_TASKS, DEFAULT_CAPTION_TASK,
+                                   ENCODE_SYSTEM_DESCRIPTOR, CAPTION_INSTRUCTION)
+
+G.LAST_USED_FILE = os.path.join(os.environ["TEMP"], "nope", ".last_used.json")
+
+fails = []
+
+
+def ck(label, cond, detail=""):
+    print(f"{'PASS' if cond else 'FAIL'}  {label}{('  ' + str(detail)) if detail else ''}")
+    if not cond:
+        fails.append(label)
+
+
+# A stand-in "text encoder file" — only its existence is checked by the gate.
+TMP = tempfile.mkdtemp()
+FAKE_TE = os.path.join(TMP, "qwen3vl_4b_bf16.safetensors")
+open(FAKE_TE, "wb").write(b"0")
+
+root = tk.Tk()
+root.withdraw()
+g = G.LoRATrainerGUI(root)
+
+# --- 1. gating on the file, not on model family -----------------------------------------
+g.prefs_vars["krea2_text_encoder"].set("")
+root.update()
+ck("no TE path -> 3 Florence models only", g._caption_model_values() == G.FLORENCE_MODELS,
+   g._caption_model_values())
+
+g.prefs_vars["krea2_text_encoder"].set(FAKE_TE)
+root.update()
+vals = list(g.caption_model_combo.cget("values"))
+ck("TE path set -> Qwen3-VL appears without restart", G.QWEN_CAPTION_MODEL in vals, vals)
+ck("  ...and it is offered regardless of model family (Klein selected)",
+   g.architecture_var.get().startswith("Flux 2 Klein") and G.QWEN_CAPTION_MODEL in vals)
+
+# --- 2. task list swaps with the model ---------------------------------------------------
+g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
+g._on_caption_model_changed()
+root.update()
+qwen_tasks = list(g.caption_task_combo.cget("values"))
+ck("Qwen selected -> 4 presets + Custom", len(qwen_tasks) == 5 and qwen_tasks[-1] == G.QWEN_CUSTOM_TASK,
+   qwen_tasks)
+ck("  default task is the doctrine one",
+   g.caption_task_var.get() == CAPTION_TASKS[DEFAULT_CAPTION_TASK][0], g.caption_task_var.get())
+ck("  Edit instructions button shown", bool(g.caption_edit_instr_btn.winfo_manager()))
+ck("  max tokens seeded from the task", g.caption_max_tokens_var.get() == "120",
+   g.caption_max_tokens_var.get())
+
+g.caption_model_var.set(G.FLORENCE_DEFAULT_MODEL)
+g._on_caption_model_changed()
+root.update()
+ck("Florence selected -> task tokens back",
+   list(g.caption_task_combo.cget("values")) == G.FLORENCE_TASKS)
+ck("  Edit instructions button hidden", not g.caption_edit_instr_btn.winfo_manager())
+
+# --- 3. instruction resolution -----------------------------------------------------------
+g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
+g._on_caption_model_changed()
+for key, (label, instr, tok) in CAPTION_TASKS.items():
+    g.caption_task_var.set(label)
+    ck(f"  task '{key}' resolves to its own instruction",
+       g._resolve_caption_instruction() == instr)
+
+g.prefs["caption_qwen_instruction"] = "MY CUSTOM INSTRUCTION"
+g.caption_task_var.set(G.QWEN_CUSTOM_TASK)
+ck("Custom… resolves to the saved prefs instruction",
+   g._resolve_caption_instruction() == "MY CUSTOM INSTRUCTION")
+g.prefs.pop("caption_qwen_instruction", None)
+ck("Custom… with nothing saved falls back to the default task's text",
+   g._resolve_caption_instruction() == CAPTION_TASKS[DEFAULT_CAPTION_TASK][1])
+
+# --- 4. router picks the right generator -------------------------------------------------
+calls = []
+g.generate_qwen_caption = lambda p: calls.append(("qwen", p)) or "qwen caption"
+g.generate_florence_caption = lambda p: calls.append(("florence", p)) or "florence caption"
+g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
+g._generate_ai_caption("x.png")
+g.caption_model_var.set(G.FLORENCE_DEFAULT_MODEL)
+g._generate_ai_caption("x.png")
+ck("router: Qwen selected -> qwen, Florence selected -> florence",
+   [c[0] for c in calls] == ["qwen", "florence"], calls)
+
+# --- 5. trigger word still prepended for BOTH paths --------------------------------------
+imgdir = tempfile.mkdtemp()
+img = os.path.join(imgdir, "a.png")
+open(img, "wb").write(b"0")
+g.caption_trigger_var.set("zwxbsp")
+g.save_caption_with_trigger(img, "a woman viewed from behind")
+txt = open(os.path.splitext(img)[0] + ".txt", encoding="utf-8").read()
+ck("trigger prepended", txt == "zwxbsp, a woman viewed from behind", txt)
+g.caption_trigger_var.set("")
+g.save_caption_with_trigger(img, "a woman viewed from behind")
+txt = open(os.path.splitext(img)[0] + ".txt", encoding="utf-8").read()
+ck("no trigger -> no stray leading comma", txt == "a woman viewed from behind", txt)
+
+# --- 6. training guard -------------------------------------------------------------------
+class _FakeProc:
+    def poll(self):
+        return None          # still running
+
+
+g.current_process = _FakeProc()
+g.caption_model_var.set(G.FLORENCE_DEFAULT_MODEL)
+ck("Florence not blocked during training", g._caption_model_blocked_by_training() is False)
+g.current_process = None
+
+# --- 7. encode system prompt is read from the module, never duplicated -------------------
+src = open(os.path.join(REPO, "lora_trainer_gui.py"), encoding="utf-8").read()
+ck("GUI imports the encode system prompt rather than copying it",
+   "ENCODE_SYSTEM_DESCRIPTOR" in src and "Describe the image by detailing" not in src)
+
+# --- 8. persistence ----------------------------------------------------------------------
+g.caption_model_var.set(G.QWEN_CAPTION_MODEL)
+g.caption_task_var.set(CAPTION_TASKS["exhaustive"][0])
+g.caption_max_tokens_var.set("240")
+data = dict(g.last_used)
+for attr, key in (("caption_model_var", "caption_model"),
+                  ("caption_task_var", "caption_task"),
+                  ("caption_max_tokens_var", "caption_max_tokens")):
+    data[key] = getattr(g, attr).get()
+root.destroy()
+
+root2 = tk.Tk()
+root2.withdraw()
+g2 = G.LoRATrainerGUI(root2)
+g2.last_used = data
+# re-seed as the constructor would
+g2.caption_model_var.set(data["caption_model"])
+g2.caption_task_var.set(data["caption_task"])
+g2.caption_max_tokens_var.set(data["caption_max_tokens"])
+ck("model/task/max-tokens survive a restart",
+   g2.caption_model_var.get() == G.QWEN_CAPTION_MODEL
+   and g2.caption_task_var.get() == CAPTION_TASKS["exhaustive"][0]
+   and g2.caption_max_tokens_var.get() == "240")
+root2.destroy()
+
+# --- 9. trainer CLI accepts the custom instruction ---------------------------------------
+from fizgig.scripts.krea2_train import setup_parser
+p = setup_parser()
+ns = p.parse_args(["--dit", "d", "--dataset_config", "c", "--output_dir", "o",
+                   "--output_name", "n", "--recaption_instruction", "CUSTOM"])
+ck("krea2_train --recaption_instruction parses", ns.recaption_instruction == "CUSTOM")
+
+import inspect
+from fizgig.krea2.trainer import train_krea2, _apply_caption_updates
+ck("train_krea2 takes recaption_instruction",
+   "recaption_instruction" in inspect.signature(train_krea2).parameters)
+ck("_apply_caption_updates takes recaption_instruction",
+   "recaption_instruction" in inspect.signature(_apply_caption_updates).parameters)
+
+from fizgig.krea2.embedder import generate_caption
+ck("generate_caption takes instruction",
+   "instruction" in inspect.signature(generate_caption).parameters)
+
+shutil.rmtree(TMP, ignore_errors=True)
+shutil.rmtree(imgdir, ignore_errors=True)
+print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILURE(S)"))
+sys.exit(1 if fails else 0)

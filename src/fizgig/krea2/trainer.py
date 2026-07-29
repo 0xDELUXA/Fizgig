@@ -777,7 +777,7 @@ def _remove_claimed_queue(path: str) -> None:
 
 def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_swap, loss_watch, epoch,
                            *, auto_recaption=False, trigger_word=None, recaptioned=None,
-                           image_dir=None, caption_ext=".txt"):
+                           image_dir=None, caption_ext=".txt", recaption_instruction=None):
     """Live caption repair (Problem Images window). Consume <output_dir>/loss_log/caption_updates.json
     ({item_key: new_caption}), re-encode each caption with Qwen3-VL, and OVERWRITE the item's
     text-embedding cache file — the collate re-reads that file from disk every step, so the very
@@ -792,6 +792,12 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
     exhaustive-detail caption; after that it's permanently human-review. A manual edit already
     queued for a key always wins over the auto path. Both jobs share one DiT park + one
     text-encoder load.
+
+    recaption_instruction: the user's own captioning instruction from the Captions tab, if they
+    edited one. It replaces attempt 1 only — attempt 2 keeps the built-in exhaustive instruction,
+    because escalating to exhaustive detail IS the second attempt's purpose (and what makes the
+    two-attempt protocol a causal test separating caption-fixable images from entropy-limited
+    ones). Overriding both would remove the escalation.
 
     The GUI separately rewrites the .txt for manual edits; the auto path writes the .txt itself
     (image_dir + caption_ext from the dataset TOML) so fixes survive future re-caches. The 8 GB
@@ -884,9 +890,16 @@ def _apply_caption_updates(output_dir, group, te_path, device, dit, blocks_to_sw
         # trigger word (if any) is appended at the END — per the conditional-trigger doctrine,
         # a trailing token is a far weaker identity claim than a leading one. Attempt 2 (the
         # first caption demonstrably failed) goes exhaustive-detail.
+        if recaption_instruction:
+            logger.info("[auto-recaption] using your custom captioning instruction for attempt 1 "
+                        "(attempt 2 still escalates to the built-in exhaustive instruction)")
         for k, img_path, attempt in auto_todo:
             try:
-                cap = generate_caption(encoder, img_path, detailed=(attempt >= 2))
+                # Custom instruction (from the Captions tab) applies to attempt 1 only — see the
+                # docstring: attempt 2's whole job is escalating to exhaustive detail.
+                _instr = recaption_instruction if (recaption_instruction and attempt < 2) else None
+                cap = generate_caption(encoder, img_path, detailed=(attempt >= 2),
+                                       instruction=_instr)
                 if trigger_word:
                     cap = f"{cap}, {trigger_word}"
                 cap_path = os.path.join(image_dir, os.path.basename(k) + caption_ext)
@@ -1177,6 +1190,9 @@ def train_krea2(
     auto_recaption: bool = False,
     warmup_look_outliers: bool = False,
     trigger_word: str = None,
+    # Custom captioning instruction from the Captions tab. Applies to auto-recaption attempt 1;
+    # attempt 2 still escalates to the built-in exhaustive instruction.
+    recaption_instruction: str = None,
     resume_state_dir: str = None,
     context_lora_path: str = None,
     context_lora_strength: float = 1.0,
@@ -1714,7 +1730,8 @@ def train_krea2(
                                loss_watch, epoch + 1,
                                auto_recaption=auto_recaption, trigger_word=trigger_word,
                                recaptioned=recaptioned, image_dir=ar_image_dir,
-                               caption_ext=ar_caption_ext)
+                               caption_ext=ar_caption_ext,
+                               recaption_instruction=recaption_instruction)
 
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             _save_lora(network, os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors"),

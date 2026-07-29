@@ -12105,6 +12105,20 @@ class LoRATrainerGUI:
             download_url="https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/blob/main/split_files/text_encoders/qwen_3_8b.safetensors",
             download_note="~15GB single-file safetensors — Qwen3-8B packaged for Klein 9B (Comfy-Org)",
         )
+        # Klein users routinely skip the whole Krea 2 card, and would never learn that one file
+        # in it is a better captioner than Florence-2 for THEIR datasets — captions are just
+        # .txt, so the model family is irrelevant. Worth saying here, where they are already
+        # filling in paths, rather than hoping they read the card below.
+        _qwen_tip = tk.Label(
+            models_card,
+            text="💡 Training Klein only? The Krea 2 Qwen3-VL text encoder below (~8 GB) is still "
+                 "worth downloading — the Captions tab can caption ANY dataset with it, following "
+                 "an instruction you can edit, and it writes better training captions than "
+                 "Florence-2. Nothing else about Krea 2 is needed.",
+            font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+            wraplength=760, justify=tk.LEFT)
+        _qwen_tip.grid(row=next_row, column=0, columnspan=3, sticky=tk.W, pady=(12, 2))
+        next_row += 1
 
         # Card 1b: Krea 2 model paths
         krea_card = self._start_section_card(

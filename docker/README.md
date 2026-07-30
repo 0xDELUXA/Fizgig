@@ -70,16 +70,17 @@ know it, and you never have to go looking.
 Anything shorter gets zero-padded for the file manager, which needs 12 — so choose 12+ and both
 logins stay identical.
 
-**Didn't set one?** Fizgig generates one per pod and prints it near the top of the log:
+**Didn't set one?** Fizgig generates one per pod and prints it at the **end of the log**, in the
+"Ready" banner:
 
 ```
-[fizgig] No VNC_PASSWORD set — generated one for this pod: ...
+[fizgig]  Your browser will ask for a username and password:
+[fizgig]      username: fizgig
+[fizgig]      password: ...
 ```
 
-It's repeated in the "Ready" banner at the very bottom, which is usually easier to find than
-hunting above thousands of download lines. If the log looks like it's stopped short of that,
-switch to another tab and back — RunPod's log view sometimes needs a nudge before it shows the
-newest lines.
+If the log looks like it stops short of that, switch to another tab and back — RunPod's log view
+sometimes needs a nudge before it shows the newest lines.
 
 ## First run
 

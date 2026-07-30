@@ -58,9 +58,8 @@ screen expand **Edit Template → Environment Variables**, add `VNC_PASSWORD`, a
 **12+ characters**. Shorter ones get zero-padded for the file manager, which requires 12, so 12+
 keeps both logins identical.
 
-**Didn't set one?** Fizgig generates one per pod and prints it near the top of the log, and again
-in the "Ready" banner at the bottom — the banner is easier to find than hunting above thousands of
-download lines. If the log seems to stop short of it, switch to another tab and back; RunPod's log
+**Didn't set one?** Fizgig generates one per pod and prints it at the **end of the log**, in the
+"Ready" banner. If the log seems to stop short of it, switch to another tab and back; RunPod's log
 view sometimes needs a nudge before it shows the newest lines.
 
 ## First run

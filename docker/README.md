@@ -78,11 +78,11 @@ since it resumes and syncs incrementally.
 
 | | Port | Username | Password |
 |---|---|---|---|
-| **Fizgig** | 6080 | `fizgig` | your `VNC_PASSWORD` |
-| **File manager** | 8080 | `admin` | your `VNC_PASSWORD` |
+| **Fizgig** | 6080 | `fizgig` | see below |
+| **File manager** | 8080 | `admin` | the same one |
 
-   All of it is printed in the pod log at startup — including a generated password if you didn't set
-   one, and the zero-padded version the file manager uses when your password is under 12 characters.
+   The password is in the pod log: by default Fizgig generates a fresh one per pod and prints it
+   there. Also logged is the zero-padded version the file manager uses when your password is under 12 characters.
 
    To choose your own, set `VNC_PASSWORD` on the deploy screen under **Edit Template →
    Environment Variables** before launching.

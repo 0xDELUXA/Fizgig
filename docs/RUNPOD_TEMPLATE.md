@@ -37,16 +37,15 @@ Both ports ask for a username and password:
 
 | | Port | Username | Password |
 |---|---|---|---|
-| **Fizgig** | 6080 | `fizgig` | your `VNC_PASSWORD` |
-| **File manager** | 8080 | `admin` | your `VNC_PASSWORD` |
+| **Fizgig** | 6080 | `fizgig` | see below |
+| **File manager** | 8080 | `admin` | the same one |
 
-Everything is printed in the **pod log** at startup, including a generated password if you didn't
-set one. If your `VNC_PASSWORD` is under 12 characters the file manager pads it with zeros — the
-log tells you exactly what to type.
+**The password is in the pod log.** Fizgig generates a fresh one for every pod and prints it at
+startup — open the pod's log and copy it.
 
-**Choosing your own password:** on the deploy screen, expand **Edit Template → Environment
-Variables** and set `VNC_PASSWORD` before you launch. Skip it and Fizgig generates one and prints
-it in the pod log — fine, just less memorable.
+**Want your own instead?** On the deploy screen expand **Edit Template → Environment Variables**
+and set `VNC_PASSWORD` before launching. Use 12+ characters: shorter ones get zero-padded for the
+file manager, and the log tells you what it ended up as.
 
 ## First run
 

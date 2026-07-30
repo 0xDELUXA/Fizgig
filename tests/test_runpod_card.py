@@ -135,6 +135,21 @@ try:
 except AssertionError as e:
     ck("toggle off -> no countdown even on a clean finish", False, e)
 
+# --- 3a. the version line ---------------------------------------------------------------------
+# A pinned image plus a self-updating app means the two versions diverge by design, so a bug
+# report needs both. Rebuild the card with the env a real pod provides.
+os.environ["FIZGIG_IMAGE_VERSION"] = "2.13.0"
+os.environ["RUNPOD_POD_ID"] = "dvjecz8zn02rn1"
+os.environ["RUNPOD_GPU_NAME"] = "NVIDIA+GeForce+RTX+4090"
+root.destroy()
+root, g = gui(pod=True)
+vtxt = " ".join(all_text(g._runpod_card))
+ck("version line shows the image", "image 2.13.0" in vtxt, vtxt[-90:])
+ck("  and the pod id", "dvjecz8zn02rn1" in vtxt)
+ck("  and un-mangles the GPU name", "GeForce RTX 4090" in vtxt)
+for k in ("FIZGIG_IMAGE_VERSION", "RUNPOD_POD_ID", "RUNPOD_GPU_NAME"):
+    os.environ.pop(k, None)
+
 # --- 3b. the API key field --------------------------------------------------------------------
 # A public template hands its env vars to every container deployed from it, so a key cannot ship
 # in one — it has to be per-user. That makes the prefs field the primary route, not a convenience.

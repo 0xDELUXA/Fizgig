@@ -787,6 +787,22 @@ def _pod_id() -> str:
     return ""
 
 
+def _app_commit() -> str:
+    """Short git commit of the running checkout, or "".
+
+    On a pod this is the interesting half of the version: the IMAGE is pinned in the RunPod
+    template while the app pulls master at every boot, so the two are meant to differ and a bug
+    report needs both."""
+    try:
+        import subprocess as _sp
+        r = _sp.run(["git", "-C", FIZGIG_DIR, "rev-parse", "--short", "HEAD"],
+                    capture_output=True, text=True, timeout=8,
+                    creationflags=(0x08000000 if os.name == "nt" else 0))
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
 def _pod_stop_key_env() -> str:
     """A stop-capable key from the environment, or "".
 
@@ -12637,10 +12653,24 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 10, "bold"), fg=COLORS["success"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
 
+        # Image version AND app commit: the template pins the image while the app updates itself
+        # from git at every boot, so they diverge by design and "what are you running?" needs both.
+        bits = []
+        _img = (os.environ.get("FIZGIG_IMAGE_VERSION") or "").strip()
+        if _img:
+            bits.append(f"image {_img}")
+        _sha = _app_commit()
+        if _sha:
+            bits.append(f"app {_sha}")
         _pid = _pod_id()
         if _pid:
-            tk.Label(card, text=f"Pod id: {_pid}", font=(FONT_FAMILY, 8),
-                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(10, 0))
+            bits.append(f"pod {_pid}")
+        if bits:
+            _gpu = (os.environ.get("RUNPOD_GPU_NAME") or "").replace("+", " ").strip()
+            line = "  ·  ".join(bits) + (f"  ·  {_gpu}" if _gpu else "")
+            tk.Label(card, text=line, font=(FONT_FAMILY, 8), fg=COLORS["text_muted"],
+                     bg=COLORS["bg_surface"], wraplength=760,
+                     justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
 
     def _build_pod_advert(self, outer):
         card = self._start_section_card(

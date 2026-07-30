@@ -141,6 +141,13 @@ ENV VIRTUAL_ENV=/opt/venv PATH="/opt/venv/bin:$PATH"
 # Everything the user creates lives here so a RunPod network volume keeps it across pods:
 # models, datasets, output LoRAs, latent cache, and the HuggingFace/InsightFace caches — which
 # would otherwise re-download Florence-2 and the face model on every single boot.
+# Stamped by CI from the release tag. The app shows it next to the app's own commit, because the
+# two deliberately diverge: the image is pinned in the RunPod template while Fizgig itself updates
+# from git at every pod start. Without this, "which image are you on?" is unanswerable, which is
+# exactly the failure mode that makes a mutable :latest tag risky.
+ARG FIZGIG_IMAGE_VERSION=dev
+ENV FIZGIG_IMAGE_VERSION=${FIZGIG_IMAGE_VERSION}
+
 # FIZGIG_POD is what the app keys off to show its RunPod controls instead of the "run on a rented
 # GPU" advert. Our own marker rather than RUNPOD_POD_ID: provider variable names are theirs to
 # change, and Vast sets none of them.

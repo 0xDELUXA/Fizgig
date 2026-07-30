@@ -17,10 +17,14 @@ app in your browser, on whatever GPU you feel like renting.
 
 ## Before you deploy
 
-**Attach a Network Volume (100 GB+) at `/workspace`.**
+**Choose a Network Volume (100 GB+), not the default Volume Disk.**
 
-Not the template's *Volume Disk* — that one is deleted when you terminate the pod, taking ~45 GB of
-downloaded models with it. A Network Volume outlives any pod, so you download the models once.
+On the deploy screen, under storage, pick a Network Volume — create one first if you have none.
+The Volume Disk this template comes with works fine, but it is **deleted when you terminate the
+pod**, taking ~45 GB of downloaded models with it. A Network Volume outlives any pod, so you
+download the models once and every future session reuses them.
+
+Either survives *stopping* a pod. Only the Network Volume survives *terminating* one.
 
 ## What you get
 

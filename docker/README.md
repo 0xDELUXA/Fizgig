@@ -25,8 +25,13 @@ to match your browser window**, so there is no screen size to guess at.
 | Compute type | NVIDIA · GPU |
 | Container image | `ghcr.io/shootthesound/fizgig:2.13.0` — a **version** tag, see below |
 | Container disk | `25` GB |
-| Persistent storage | **Network storage** — pick your volume from the dropdown |
+| Persistent storage | **Volume disk**, `100` GB |
 | Persistent storage mount path | `/workspace` |
+
+A **public** template has to use Volume Disk, not Network storage — RunPod greys the Public toggle
+out otherwise, and rightly so: a network volume belongs to your account and cannot be handed to
+everyone who deploys your template. Each deployer picks their own Network Volume at deploy time
+instead.
 
 **Pin a version, don't use `:latest`.** RunPod caches images on the host, so pushing a new
 `:latest` can leave workers running a stale one with no way to tell — which is their own
@@ -53,8 +58,9 @@ are not encrypted, and a public template hands them to everyone who deploys it �
 set here would become the shared password for every pod created from it. Fizgig generates a unique
 one per pod instead and prints it in the log.
 
-**Use a Network Volume, not the template's Volume Disk.** The difference only bites at
-termination, and it bites hard:
+**Pick a Network Volume when you deploy.** The template can only offer a Volume Disk (see above);
+the choice is yours at deploy time, and the difference only bites at termination — but it bites
+hard:
 
 | | Stop the pod | **Terminate** the pod |
 |---|---|---|
@@ -65,9 +71,9 @@ RunPod's own wording for Volume Disk is "tied to the Pod's lifecycle" — termin
 your ~45 GB of models with it. That matters more than it sounds, because **every image update
 requires terminating and redeploying**, so on a Volume Disk you re-download the models each time.
 
-Create the Network Volume first (Storage → Network Volumes), then pick it when you deploy. Two
-trade-offs: it is billed per GB/month whether or not a pod is running, and it is region-locked,
-which fixes the set of GPUs you can rent.
+Create the Network Volume first (Storage → Network Volumes), then select it on the deploy screen
+in place of the template's Volume Disk. Two trade-offs: it is billed per GB/month whether or not a
+pod is running, and it is region-locked, which fixes the set of GPUs you can rent.
 
 **Environment variables**
 

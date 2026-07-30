@@ -12549,7 +12549,7 @@ class LoRATrainerGUI:
     RUNPOD_TEMPLATE_LIVE = False
     RUNPOD_GUIDE_URL = ("https://github.com/shootthesound/Fizgig/blob/master/docker/README.md")
     RUNPOD_DEPLOY_URL = "https://runpod.io/console/deploy?template=fizgig"
-    RUNPOD_REFERRAL = ""   # set to Peter's ref id to earn on deploys through this button
+    RUNPOD_REFERRAL = "vkb387ep"
 
     def _runpod_deploy_url(self) -> str:
         u = self.RUNPOD_DEPLOY_URL

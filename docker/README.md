@@ -23,10 +23,20 @@ to match your browser window**, so there is no screen size to guess at.
 | Template name | `Fizgig` |
 | Template type | Pods |
 | Compute type | NVIDIA · GPU |
-| Container image | `ghcr.io/shootthesound/fizgig:latest` |
+| Container image | `ghcr.io/shootthesound/fizgig:2.13.0` — a **version** tag, see below |
 | Container disk | `25` GB |
 | Persistent storage | **Network storage** — pick your volume from the dropdown |
 | Persistent storage mount path | `/workspace` |
+
+**Pin a version, don't use `:latest`.** RunPod caches images on the host, so pushing a new
+`:latest` can leave workers running a stale one with no way to tell — which is their own
+recommendation, and it makes a bug report impossible to place against a version.
+
+That costs less here than it usually does: Fizgig's source is pulled from git at every pod start,
+so app updates reach users whatever the image tag says. The image only changes when system packages
+or Python dependencies do. Bump the tag when a release changes those; otherwise leave it.
+
+Every release publishes `X.Y.Z`, `X.Y` and `latest` — pick the full version.
 
 Under **Networking configuration → HTTP Ports**, add two. The labels show up in the pod's Connect
 menu, so name them:
@@ -129,7 +139,7 @@ Any machine with Docker and an NVIDIA GPU:
 docker run --gpus all -p 6080:6080 \
   -v fizgig-data:/workspace \
   -e VNC_PASSWORD=changeme \
-  ghcr.io/shootthesound/fizgig:latest
+  ghcr.io/shootthesound/fizgig:2.13.0
 ```
 
 Then open <http://localhost:6080/vnc.html>.

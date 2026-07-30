@@ -66,7 +66,7 @@ Environment variables — set them on the deploy screen under **Edit Template**.
 | `VNC_PASSWORD` | Desktop *and* file manager. **12+ characters.** |
 | `HF_TOKEN` | Klein only. Krea 2 needs nothing. |
 | `FETCH_MODELS` | e.g. `tools,krea2` to download at boot instead of in the app. |
-| `FIZGIG_REF` | Branch or tag to run. Defaults to `master`. |
+| `FIZGIG_REF` | Branch or tag of Fizgig to run. Defaults to `master`, so the app updates itself at every pod start regardless of the image version. |
 
 To enable auto-stop, paste a RunPod API key into **Preferences → RunPod** inside the app. Don't put
 one in a template — template variables reach every container deployed from it.

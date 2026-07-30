@@ -117,8 +117,15 @@ ck("  builtin_only always returns the shipped text",
 for _k in ("style", "style_named"):
     _instr = CAPTION_TASKS[_k][1]
     ck(f"  '{_k}' does not use the person-only subject rule", SUBJECT_RULE not in _instr)
-    ck(f"  '{_k}' never asks for lighting", "lighting" not in _instr.split("Say nothing about")[0])
+    # "lighting" may appear only inside the exclusion list, never as something to describe.
+    ck(f"  '{_k}' never asks for lighting",
+       "lighting" not in _instr.lower().split("say nothing about")[0])
     ck(f"  '{_k}' excludes the style itself", "never how it was made" in _instr)
+    # The framing, not the blocklist, is what generalises: a layered paper-cut set was described
+    # as "layered mountains" / "arranged in layered depth" in 4 of 9 captions while the rule only
+    # banned art-technique words. Measured 4/9 -> 0/9 once this clause was added.
+    ck(f"  '{_k}' says to describe the scene as real", "as if it were real" in _instr)
+    ck(f"  '{_k}' blocks construction artefacts too", "layers" in _instr and "stacking" in _instr)
 # The style phrase is trailing, not leading: 'in X style' gives a made-up token a role the model
 # already understands, which a bare token or a leading phrase does not.
 ck("  only the named preset names a look", "in mystyle style" in CAPTION_TASKS["style_named"][1]

@@ -261,11 +261,21 @@ DEPICTED_RULE = (
     "'an animal' or 'a scene'. If nothing concrete is depicted, name the shapes and forms "
     "instead. "
 )
+# The "as if it were real" framing is doing the heavy lifting, and it was earned the hard way. An
+# earlier version listed only art-TECHNIQUE words (brushwork, shading, rendering) and a layered
+# paper-cut dataset walked straight past it: the model never reached for a technique word, it
+# described the style in CONTENT-shaped ones — "layered mountains", "arranged in layered depth",
+# "tiered pagodas" — in 4 of 9 captions. Extending the blocklist is whack-a-mole; every style has
+# its own vocabulary. Telling it to describe the real scene removes the whole class at once,
+# because a real place has no layers, no brushstrokes and no composition. Measured on that dataset:
+# 4/9 -> 0/9, with the closing style phrase still landing 9/9.
 NO_STYLE_RULE = (
-    "Describe only WHAT is depicted, never how it was made or how it looks as an artwork. Say "
-    "nothing about medium, brushwork, linework, texture, shading, rendering, film stock, grain, "
-    "colour grading, palette, lighting, mood, atmosphere, era or quality. Name the colours of the "
-    "things themselves, but not the overall colour treatment. "
+    "Describe the scene as if it were real and you were standing in it, not as a picture someone "
+    "made — if a word would only make sense about an artwork, leave it out. Name only WHAT is "
+    "there, never how it was made: say nothing about medium, brushwork, linework, texture, "
+    "shading, rendering, layers, stacking, relief, depth arrangement, film stock, grain, colour "
+    "grading, palette, lighting, mood, atmosphere, era or quality. Name the colours of the things "
+    "themselves, but not the overall colour treatment. "
 )
 
 CAPTION_INSTRUCTION = (

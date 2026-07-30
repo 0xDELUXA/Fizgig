@@ -44,6 +44,10 @@ Everything is printed in the **pod log** at startup, including a generated passw
 set one. If your `VNC_PASSWORD` is under 12 characters the file manager pads it with zeros — the
 log tells you exactly what to type.
 
+**Choosing your own password:** on the deploy screen, expand **Edit Template → Environment
+Variables** and set `VNC_PASSWORD` before you launch. Skip it and Fizgig generates one and prints
+it in the pod log — fine, just less memorable.
+
 ## First run
 
 1. Connect on **port 6080** and log in
@@ -55,6 +59,8 @@ Closing the browser tab does **not** stop training. Fizgig runs on the pod — s
 back later, the run is still going.
 
 ## Settings
+
+Environment variables — set them on the deploy screen under **Edit Template**.
 
 | Variable | |
 |---|---|

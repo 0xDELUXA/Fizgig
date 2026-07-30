@@ -83,6 +83,9 @@ since it resumes and syncs incrementally.
 
    All of it is printed in the pod log at startup — including a generated password if you didn't set
    one, and the zero-padded version the file manager uses when your password is under 12 characters.
+
+   To choose your own, set `VNC_PASSWORD` on the deploy screen under **Edit Template →
+   Environment Variables** before launching.
 2. Fizgig is already running. Go to **Preferences → ⬇ Download models for me**.
    Krea 2 needs no HuggingFace account; Klein will ask for a token.
 3. Point the **Start** tab at a dataset folder and train.

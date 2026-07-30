@@ -12615,7 +12615,8 @@ class LoRATrainerGUI:
         tk.Label(card,
                  text="Only after a run completes on its own — never after a Pause, a Stop, or a "
                       "failure, since those are exactly the times you want the machine alive. You "
-                      "get a two-minute countdown you can cancel.",
+                      "get a two-minute countdown you can cancel. This stops the pod, it never "
+                      "terminates it, so your files are still here when you start it again.",
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=760,
                  justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 2))
@@ -12659,6 +12660,8 @@ class LoRATrainerGUI:
                  text="Your files: datasets in /workspace/datasets, models in /workspace/models, "
                       "finished LoRAs in /workspace/output_loras. Everything under /workspace "
                       "survives stopping and restarting the pod — anything outside it does not. "
+                      "On the default Volume Disk it goes when you TERMINATE the pod, so stop "
+                      "rather than terminate between sessions; a Network Volume survives that too. "
                       "Drag files in and out with the file manager on port 8080.",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))

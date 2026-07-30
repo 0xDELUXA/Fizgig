@@ -9,18 +9,24 @@ Extract and the sample gallery. Nothing to install, and your own GPU stays free 
 
 ---
 
-## Before you deploy
+## Storage
 
-**Create a Network Volume first** (Storage → Network Volumes, 100 GB+), then select it on the deploy
-screen.
+**Give it 100 GB+, and mount it at `/workspace`.** The models are ~45 GB, and you want room for
+datasets and output LoRAs on top.
 
-This is the one choice that costs real time to get wrong. The default *Volume Disk* is **deleted
-when you terminate a pod**, taking ~45 GB of downloaded models with it. A Network Volume outlives
-any pod, so you download the models once and every future session reuses them. Both survive
-*stopping* a pod; only the Network Volume survives *terminating* one.
+Then the one thing to know: **stopping a pod keeps everything; terminating it does not.** Stop
+between sessions and your models, datasets and LoRAs are all still there when you start it again.
+Terminate and the disk goes with the pod.
 
-It's billed per GB/month whether or not a pod is running, and it's region-locked — which fixes
-which GPUs you can rent later, so pick a region with the cards you want.
+That's it for the default **Volume Disk**, which is what the template comes with and is perfectly
+fine to use.
+
+A **Network Volume** is the upgrade if you want one: it's a separate thing that outlives any pod, so
+you can terminate freely and attach the same storage to a new pod later. The catch is that it's
+region-locked, and the region you create it in may not have the GPU you want — so if you can't find
+a region with both, don't fight it. Take the Volume Disk and just stop rather than terminate.
+
+Either way, download the models once and every future session reuses them.
 
 ## Which GPU
 
@@ -119,7 +125,8 @@ login details.
 
 - **Storage shows ~25 GB** — the volume didn't mount. Check the mount path is `/workspace`.
 - **Downloads fail with "no space left"** — same cause: models are landing on container disk.
-- **A restart lost your models** — a Volume Disk was used instead of a Network Volume.
+- **Your models vanished** — the pod was *terminated* rather than *stopped*. A Volume Disk goes
+  with its pod; stop it instead, or use a Network Volume if you need to terminate.
 
 Fizgig's own version and the image's are both shown in **Preferences → RunPod**; quote both if you
 report a problem, since the app updates itself independently of the image.

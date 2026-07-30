@@ -15,16 +15,19 @@ Here they are choosing what to rent, and the appeal is getting a bigger card tha
 Train, profile, repair and extract LoRAs for **Flux 2 Klein 9B** and **Krea 2** — the full desktop
 app in your browser, on whatever GPU you feel like renting.
 
-## Before you deploy
+## Storage
 
-**Choose a Network Volume (100 GB+), not the default Volume Disk.**
+**Give it 100 GB+, mounted at `/workspace`.** The models are ~45 GB, plus your datasets and the
+LoRAs you train.
 
-On the deploy screen, under storage, pick a Network Volume — create one first if you have none.
-The Volume Disk this template comes with works fine, but it is **deleted when you terminate the
-pod**, taking ~45 GB of downloaded models with it. A Network Volume outlives any pod, so you
-download the models once and every future session reuses them.
+The default **Volume Disk** is fine. Just know that **stopping a pod keeps everything, terminating
+it does not** — so stop between sessions and your models, datasets and LoRAs are waiting when you
+come back. Download the models once and every future session reuses them.
 
-Either survives *stopping* a pod. Only the Network Volume survives *terminating* one.
+A **Network Volume** is optional, and the upgrade if you want it: separate storage that outlives any
+pod, so you can terminate freely and reattach it later. It is region-locked, though, and that region
+may not have the GPU you want — if you can't get both, take the Volume Disk and stop rather than
+terminate.
 
 ## What you get
 

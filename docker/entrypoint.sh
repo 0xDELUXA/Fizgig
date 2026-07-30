@@ -26,6 +26,13 @@ if [ -z "${VNC_PASSWORD:-}" ]; then
   log "No VNC_PASSWORD set — generated one for this pod: ${VNC_PASSWORD}"
   log "Set VNC_PASSWORD in the template to choose your own."
 fi
+# Exported so Fizgig itself can authenticate against the same password — anything the app serves
+# on its own port (a phone-facing run monitor, say) should ask for the credential the user already
+# has, not invent a second one. Without this, a password the ENTRYPOINT generated is only a shell
+# variable and never reaches the app, which is the default case now that the public template ships
+# no VNC_PASSWORD at all.
+export VNC_PASSWORD
+
 mkdir -p /root/.vnc
 # KasmVNC authenticates the WEB session against its own user db, not a VNC-protocol password.
 # -w gives write (input) permission; without it you get a read-only desktop you cannot click.

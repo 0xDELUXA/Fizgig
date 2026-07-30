@@ -204,6 +204,9 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # noVNC over HTTP — the only port that needs exposing. 5900 stays internal on purpose: raw VNC
 # is unencrypted, and the host's HTTPS proxy is what makes this safe to reach over the internet.
-EXPOSE 6080 8080
+# 8081 is reserved for the app to serve on (a phone-facing run monitor). Declaring it here
+# is documentation — RunPod exposes what the TEMPLATE lists — but it keeps the ports in
+# one place and works for a plain `docker run -p`.
+EXPOSE 6080 8080 8081
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

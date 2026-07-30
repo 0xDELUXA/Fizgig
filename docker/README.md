@@ -47,6 +47,17 @@ several times more for it.
 
 ## Logging in
 
+**Give it a few minutes first.** RunPod has to download the image before anything can start, and
+it's a big one. Until that finishes the links are dead — the pod looks ready, the ports are listed,
+and both give you nothing. That's normal on a first deploy; the **Logs** tab shows the download
+running.
+
+You're in business when the log reaches:
+
+```
+[fizgig] Starting KasmVNC display (1600x1400, resizes to your browser window)
+```
+
 | | Port | Username | Password |
 |---|---|---|---|
 | **Fizgig** | 6080 | `fizgig` | see below |
@@ -123,6 +134,8 @@ Three more exist for unusual cases: `FETCH_MODELS_EXTRA` passes extra flags to t
 The **pod log** is the first place to look — every step is narrated there, including storage and the
 login details.
 
+- **Both links dead just after deploying** — it's still downloading the image. Wait for
+  `Starting KasmVNC display` in the log.
 - **Storage shows ~25 GB** — the volume didn't mount. Check the mount path is `/workspace`.
 - **Downloads fail with "no space left"** — same cause: models are landing on container disk.
 - **Your models vanished** — the pod was *terminated* rather than *stopped*. A Volume Disk goes

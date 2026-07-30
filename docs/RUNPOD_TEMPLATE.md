@@ -40,7 +40,13 @@ terminate.
 
 ## Logging in
 
-Both ports ask for a username and password:
+**Give it a few minutes first.** RunPod downloads the image before anything can start, and it's a
+big one. Until that finishes the links are dead — the pod looks ready and both ports give you
+nothing. That's normal on a first deploy, and the **Logs** tab shows the download running.
+
+You're ready when the log reaches `[fizgig] Starting KasmVNC display`.
+
+Both ports then ask for a username and password:
 
 | | Port | Username | Password |
 |---|---|---|---|

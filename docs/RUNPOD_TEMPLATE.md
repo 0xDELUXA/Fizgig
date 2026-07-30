@@ -31,11 +31,24 @@ downloaded models with it. A Network Volume outlives any pod, so you download th
 - **Auto-stop** — optionally shut the pod down when a run finishes, so an overnight finish doesn't
   bill until morning
 
+## Logging in
+
+Both ports ask for a username and password:
+
+| | Port | Username | Password |
+|---|---|---|---|
+| **Fizgig** | 6080 | `fizgig` | your `VNC_PASSWORD` |
+| **File manager** | 8080 | `admin` | your `VNC_PASSWORD` |
+
+Everything is printed in the **pod log** at startup, including a generated password if you didn't
+set one. If your `VNC_PASSWORD` is under 12 characters the file manager pads it with zeros — the
+log tells you exactly what to type.
+
 ## First run
 
-1. Connect on **port 6080** — username `fizgig`, password is your `VNC_PASSWORD` (both in the pod log)
+1. Connect on **port 6080** and log in
 2. **Preferences → ⬇ Download models for me** (Krea 2 ~32 GB, no account needed)
-3. **Port 8080** is a file manager — log in as `admin` with that same password, then drag a dataset folder into `/workspace/datasets`
+3. Open **port 8080** and drag a dataset folder into `/workspace/datasets`
 4. **Start tab → Browse** → pick it, then **Training → Start**
 
 Closing the browser tab does **not** stop training. Fizgig runs on the pod — shut the tab, come

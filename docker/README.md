@@ -74,7 +74,15 @@ since it resumes and syncs incrementally.
 
 **First run**
 
-1. Open the pod's HTTP `6080` endpoint. Your browser asks for a username and password: **`fizgig`** and your `VNC_PASSWORD` (both are printed in the pod log).
+1. Open the pod's HTTP `6080` endpoint and log in.
+
+| | Port | Username | Password |
+|---|---|---|---|
+| **Fizgig** | 6080 | `fizgig` | your `VNC_PASSWORD` |
+| **File manager** | 8080 | `admin` | your `VNC_PASSWORD` |
+
+   All of it is printed in the pod log at startup — including a generated password if you didn't set
+   one, and the zero-padded version the file manager uses when your password is under 12 characters.
 2. Fizgig is already running. Go to **Preferences → ⬇ Download models for me**.
    Krea 2 needs no HuggingFace account; Klein will ask for a token.
 3. Point the **Start** tab at a dataset folder and train.

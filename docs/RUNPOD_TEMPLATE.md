@@ -50,6 +50,7 @@ tab and come back later.
 | `VNC_PASSWORD` | Used for both the desktop and the file manager. **12+ characters** — shorter ones get padded and the pod log tells you what to. |
 | `HF_TOKEN` | Only for Klein. Krea 2 needs nothing. |
 | `FETCH_MODELS` | e.g. `tools,krea2` to download before launch. Left empty by default so you choose. |
+| `RUNPOD_STOP_API_KEY` | Enables *stop the pod when training finishes*. Must be an **account** key from RunPod → Settings → API Keys — the key RunPod injects into a pod is pod-scoped and returns 403 on any pod-management call, which is a known RunPod limitation, not a Fizgig one. |
 | `FIZGIG_REF` | Branch or tag to run. Defaults to `master`, which updates on every pod start. |
 
 **Attach a Network Volume of 100 GB+ mounted at `/workspace`.**

@@ -782,6 +782,15 @@ def _pod_id() -> str:
     return ""
 
 
+def _pod_stop_key() -> str:
+    """An API key that can actually stop this pod, or "".
+
+    NOT RunPod's injected RUNPOD_API_KEY — that one is pod-scoped and 403s on every pod-management
+    call (verified on a live pod). Stopping a pod needs an account key the user creates and passes
+    in themselves, which is why this reads a separate variable rather than falling back."""
+    return (os.environ.get("RUNPOD_STOP_API_KEY") or "").strip()
+
+
 def save_prefs(prefs: dict) -> None:
     """Save preferences to prefs.json. Portable-dir paths inside the repo are
     stored as relative strings so a cloned/moved repo finds its own defaults."""
@@ -12569,7 +12578,21 @@ class LoRATrainerGUI:
                       "get a two-minute countdown you can cancel.",
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=760,
-                 justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 12))
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 2))
+        if not _pod_stop_key():
+            # Better to say this here than to let someone tick the box, go to bed, and wake up to
+            # a pod that billed all night because the key it needed was never set.
+            tk.Label(card,
+                     text="Needs an API key first. RunPod only gives a pod a limited key that "
+                          "cannot stop pods, so make one at RunPod > Settings > API Keys and add "
+                          "it to your template as RUNPOD_STOP_API_KEY. Until then this switch "
+                          "does nothing.",
+                     font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
+                     wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 12))
+        else:
+            tk.Label(card, text="API key found — auto-stop is ready.",
+                     font=(FONT_FAMILY, 9), fg=COLORS["success"],
+                     bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(0, 12))
 
         # Storage — the thing that silently ends a run at 3am.
         self._pod_storage_lbl = tk.Label(card, text="", font=(FONT_FAMILY, 10),
@@ -19861,26 +19884,42 @@ class LoRATrainerGUI:
             pass
 
     def _stop_this_pod(self):
-        """Ask the host to stop this pod. Reports what happened either way.
+        """Stop this pod through RunPod's API. Reports what happened either way.
 
-        Whether a pod can stop ITSELF depends on the host injecting credentials runpodctl can use;
-        that is not guaranteed on a custom image. So this never pretends to have succeeded — if it
-        cannot, it says so and the user stops it from the dashboard."""
-        pid = _pod_id()
+        Uses the GraphQL endpoint directly rather than runpodctl: runpodctl tries to sync SSH keys
+        as a side effect of being configured, which fails noisily and has nothing to do with
+        stopping a machine.
+
+        The key RunPod injects as RUNPOD_API_KEY is POD-SCOPED and cannot manage pods — verified
+        on a live pod, where `runpodctl pod list` returns 403 both before and after configuring
+        with it. So this needs an account key the user supplies themselves."""
+        key = _pod_stop_key()
+        pid = os.environ.get("RUNPOD_POD_ID", "").strip() or _pod_id()
+        if not key:
+            self.update_console(
+                "[pod] auto-stop is on but no API key is set, so the pod is still running.\n"
+                "[pod] Add RUNPOD_STOP_API_KEY to your template (RunPod > Settings > API Keys).\n"
+                "[pod] The key RunPod provides automatically is pod-scoped and cannot stop pods.\n")
+            return
         self.update_console(f"[pod] stopping pod {pid or '(unknown id)'}…\n")
         try:
-            import subprocess as _sp
-            cmd = ["runpodctl", "stop", "pod", pid] if pid else ["runpodctl", "stop", "pod"]
-            r = _sp.run(cmd, capture_output=True, text=True, timeout=60)
-            out = ((r.stdout or "") + (r.stderr or "")).strip()
-            if r.returncode == 0:
-                self.update_console(f"[pod] stop requested. {out}\n")
+            import json as _json
+            import urllib.request as _u
+            body = _json.dumps({
+                "query": "mutation($id: String!) { podStop(input: {podId: $id}) "
+                         "{ id desiredStatus } }",
+                "variables": {"id": pid},
+            }).encode()
+            req = _u.Request(f"https://api.runpod.io/graphql?api_key={key}", data=body,
+                             headers={"Content-Type": "application/json"})
+            with _u.urlopen(req, timeout=45) as resp:
+                payload = _json.loads(resp.read().decode())
+            if payload.get("errors"):
+                msg = payload["errors"][0].get("message", "unknown error")
+                self.update_console(f"[pod] RunPod refused the stop: {msg}\n"
+                                    f"[pod] Stop it from the dashboard to stop billing.\n")
             else:
-                self.update_console(
-                    f"[pod] could not stop the pod automatically: {out or 'runpodctl failed'}\n"
-                    f"[pod] Stop it from the RunPod dashboard to stop billing.\n")
-        except FileNotFoundError:
-            self.update_console("[pod] runpodctl not found — stop the pod from the dashboard.\n")
+                self.update_console("[pod] stop requested — this pod is shutting down.\n")
         except Exception as e:
             self.update_console(f"[pod] auto-stop failed ({type(e).__name__}: {e}). "
                                 f"Stop it from the dashboard to stop billing.\n")

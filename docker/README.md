@@ -49,6 +49,7 @@ which fixes the set of GPUs you can rent.
 | `VNC_PASSWORD` | *generated* | Password for the browser session **and** the file manager. If unset, one is generated and printed to the pod log — **set your own**. Use **12+ characters**: the file manager rejects anything shorter, and a short password gets silently padded with `0`s (the pod log tells you what it ended up as). |
 | `FETCH_MODELS` | *(empty)* | Comma-separated families to download before launch, e.g. `tools,krea2`. Left empty on purpose: pulling tens of GB unasked spends your money, possibly on the family you didn't want. Use the button in Preferences instead. |
 | `HF_TOKEN` | — | Only needed for Klein. Krea 2's files aren't gated. |
+| `RUNPOD_STOP_API_KEY` | Enables *stop the pod when training finishes*. Must be an **account** key from RunPod → Settings → API Keys — the key RunPod injects into a pod is pod-scoped and returns 403 on any pod-management call, which is a known RunPod limitation, not a Fizgig one. |
 | `FIZGIG_REF` | `master` | Branch or tag to run. Pin it if you want a fixed version. |
 | `SCREEN_W` / `SCREEN_H` | `1600` / `1400` | Only the *starting* size — the desktop resizes to match your browser window, so this rarely matters. |
 

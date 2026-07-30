@@ -132,6 +132,34 @@ try:
 except AssertionError as e:
     ck("toggle off -> no countdown even on a clean finish", False, e)
 
+# --- 3b. the API key field --------------------------------------------------------------------
+# A public template hands its env vars to every container deployed from it, so a key cannot ship
+# in one — it has to be per-user. That makes the prefs field the primary route, not a convenience.
+ck("key field is masked", str(g._pod_key_entry.cget("show")) not in ("", "None"),
+   repr(g._pod_key_entry.cget("show")))
+g.prefs_vars["runpod_api_key"].set("")
+os.environ.pop("RUNPOD_STOP_API_KEY", None)
+ck("no key anywhere -> not ready", g._pod_stop_key() == "")
+ck("  and the card says so", "needed" in g._pod_key_status.cget("text"))
+
+g.prefs_vars["runpod_api_key"].set("rpa_pretend_account_key")
+ck("key in prefs -> ready", g._pod_stop_key() == "rpa_pretend_account_key")
+ck("  and the card confirms it", "ready" in g._pod_key_status.cget("text"))
+
+g.prefs_vars["runpod_api_key"].set("")
+os.environ["RUNPOD_STOP_API_KEY"] = "rpa_from_template"
+ck("env var still works as a fallback", g._pod_stop_key() == "rpa_from_template")
+g.prefs_vars["runpod_api_key"].set("rpa_prefs_wins")
+ck("  prefs takes precedence over the env var", g._pod_stop_key() == "rpa_prefs_wins")
+os.environ.pop("RUNPOD_STOP_API_KEY", None)
+g.prefs_vars["runpod_api_key"].set("")
+
+# The injected pod-scoped key must never be picked up: it 403s on every pod call, so using it
+# would produce a failure at the one moment nobody is watching.
+os.environ["RUNPOD_API_KEY"] = "rpa_pod_scoped_cannot_stop_pods"
+ck("RunPod's own injected key is NOT used", g._pod_stop_key() == "")
+os.environ.pop("RUNPOD_API_KEY", None)
+
 # --- 4. prefs round-trip ----------------------------------------------------------------------
 ck("runpod_stop_when_done is in DEFAULT_PREFS and defaults off",
    G.DEFAULT_PREFS.get("runpod_stop_when_done") == "0")

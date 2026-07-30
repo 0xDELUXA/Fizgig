@@ -690,6 +690,11 @@ DEFAULT_PREFS = {
     # by the hour, so a run that ends at 4am otherwise bills until someone notices — but stopping
     # a machine out from under someone has to be something they asked for.
     "runpod_stop_when_done": "0",
+    # An account API key that can stop pods. Stored here rather than expected as a template env
+    # var because a PUBLIC template hands its variables to everyone who deploys it — one person's
+    # key would end up controlling their account from strangers' containers. Kept on the user's
+    # own volume, entered in the RunPod card, masked in the UI.
+    "runpod_api_key": "",
     # Inference DiT block swap — int 0-16 for Klein 9B. With the Distilled fp8
     # model (workbench default) 0 = no swap fits ~16GB; loading Base is heavier
     # (0 ≈ 24GB). 16 = max swap for the smallest cards. Applies to Repair Studio,
@@ -782,12 +787,12 @@ def _pod_id() -> str:
     return ""
 
 
-def _pod_stop_key() -> str:
-    """An API key that can actually stop this pod, or "".
+def _pod_stop_key_env() -> str:
+    """A stop-capable key from the environment, or "".
 
     NOT RunPod's injected RUNPOD_API_KEY — that one is pod-scoped and 403s on every pod-management
-    call (verified on a live pod). Stopping a pod needs an account key the user creates and passes
-    in themselves, which is why this reads a separate variable rather than falling back."""
+    call (verified on a live pod, and a documented RunPod limitation). Stopping a pod needs an
+    account key, which is why this reads a separate variable rather than falling back."""
     return (os.environ.get("RUNPOD_STOP_API_KEY") or "").strip()
 
 
@@ -12579,20 +12584,34 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=760,
                  justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 2))
-        if not _pod_stop_key():
-            # Better to say this here than to let someone tick the box, go to bed, and wake up to
-            # a pod that billed all night because the key it needed was never set.
-            tk.Label(card,
-                     text="Needs an API key first. RunPod only gives a pod a limited key that "
-                          "cannot stop pods, so make one at RunPod > Settings > API Keys and add "
-                          "it to your template as RUNPOD_STOP_API_KEY. Until then this switch "
-                          "does nothing.",
-                     font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
-                     wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 12))
-        else:
-            tk.Label(card, text="API key found — auto-stop is ready.",
-                     font=(FONT_FAMILY, 9), fg=COLORS["success"],
-                     bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(0, 12))
+        # The key field. Better here than as a template variable: a public template hands its
+        # variables to everyone who deploys it, so nobody can safely ship a key in one.
+        key_row = tk.Frame(card, bg=COLORS["bg_surface"])
+        key_row.pack(anchor=tk.W, fill=tk.X, pady=(2, 0))
+        tk.Label(key_row, text="RunPod API key:", font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_secondary"], bg=COLORS["bg_surface"]).pack(side=tk.LEFT,
+                                                                            padx=(0, 8))
+        self._pod_key_entry = ttk.Entry(key_row, textvariable=self.prefs_vars["runpod_api_key"],
+                                        width=44, show="•")
+        self._pod_key_entry.pack(side=tk.LEFT)
+        ttk.Button(key_row, text="Clear", width=7,
+                   command=lambda: self.prefs_vars["runpod_api_key"].set("")).pack(side=tk.LEFT,
+                                                                                    padx=(6, 0))
+        self._pod_key_status = tk.Label(key_row, text="", font=(FONT_FAMILY, 9),
+                                        bg=COLORS["bg_surface"])
+        self._pod_key_status.pack(side=tk.LEFT, padx=(10, 0))
+
+        tk.Label(card,
+                 text="Make one at RunPod → Settings → API Keys. The key RunPod gives a pod "
+                      "automatically is pod-scoped and cannot stop pods, which is a RunPod "
+                      "limitation rather than a Fizgig one. Saved to prefs.json on your volume, so "
+                      "it persists across pods — and stays out of any shared template.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 12))
+
+        self.prefs_vars["runpod_api_key"].trace_add(
+            "write", lambda *a: self._refresh_pod_key_status())
+        self._refresh_pod_key_status()
 
         # Storage — the thing that silently ends a run at 3am.
         self._pod_storage_lbl = tk.Label(card, text="", font=(FONT_FAMILY, 10),
@@ -12669,6 +12688,26 @@ class LoRATrainerGUI:
                       "where your files live.",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
+
+    def _pod_stop_key(self) -> str:
+        """The key to stop this pod with: the one saved in Preferences, else a template env var.
+
+        Prefs first because that is the route that scales — a public template cannot carry anyone's
+        key, since template variables are handed to every container deployed from it."""
+        try:
+            k = self.prefs_vars["runpod_api_key"].get().strip()
+        except Exception:
+            k = ""
+        return k or _pod_stop_key_env()
+
+    def _refresh_pod_key_status(self):
+        lbl = getattr(self, "_pod_key_status", None)
+        if lbl is None or not lbl.winfo_exists():
+            return
+        if self._pod_stop_key():
+            lbl.config(text="auto-stop ready", fg=COLORS["success"])
+        else:
+            lbl.config(text="needed for auto-stop", fg=COLORS["warning"])
 
     def _refresh_pod_storage(self):
         """Free space on the volume, refreshed while the tab is open."""
@@ -19893,7 +19932,7 @@ class LoRATrainerGUI:
         The key RunPod injects as RUNPOD_API_KEY is POD-SCOPED and cannot manage pods — verified
         on a live pod, where `runpodctl pod list` returns 403 both before and after configuring
         with it. So this needs an account key the user supplies themselves."""
-        key = _pod_stop_key()
+        key = self._pod_stop_key()
         pid = os.environ.get("RUNPOD_POD_ID", "").strip() or _pod_id()
         if not key:
             self.update_console(

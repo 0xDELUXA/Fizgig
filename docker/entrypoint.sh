@@ -66,10 +66,33 @@ for key, path in (("lora_output_dir", "/workspace/output_loras"),
                   ("cache_dir",       "/workspace/cache")):
     prefs.setdefault(key, path)
     os.makedirs(prefs[key], exist_ok=True)
+# Where the Start tab's Browse opens. setdefault, not assignment: if the user picked their own
+# folder we leave it alone.
+prefs.setdefault("input_dataset_dir", "/workspace/datasets")
 os.makedirs("/workspace/models", exist_ok=True)
 json.dump(prefs, open(p, "w", encoding="utf-8"), indent=2)
 print("[fizgig] output dirs on /workspace")
 PY
+
+# An obvious place to put training images. Created here rather than committed to the repo: in the
+# repo it would land inside the git clone (the one directory that gets reset --hard on every boot)
+# and every desktop user would get a stray pod-only folder they have no use for. Top level puts it
+# beside models/ and output_loras/ in the file manager, which is where someone looks first.
+mkdir -p /workspace/datasets
+if [ ! -f /workspace/datasets/README.txt ]; then
+    cat > /workspace/datasets/README.txt <<'NOTE'
+Put your training images here.
+
+Make one folder per LoRA, e.g.  /workspace/datasets/my_subject/
+and put the images and their .txt caption files in it together.
+
+Upload by dragging a folder into the file manager on port 8080, then on Fizgig's
+Start tab click Browse and pick your folder under /workspace/datasets.
+
+Everything under /workspace lives on your persistent volume, so it survives
+stopping and restarting the pod. Anything outside /workspace does not.
+NOTE
+fi
 
 # fetch_models defaults to <repo>/models, which puts 32 GB of weights INSIDE the git clone that
 # this script runs `git reset --hard` on every boot. Point it at /workspace/models instead, next

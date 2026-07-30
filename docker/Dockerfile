@@ -141,7 +141,11 @@ ENV VIRTUAL_ENV=/opt/venv PATH="/opt/venv/bin:$PATH"
 # Everything the user creates lives here so a RunPod network volume keeps it across pods:
 # models, datasets, output LoRAs, latent cache, and the HuggingFace/InsightFace caches — which
 # would otherwise re-download Florence-2 and the face model on every single boot.
-ENV FIZGIG_HOME=/workspace \
+# FIZGIG_POD is what the app keys off to show its RunPod controls instead of the "run on a rented
+# GPU" advert. Our own marker rather than RUNPOD_POD_ID: provider variable names are theirs to
+# change, and Vast sets none of them.
+ENV FIZGIG_POD=1 \
+    FIZGIG_HOME=/workspace \
     HF_HOME=/workspace/.cache/huggingface \
     INSIGHTFACE_HOME=/workspace/.insightface \
     XDG_CACHE_HOME=/workspace/.cache

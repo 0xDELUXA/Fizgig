@@ -683,6 +683,13 @@ DEFAULT_PREFS = {
     # Absolute paths (may live anywhere); empty = no default (last folder).
     "input_lora_dir": "",
     "input_ref_dir": "",
+    # Where the Start tab's training-folder Browse opens. On a pod the entrypoint seeds this to
+    # /workspace/datasets so Browse lands where the uploads are, rather than at cwd.
+    "input_dataset_dir": "",
+    # Stop the RunPod pod when a training run finishes cleanly. Off by default: a rented GPU bills
+    # by the hour, so a run that ends at 4am otherwise bills until someone notices — but stopping
+    # a machine out from under someone has to be something they asked for.
+    "runpod_stop_when_done": "0",
     # Inference DiT block swap — int 0-16 for Klein 9B. With the Distilled fp8
     # model (workbench default) 0 = no swap fits ~16GB; loading Base is heavier
     # (0 ≈ 24GB). 16 = max swap for the smallest cards. Applies to Repair Studio,
@@ -754,6 +761,25 @@ def _persist_disabled() -> bool:
     settings / Fizgig_train.toml (traced vars auto-save on write, so a test setting
     image_folder_var would otherwise clobber the remembered training folder)."""
     return bool(os.environ.get("FIZGIG_NO_PERSIST"))
+
+
+def _running_on_pod() -> bool:
+    """True when this is the Docker pod image (RunPod, Vast, or any rented box).
+
+    Keyed off OUR marker, set in docker/entrypoint.sh, rather than RunPod's RUNPOD_POD_ID: the
+    hosting provider's variable names are theirs to change, and Vast sets none of them. The pod
+    id below is read separately and only used for display and for targeting a stop — everything
+    degrades if it is absent."""
+    return os.environ.get("FIZGIG_POD", "0") not in ("0", "", None)
+
+
+def _pod_id() -> str:
+    """The provider's id for this pod, or "" if it doesn't advertise one."""
+    for key in ("RUNPOD_POD_ID", "VAST_CONTAINERLABEL", "HOSTNAME"):
+        v = (os.environ.get(key) or "").strip()
+        if v:
+            return v
+    return ""
 
 
 def save_prefs(prefs: dict) -> None:
@@ -2618,8 +2644,14 @@ class LoRATrainerGUI:
         self._add_youtube_help_button(scrollable_frame, "start", prominent=True)
 
     def _browse_image_folder(self):
-        """Folder picker for the Start tab (unified image folder)."""
-        folder = filedialog.askdirectory(initialdir=self.image_folder_var.get() or os.getcwd())
+        """Folder picker for the Start tab (unified image folder).
+
+        Falls back through: the folder you last used, then the Preferences default (which the pod
+        image seeds to /workspace/datasets so Browse opens where uploads land), then cwd."""
+        folder = filedialog.askdirectory(
+            initialdir=(self.image_folder_var.get()
+                        or self._pref_initialdir("input_dataset_dir")
+                        or os.getcwd()))
         if folder:
             self.image_folder_var.set(folder)
 
@@ -12482,6 +12514,10 @@ class LoRATrainerGUI:
                                     "Default folder for loading LoRAs — Repair Studio, LoRA the Explorer, and the Context LoRA picker", is_dir=True)
         in_row = self._add_pref_row(in_card, in_row, "Reference images:", "input_ref_dir",
                                     "Default folder for reference images — Repair Studio and LoRA the Explorer", is_dir=True)
+        in_row = self._add_pref_row(in_card, in_row, "Training images:", "input_dataset_dir",
+                                    "Default folder the Start tab's Browse opens in", is_dir=True)
+
+        self._add_runpod_card(outer)
 
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)
@@ -12491,6 +12527,133 @@ class LoRATrainerGUI:
         ttk.Button(action_row, text="Open prefs.json", command=self._open_prefs_file).pack(side=tk.LEFT)
 
         self._add_youtube_help_button(outer, "preferences")
+
+    # The template someone lands on from the desktop card. Referral id appended when set — see
+    # RUNPOD_REFERRAL below.
+    RUNPOD_DEPLOY_URL = "https://runpod.io/console/deploy?template=fizgig"
+    RUNPOD_REFERRAL = ""   # set to Peter's ref id to earn on deploys through this button
+
+    def _runpod_deploy_url(self) -> str:
+        u = self.RUNPOD_DEPLOY_URL
+        return f"{u}&ref={self.RUNPOD_REFERRAL}" if self.RUNPOD_REFERRAL else u
+
+    def _add_runpod_card(self, outer):
+        """One card, two audiences.
+
+        On a pod it is the control panel for things only a rented machine has — an hourly bill, a
+        volume that fills up, and a browser tab people assume is holding the run up. On the desktop
+        it is how someone finds out Fizgig runs on rented hardware at all."""
+        if _running_on_pod():
+            self._build_pod_controls(outer)
+        else:
+            self._build_pod_advert(outer)
+
+    def _build_pod_controls(self, outer):
+        card = self._start_section_card(
+            outer, "RunPod",
+            "Fizgig is running on a rented GPU. These settings only appear here.")
+        self._runpod_card = card
+
+        # The money one. A finished run on an idle rented GPU bills until someone notices.
+        ttk.Checkbutton(
+            card,
+            text="Stop this pod when a training run finishes",
+            variable=self.prefs_vars["runpod_stop_when_done"], onvalue="1", offvalue="0",
+            style="Surface.TCheckbutton").pack(anchor=tk.W)
+        tk.Label(card,
+                 text="Only after a run completes on its own — never after a Pause, a Stop, or a "
+                      "failure, since those are exactly the times you want the machine alive. You "
+                      "get a two-minute countdown you can cancel.",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                 bg=COLORS["bg_surface"], wraplength=760,
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 12))
+
+        # Storage — the thing that silently ends a run at 3am.
+        self._pod_storage_lbl = tk.Label(card, text="", font=(FONT_FAMILY, 10),
+                                         fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                                         justify=tk.LEFT, anchor="w")
+        self._pod_storage_lbl.pack(anchor=tk.W, fill=tk.X)
+        self._refresh_pod_storage()
+
+        tk.Label(card,
+                 text="Your files: datasets in /workspace/datasets, models in /workspace/models, "
+                      "finished LoRAs in /workspace/output_loras. Everything under /workspace "
+                      "survives stopping and restarting the pod — anything outside it does not. "
+                      "Drag files in and out with the file manager on port 8080.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
+
+        # Asked constantly by anyone new to a remote desktop, and the answer is reassuring.
+        tk.Label(card,
+                 text="Closing this browser tab does not stop training. Fizgig runs on the pod, "
+                      "not in your browser — shut the tab, come back later, and the run is still "
+                      "going.",
+                 font=(FONT_FAMILY, 10, "bold"), fg=COLORS["success"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
+
+        _pid = _pod_id()
+        if _pid:
+            tk.Label(card, text=f"Pod id: {_pid}", font=(FONT_FAMILY, 8),
+                     fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(10, 0))
+
+    def _build_pod_advert(self, outer):
+        card = self._start_section_card(
+            outer, "Run Fizgig on a rented GPU",
+            "Train on whatever card you like, with as much VRAM as you want, billed by the hour. "
+            "Nothing to install, and your own machine stays free while it trains.")
+        self._runpod_card = card
+        tk.Label(card,
+                 text="Fizgig ships as a ready-made image: the full app in your browser, your "
+                      "models and datasets on persistent storage, and drag-and-drop file transfer. "
+                      "Rent a big card for an afternoon instead of buying one.",
+                 font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
+
+        row = tk.Frame(card, bg=COLORS["bg_surface"])
+        row.pack(anchor=tk.W)
+        _btn = tk.Button(row, text="  Deploy on RunPod  ",
+                         font=(FONT_FAMILY, 10, "bold"), fg="#FFFFFF", bg="#673AB7",
+                         activebackground="#5E35B1", activeforeground="#FFFFFF",
+                         relief="flat", bd=0, cursor="hand2", padx=16, pady=6,
+                         command=lambda: self._open_url(self._runpod_deploy_url()))
+        _btn.pack(side=tk.LEFT)
+
+        tk.Label(card,
+                 text="Deploying through this link supports Fizgig's development, at no extra cost "
+                      "to you.",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                 bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(6, 0))
+        tk.Label(card,
+                 text="When Fizgig is running on a pod, this section turns into its controls — "
+                      "stop the pod automatically when training finishes, check storage, and see "
+                      "where your files live.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
+
+    def _refresh_pod_storage(self):
+        """Free space on the volume, refreshed while the tab is open."""
+        lbl = getattr(self, "_pod_storage_lbl", None)
+        if lbl is None or not lbl.winfo_exists():
+            return
+        try:
+            import shutil as _sh
+            usage = _sh.disk_usage("/workspace")
+            free_gb, total_gb = usage.free / 1024 ** 3, usage.total / 1024 ** 3
+            txt = f"Storage: {free_gb:.0f} GB free of {total_gb:.0f} GB on /workspace"
+            # A total this small means the volume never mounted and /workspace is container disk,
+            # which RunPod wipes when the pod stops — a 32 GB model download would evaporate.
+            colour = COLORS["warning"] if total_gb < 60 else COLORS["text_explain"]
+            if total_gb < 60:
+                txt += "  — that looks like container disk, not your volume. Check the template's"
+                txt += " volume mount path is /workspace."
+            lbl.config(text=txt, fg=colour)
+        except Exception:
+            lbl.config(text="Storage: unavailable")
+        lbl.after(30000, self._refresh_pod_storage)
+
+    def _open_url(self, url):
+        """Open a link. Central so the pod image's browser handling stays in one place."""
+        webbrowser.open(url)
 
     def _add_fetch_models_row(self, frame, row, family, blurb):
         """'Download them all for me' row at the foot of a model-paths card.
@@ -18519,6 +18682,9 @@ class LoRATrainerGUI:
         if not self._confirm_resume_has_epochs_left():
             return
 
+        if not self._confirm_disk_headroom():
+            return
+
         # Clear a stale pause sentinel from a previous session (window close / crash after
         # Pause left it on disk; the trainer would read it at epoch 1 and exit "cleanly").
         try:
@@ -18718,6 +18884,39 @@ class LoRATrainerGUI:
         # Mark as running for the pause/resume state machine
         self.training_state = "running"
         self._refresh_training_buttons()
+
+    DISK_WARN_GB = 15
+
+    def _confirm_disk_headroom(self):
+        """True to proceed. Warns when the output drive is nearly full.
+
+        A threshold plus the REAL figure rather than a predicted requirement: what a run actually
+        writes depends on rank, epochs, save cadence and keep-N, and a confidently wrong estimate
+        is worse than showing someone the number and letting them judge. Running out of disk four
+        hours into a run costs the whole run."""
+        out_dir = (self.settings.get("LORA_OUTPUT_DIR") or "").strip()
+        if not out_dir:
+            return True
+        probe = out_dir
+        while probe and not os.path.isdir(probe):
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                return True
+            probe = parent
+        try:
+            import shutil as _sh
+            free_gb = _sh.disk_usage(probe).free / 1024 ** 3
+        except Exception:
+            return True                      # never block a run over a failed disk probe
+        if free_gb >= self.DISK_WARN_GB:
+            return True
+        return messagebox.askyesno(
+            "Low disk space",
+            f"Only {free_gb:.1f} GB free where your LoRAs are saved:\n{probe}\n\n"
+            f"A run writes a checkpoint every few epochs, plus resumable state dirs (a few hundred "
+            f"MB each) and sample images. Running out part-way through loses the run.\n\n"
+            f"Free some space, or lower Save Every N Epochs and Keep Last.\n\n"
+            f"Start training anyway?")
 
     def _confirm_resume_has_epochs_left(self):
         """True to proceed. Warns when the resume state is already at/past Max Train Epochs.
@@ -19563,8 +19762,105 @@ class LoRATrainerGUI:
         candidates.sort(reverse=True)
         return os.path.join(out_dir, candidates[0][1])
 
+    POD_STOP_COUNTDOWN = 120   # seconds
+
+    def _maybe_stop_pod_after_training(self):
+        """Offer to stop a rented pod once a run has finished on its own.
+
+        Never silent and never immediate: the point is to stop billing on an UNATTENDED finish, so
+        anyone actually sitting there must be able to stop it happening. A countdown they can
+        cancel does both."""
+        if not _running_on_pod():
+            return
+        if str(self.prefs_vars.get("runpod_stop_when_done", tk.StringVar()).get()).strip() != "1":
+            return
+
+        win = tk.Toplevel(self.master)
+        win.title("Training finished — stopping pod")
+        win.configure(bg=BG_COLOR)
+        win.transient(self.master)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)
+        win.resizable(False, False)
+
+        # Cancel packed BOTTOM first so a long message can never push it off the edge (v2.8.5).
+        row = ttk.Frame(win)
+        row.pack(side=tk.BOTTOM, pady=(6, 14))
+
+        tk.Label(win, text="Training finished", font=(FONT_FAMILY, 12, "bold"),
+                 fg=COLORS["text_primary"], bg=BG_COLOR).pack(anchor=tk.W, padx=18, pady=(16, 2))
+        msg = tk.Label(win, text="", font=(FONT_FAMILY, 10), fg=COLORS["text_explain"],
+                       bg=BG_COLOR, wraplength=460, justify=tk.LEFT)
+        msg.pack(anchor=tk.W, padx=18, pady=(0, 6))
+        tk.Label(win,
+                 text="Your LoRA and everything else under /workspace is on the persistent volume "
+                      "and will still be there next time.",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=BG_COLOR,
+                 wraplength=460, justify=tk.LEFT).pack(anchor=tk.W, padx=18)
+
+        state = {"left": self.POD_STOP_COUNTDOWN, "cancelled": False}
+
+        def cancel():
+            state["cancelled"] = True
+            self.update_console("[pod] auto-stop cancelled — pod left running.\n")
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        ttk.Button(row, text="Keep the pod running", command=cancel).pack()
+
+        def tick():
+            if state["cancelled"]:
+                return
+            if state["left"] <= 0:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                self._stop_this_pod()
+                return
+            msg.config(text=f"Stopping this pod in {state['left']}s to stop it billing.\n"
+                            f"Cancel below if you want to keep working.")
+            state["left"] -= 1
+            win.after(1000, tick)
+
+        tick()
+        try:
+            win.update_idletasks()
+            win.grab_set()
+        except Exception:
+            pass
+
+    def _stop_this_pod(self):
+        """Ask the host to stop this pod. Reports what happened either way.
+
+        Whether a pod can stop ITSELF depends on the host injecting credentials runpodctl can use;
+        that is not guaranteed on a custom image. So this never pretends to have succeeded — if it
+        cannot, it says so and the user stops it from the dashboard."""
+        pid = _pod_id()
+        self.update_console(f"[pod] stopping pod {pid or '(unknown id)'}…\n")
+        try:
+            import subprocess as _sp
+            cmd = ["runpodctl", "stop", "pod", pid] if pid else ["runpodctl", "stop", "pod"]
+            r = _sp.run(cmd, capture_output=True, text=True, timeout=60)
+            out = ((r.stdout or "") + (r.stderr or "")).strip()
+            if r.returncode == 0:
+                self.update_console(f"[pod] stop requested. {out}\n")
+            else:
+                self.update_console(
+                    f"[pod] could not stop the pod automatically: {out or 'runpodctl failed'}\n"
+                    f"[pod] Stop it from the RunPod dashboard to stop billing.\n")
+        except FileNotFoundError:
+            self.update_console("[pod] runpodctl not found — stop the pod from the dashboard.\n")
+        except Exception as e:
+            self.update_console(f"[pod] auto-stop failed ({type(e).__name__}: {e}). "
+                                f"Stop it from the dashboard to stop billing.\n")
+
     def _on_training_subprocess_exited(self, return_code: int):
         """Called from check_process when the training subprocess ends. Routes to paused or idle."""
+        # Captured BEFORE the branches below rewrite it — a pause is the one case that exits 0,
+        # and telling it apart from a completed run is the whole basis of the auto-stop decision.
+        was_state = getattr(self, "training_state", "idle")
         # Clean up pause flag if still present
         try:
             flag = self._pause_flag_path()
@@ -19572,6 +19868,11 @@ class LoRATrainerGUI:
                 os.remove(flag)
         except Exception:
             pass
+        # Only a run that finished on its own. Pause exits 0 too (state "pausing"); Stop and
+        # crashes arrive non-zero. Each of the three conditions excludes a real case, and getting
+        # it wrong shuts the machine down under someone who is still using it.
+        if return_code == 0 and was_state == "running":
+            self._maybe_stop_pod_after_training()
         if getattr(self, "training_state", "idle") == "pausing" and return_code == 0:
             # Successful graceful exit — record paused state
             state_dir = self._detect_latest_state_dir()

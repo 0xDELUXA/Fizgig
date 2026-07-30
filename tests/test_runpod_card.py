@@ -1,0 +1,166 @@
+"""RunPod Preferences card, auto-stop, and the disk warning — headless, no GPU.
+
+The auto-stop predicate is the dangerous one and gets the most coverage here. It shuts down a
+machine somebody is paying for, so every way a training subprocess can end is asserted
+individually. The two that look alike are the trap: a PAUSE exits 0 just like a completed run, and
+a user STOP arrives as a non-zero code with no flag distinguishing it from a crash.
+
+Run: venv/Scripts/python.exe tests/test_runpod_card.py
+"""
+import os
+import sys
+
+os.environ["FIZGIG_NO_PERSIST"] = "1"
+REPO = r"W:/Peter/Documents/Development/Fizgig"
+sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.join(REPO, "src"))
+
+import tkinter as tk  # noqa: E402
+import lora_trainer_gui as G  # noqa: E402
+
+G.LAST_USED_FILE = os.path.join(os.environ["TEMP"], "nope", ".last_used.json")
+
+fails = []
+
+
+def ck(label, cond, detail=""):
+    print(f"{'PASS' if cond else 'FAIL'}  {label}{('  ' + str(detail)) if detail else ''}")
+    if not cond:
+        fails.append(label)
+
+
+def gui(pod: bool):
+    if pod:
+        os.environ["FIZGIG_POD"] = "1"
+    else:
+        os.environ.pop("FIZGIG_POD", None)
+    root = tk.Tk()
+    root.withdraw()
+    return root, G.LoRATrainerGUI(root)
+
+
+def all_text(widget):
+    out = []
+    for c in widget.winfo_children():
+        try:
+            t = c.cget("text")
+            if t:
+                out.append(str(t))
+        except Exception:
+            pass
+        out.extend(all_text(c))
+    return out
+
+
+# --- 1. detection -----------------------------------------------------------------------------
+os.environ.pop("FIZGIG_POD", None)
+ck("no marker -> not a pod", not G._running_on_pod())
+for val in ("1", "true", "yes"):
+    os.environ["FIZGIG_POD"] = val
+    ck(f"  FIZGIG_POD={val!r} -> pod", G._running_on_pod())
+os.environ["FIZGIG_POD"] = "0"
+ck("  FIZGIG_POD='0' -> not a pod", not G._running_on_pod())
+os.environ.pop("FIZGIG_POD", None)
+
+# --- 2. the card, both audiences --------------------------------------------------------------
+root, g = gui(pod=False)
+# Scope to the card, not the whole window: other Preferences cards legitimately mention VRAM
+# figures ("fits 16GB cards", the 8 GB Krea 2 note), and those are correct where they are.
+# _start_section_card returns the CONTENT frame; the title and description live on its parent.
+txt = " ".join(all_text(g._runpod_card) + all_text(g._runpod_card.master))
+ck("desktop shows the advert", "Run Fizgig on a rented GPU" in txt)
+ck("  with a deploy button", "Deploy on RunPod" in txt)
+ck("  and discloses the referral", "supports Fizgig's development" in txt)
+ck("  and does NOT show pod controls", "Stop this pod when a training run finishes" not in txt)
+ck("  no minimum-spec pitch (renting is about MORE card, not scraping by)",
+   "8 GB" not in txt and "8GB" not in txt)
+root.destroy()
+
+root, g = gui(pod=True)
+txt = " ".join(all_text(g._runpod_card) + all_text(g._runpod_card.master))
+ck("pod shows the controls", "Stop this pod when a training run finishes" in txt)
+ck("  storage line present", any("Storage:" in t for t in all_text(g._runpod_card)))
+ck("  says closing the tab does not stop training",
+   "Closing this browser tab does not stop training" in txt)
+ck("  points at the file manager", "port 8080" in txt)
+ck("  and does NOT show the advert", "Deploy on RunPod" not in txt)
+
+# --- 3. THE AUTO-STOP PREDICATE ---------------------------------------------------------------
+# Every way a training subprocess can end. Only one of them may stop the machine.
+g.prefs_vars["runpod_stop_when_done"].set("1")
+calls = []
+g._maybe_stop_pod_after_training = lambda: calls.append("stop")
+
+CASES = [
+    # (label,                              return_code, state_before, should_stop)
+    ("a completed run",                              0, "running",   True),
+    ("a PAUSE (also exits 0!)",                      0, "pausing",   False),
+    ("a user Stop (taskkill on Windows)",            1, "running",   False),
+    ("a user Stop (SIGTERM on POSIX)",             -15, "running",   False),
+    ("a crash",                                      1, "running",   False),
+    ("an OOM kill",                               -9,   "running",   False),
+    ("exiting while already idle",                   0, "idle",      False),
+]
+for label, rc, state, expect in CASES:
+    calls.clear()
+    g.training_state = state
+    try:
+        g._on_training_subprocess_exited(rc)
+    except Exception as e:
+        ck(f"auto-stop: {label}", False, f"raised {type(e).__name__}: {e}")
+        continue
+    ck(f"auto-stop: {label} -> {'stops' if expect else 'does NOT stop'}",
+       bool(calls) == expect, f"fired={bool(calls)}")
+
+# The toggle has to actually gate it.
+del g._maybe_stop_pod_after_training
+g.prefs_vars["runpod_stop_when_done"].set("0")
+shown = []
+G.tk.Toplevel = (lambda *a, **k: (_ for _ in ()).throw(AssertionError("dialog shown!")))
+try:
+    g.training_state = "running"
+    g._maybe_stop_pod_after_training()
+    ck("toggle off -> no countdown even on a clean finish", True)
+except AssertionError as e:
+    ck("toggle off -> no countdown even on a clean finish", False, e)
+
+# --- 4. prefs round-trip ----------------------------------------------------------------------
+ck("runpod_stop_when_done is in DEFAULT_PREFS and defaults off",
+   G.DEFAULT_PREFS.get("runpod_stop_when_done") == "0")
+ck("input_dataset_dir is in DEFAULT_PREFS", "input_dataset_dir" in G.DEFAULT_PREFS)
+ck("  both are StringVars, not BooleanVars (the prefs loop requires it)",
+   isinstance(g.prefs_vars["runpod_stop_when_done"], tk.StringVar))
+
+# --- 5. disk warning --------------------------------------------------------------------------
+import shutil as _sh  # noqa: E402
+_real_usage = _sh.disk_usage
+asked = []
+G.messagebox.askyesno = lambda t, m: (asked.append(m), True)[1]
+
+
+class _Usage:
+    def __init__(self, free_gb):
+        self.total = 500 * 1024 ** 3
+        self.used = self.total - int(free_gb * 1024 ** 3)
+        self.free = int(free_gb * 1024 ** 3)
+
+
+g.settings["LORA_OUTPUT_DIR"] = REPO
+for free_gb, should_warn in ((3.2, True), (14.9, True), (15.1, False), (400, False)):
+    asked.clear()
+    _sh.disk_usage = lambda p, _f=free_gb: _Usage(_f)
+    g._confirm_disk_headroom()
+    ck(f"disk warning at {free_gb} GB free -> {'warns' if should_warn else 'silent'}",
+       bool(asked) == should_warn)
+    if should_warn and asked:
+        ck(f"  shows the real figure ({free_gb} GB)", f"{free_gb:.1f} GB" in asked[0])
+
+# A failed probe must never block a run.
+_sh.disk_usage = lambda p: (_ for _ in ()).throw(OSError("no such device"))
+ck("a failed disk probe does not block training", g._confirm_disk_headroom() is True)
+_sh.disk_usage = _real_usage
+
+root.destroy()
+os.environ.pop("FIZGIG_POD", None)
+print("\n" + ("ALL PASS" if not fails else f"{len(fails)} FAILURE(S): " + ", ".join(fails)))
+sys.exit(1 if fails else 0)

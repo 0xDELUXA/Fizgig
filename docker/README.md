@@ -16,15 +16,32 @@ to match your browser window**, so there is no screen size to guess at.
 
 ## RunPod
 
-**Template settings**
+**Template settings** — field names as they appear in RunPod's *Edit template* dialog:
 
 | Field | Value |
 |---|---|
+| Template name | `Fizgig` |
+| Template type | Pods |
+| Compute type | NVIDIA · GPU |
 | Container image | `ghcr.io/shootthesound/fizgig:latest` |
-| Container disk | 25 GB |
-| Volume disk | **100 GB+**, mounted at `/workspace` |
-| Expose HTTP ports | `6080, 8080` |
-| Expose TCP ports | *(none)* |
+| Container disk | `25` GB |
+| Persistent storage | **Network storage** — pick your volume from the dropdown |
+| Persistent storage mount path | `/workspace` |
+
+Under **Networking configuration → HTTP Ports**, add two. The labels show up in the pod's Connect
+menu, so name them:
+
+| Label | Port |
+|---|---|
+| `Fizgig` | `6080` |
+| `File Manager` | `8080` |
+
+No TCP ports, no start command, and no registry authentication — the image is public.
+
+**Leave Environment variables empty on a public template.** RunPod warns in that panel that they
+are not encrypted, and a public template hands them to everyone who deploys it — a `VNC_PASSWORD`
+set here would become the shared password for every pod created from it. Fizgig generates a unique
+one per pod instead and prints it in the log.
 
 **Use a Network Volume, not the template's Volume Disk.** The difference only bites at
 termination, and it bites hard:

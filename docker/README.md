@@ -62,7 +62,7 @@ termination, and it bites hard:
 | **Network Volume** (a separate resource) | kept | **kept** |
 
 RunPod's own wording for Volume Disk is "tied to the Pod's lifecycle" — terminate takes it, and
-your ~32 GB of models with it. That matters more than it sounds, because **every image update
+your ~45 GB of models with it. That matters more than it sounds, because **every image update
 requires terminating and redeploying**, so on a Volume Disk you re-download the models each time.
 
 Create the Network Volume first (Storage → Network Volumes), then pick it when you deploy. Two

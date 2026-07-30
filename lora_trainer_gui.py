@@ -12464,11 +12464,10 @@ class LoRATrainerGUI:
         )
         self._add_fetch_models_row(
             krea_card, kr + 1, "krea2",
-            "Fetches everything above except the Turbo DiT (~32 GB) and fills in these paths for "
-            "you, plus the small helper models (Florence-2 captioner, face model for the Look "
-            "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
-            "download later. No HuggingFace account needed — none of these are gated. Tick Turbo "
-            "DiT to add it (+13 GB); it's only used by the workbench tools and classic previews.")
+            "Fetches every file above (~45 GB) and fills in these paths for you, plus the small "
+            "helper models (Florence-2 captioner, face model for the Look Filter and likeness "
+            "scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to download later. No "
+            "HuggingFace account needed — none of these are gated.")
 
         # Card 2: Inference Performance
         inf_card = self._start_section_card(
@@ -12797,11 +12796,6 @@ class LoRATrainerGUI:
                          command=lambda f=family: self._start_fetch_models(f))
         btn.pack(side=tk.LEFT)
         setattr(self, f"_fetch_btn_{family}", btn)
-        if family == "krea2":
-            self._fetch_krea2_turbo_var = tk.BooleanVar(value=False)
-            ttk.Checkbutton(bar, text="also the Turbo DiT (+13 GB)",
-                            variable=self._fetch_krea2_turbo_var,
-                            style="Surface.TCheckbutton").pack(side=tk.LEFT, padx=(12, 0))
         status = tk.Label(bar, text="", font=(FONT_FAMILY, 9),
                           fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         status.pack(side=tk.LEFT, padx=(12, 0))
@@ -12916,9 +12910,6 @@ class LoRATrainerGUI:
             if not token:
                 return
 
-        include_optional = (family == "krea2"
-                            and getattr(self, "_fetch_krea2_turbo_var", None) is not None
-                            and self._fetch_krea2_turbo_var.get())
         btn = getattr(self, f"_fetch_btn_{family}", None)
         status = getattr(self, f"_fetch_status_{family}", None)
         if btn:
@@ -12934,8 +12925,6 @@ class LoRATrainerGUI:
             # Re-running is cheap — everything here is a no-op once present.
             cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress",
                    "--family", "tools", "--family", family]
-            if include_optional:
-                cmd.append("--include-optional")
             env = dict(os.environ)
             env["PYTHONPATH"] = os.path.join(FIZGIG_DIR, "src")
             env["PYTHONUNBUFFERED"] = "1"

@@ -19,7 +19,7 @@ app in your browser, on whatever GPU you feel like renting.
 
 **Attach a Network Volume (100 GB+) at `/workspace`.**
 
-Not the template's *Volume Disk* — that one is deleted when you terminate the pod, taking ~32 GB of
+Not the template's *Volume Disk* — that one is deleted when you terminate the pod, taking ~45 GB of
 downloaded models with it. A Network Volume outlives any pod, so you download the models once.
 
 ## What you get
@@ -50,7 +50,7 @@ file manager, and the log tells you what it ended up as.
 ## First run
 
 1. Connect on **port 6080** and log in
-2. **Preferences → ⬇ Download models for me** (Krea 2 ~32 GB, no account needed)
+2. **Preferences → ⬇ Download models for me** (Krea 2 ~45 GB, no account needed)
 3. Open **port 8080** and drag a dataset folder into `/workspace/datasets`
 4. **Start tab → Browse** → pick it, then **Training → Start**
 

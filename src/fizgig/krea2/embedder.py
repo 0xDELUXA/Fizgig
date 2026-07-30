@@ -364,6 +364,30 @@ STYLE_NAMED_CAPTION_INSTRUCTION = (
     "speculation and no proper names."
 )
 
+# Same machinery as the preset above with exactly one variable changed: the closing phrase names
+# the medium in words the model ALREADY KNOWS instead of a made-up token. Which wins is a genuine
+# open question, which is why both ship:
+#   made-up token — nothing to lean on, so the LoRA binds the look from scratch. Clean, but the
+#                   token means nothing at all until enough images have taught it.
+#   plain words   — 'paper-cut art' arrives with the model's own prior attached, so it starts from
+#                   somewhere. That prior is the risk as much as the benefit: you inherit its idea
+#                   of the medium alongside yours, and it may fight your dataset.
+#
+# Asking the model itself what to put here works. Shown four images at 0.5 MP and asked to complete
+# "in ___ style" — naming how they are made, never what they show — Qwen3-VL 4B answered "paper-cut
+# art style" for a layered-paper dataset, identically on three greedy runs. Two things that did NOT
+# matter, both measured: subject variety among the sampled images, and splitting into batches to
+# reconcile afterwards (reconciling was worse than simply showing more images at once).
+STYLE_PLAIN_CAPTION_INSTRUCTION = (
+    "Write one factual training caption for this image as a single sentence of 30-50 words, "
+    "covering these in order: what is depicted and what it is doing; how it is arranged in the "
+    "frame; the setting or background. Then end the sentence with the exact words 'in oil "
+    "painting style'. Use that same closing phrase word for word every time, and the same plain "
+    "phrasing throughout. " + DEPICTED_RULE + NO_PREAMBLE_RULE + NO_STYLE_RULE +
+    "Those closing words are the only place the style is named. State only what is visible — no "
+    "speculation and no proper names."
+)
+
 # The task menu the Captions tab offers for this model. Lives here rather than in the GUI so the
 # trainer's auto-recaption and the GUI read the same text — the instruction is part of the
 # captioning contract, not a piece of UI.
@@ -379,7 +403,8 @@ CAPTION_TASKS = {
     # Style presets last: the four above are the identity path, which is the common case and the
     # one auto-recaption uses. 80/90 tokens ≈ the 30-50 word target with headroom.
     "style":       ("Style — content only (with trigger word)", STYLE_CAPTION_INSTRUCTION, 80),
-    "style_named": ("Style — in X style (edit the phrase)", STYLE_NAMED_CAPTION_INSTRUCTION, 90),
+    "style_named": ("Style — in X style (made-up token)", STYLE_NAMED_CAPTION_INSTRUCTION, 90),
+    "style_plain": ("Style — in X style (plain words)", STYLE_PLAIN_CAPTION_INSTRUCTION, 90),
 }
 DEFAULT_CAPTION_TASK = "training"
 

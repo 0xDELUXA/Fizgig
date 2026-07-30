@@ -114,7 +114,7 @@ ck("  builtin_only always returns the shipped text",
 # for a dataset of landscapes and objects; and lighting must NOT be captioned for a style, or the
 # look only fires under the lighting it was trained on. The four identity presets ask for lighting
 # correctly — there it varies and you want it steerable — so the two rules genuinely coexist.
-for _k in ("style", "style_named"):
+for _k in ("style", "style_named", "style_plain"):
     _instr = CAPTION_TASKS[_k][1]
     ck(f"  '{_k}' does not use the person-only subject rule", SUBJECT_RULE not in _instr)
     # "lighting" may appear only inside the exclusion list, never as something to describe.
@@ -128,11 +128,23 @@ for _k in ("style", "style_named"):
     ck(f"  '{_k}' blocks construction artefacts too", "layers" in _instr and "stacking" in _instr)
 # The style phrase is trailing, not leading: 'in X style' gives a made-up token a role the model
 # already understands, which a bare token or a leading phrase does not.
-ck("  only the named preset names a look", "in mystyle style" in CAPTION_TASKS["style_named"][1]
-   and "mystyle" not in CAPTION_TASKS["style"][1])
-ck("  ...and names it at the END, not the start",
-   CAPTION_TASKS["style_named"][1].index("end the sentence with the exact words")
-   > CAPTION_TASKS["style_named"][1].index("what is depicted and what it is doing"))
+ck("  content-only preset names no look at all",
+   "in mystyle style" not in CAPTION_TASKS["style"][1]
+   and "style'" not in CAPTION_TASKS["style"][1])
+ck("  the token preset closes with a made-up word",
+   "in mystyle style" in CAPTION_TASKS["style_named"][1])
+ck("  the plain-words preset closes with real vocabulary",
+   "in oil painting style" in CAPTION_TASKS["style_plain"][1]
+   and "mystyle" not in CAPTION_TASKS["style_plain"][1])
+# The two phrase presets must differ ONLY in the phrase — they exist to be A/B'd against each
+# other, so any other divergence would confound the comparison.
+ck("  the two phrase presets differ only in the closing phrase",
+   CAPTION_TASKS["style_named"][1].replace("in mystyle style", "@")
+   == CAPTION_TASKS["style_plain"][1].replace("in oil painting style", "@"))
+for _k in ("style_named", "style_plain"):
+    ck(f"  '{_k}' names the style at the END, not the start",
+       CAPTION_TASKS[_k][1].index("end the sentence with the exact words")
+       > CAPTION_TASKS[_k][1].index("what is depicted and what it is doing"))
 # 'short' is excluded: it is a single clause (subject, action, setting) and never asked for
 # lighting in the first place — nothing to preserve there.
 for _k in ("training", "detailed", "exhaustive"):

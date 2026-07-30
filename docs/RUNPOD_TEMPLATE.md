@@ -50,15 +50,18 @@ Both ports then ask for a username and password:
 
 | | Port | Username | Password |
 |---|---|---|---|
-| **Fizgig** | 6080 | `fizgig` | see below |
+| **Fizgig** | 6080 | `fizgig` | your `VNC_PASSWORD` |
 | **File manager** | 8080 | `admin` | the same one |
 
-**The password is in the pod log.** Fizgig generates a fresh one for every pod and prints it at
-startup — open the pod's log and copy it.
+**Set your own password when you deploy** — it saves you hunting for one later. On the deploy
+screen expand **Edit Template → Environment Variables**, add `VNC_PASSWORD`, and pick something
+**12+ characters**. Shorter ones get zero-padded for the file manager, which requires 12, so 12+
+keeps both logins identical.
 
-**Want your own instead?** On the deploy screen expand **Edit Template → Environment Variables**
-and set `VNC_PASSWORD` before launching. Use 12+ characters: shorter ones get zero-padded for the
-file manager, and the log tells you what it ended up as.
+**Didn't set one?** Fizgig generates one per pod and prints it near the top of the log, and again
+in the "Ready" banner at the bottom — the banner is easier to find than hunting above thousands of
+download lines. If the log seems to stop short of it, switch to another tab and back; RunPod's log
+view sometimes needs a nudge before it shows the newest lines.
 
 ## First run
 

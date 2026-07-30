@@ -238,6 +238,42 @@ NO_PREAMBLE_RULE = (
     "'In this image', 'Here we see', 'The photo shows' or any similar preamble. "
 )
 
+# --- style-caption rules -------------------------------------------------------------------
+# The rules above are written for identity training, where the subject is a person and the
+# lighting, viewpoint and clothing all VARY — you name them so they stay steerable. A style
+# dataset inverts that: the look is the constant you are training, and the subject is whatever
+# happens to be in front of it.
+#
+# Hence one rule underneath both style presets: caption what varies, never the constant.
+#
+# DEPICTED_RULE replaces SUBJECT_RULE, which can only say 'a woman' / 'a man' / 'a girl' /
+# 'a boy'. A style set is landscapes, objects, animals and abstracts as often as people, and the
+# 4B model hedges to "a scene" for those exactly as it hedged to "a person" for faces.
+#
+# NO_STYLE_RULE lists lighting deliberately, and it is the one that looks wrong next to the four
+# presets above — all of which ASK for lighting. Both are right: there it varies, here it is part
+# of the look, and a style captioned with its lighting only fires under the lighting it saw. The
+# same goes for medium and colour grade: describing the constant in different words image by image
+# splits it across many tokens instead of concentrating it where it belongs.
+DEPICTED_RULE = (
+    "Name what is depicted with the specific term a viewer would use — 'a woman', 'a man', "
+    "'a cat', 'a mountain range', 'a teapot', 'an empty street' — never the vague 'a person', "
+    "'an animal' or 'a scene'. If nothing concrete is depicted, name the shapes and forms "
+    "instead. "
+)
+NO_STYLE_RULE = (
+    "Describe only WHAT is depicted, never how it was made or how it looks as an artwork. Say "
+    "nothing about medium, brushwork, linework, texture, shading, rendering, film stock, grain, "
+    "colour grading, palette, lighting, mood, atmosphere, era or quality. Name the colours of the "
+    "things themselves, but not the overall colour treatment. "
+)
+# The stock NO_PREAMBLE_RULE opens with "Begin directly with the subject", which contradicts an
+# instruction to begin with a fixed phrase. Same job, without the collision.
+NO_PREAMBLE_AFTER_LEAD_RULE = (
+    "Go straight from the opening phrase to what is depicted. Never insert 'This image shows', "
+    "'The image depicts', 'In this image', 'Here we see' or any similar preamble. "
+)
+
 CAPTION_INSTRUCTION = (
     "Write one factual training caption for this image as a single sentence, covering these in "
     "order: the subject and what they are doing; the camera viewpoint (e.g. 'viewed from behind', "
@@ -285,6 +321,35 @@ DETAILED_DESCRIPTION_INSTRUCTION = (
     "State only what is visible — no speculation, no names, no style commentary."
 )
 
+# Two style presets rather than one, because the trigger-word field already prepends
+# f"{trigger}, " to every caption (save_caption_with_trigger in the GUI). That makes "is the look
+# named?" a fork rather than a setting: with one preset, half of users would either name the style
+# twice or never name it at all.
+#   content only + trigger 'mystyle' -> "mystyle, a vintage blue car parked on a street"
+#   lead phrase  + no trigger        -> "an illustration of a vintage blue car parked on a street"
+# The labels say which is which, so the choice happens at the point of selection.
+STYLE_CAPTION_INSTRUCTION = (
+    "Write one factual training caption for this image as a single sentence of 30-50 words, "
+    "covering these in order: what is depicted and what it is doing; how it is arranged in the "
+    "frame; the setting or background. Use the same order and the same plain phrasing every "
+    "time. " + DEPICTED_RULE + NO_PREAMBLE_RULE + NO_STYLE_RULE +
+    "State only what is visible — no speculation and no proper names."
+)
+
+# The opening phrase is meant to be edited to match the dataset ('an oil painting of', 'a
+# watercolour of', 'a 3D render of'). One edit to avoid: do NOT start it with "the image is a" —
+# _strip_caption_preamble removes that prefix, so it would vanish from every caption with nothing
+# to show it had. The shipped phrase and the likely replacements all pass through untouched.
+STYLE_LEAD_CAPTION_INSTRUCTION = (
+    "Write one factual training caption for this image as a single sentence of 30-50 words. "
+    "Begin with the exact words 'an illustration of', then cover in order: what is depicted and "
+    "what it is doing; how it is arranged in the frame; the setting or background. Use that "
+    "opening phrase word for word every time, and the same plain phrasing throughout. "
+    + DEPICTED_RULE + NO_PREAMBLE_AFTER_LEAD_RULE + NO_STYLE_RULE +
+    "The opening phrase is the only place the style is named. State only what is visible — no "
+    "speculation and no proper names."
+)
+
 # The task menu the Captions tab offers for this model. Lives here rather than in the GUI so the
 # trainer's auto-recaption and the GUI read the same text — the instruction is part of the
 # captioning contract, not a piece of UI.
@@ -297,6 +362,10 @@ CAPTION_TASKS = {
     "short":      ("Short caption", SHORT_CAPTION_INSTRUCTION, 60),
     "detailed":   ("Detailed description", DETAILED_DESCRIPTION_INSTRUCTION, 160),
     "exhaustive": ("Exhaustive detail", DETAILED_CAPTION_INSTRUCTION, 240),
+    # Style presets last: the four above are the identity path, which is the common case and the
+    # one auto-recaption uses. 80/90 tokens ≈ the 30-50 word target with headroom.
+    "style":      ("Style — content only (with trigger word)", STYLE_CAPTION_INSTRUCTION, 80),
+    "style_lead": ("Style — lead phrase (no trigger word)", STYLE_LEAD_CAPTION_INSTRUCTION, 90),
 }
 DEFAULT_CAPTION_TASK = "training"
 

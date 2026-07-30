@@ -171,6 +171,7 @@ Captioning rules that come from real runs:
 
 - **Caption anything the model's prior would call a lie** — viewpoint especially. A profile shot captioned like a frontal portrait teaches the model to fight itself; caption it `..., profile view from the left`. On Krea 2 this matters doubly: caption-viewpoint mismatches are the single most common thing the per-image loss watch convicts.
 - That rule includes the trigger itself: if the subject isn't actually recognizable in a shot (back of head, extreme distance), consider leaving the trigger out of that caption.
+- **For a style dataset, caption what varies and never the constant you're training.** Describe the subject, the composition and the colours of the things themselves; say nothing about medium, brushwork, texture, colour grade — or lighting. Lighting is the one people get wrong: caption it and the style only fires under the lighting it saw. Describing the look in different words image by image splits it across many tokens instead of concentrating it. Either name the look once, in the same words every time (the GUI's *Style — lead phrase* preset writes `an illustration of …` for you), or leave it unnamed and let the trigger word carry it (*Style — content only*) — but not both, or you name it twice.
 - Changed captions require re-running the text-cache step. (During a Krea 2 run, `--auto_recaption` handles stuck images' captions for you, including the re-encode.)
 
 ### Dataset sidecar files (Krea 2 intelligence)

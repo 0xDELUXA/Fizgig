@@ -161,6 +161,23 @@ Loads kohya, PEFT, OneTrainer (OMI + legacy), AI-Toolkit, and LyCORIS (LoKR / Lo
 
 ---
 
+## No GPU? Rent one
+
+Fizgig ships as a ready-made cloud image, so you can train on a card far bigger than the one in
+your machine — or keep your own GPU free while a run goes on somewhere else.
+
+**It's the whole app, not a cut-down web version.** Training, Repair Studio, LoRA the Explorer,
+LoRA Royale, Profiler, Extract and the sample gallery, in a browser tab. Drag datasets in and
+finished LoRAs out with a built-in file manager, download models in one click, and optionally have
+the pod **shut itself down when training finishes** so an overnight run doesn't bill until morning.
+
+Your models and datasets live on persistent storage, so you download them once and every future
+session picks up where you left off.
+
+**[Running Fizgig on a rented GPU →](docker/README.md)**
+
+---
+
 ## Requirements
 
 - **GPU** — NVIDIA RTX 30 / 40 / 50-series. **16 GB+ VRAM** recommended (24 GB+ comfortable), but the floor is lower than that suggests: **Klein 9B** needs 16 GB, while **Krea 2** trains on **8 GB** with everything on Auto and batch size 1 — see [VRAM guidance](#vram-guidance). The fp8 Base's VRAM savings apply on every supported card.

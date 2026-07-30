@@ -12547,6 +12547,7 @@ class LoRATrainerGUI:
     # nowhere — so this can ship long before the template does. test_runpod_card.py refuses to
     # let LIVE be True while the URL is still the placeholder.
     RUNPOD_TEMPLATE_LIVE = False
+    RUNPOD_GUIDE_URL = ("https://github.com/shootthesound/Fizgig/blob/master/docker/README.md")
     RUNPOD_DEPLOY_URL = "https://runpod.io/console/deploy?template=fizgig"
     RUNPOD_REFERRAL = ""   # set to Peter's ref id to earn on deploys through this button
 
@@ -12681,7 +12682,15 @@ class LoRATrainerGUI:
                           "Deploy button once it is published — nothing to do in the meantime.",
                      font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                      bg=COLORS["bg_surface"], wraplength=760,
-                     justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
+                     justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 6))
+
+        # The guide, in both states: while it says Coming soon this is the only way to read about
+        # it, and once it is live it is where the storage and cost decisions are explained.
+        _guide = tk.Label(card, text="Read the guide: running Fizgig on a rented GPU",
+                          font=(FONT_FAMILY, 10, "underline"), fg=COLORS["accent_hover"],
+                          bg=COLORS["bg_surface"], cursor="hand2")
+        _guide.pack(anchor=tk.W, pady=(4, 0))
+        _guide.bind("<Button-1>", lambda e: self._open_url(self.RUNPOD_GUIDE_URL))
         tk.Label(card,
                  text="When Fizgig is running on a pod, this section turns into its controls — "
                       "stop the pod automatically when training finishes, check storage, and see "

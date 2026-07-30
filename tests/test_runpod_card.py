@@ -79,6 +79,9 @@ if G.LoRATrainerGUI.RUNPOD_TEMPLATE_LIVE:
 else:
     ck("  not live yet -> says Coming soon", "Coming soon" in txt)
     ck("  and offers NO dead deploy button", "Deploy on RunPod" not in txt)
+# The guide is the only way to read about this while it says Coming soon, so it must be there in
+# BOTH states, not just once a Deploy button exists.
+ck("  links to the guide either way", "Read the guide" in txt)
 ck("  and does NOT show pod controls", "Stop this pod when a training run finishes" not in txt)
 ck("  no minimum-spec pitch (renting is about MORE card, not scraping by)",
    "8 GB" not in txt and "8GB" not in txt)

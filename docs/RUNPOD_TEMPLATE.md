@@ -65,12 +65,15 @@ back later, the run is still going.
 
 Environment variables — set them on the deploy screen under **Edit Template**.
 
-| Variable | |
-|---|---|
-| `VNC_PASSWORD` | Desktop *and* file manager. **12+ characters.** |
-| `HF_TOKEN` | Klein only. Krea 2 needs nothing. |
-| `FETCH_MODELS` | e.g. `tools,krea2` to download at boot instead of in the app. |
-| `FIZGIG_REF` | Branch or tag of Fizgig to run. Defaults to `master`, so the app updates itself at every pod start regardless of the image version. |
+All optional — the defaults are the intended setup, and everything here can be done from inside the
+app instead.
+
+| Variable | Values | |
+|---|---|---|
+| `VNC_PASSWORD` | **12+ characters** | Desktop *and* file manager. Generated per pod if unset. |
+| `HF_TOKEN` | `hf_…` | Only needed for Klein, which is gated. Krea 2 needs nothing. |
+| `FETCH_MODELS` | `krea2`, `klein`, `tools` — comma-separated | Download at boot instead of clicking the button in Preferences. `tools` is the Florence-2 captioner, the EN→ZH translator and the face model. |
+| `FIZGIG_REF` | branch or tag | Which Fizgig to run. Defaults to `master`, so the app updates itself at every pod start regardless of the image version. |
 
 To enable auto-stop, paste a RunPod API key into **Preferences → RunPod** inside the app. Don't put
 one in a template — template variables reach every container deployed from it.

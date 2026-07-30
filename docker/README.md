@@ -98,12 +98,19 @@ limitation rather than a Fizgig one. It's stored on your volume, not in any temp
 
 Environment variables, set on the deploy screen under **Edit Template**:
 
-| Variable | |
-|---|---|
-| `VNC_PASSWORD` | Desktop *and* file manager. 12+ characters. |
-| `HF_TOKEN` | Klein only. Krea 2 needs nothing. |
-| `FETCH_MODELS` | e.g. `tools,krea2` to download at boot instead of in the app. |
-| `FIZGIG_REF` | Branch or tag of Fizgig to run. Defaults to `master`, so the app updates itself at every pod start. |
+| Variable | Values | |
+|---|---|---|
+| `VNC_PASSWORD` | 12+ characters | Desktop *and* file manager. Generated per pod if unset. |
+| `HF_TOKEN` | `hf_…` | Only needed for Klein, which is gated. Krea 2 needs nothing. |
+| `FETCH_MODELS` | `krea2`, `klein`, `tools` — comma-separated | Download at boot instead of clicking the button in Preferences. `tools` is the Florence-2 captioner, the EN→ZH translator for bilingual captions, and the face model the Look Filter uses. |
+| `FIZGIG_REF` | branch or tag | Which Fizgig to run. Defaults to `master`, so the app updates itself at every pod start. |
+
+Nothing is compulsory — the defaults are the intended setup, and everything here can be done from
+inside the app instead.
+
+Three more exist for unusual cases: `FETCH_MODELS_EXTRA` passes extra flags to the downloader,
+`FIZGIG_REPO` points the pod at a fork, and `SCREEN_W`/`SCREEN_H` set the desktop's *starting* size
+(1600×1400) — which rarely matters, since it then resizes to your browser window.
 
 ## If something's wrong
 

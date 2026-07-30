@@ -2236,10 +2236,14 @@ class LoRATrainerGUI:
         return banner
 
     def _add_youtube_help_button(self, parent, tab_key="start", prominent=False):
-        """Add a 'Get help on YouTube' button at the bottom of a tab's outer frame.
+        """Add a 'Tutorial' button at the bottom of a tab's outer frame.
+
+        Labelled just "Tutorial" rather than "Get help on YouTube": the play glyph and the red
+        already say where it goes, and "get help" reads as troubleshooting when these are walk-
+        throughs. Shorter also keeps the Start tab's button row on one line.
 
         `tab_key` selects the URL from help.json's `youtube_urls` dict.
-        `prominent=True` uses a larger button with a hint about per-tab help (for the Start tab).
+        `prominent=True` uses a larger button and the Start tab's extra buttons alongside.
         """
         # Used only when help.json is missing or unreadable — point it at the real guide
         # rather than the old joke URL, since that path fires on a genuine error.
@@ -2255,7 +2259,7 @@ class LoRATrainerGUI:
         row = tk.Frame(btn_frame, bg=COLORS["bg_deep"])
         row.pack(anchor=tk.W)
         btn = tk.Button(
-            row, text="\u25b6  Get help on YouTube",
+            row, text="\u25b6  Tutorial",
             font=(FONT_FAMILY, 12 if prominent else 10, "bold"),
             fg="#FFFFFF", bg="#CC0000", activeforeground="#FFFFFF", activebackground="#990000",
             relief="flat", bd=0, padx=20 if prominent else 16,
@@ -2273,6 +2277,17 @@ class LoRATrainerGUI:
                     "https://buymeacoffee.com/lorasandlenses"),
             )
             coffee.pack(side=tk.LEFT, padx=(12, 0))
+            # Shown on a pod too, deliberately: the Preferences card already tells a pod user they
+            # are on one, and a user who is happy renting is exactly who might send the link on.
+            # RunPod's own violet, so it reads as theirs rather than as another Fizgig action.
+            runpod = tk.Button(
+                row, text="⚡  Deploy on RunPod",
+                font=(FONT_FAMILY, 12, "bold"),
+                fg="#FFFFFF", bg="#7C3AED", activeforeground="#FFFFFF", activebackground="#6D28D9",
+                relief="flat", bd=0, padx=20, pady=6, cursor="hand2",
+                command=lambda: __import__("webbrowser").open(self._runpod_deploy_url()),
+            )
+            runpod.pack(side=tk.LEFT, padx=(12, 0))
             about = tk.Button(
                 row, text="About",
                 font=(FONT_FAMILY, 12, "bold"),
@@ -12671,7 +12686,9 @@ class LoRATrainerGUI:
         if bits:
             _gpu = (os.environ.get("RUNPOD_GPU_NAME") or "").replace("+", " ").strip()
             line = "  ·  ".join(bits) + (f"  ·  {_gpu}" if _gpu else "")
-            tk.Label(card, text=line, font=(FONT_FAMILY, 8), fg=COLORS["text_muted"],
+            # Readable tier despite being a footer: this is the one line a user is asked to
+            # transcribe into a bug report, so 8pt at 2.54:1 was exactly backwards.
+            tk.Label(card, text=line, font=(FONT_FAMILY, 9), fg=COLORS["text_explain"],
                      bg=COLORS["bg_surface"], wraplength=760,
                      justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
 

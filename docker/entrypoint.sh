@@ -2,7 +2,7 @@
 # Bring up a virtual screen, put Fizgig on it, and serve it to a browser over noVNC.
 #
 # Order matters: the screen has to exist before Tkinter starts, and the VNC server has to be
-# running before websockify has anything to proxy.
+# running before anything tries to draw on it.
 set -euo pipefail
 
 log() { echo "[fizgig] $*"; }
@@ -10,16 +10,10 @@ log() { echo "[fizgig] $*"; }
 REPO_URL="${FIZGIG_REPO:-https://github.com/shootthesound/Fizgig.git}"
 REPO_REF="${FIZGIG_REF:-master}"
 APP_DIR="/workspace/Fizgig"
-# Shaped for Fizgig rather than for a monitor. Its window is 1360x1124 and its content wraps at
-# 760px, so width past ~1400 is dead space — 1600 is enough for the window plus a dialog beside
-# it (the Repair Studio pop-out preview is the case that wants room). Height is the axis that
-# matters: every extra pixel is one less pixel of in-app scrolling, and 1400 gives ~280 more
-# than the window was designed around. A 16:9 desktop spends that budget on width nobody uses.
-#
-# Set SCREEN_SIZE to taste — taller means less scrolling. Worth knowing: noVNC shows the desktop
-# 1:1 by default, so a tall desktop shows more at full size; only if you turn scaling on does it
-# shrink to fit, at which point height costs you legibility.
-SCREEN="${SCREEN_SIZE:-1600x1400x24}"
+# Only the STARTING size now — KasmVNC resizes the desktop to match the browser window, so this
+# stops being the compromise it used to be between "fits a laptop" and "less in-app scrolling".
+SCREEN_W="${SCREEN_W:-1600}"
+SCREEN_H="${SCREEN_H:-1400}"
 
 mkdir -p /workspace/.cache /workspace/.insightface
 
@@ -33,7 +27,11 @@ if [ -z "${VNC_PASSWORD:-}" ]; then
   log "Set VNC_PASSWORD in the template to choose your own."
 fi
 mkdir -p /root/.vnc
-x11vnc -storepasswd "$VNC_PASSWORD" /root/.vnc/passwd >/dev/null 2>&1
+# KasmVNC authenticates the WEB session against its own user db, not a VNC-protocol password.
+# -w gives write (input) permission; without it you get a read-only desktop you cannot click.
+echo -e "${VNC_PASSWORD}
+${VNC_PASSWORD}
+" | kasmvncpasswd -u fizgig -w -o /root/.kasmpasswd >/dev/null 2>&1
 
 # ---------------------------------------------------------------- Fizgig source
 # Pulled rather than baked, so a new release needs no image rebuild. A pod restart is an update.
@@ -86,24 +84,18 @@ if [ -n "${FETCH_MODELS:-}" ]; then
 fi
 
 # ---------------------------------------------------------------- the screen
-# A restarted container keeps /tmp, so the previous run's X lock survives and Xvfb refuses to
-# start with "Server is already active for display 1" — even though nothing is running. x11vnc
-# then has no display, exits, and the container dies with no obvious cause. Stopping and
-# starting a pod is routine, so this has to be cleared every boot, not just on first run.
+# A restarted container keeps /tmp, so the previous run's X lock survives and the X server refuses
+# to start with "Server is already active for display 1" — even though nothing is running. It then
+# has no display, exits, and the container dies with no obvious cause. Stopping and starting a pod
+# is routine, so this has to be cleared every boot, not just on first run.
 rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
-
-log "Starting virtual display ($SCREEN)"
-Xvfb :1 -screen 0 "$SCREEN" -nolisten tcp &
-for _ in $(seq 1 50); do xdpyinfo -display :1 >/dev/null 2>&1 && break; sleep 0.2; done
+rm -rf /tmp/.X11-unix/X1-lock /root/.vnc/*.pid
 
 # Session bus, started before anything that might open a link. Firefox passes a URL to an
 # already-running instance over this bus; without it the second link you click in a session
 # starts a second firefox, hits the profile lock, and shows "Close Firefox" instead of the page.
-# Exported here so Fizgig and everything it spawns inherits it — the GUI is exec'd below and its
-# children are what actually call webbrowser.open().
 # Deliberately non-fatal: set -e is on, and a bus that fails to start must not take the whole
-# container down with it. Without the bus you lose the second-and-later link click, which is a
-# nuisance; a container that will not boot is not.
+# container down with it.
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     if eval "$(dbus-launch --sh-syntax 2>/dev/null)" 2>/dev/null; then
         export DBUS_SESSION_BUS_ADDRESS
@@ -113,14 +105,31 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     fi
 fi
 
+log "Starting KasmVNC display (${SCREEN_W}x${SCREEN_H}, resizes to your browser window)"
+# One process instead of Xvfb + x11vnc + websockify: KasmVNC is an X server WITH a web server,
+# encoding in WebP rather than the LAN-shaped defaults noVNC fell back to.
+# -httpd is NOT optional: the built-in default is /usr/local/share/kasmvnc/www but the Debian
+# package installs to /usr/share/kasmvnc/www, so without it the server authenticates you fine and
+# then closes the connection with an empty reply, having nothing to serve.
+# KasmPasswordFile is the WEB login (what kasmvncpasswd writes); PasswordFile/-rfbauth is the
+# VNC-protocol password, which nothing here uses since the client is the browser.
+# DynamicQuality 4-9 lets it drop quality while you drag and restore it when you stop, which is
+# where the responsiveness actually comes from over a long link.
+Xvnc :1     -geometry "${SCREEN_W}x${SCREEN_H}"     -depth 24     -websocketPort 6080     -interface 0.0.0.0     -KasmPasswordFile /root/.kasmpasswd     -httpd /usr/share/kasmvnc/www     -sslOnly=0     -AlwaysShared     -FrameRate=60     -DynamicQualityMin=4     -DynamicQualityMax=9     >/var/log/kasmvnc.log 2>&1 &
+
+for _ in $(seq 1 60); do xdpyinfo -display :1 >/dev/null 2>&1 && break; sleep 0.25; done
+if ! xdpyinfo -display :1 >/dev/null 2>&1; then
+    log "ERROR: display never came up. Last lines of /var/log/kasmvnc.log:"
+    tail -15 /var/log/kasmvnc.log || true
+    exit 1
+fi
+
 # Tkinter draws Toplevels without decoration and mishandles focus if nothing is managing the
 # screen — Fizgig leans on dialogs (Repair Studio pop-out, the token prompt, Problem Images),
 # so a window manager is required, not cosmetic.
 openbox &
-x11vnc -display :1 -forever -shared -rfbauth /root/.vnc/passwd -rfbport 5900 -quiet -bg >/dev/null
 
-log "Serving noVNC on :6080"
-websockify --web=/usr/share/novnc 6080 localhost:5900 &
+log "Serving Fizgig on :6080"
 
 # Drag-and-drop file transfer on its own port: datasets in, trained LoRAs out, no terminal.
 # Shares VNC_PASSWORD rather than inventing a second credential — it exposes the same /workspace
@@ -157,8 +166,10 @@ fi
 
 cat <<EOF
 [fizgig] ------------------------------------------------------------
-[fizgig]  Ready. Open the pod's HTTP port 6080 and connect.
-[fizgig]  VNC password: ${VNC_PASSWORD}
+[fizgig]  Ready. Open the pod's HTTP port 6080.
+[fizgig]  Your browser will ask for a username and password:
+[fizgig]      username: fizgig
+[fizgig]      password: ${VNC_PASSWORD}
 [fizgig]
 [fizgig]  Models: Preferences -> "Download models for me"
 [fizgig]          Krea 2 needs no HuggingFace account; Klein needs a token.

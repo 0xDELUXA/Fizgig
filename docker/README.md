@@ -5,9 +5,14 @@ screen to your browser, so what you get is the whole workbench — Repair Studio
 the sample gallery — rather than a cut-down web version of the trainer.
 
 ```
-your browser  ──HTTP :6080──▶  noVNC  ──▶  x11vnc  ──▶  Xvfb :1 (1920x1080)
-                                                            └── openbox + Fizgig
+your browser  ──HTTP :6080──▶  KasmVNC (X server + web server in one)
+                                   └── openbox + Fizgig
 ```
+
+KasmVNC rather than the usual Xvfb + x11vnc + noVNC stack: it encodes in **WebP**, multi-threaded,
+and drops quality while you drag then restores it when you stop. The plain stack was noticeably
+laggy over a link to a rented GPU and had no tuning left client-side. It also **resizes the desktop
+to match your browser window**, so there is no screen size to guess at.
 
 ## RunPod
 
@@ -34,7 +39,7 @@ region-locked, which limits which GPUs you can rent.
 | `FETCH_MODELS` | *(empty)* | Comma-separated families to download before launch, e.g. `tools,krea2`. Left empty on purpose: pulling tens of GB unasked spends your money, possibly on the family you didn't want. Use the button in Preferences instead. |
 | `HF_TOKEN` | — | Only needed for Klein. Krea 2's files aren't gated. |
 | `FIZGIG_REF` | `master` | Branch or tag to run. Pin it if you want a fixed version. |
-| `SCREEN_SIZE` | `1600x1400x24` | Virtual screen size. Shaped for Fizgig, not for a monitor: its content wraps at 760px so width past ~1400 is wasted, while **height is what reduces in-app scrolling**. Raise the height if you want to scroll less (`1600x1800x24`); noVNC shows the desktop 1:1 by default, so taller means more content at full size. |
+| `SCREEN_W` / `SCREEN_H` | `1600` / `1400` | Only the *starting* size — the desktop resizes to match your browser window, so this rarely matters. |
 
 ### Getting files in and out
 
@@ -57,7 +62,7 @@ since it resumes and syncs incrementally.
 
 **First run**
 
-1. Open the pod's HTTP `6080` endpoint and enter the VNC password from the pod log.
+1. Open the pod's HTTP `6080` endpoint. Your browser asks for a username and password: **`fizgig`** and your `VNC_PASSWORD` (both are printed in the pod log).
 2. Fizgig is already running. Go to **Preferences → ⬇ Download models for me**.
    Krea 2 needs no HuggingFace account; Klein will ask for a token.
 3. Point the **Start** tab at a dataset folder and train.

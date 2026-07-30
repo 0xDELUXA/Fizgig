@@ -51,7 +51,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-venv \
       python3-tk \
       git curl ca-certificates \
-      xvfb x11vnc openbox novnc websockify x11-utils wmctrl \
+      xvfb openbox x11-utils wmctrl \
+      libxfont2 libgbm1 libgl1-mesa-dri libegl1 \
       libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
       fonts-dejavu-core fonts-liberation fontconfig unzip \
       xdg-utils pcmanfm dbus-x11 \
@@ -146,17 +147,46 @@ ENV FIZGIG_HOME=/workspace \
     XDG_CACHE_HOME=/workspace/.cache
 WORKDIR /workspace
 
-# noVNC ships vnc.html and no index.html, so the bare URL serves a DIRECTORY LISTING. RunPod's
-# Connect button opens exactly that bare URL, so the first thing a user sees is a file index
-# rather than Fizgig. Redirect the root at the client, with autoconnect so they go straight to
-# the password prompt, and scaling so a 1600x1400 desktop fits a laptop window instead of
-# forcing scrollbars.
+# KasmVNC replaces Xvfb + x11vnc + websockify + noVNC with one server.
+#
+# The old stack was laggy over the internet and there was no tuning left to do client-side: noVNC's
+# defaults are LAN-shaped, and even at compression 9 it was still shipping raw-ish framebuffer
+# updates. KasmVNC encodes in WebP (~30% smaller than the JPEG/Tight the old stack managed),
+# encodes multi-threaded, and mixes WebP/JPEG automatically based on spare CPU — of which a
+# training pod has plenty. It also serves its own web client, so websockify and the noVNC package
+# both disappear.
+#
+# The other win is dynamic resize: the desktop follows the browser window, so SCREEN_SIZE stops
+# being a guess between "fits a laptop" and "less scrolling" and just becomes whatever the user's
+# window is.
+RUN curl -fsSL https://github.com/kasmtech/KasmVNC/releases/download/v1.5.0/kasmvncserver_jammy_1.5.0_amd64.deb \
+      -o /tmp/kasmvnc.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends /tmp/kasmvnc.deb \
+    && rm /tmp/kasmvnc.deb && rm -rf /var/lib/apt/lists/* \
+    && Xvnc -version 2>&1 | head -1
+
+# HTTP not HTTPS: RunPod (and any sane host) terminates TLS at its own proxy, and leaving
+# require_ssl on means the proxy talks plaintext to an endpoint expecting TLS and the connection
+# just fails. allow_resize is what makes the desktop track the browser window.
 RUN printf '%s\n' \
-      '<!DOCTYPE html>' \
-      '<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=true&resize=scale">' \
-      '<title>Fizgig</title>' \
-      '<a href="vnc.html?autoconnect=true&resize=scale">Open Fizgig</a>' \
-      > /usr/share/novnc/index.html
+      'desktop:' \
+      '  resolution:' \
+      '    width: 1600' \
+      '    height: 1400' \
+      '  allow_resize: true' \
+      '  pixel_depth: 24' \
+      'network:' \
+      '  protocol: http' \
+      '  interface: 0.0.0.0' \
+      '  websocket_port: 6080' \
+      '  ssl:' \
+      '    require_ssl: false' \
+      'user_session:' \
+      '  new_session_disconnects_existing_exclusive_session: true' \
+      '  concurrent_connections_prompt: false' \
+      '  idle_timeout: never' \
+      > /etc/kasmvnc/kasmvnc.yaml
 
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

@@ -12528,8 +12528,11 @@ class LoRATrainerGUI:
 
         self._add_youtube_help_button(outer, "preferences")
 
-    # The template someone lands on from the desktop card. Referral id appended when set — see
-    # RUNPOD_REFERRAL below.
+    # Flip to True only when the RunPod template is public AND the URL below is the real one.
+    # Until then the desktop card says "coming soon" instead of offering a button that goes
+    # nowhere — so this can ship long before the template does. test_runpod_card.py refuses to
+    # let LIVE be True while the URL is still the placeholder.
+    RUNPOD_TEMPLATE_LIVE = False
     RUNPOD_DEPLOY_URL = "https://runpod.io/console/deploy?template=fizgig"
     RUNPOD_REFERRAL = ""   # set to Peter's ref id to earn on deploys through this button
 
@@ -12609,20 +12612,34 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 10))
 
-        row = tk.Frame(card, bg=COLORS["bg_surface"])
-        row.pack(anchor=tk.W)
-        _btn = tk.Button(row, text="  Deploy on RunPod  ",
-                         font=(FONT_FAMILY, 10, "bold"), fg="#FFFFFF", bg="#673AB7",
-                         activebackground="#5E35B1", activeforeground="#FFFFFF",
-                         relief="flat", bd=0, cursor="hand2", padx=16, pady=6,
-                         command=lambda: self._open_url(self._runpod_deploy_url()))
-        _btn.pack(side=tk.LEFT)
+        if self.RUNPOD_TEMPLATE_LIVE:
+            row = tk.Frame(card, bg=COLORS["bg_surface"])
+            row.pack(anchor=tk.W)
+            _btn = tk.Button(row, text="  Deploy on RunPod  ",
+                             font=(FONT_FAMILY, 10, "bold"), fg="#FFFFFF", bg="#673AB7",
+                             activebackground="#5E35B1", activeforeground="#FFFFFF",
+                             relief="flat", bd=0, cursor="hand2", padx=16, pady=6,
+                             command=lambda: self._open_url(self._runpod_deploy_url()))
+            _btn.pack(side=tk.LEFT)
 
-        tk.Label(card,
-                 text="Deploying through this link supports Fizgig's development, at no extra cost "
-                      "to you.",
-                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
-                 bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(6, 0))
+            tk.Label(card,
+                     text="Deploying through this link supports Fizgig's development, at no extra "
+                          "cost to you.",
+                     font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                     bg=COLORS["bg_surface"]).pack(anchor=tk.W, pady=(6, 0))
+        else:
+            # Shipped before the template is public. A button that goes nowhere is worse than no
+            # button, and saying so plainly is better than hiding the section and surprising
+            # people with it later.
+            tk.Label(card, text="Coming soon",
+                     font=(FONT_FAMILY, 11, "bold"), fg=COLORS["warning"],
+                     bg=COLORS["bg_surface"]).pack(anchor=tk.W)
+            tk.Label(card,
+                     text="The one-click image is built and being tested. This section will get a "
+                          "Deploy button once it is published — nothing to do in the meantime.",
+                     font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                     bg=COLORS["bg_surface"], wraplength=760,
+                     justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
         tk.Label(card,
                  text="When Fizgig is running on a pod, this section turns into its controls — "
                       "stop the pod automatically when training finishes, check storage, and see "

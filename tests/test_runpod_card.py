@@ -69,8 +69,16 @@ root, g = gui(pod=False)
 # _start_section_card returns the CONTENT frame; the title and description live on its parent.
 txt = " ".join(all_text(g._runpod_card) + all_text(g._runpod_card.master))
 ck("desktop shows the advert", "Run Fizgig on a rented GPU" in txt)
-ck("  with a deploy button", "Deploy on RunPod" in txt)
-ck("  and discloses the referral", "supports Fizgig's development" in txt)
+# Until the template is public the card must NOT offer a button that goes nowhere.
+if G.LoRATrainerGUI.RUNPOD_TEMPLATE_LIVE:
+    ck("  with a deploy button", "Deploy on RunPod" in txt)
+    ck("  and discloses the referral", "supports Fizgig's development" in txt)
+    ck("  LIVE means the URL is real, not the placeholder",
+       "template=fizgig" not in G.LoRATrainerGUI.RUNPOD_DEPLOY_URL,
+       G.LoRATrainerGUI.RUNPOD_DEPLOY_URL)
+else:
+    ck("  not live yet -> says Coming soon", "Coming soon" in txt)
+    ck("  and offers NO dead deploy button", "Deploy on RunPod" not in txt)
 ck("  and does NOT show pod controls", "Stop this pod when a training run finishes" not in txt)
 ck("  no minimum-spec pitch (renting is about MORE card, not scraping by)",
    "8 GB" not in txt and "8GB" not in txt)
@@ -83,7 +91,7 @@ ck("  storage line present", any("Storage:" in t for t in all_text(g._runpod_car
 ck("  says closing the tab does not stop training",
    "Closing this browser tab does not stop training" in txt)
 ck("  points at the file manager", "port 8080" in txt)
-ck("  and does NOT show the advert", "Deploy on RunPod" not in txt)
+ck("  and does NOT show the advert", "Run Fizgig on a rented GPU" not in txt)
 
 # --- 3. THE AUTO-STOP PREDICATE ---------------------------------------------------------------
 # Every way a training subprocess can end. Only one of them may stop the machine.

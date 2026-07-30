@@ -22,7 +22,15 @@ mkdir -p /workspace/.cache /workspace/.insightface
 # generate one and print it, rather than leaving it open — a random password in the logs is
 # recoverable; an open port is not fixable after the fact.
 if [ -z "${VNC_PASSWORD:-}" ]; then
-  VNC_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 12)"
+  # NOT `tr -dc ... </dev/urandom | head -c 12`. head exits at 12 bytes and closes the pipe, tr
+  # is still reading an infinite file, takes SIGPIPE and returns 141 — which `pipefail` makes the
+  # pipeline's status and `set -e` turns into an instant exit, before the first log line. The
+  # container then dies and restarts forever. It only bites when no password is set, so it
+  # survived every test where one was, and shipped as the default path in the public template.
+  # Reading a FIXED number of bytes means nothing exits early and no pipe is ever broken.
+  _rand="$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9')"
+  VNC_PASSWORD="${_rand:0:12}"
+  unset _rand
   log "No VNC_PASSWORD set — generated one for this pod: ${VNC_PASSWORD}"
   log "Set VNC_PASSWORD in the template to choose your own."
 fi

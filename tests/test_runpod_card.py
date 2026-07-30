@@ -163,6 +163,24 @@ for free_gb, should_warn in ((3.2, True), (14.9, True), (15.1, False), (400, Fal
     if should_warn and asked:
         ck(f"  shows the real figure ({free_gb} GB)", f"{free_gb:.1f} GB" in asked[0])
 
+# --- 5b. the storage line copes with what real hosts report ----------------------------------
+# A network volume reports the host's whole backing pool, not the volume quota: a real 100 GB
+# volume read as "431035 GB free of 1430281 GB". Printing that verbatim looks broken.
+for total_gb, free_gb, expect in ((1430281, 431035, "network volume"),
+                                  (25, 23, "container disk"),
+                                  (1000, 840, "GB free of")):
+    class _U:
+        total = int(total_gb * 1024 ** 3)
+        free = int(free_gb * 1024 ** 3)
+        used = total - free
+    _sh.disk_usage = lambda p, _u=_U: _u
+    g._pod_storage_lbl = tk.Label(root)
+    g._refresh_pod_storage()
+    shown = g._pod_storage_lbl.cget("text")
+    ck(f"storage: {total_gb} GB total -> says '{expect}'", expect in shown, shown[:70])
+    if total_gb > 10000:
+        ck("  and does NOT print the absurd figure", "1430281" not in shown)
+
 # A failed probe must never block a run.
 _sh.disk_usage = lambda p: (_ for _ in ()).throw(OSError("no such device"))
 ck("a failed disk probe does not block training", g._confirm_disk_headroom() is True)

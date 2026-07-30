@@ -12656,13 +12656,25 @@ class LoRATrainerGUI:
             import shutil as _sh
             usage = _sh.disk_usage("/workspace")
             free_gb, total_gb = usage.free / 1024 ** 3, usage.total / 1024 ** 3
-            txt = f"Storage: {free_gb:.0f} GB free of {total_gb:.0f} GB on /workspace"
-            # A total this small means the volume never mounted and /workspace is container disk,
-            # which RunPod wipes when the pod stops — a 32 GB model download would evaporate.
-            colour = COLORS["warning"] if total_gb < 60 else COLORS["text_explain"]
-            if total_gb < 60:
-                txt += "  — that looks like container disk, not your volume. Check the template's"
-                txt += " volume mount path is /workspace."
+            colour = COLORS["text_explain"]
+            if total_gb > 10000:
+                # A network volume does not expose its quota to the container — the kernel reports
+                # the host's whole backing pool, so this read said "431035 GB free of 1430281 GB"
+                # for a 100 GB volume. Printing that verbatim looks broken and, worse, implies
+                # there is room when your quota might be nearly full. Say what we actually know.
+                txt = ("Storage: /workspace is a network volume. Its size is set in RunPod and "
+                       "isn't visible from in here — check usage in the RunPod dashboard.")
+            elif total_gb < 60:
+                # This small means the volume never mounted and /workspace is container disk,
+                # which RunPod wipes when the pod stops — a 32 GB model download would evaporate.
+                txt = (f"Storage: only {free_gb:.0f} GB free of {total_gb:.0f} GB — that looks like "
+                       f"container disk, not your volume. Check the template's volume mount path "
+                       f"is /workspace, or your files will vanish when the pod stops.")
+                colour = COLORS["warning"]
+            else:
+                txt = f"Storage: {free_gb:.0f} GB free of {total_gb:.0f} GB on /workspace"
+                if free_gb < 40:
+                    colour = COLORS["warning"]
             lbl.config(text=txt, fg=colour)
         except Exception:
             lbl.config(text="Storage: unavailable")

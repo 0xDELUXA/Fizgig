@@ -35,7 +35,7 @@ downloaded models with it. A Network Volume outlives any pod, so you download th
 
 1. Connect on **port 6080** — username `fizgig`, password is your `VNC_PASSWORD` (both in the pod log)
 2. **Preferences → ⬇ Download models for me** (Krea 2 ~32 GB, no account needed)
-3. **Port 8080** — log in as `admin`, drag a dataset folder into `/workspace/datasets`
+3. **Port 8080** is a file manager — log in as `admin` with that same password, then drag a dataset folder into `/workspace/datasets`
 4. **Start tab → Browse** → pick it, then **Training → Start**
 
 Closing the browser tab does **not** stop training. Fizgig runs on the pod — shut the tab, come
@@ -62,6 +62,10 @@ one in a template — template variables reach every container deployed from it.
 ```
 
 Everything under `/workspace` persists. Anything outside it is wiped when the pod stops.
+
+Prefer a terminal? `runpodctl` is preinstalled — `runpodctl send <path>` on the pod, then
+`runpodctl receive <code>` on your machine. `scp` and `rsync` over SSH work too, and rsync is the
+better bet for a large dataset since it resumes.
 
 ## More
 

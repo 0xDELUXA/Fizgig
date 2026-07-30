@@ -23,47 +23,45 @@ threshold for Krea 2. Deploying through that link supports Fizgig's development 
 to you.
 
 
-**Template settings** — field names as they appear in RunPod's *Edit template* dialog:
+### Building your own template
+
+Only if you want your own — the Deploy button above needs none of this. Field names as they appear
+in RunPod's *Edit template* dialog:
 
 | Field | Value |
 |---|---|
 | Template name | `Fizgig` |
 | Template type | Pods |
 | Compute type | NVIDIA · GPU |
-| Container image | `ghcr.io/shootthesound/fizgig:2.13.0` — a **version** tag, see below |
+| Container image | `ghcr.io/shootthesound/fizgig:2.13.2` — a **version** tag, see below |
 | Container disk | `25` GB |
 | Persistent storage | **Volume disk**, `100` GB |
 | Persistent storage mount path | `/workspace` |
 
-A **public** template has to use Volume Disk, not Network storage — RunPod greys the Public toggle
-out otherwise, and rightly so: a network volume belongs to your account and cannot be handed to
-everyone who deploys your template. Each deployer picks their own Network Volume at deploy time
-instead.
+A **public** template must use Volume Disk, not Network storage — RunPod greys out the Public
+toggle otherwise, since a network volume belongs to one account. Deployers pick their own.
 
-**Pin a version, don't use `:latest`.** RunPod caches images on the host, so pushing a new
-`:latest` can leave workers running a stale one with no way to tell — which is their own
-recommendation, and it makes a bug report impossible to place against a version.
+**Pin a version, not `:latest`.** RunPod caches images per host, so a mutable tag can serve a stale
+one with no way to tell what is running. It costs little here — Fizgig pulls its source from git at
+every pod start, so app updates arrive whatever the image tag says, and the image itself only
+changes when system packages or Python dependencies do.
 
-That costs less here than it usually does: Fizgig's source is pulled from git at every pod start,
-so app updates reach users whatever the image tag says. The image only changes when system packages
-or Python dependencies do. Bump the tag when a release changes those; otherwise leave it.
-
-Every release publishes `X.Y.Z`, `X.Y` and `latest` — pick the full version.
-
-Under **Networking configuration → HTTP Ports**, add two. The labels show up in the pod's Connect
+Under **Networking configuration → HTTP Ports**, add three. The labels show up in the pod's Connect
 menu, so name them:
 
 | Label | Port |
 |---|---|
 | `Fizgig` | `6080` |
 | `File Manager` | `8080` |
+| `Mobile` | `8081` |
+
+8081 is reserved for future in-app use. Adding it now costs nothing and saves editing the template
+later — pods deployed from an older template would not have it.
 
 No TCP ports, no start command, and no registry authentication — the image is public.
 
-**Leave Environment variables empty on a public template.** RunPod warns in that panel that they
-are not encrypted, and a public template hands them to everyone who deploys it — a `VNC_PASSWORD`
-set here would become the shared password for every pod created from it. Fizgig generates a unique
-one per pod instead and prints it in the log.
+Leave **Environment variables** empty — RunPod hands them to everyone who deploys the template, and
+Fizgig generates a per-pod password anyway.
 
 **Pick a Network Volume when you deploy.** The template can only offer a Volume Disk (see above);
 the choice is yours at deploy time, and the difference only bites at termination — but it bites
@@ -152,7 +150,7 @@ Any machine with Docker and an NVIDIA GPU:
 docker run --gpus all -p 6080:6080 \
   -v fizgig-data:/workspace \
   -e VNC_PASSWORD=changeme \
-  ghcr.io/shootthesound/fizgig:2.13.0
+  ghcr.io/shootthesound/fizgig:2.13.2
 ```
 
 Then open <http://localhost:6080/vnc.html>.

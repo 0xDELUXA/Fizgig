@@ -146,6 +146,18 @@ ENV FIZGIG_HOME=/workspace \
     XDG_CACHE_HOME=/workspace/.cache
 WORKDIR /workspace
 
+# noVNC ships vnc.html and no index.html, so the bare URL serves a DIRECTORY LISTING. RunPod's
+# Connect button opens exactly that bare URL, so the first thing a user sees is a file index
+# rather than Fizgig. Redirect the root at the client, with autoconnect so they go straight to
+# the password prompt, and scaling so a 1600x1400 desktop fits a laptop window instead of
+# forcing scrollbars.
+RUN printf '%s\n' \
+      '<!DOCTYPE html>' \
+      '<meta http-equiv="refresh" content="0; url=vnc.html?autoconnect=true&resize=scale">' \
+      '<title>Fizgig</title>' \
+      '<a href="vnc.html?autoconnect=true&resize=scale">Open Fizgig</a>' \
+      > /usr/share/novnc/index.html
+
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

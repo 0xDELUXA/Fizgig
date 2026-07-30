@@ -26,10 +26,21 @@ to match your browser window**, so there is no screen size to guess at.
 | Expose HTTP ports | `6080, 8080` |
 | Expose TCP ports | *(none)* |
 
-**Use a network volume.** Without one, every pod start re-downloads tens of GB of models and you
-pay GPU time to watch it happen. With one, it's a one-off, and your datasets, LoRAs and caches
-survive between pods. Two things to know: network storage is billed per GB/month, and volumes are
-region-locked, which limits which GPUs you can rent.
+**Use a Network Volume, not the template's Volume Disk.** The difference only bites at
+termination, and it bites hard:
+
+| | Stop the pod | **Terminate** the pod |
+|---|---|---|
+| **Volume Disk** (created with the pod) | kept | **deleted with the pod** |
+| **Network Volume** (a separate resource) | kept | **kept** |
+
+RunPod's own wording for Volume Disk is "tied to the Pod's lifecycle" — terminate takes it, and
+your ~32 GB of models with it. That matters more than it sounds, because **every image update
+requires terminating and redeploying**, so on a Volume Disk you re-download the models each time.
+
+Create the Network Volume first (Storage → Network Volumes), then pick it when you deploy. Two
+trade-offs: it is billed per GB/month whether or not a pod is running, and it is region-locked,
+which fixes the set of GPUs you can rent.
 
 **Environment variables**
 

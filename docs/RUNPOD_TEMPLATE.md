@@ -52,9 +52,16 @@ tab and come back later.
 | `FETCH_MODELS` | e.g. `tools,krea2` to download before launch. Left empty by default so you choose. |
 | `FIZGIG_REF` | Branch or tag to run. Defaults to `master`, which updates on every pod start. |
 
-**Give it a volume of 100 GB+ mounted at `/workspace`.** Without one, models land on the container
-disk and are wiped when you stop the pod — you'd re-download 32 GB every session. The pod log
-reports what it found on startup and warns if that looks wrong.
+**Attach a Network Volume of 100 GB+ mounted at `/workspace`.**
+
+Storage here comes in two flavours and the difference only shows up when you terminate a pod. A
+**Volume Disk** is created with the pod and *deleted with it* — RunPod describes it as "tied to the
+Pod's lifecycle". A **Network Volume** is a separate resource that outlives any pod. Either keeps
+your files across a stop/start; only the Network Volume keeps them across a terminate.
+
+Since ~32 GB of model weights live there, use a Network Volume unless you enjoy re-downloading
+them. With no volume at all, everything lands on the container disk and is wiped the moment you
+stop. The pod log reports what it found on startup and warns if that looks wrong.
 
 ## Storage layout
 

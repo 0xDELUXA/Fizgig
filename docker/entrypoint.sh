@@ -71,6 +71,33 @@ json.dump(prefs, open(p, "w", encoding="utf-8"), indent=2)
 print("[fizgig] output dirs on /workspace")
 PY
 
+# fetch_models defaults to <repo>/models, which puts 32 GB of weights INSIDE the git clone that
+# this script runs `git reset --hard` on every boot. Point it at /workspace/models instead, next
+# to the datasets and outputs, so it survives a re-clone and is where anyone would look for it.
+if [ ! -L "$APP_DIR/models" ]; then
+    if [ -d "$APP_DIR/models" ] && [ -n "$(ls -A "$APP_DIR/models" 2>/dev/null)" ]; then
+        # Models already downloaded to the old location — move rather than orphan them.
+        log "Moving existing models to /workspace/models"
+        mv "$APP_DIR/models"/* /workspace/models/ 2>/dev/null || true
+    fi
+    rm -rf "$APP_DIR/models"
+    ln -s /workspace/models "$APP_DIR/models"
+fi
+
+# Report the disk the models actually land on. Getting this wrong is expensive and silent: if the
+# volume is not mounted, /workspace is the CONTAINER disk — which RunPod erases when the pod stops,
+# so a 32 GB download evaporates on every restart. The failure mode is a "no space left on device"
+# part-way through a download, which reads like a Fizgig bug rather than a template setting.
+_avail_kb=$(df -Pk /workspace | awk 'NR==2{print $4}')
+_avail_gb=$(( _avail_kb / 1024 / 1024 ))
+_total_gb=$(( $(df -Pk /workspace | awk 'NR==2{print $2}') / 1024 / 1024 ))
+log "Storage: /workspace has ${_avail_gb} GB free of ${_total_gb} GB"
+if [ "$_total_gb" -lt 60 ]; then
+    log "  WARN: that looks like the CONTAINER disk, not a volume. Krea 2 alone needs ~32 GB,"
+    log "        and container disk is wiped when the pod stops. Check the template has a"
+    log "        Volume Disk of 100 GB+ AND a mount path of /workspace."
+fi
+
 # ---------------------------------------------------------------- optional model prefetch
 # Off by default. Downloading tens of GB unasked spends the user's money and may fetch the
 # family they didn't want — the Preferences button does this on demand, with a progress bar.

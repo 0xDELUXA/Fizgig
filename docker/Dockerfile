@@ -1,4 +1,4 @@
-# Fizgig on a headless GPU box (RunPod, Vast, or any Docker host with an NVIDIA GPU).
+# Fizgig on a headless GPU box — RunPod, or any Docker host with an NVIDIA GPU.
 #
 # Fizgig is a Tkinter desktop app: it needs a display, and there is no web UI to expose. So the
 # image runs a virtual screen (Xvfb) with a light window manager on it, and streams that screen
@@ -149,8 +149,8 @@ ARG FIZGIG_IMAGE_VERSION=dev
 ENV FIZGIG_IMAGE_VERSION=${FIZGIG_IMAGE_VERSION}
 
 # FIZGIG_POD is what the app keys off to show its RunPod controls instead of the "run on a rented
-# GPU" advert. Our own marker rather than RUNPOD_POD_ID: provider variable names are theirs to
-# change, and Vast sets none of them.
+# GPU" advert. Our own marker rather than RUNPOD_POD_ID: a provider's variable names are theirs
+# to change, and another host would set different ones entirely.
 ENV FIZGIG_POD=1 \
     FIZGIG_HOME=/workspace \
     HF_HOME=/workspace/.cache/huggingface \

@@ -769,18 +769,18 @@ def _persist_disabled() -> bool:
 
 
 def _running_on_pod() -> bool:
-    """True when this is the Docker pod image (RunPod, Vast, or any rented box).
+    """True when this is the Docker pod image (RunPod, or any rented box).
 
     Keyed off OUR marker, set in docker/entrypoint.sh, rather than RunPod's RUNPOD_POD_ID: the
-    hosting provider's variable names are theirs to change, and Vast sets none of them. The pod
-    id below is read separately and only used for display and for targeting a stop — everything
-    degrades if it is absent."""
+    hosting provider's variable names are theirs to change, and another host would set different
+    ones entirely. The pod id below is read separately and only used for display and for targeting
+    a stop — everything degrades if it is absent."""
     return os.environ.get("FIZGIG_POD", "0") not in ("0", "", None)
 
 
 def _pod_id() -> str:
     """The provider's id for this pod, or "" if it doesn't advertise one."""
-    for key in ("RUNPOD_POD_ID", "VAST_CONTAINERLABEL", "HOSTNAME"):
+    for key in ("RUNPOD_POD_ID", "HOSTNAME"):
         v = (os.environ.get(key) or "").strip()
         if v:
             return v

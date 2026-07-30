@@ -108,6 +108,13 @@ fi
 log "Starting KasmVNC display (${SCREEN_W}x${SCREEN_H}, resizes to your browser window)"
 # One process instead of Xvfb + x11vnc + websockify: KasmVNC is an X server WITH a web server,
 # encoding in WebP rather than the LAN-shaped defaults noVNC fell back to.
+# SecurityTypes None + basic auth ON is the pairing that works, and the two halves are not
+# independent. KasmVNC defaults SecurityTypes to VncAuth, which wants a VNC-PROTOCOL password
+# (PasswordFile) -- a different credential from the web login. Set only the web one and the
+# browser authenticates fine, loads the client, and THEN the session underneath is rejected with
+# "No password configured for VNC Auth". Turning the VNC layer off is correct here because
+# DisableBasicAuth=0 means the HTTP gate is still doing the authenticating; it is stated
+# explicitly so nobody removes it later and leaves the pod wide open.
 # -httpd is NOT optional: the built-in default is /usr/local/share/kasmvnc/www but the Debian
 # package installs to /usr/share/kasmvnc/www, so without it the server authenticates you fine and
 # then closes the connection with an empty reply, having nothing to serve.
@@ -115,7 +122,7 @@ log "Starting KasmVNC display (${SCREEN_W}x${SCREEN_H}, resizes to your browser 
 # VNC-protocol password, which nothing here uses since the client is the browser.
 # DynamicQuality 4-9 lets it drop quality while you drag and restore it when you stop, which is
 # where the responsiveness actually comes from over a long link.
-Xvnc :1     -geometry "${SCREEN_W}x${SCREEN_H}"     -depth 24     -websocketPort 6080     -interface 0.0.0.0     -KasmPasswordFile /root/.kasmpasswd     -httpd /usr/share/kasmvnc/www     -sslOnly=0     -AlwaysShared     -FrameRate=60     -DynamicQualityMin=4     -DynamicQualityMax=9     >/var/log/kasmvnc.log 2>&1 &
+Xvnc :1     -geometry "${SCREEN_W}x${SCREEN_H}"     -depth 24     -websocketPort 6080     -interface 0.0.0.0     -KasmPasswordFile /root/.kasmpasswd     -httpd /usr/share/kasmvnc/www     -SecurityTypes None     -DisableBasicAuth=0     -sslOnly=0     -AlwaysShared     -FrameRate=60     -DynamicQualityMin=4     -DynamicQualityMax=9     >/var/log/kasmvnc.log 2>&1 &
 
 for _ in $(seq 1 60); do xdpyinfo -display :1 >/dev/null 2>&1 && break; sleep 0.25; done
 if ! xdpyinfo -display :1 >/dev/null 2>&1; then

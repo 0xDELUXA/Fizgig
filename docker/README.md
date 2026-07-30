@@ -16,6 +16,13 @@ to match your browser window**, so there is no screen size to guess at.
 
 ## RunPod
 
+**[⚡ Deploy Fizgig on RunPod →](https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=faoq8ed6um&ref=vkb387ep)**
+
+One click, pre-set to an RTX 5090 — the cheapest card that clears Fizgig's 32 GB no-block-swap
+threshold for Krea 2. Deploying through that link supports Fizgig's development at no extra cost
+to you.
+
+
 **Template settings** — field names as they appear in RunPod's *Edit template* dialog:
 
 | Field | Value |

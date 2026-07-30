@@ -12561,9 +12561,13 @@ class LoRATrainerGUI:
     # Until then the desktop card says "coming soon" instead of offering a button that goes
     # nowhere — so this can ship long before the template does. test_runpod_card.py refuses to
     # let LIVE be True while the URL is still the placeholder.
-    RUNPOD_TEMPLATE_LIVE = False
+    RUNPOD_TEMPLATE_LIVE = True
     RUNPOD_GUIDE_URL = ("https://github.com/shootthesound/Fizgig/blob/master/docker/README.md")
-    RUNPOD_DEPLOY_URL = "https://runpod.io/console/deploy?template=fizgig"
+    # Pre-selects an RTX 5090: it is the cheapest card that clears Fizgig's 32 GB
+    # no-block-swap threshold for Krea 2, so the default lands people on the fastest
+    # sensible option rather than the biggest or the cheapest.
+    RUNPOD_DEPLOY_URL = ("https://console.runpod.io/deploy"
+                         "?type=GPU&gpu=RTX+5090&count=1&template=faoq8ed6um")
     RUNPOD_REFERRAL = "vkb387ep"
 
     def _runpod_deploy_url(self) -> str:

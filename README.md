@@ -6,7 +6,12 @@
 </p>
 
 <p align="center">
+  <a href="https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=faoq8ed6um&ref=vkb387ep"><img src="https://img.shields.io/badge/⚡%20Deploy%20on%20RunPod-673AB7?style=for-the-badge&logoColor=white" alt="Deploy Fizgig on RunPod"></a>
   <a href="https://buymeacoffee.com/lorasandlenses"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"></a>
+</p>
+<p align="center">
+  <sub>No GPU, or want a bigger one? Fizgig runs on rented hardware — one click, nothing to install.<br>
+  Deploying through that link supports Fizgig's development at no extra cost to you.</sub>
 </p>
 
 <p align="center">
@@ -174,7 +179,7 @@ the pod **shut itself down when training finishes** so an overnight run doesn't 
 Your models and datasets live on persistent storage, so you download them once and every future
 session picks up where you left off.
 
-**[Running Fizgig on a rented GPU →](docker/README.md)**
+**[⚡ Deploy on RunPod →](https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=faoq8ed6um&ref=vkb387ep)**  ·  [Read the guide first](docker/README.md)
 
 ---
 

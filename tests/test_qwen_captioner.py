@@ -58,7 +58,7 @@ ck("Qwen selected -> every shipped preset + Custom",
    len(qwen_tasks) == len(CAPTION_TASKS) + 1 and qwen_tasks[-1] == G.QWEN_CUSTOM_TASK,
    qwen_tasks)
 ck("  both style presets are offered",
-   {CAPTION_TASKS["style"][0], CAPTION_TASKS["style_lead"][0]} <= set(qwen_tasks), qwen_tasks)
+   {CAPTION_TASKS["style"][0], CAPTION_TASKS["style_named"][0]} <= set(qwen_tasks), qwen_tasks)
 ck("  default task is the doctrine one",
    g.caption_task_var.get() == CAPTION_TASKS[DEFAULT_CAPTION_TASK][0], g.caption_task_var.get())
 ck("  Edit instructions button shown", bool(g.caption_edit_instr_btn.winfo_manager()))
@@ -114,25 +114,31 @@ ck("  builtin_only always returns the shipped text",
 # for a dataset of landscapes and objects; and lighting must NOT be captioned for a style, or the
 # look only fires under the lighting it was trained on. The four identity presets ask for lighting
 # correctly — there it varies and you want it steerable — so the two rules genuinely coexist.
-for _k in ("style", "style_lead"):
+for _k in ("style", "style_named"):
     _instr = CAPTION_TASKS[_k][1]
     ck(f"  '{_k}' does not use the person-only subject rule", SUBJECT_RULE not in _instr)
     ck(f"  '{_k}' never asks for lighting", "lighting" not in _instr.split("Say nothing about")[0])
     ck(f"  '{_k}' excludes the style itself", "never how it was made" in _instr)
-ck("  only the lead preset names a look", "an illustration of" in CAPTION_TASKS["style_lead"][1]
-   and "an illustration of" not in CAPTION_TASKS["style"][1])
+# The style phrase is trailing, not leading: 'in X style' gives a made-up token a role the model
+# already understands, which a bare token or a leading phrase does not.
+ck("  only the named preset names a look", "in mystyle style" in CAPTION_TASKS["style_named"][1]
+   and "mystyle" not in CAPTION_TASKS["style"][1])
+ck("  ...and names it at the END, not the start",
+   CAPTION_TASKS["style_named"][1].index("end the sentence with the exact words")
+   > CAPTION_TASKS["style_named"][1].index("what is depicted and what it is doing"))
 # 'short' is excluded: it is a single clause (subject, action, setting) and never asked for
 # lighting in the first place — nothing to preserve there.
 for _k in ("training", "detailed", "exhaustive"):
     ck(f"  identity preset '{_k}' still asks for lighting", "lighting" in CAPTION_TASKS[_k][1])
 
-# The lead phrase is meant to be edited, and _strip_caption_preamble silently eats some openings.
-# If this ever fails, every caption from the lead preset loses its style phrase with nothing to
-# show for it — the exact failure the code comment warns about.
-for _lead in ("an illustration of", "an oil painting of", "a watercolour of", "a 3D render of"):
-    ck(f"  lead phrase '{_lead}' survives preamble stripping",
-       _strip_caption_preamble(f"{_lead} a red car").startswith(_lead))
-ck("  ...but 'the image is a' is still stripped (the edit to avoid)",
+# Putting the phrase at the end also puts it out of reach of _strip_caption_preamble, which only
+# matches at the start. That is a real safety property of the trailing form, not an accident: a
+# LEADING phrase can be silently eaten (see the negative case below), which would delete the style
+# from every caption with nothing to show it had happened.
+for _phrase in ("in mystyle style", "in oil painting style", "in the image style"):
+    ck(f"  trailing phrase '{_phrase}' is untouched by preamble stripping",
+       _strip_caption_preamble(f"a red car parked on a street, {_phrase}").endswith(_phrase))
+ck("  ...whereas a LEADING 'the image is a' would have been stripped",
    not _strip_caption_preamble("the image is a watercolour of a red car").startswith("the image"))
 
 # auto-recaption maps attempt 1 -> Training caption, attempt 2 -> Exhaustive detail.

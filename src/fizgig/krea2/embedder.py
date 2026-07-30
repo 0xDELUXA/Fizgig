@@ -267,12 +267,6 @@ NO_STYLE_RULE = (
     "colour grading, palette, lighting, mood, atmosphere, era or quality. Name the colours of the "
     "things themselves, but not the overall colour treatment. "
 )
-# The stock NO_PREAMBLE_RULE opens with "Begin directly with the subject", which contradicts an
-# instruction to begin with a fixed phrase. Same job, without the collision.
-NO_PREAMBLE_AFTER_LEAD_RULE = (
-    "Go straight from the opening phrase to what is depicted. Never insert 'This image shows', "
-    "'The image depicts', 'In this image', 'Here we see' or any similar preamble. "
-)
 
 CAPTION_INSTRUCTION = (
     "Write one factual training caption for this image as a single sentence, covering these in "
@@ -322,11 +316,10 @@ DETAILED_DESCRIPTION_INSTRUCTION = (
 )
 
 # Two style presets rather than one, because the trigger-word field already prepends
-# f"{trigger}, " to every caption (save_caption_with_trigger in the GUI). That makes "is the look
-# named?" a fork rather than a setting: with one preset, half of users would either name the style
-# twice or never name it at all.
+# f"{trigger}, " to every caption (save_caption_with_trigger in the GUI) and can only ever produce
+# that weak comma form. Naming the look properly has to come from the instruction instead:
 #   content only + trigger 'mystyle' -> "mystyle, a vintage blue car parked on a street"
-#   lead phrase  + no trigger        -> "an illustration of a vintage blue car parked on a street"
+#   in-X-style, no trigger           -> "a vintage blue car parked on a street, in mystyle style"
 # The labels say which is which, so the choice happens at the point of selection.
 STYLE_CAPTION_INSTRUCTION = (
     "Write one factual training caption for this image as a single sentence of 30-50 words, "
@@ -336,17 +329,28 @@ STYLE_CAPTION_INSTRUCTION = (
     "State only what is visible — no speculation and no proper names."
 )
 
-# The opening phrase is meant to be edited to match the dataset ('an oil painting of', 'a
-# watercolour of', 'a 3D render of'). One edit to avoid: do NOT start it with "the image is a" —
-# _strip_caption_preamble removes that prefix, so it would vanish from every caption with nothing
-# to show it had. The shipped phrase and the likely replacements all pass through untouched.
-STYLE_LEAD_CAPTION_INSTRUCTION = (
-    "Write one factual training caption for this image as a single sentence of 30-50 words. "
-    "Begin with the exact words 'an illustration of', then cover in order: what is depicted and "
-    "what it is doing; how it is arranged in the frame; the setting or background. Use that "
-    "opening phrase word for word every time, and the same plain phrasing throughout. "
-    + DEPICTED_RULE + NO_PREAMBLE_AFTER_LEAD_RULE + NO_STYLE_RULE +
-    "The opening phrase is the only place the style is named. State only what is visible — no "
+# The style phrase goes at the END, in the "in X style" construction, because that is what gives
+# a made-up token a job. 'mystyle' on its own is a noise word the model can only decode from
+# repetition; '… in mystyle style' drops it into a slot the language model already understands,
+# next to the word that defines what it is. The same construction works for a real phrase
+# ('in oil painting style'), so one preset covers both the token and the descriptive case.
+#
+# This sits next to the opposite-looking rule in the trainer, which APPENDS the identity trigger
+# precisely because "a trailing token is a far weaker identity claim than a leading one". They do
+# not contradict: there the subject may be absent from a given shot and a weak claim is the point,
+# whereas the style is in every image here, and it is the 'in … style' scaffold doing the binding
+# rather than the position.
+#
+# Edit the phrase to match the dataset. Unlike a leading phrase there is nothing to get wrong:
+# _strip_caption_preamble only matches at the start of a caption, so any trailing wording is safe,
+# and an unedited run still trains — it just binds the look to the literal token 'mystyle'.
+STYLE_NAMED_CAPTION_INSTRUCTION = (
+    "Write one factual training caption for this image as a single sentence of 30-50 words, "
+    "covering these in order: what is depicted and what it is doing; how it is arranged in the "
+    "frame; the setting or background. Then end the sentence with the exact words 'in mystyle "
+    "style'. Use that same closing phrase word for word every time, and the same plain phrasing "
+    "throughout. " + DEPICTED_RULE + NO_PREAMBLE_RULE + NO_STYLE_RULE +
+    "Those closing words are the only place the style is named. State only what is visible — no "
     "speculation and no proper names."
 )
 
@@ -364,8 +368,8 @@ CAPTION_TASKS = {
     "exhaustive": ("Exhaustive detail", DETAILED_CAPTION_INSTRUCTION, 240),
     # Style presets last: the four above are the identity path, which is the common case and the
     # one auto-recaption uses. 80/90 tokens ≈ the 30-50 word target with headroom.
-    "style":      ("Style — content only (with trigger word)", STYLE_CAPTION_INSTRUCTION, 80),
-    "style_lead": ("Style — lead phrase (no trigger word)", STYLE_LEAD_CAPTION_INSTRUCTION, 90),
+    "style":       ("Style — content only (with trigger word)", STYLE_CAPTION_INSTRUCTION, 80),
+    "style_named": ("Style — in X style (edit the phrase)", STYLE_NAMED_CAPTION_INSTRUCTION, 90),
 }
 DEFAULT_CAPTION_TASK = "training"
 

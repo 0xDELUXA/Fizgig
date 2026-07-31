@@ -370,13 +370,16 @@ _COMPILE_GB_PER_MP = 15.0
 
 def should_compile(total_steps: int, quant_4bit: bool, quant_int8: str,
                    blocks_to_swap: int, vram_gb: Optional[float] = None,
-                   caps: Optional[Capabilities] = None, mp: float = 0.25) -> tuple:
+                   caps: Optional[Capabilities] = None, mp: float = 0.25,
+                   batch: int = 1) -> tuple:
     """Decide whether torch.compile pays for itself on this run. Returns (bool, reason).
 
-    `mp` is the run's largest bucket in megapixels. At the 0.25 default every resolution term
-    below is exactly zero, so the extensively-validated 0.25 MP behaviour cannot shift; above
-    it, the VRAM gates grow by _COMPILE_GB_PER_MP because compiled activation stashes scale
-    with token count where eager checkpointing absorbs them.
+    `mp` is the run's largest bucket in megapixels, `batch` its batch size. What compiled
+    activation stashes scale with is tokens PER STEP, and batch multiplies tokens exactly as
+    resolution does — so the load term is mp x batch, priced at _COMPILE_GB_PER_MP over the
+    0.25 baseline. At the defaults (0.25 MP, batch 1) the term is exactly zero, so the
+    extensively-validated behaviour there cannot shift; eager checkpointing absorbs both knobs,
+    which is why only the compile gate needs them at this strength.
     """
     caps = caps or detect()
     vram = vram_gb if vram_gb is not None else (caps.vram_free_gb or caps.vram_gb)
@@ -392,16 +395,18 @@ def should_compile(total_steps: int, quant_4bit: bool, quant_int8: str,
     kind = "nf4" if quant_4bit else ("int8" if quant_int8 else None)
     if kind is None:
         return False, "only measured for the quantised paths (NF4 / INT8); not enabled for fp8 or bf16"
-    _res_gb = _COMPILE_GB_PER_MP * max(0.0, float(mp) - 0.25)
+    _step_mp = float(mp) * max(1, int(batch))       # MP of latents per step
+    _res_gb = _COMPILE_GB_PER_MP * max(0.0, _step_mp - 0.25)
+    _shape = (f" at {mp:.2f} MP" + (f" x batch {batch}" if batch > 1 else "")) if _res_gb else ""
+    _fix = (" (lower Target Megapixels or batch size to compile)" if _res_gb else "")
     if kind == "int8" and vram < _INT8_COMPILE_PEAK_GB + _res_gb + _HEADROOM_GB:
-        _at = f" at {mp:.2f} MP" if _res_gb else ""
-        return False, (f"INT8 + compile peaks near {_INT8_COMPILE_PEAK_GB + _res_gb:.0f} GB{_at} "
+        return False, (f"INT8 + compile peaks near {_INT8_COMPILE_PEAK_GB + _res_gb:.0f} GB{_shape} "
                        f"and only {vram:.1f} GB is free — INT8 alone still fits, compile does not"
-                       + (" (lower Target Megapixels to compile)" if _res_gb else ""))
+                       + _fix)
     if kind == "nf4" and _res_gb and vram < _NF4_COMPILE_PEAK_GB + _res_gb + _HEADROOM_GB:
-        return False, (f"NF4 + compile peaks near {_NF4_COMPILE_PEAK_GB + _res_gb:.0f} GB at "
-                       f"{mp:.2f} MP and only {vram:.1f} GB is free — NF4 alone still fits, "
-                       "compile does not (lower Target Megapixels to compile)")
+        return False, (f"NF4 + compile peaks near {_NF4_COMPILE_PEAK_GB + _res_gb:.0f} GB{_shape} "
+                       f"and only {vram:.1f} GB is free — NF4 alone still fits, compile does not"
+                       + _fix)
 
     needed = int(_COMPILE_WARMUP_S / _COMPILE_SAVING_S[kind] * _COMPILE_MARGIN)
     if total_steps < needed:

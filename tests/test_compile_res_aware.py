@@ -82,6 +82,22 @@ _gate = _NF4_COMPILE_PEAK_GB + _COMPILE_GB_PER_MP * (_mp - 0.25) + _HEADROOM_GB
 ck("nf4 gate sits exactly at the formula",
    sc("nf4", _gate + 0.01, mp=_mp)[0] and not sc("nf4", _gate - 0.01, mp=_mp)[0])
 
+# --- 2b. batch multiplies tokens exactly as resolution does -------------------------------
+# batch 1 must be a pure no-op (same decision AND words); batch 2 at the 0.25 MP default is the
+# token load of 0.5 MP and gates accordingly.
+for kind in ("int8", "nf4"):
+    for vram in (30.0, 21.4, 14.0):
+        ck(f"{kind} {vram} GB: batch omitted == batch=1",
+           sc(kind, vram, mp=0.25)
+           == should_compile(LONG, kind == "nf4", "bf16" if kind == "int8" else "",
+                             0, vram_gb=vram, caps=CAPS, mp=0.25, batch=1))
+ok, why = should_compile(LONG, False, "bf16", 0, vram_gb=30.0, caps=CAPS, mp=0.25, batch=2)
+_b2 = should_compile(LONG, False, "bf16", 0, vram_gb=30.0, caps=CAPS, mp=0.5)
+ck("int8 @0.25MP batch 2 gates exactly like 0.5 MP batch 1", ok == _b2[0], why)
+ok, why = should_compile(LONG, False, "bf16", 0, vram_gb=22.0, caps=CAPS, mp=0.25, batch=2)
+ck("int8 @0.25MP batch 2, 22 GB free -> DECLINED, reason names the batch",
+   not ok and "batch 2" in why and "batch size" in why, why)
+
 # --- 3. the earlier gates still fire first, untouched by mp -------------------------------
 ok, why = sc("int8", 30.0, mp=2.0, swap=8)
 ck("block swap still declines before any VRAM math", not ok and "block swap" in why, why)

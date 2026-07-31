@@ -18743,7 +18743,12 @@ class LoRATrainerGUI:
         env["PYTHONUNBUFFERED"] = "1"  # flush stdout/stderr line-by-line so log output streams live
 
         if os.name == 'nt':
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            # BELOW_NORMAL: Windows weights GPU scheduling by process priority class, and the
+            # desktop compositor renders on the same card that training saturates. Below-normal
+            # gives DWM the preemption slices it needs (fixes juddery mouse/desktop during a run)
+            # and costs training ~1% — it only yields when something else actually wants time.
+            creationflags = (subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+                             | subprocess.BELOW_NORMAL_PRIORITY_CLASS)
             preexec_fn = None
         else:
             creationflags = 0

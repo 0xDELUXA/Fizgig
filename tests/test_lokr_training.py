@@ -216,6 +216,47 @@ with tempfile.TemporaryDirectory() as td:
        any(k.startswith("lora_unet_") and k.endswith(".lora_down.weight") for k in ssd)
        and detect_lora_format(ssd) == "kohya")
 
+# --- 4b. Context LoRA under a trainable LoKR ----------------------------------------------
+# The trainer stacks: frozen context (inference net) -> trainable net, both additive forward
+# patches. Training LoKR must not change that: output == base + ctx_delta + lokr_delta, and
+# grads flow ONLY to the trainable LoKR.
+dit_ctx = ToyDiT()
+x = torch.randn(2, 24)
+base_out = dit_ctx.blocks[0].attn.qkv(x)
+
+# Frozen context: a standard LoRA built from weights (the _apply_context_lora path).
+ctx_sd = {
+    "lora_unet_blocks_0_attn_qkv.lora_down.weight": torch.randn(2, 24),
+    "lora_unet_blocks_0_attn_qkv.lora_up.weight": torch.randn(48, 2),
+    "lora_unet_blocks_0_attn_qkv.alpha": torch.tensor(2.0),
+}
+ctx_net = create_network_from_weights(None, 1.0, dict(ctx_sd), None, dit_ctx, for_inference=True)
+ctx_net.apply_to(text_encoders=None, unet=dit_ctx, apply_text_encoder=False, apply_unet=True)
+ctx_net.load_state_dict(dict(ctx_sd), strict=False)
+ctx_net.requires_grad_(False)
+ctx_delta = (ctx_sd["lora_unet_blocks_0_attn_qkv.lora_up.weight"].float()
+             @ ctx_sd["lora_unet_blocks_0_attn_qkv.lora_down.weight"].float())
+
+# Trainable LoKR on top, given real weights.
+lokr_net = create_network(None, "lora_unet", 1.0, 4, 1.0, None, [], dit_ctx,
+                          module_class=LoKRModule, module_kwargs={"factor": 4})
+lokr_net.apply_to(text_encoders=None, unet=dit_ctx, apply_text_encoder=False, apply_unet=True)
+with torch.no_grad():
+    for m in lokr_net.unet_loras:
+        m.lokr_w1.copy_(torch.randn_like(m.lokr_w1))
+        m.lokr_w2.copy_(torch.randn_like(m.lokr_w2))
+m0 = next(m for m in lokr_net.unet_loras if m.lora_name == "lora_unet_blocks_0_attn_qkv")
+lokr_delta = torch.kron(m0.lokr_w1, m0.lokr_w2)
+
+got = dit_ctx.blocks[0].attn.qkv.forward(x)
+ref = base_out + x @ ctx_delta.T + x @ lokr_delta.T
+ck("context LoRA + trainable LoKR stack additively (base + ctx + lokr)",
+   torch.allclose(got, ref, atol=1e-4), f"max diff {(got - ref).abs().max():.2e}")
+got.sum().backward()
+ck("  grads reach the trainable LoKR only",
+   m0.lokr_w1.grad is not None and m0.lokr_w1.grad.abs().sum() > 0
+   and all(p.grad is None or p.grad.abs().sum() == 0 for p in ctx_net.parameters()))
+
 # --- 5. lossless LoKR bake (Repair Studio / Explorer save path) ---------------------------
 from fizgig.repair_studio.bake import save_repaired_lora  # noqa: E402
 from fizgig.repair_studio.state import SliderState  # noqa: E402

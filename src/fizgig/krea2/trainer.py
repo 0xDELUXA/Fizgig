@@ -1664,6 +1664,13 @@ def train_krea2(
                 move_nf4_to_device(dit, device)
             dit.train()
 
+    # Return the load-time transients (quantise staging, resume's optimizer-state copy) to the
+    # driver before stepping. Fresh runs with Sample at Start got this for free from the
+    # preview's empty_cache; resumed runs skip that preview and sat ~4 GB high until the first
+    # epoch-boundary preview cleared it (issue #24). Unconditional so every path starts clean.
+    gc.collect()
+    torch.cuda.empty_cache()
+
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="steps", smoothing=0)
     pending_accum = 0  # micro-batches backward'd since the last optimizer step

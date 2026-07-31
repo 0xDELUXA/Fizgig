@@ -308,6 +308,10 @@ Krea 2 is a bigger model, so the numbers differ — but Fizgig **auto-sizes bloc
 - **Training** runs on the RAW fp8 base (~14 GB resident); block swap auto-detects from VRAM (32 GB → none, scaling up to maximum on sub-16 GB cards). The **4-bit (NF4)** toggle drops the base to ~5.6 GB (base + LoRA ~8.3 GB), fitting a **10–12 GB card with no swap** and an 8 GB card with the swap Auto sizes for it. You don't need to pick: Auto budgets from your *free* VRAM and the console explains its choice.
 - **In-training previews** default to the **RAW + Turbo LoRA** engine: they render on the model already training, so previews add almost nothing on top of the training footprint — no checkpoint load, no CPU↔GPU shuffling between epochs. The **workbench** (Repair Studio / Explorer / Royale) and the classic preview mode run on the fp8 Turbo checkpoint, which peaks ~22.6 GB unswapped — Fizgig auto-swaps it to fit your GPU (≈17 GB at swap 12; 16 GB cards swap enough to fit). If a preview still can't fit, it **auto-disables and training keeps running and saving** — evaluate the LoRA in ComfyUI.
 
+### Desktop feels juddery while training? (Windows)
+
+If your mouse or video playback stutters during a run — even with CPU, RAM and VRAM all showing plenty free — turn off **Hardware-accelerated GPU scheduling**: Windows Settings → System → Display → Graphics → *Default graphics settings*, then reboot. Training and your desktop share the same GPU, and with that setting on, Windows can't prioritise between them; with it off, Fizgig runs training at low priority so your desktop stays smooth and training speed is unaffected.
+
 ---
 
 ## INT8 fast inference (on by default)

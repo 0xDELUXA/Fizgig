@@ -1273,7 +1273,17 @@ class LoRATrainerGUI:
     # ── Global log + status indicator ───────────────────────────────────
 
     def _append_global_log(self, text):
-        """Append text to the global log buffer and push to popup if open."""
+        """Append text to the global log buffer and push to popup if open.
+
+        Thread-safe by marshalling: several workers (profiler, extract, engine loads) log
+        from their own threads, and writing the console popup's Text widget off the main
+        thread is a Tcl panic — a hard process crash no try/except can catch. That is how
+        clicking the IDLE/BUSY light during a model load killed the app: the click queued,
+        the popup opened as the load returned, and the next worker log write hit it."""
+        import threading
+        if threading.current_thread() is not threading.main_thread():
+            self.master.after(0, self._append_global_log, text)
+            return
         self._log_buffer.append(text)
         if len(self._log_buffer) > 50000:
             self._log_buffer = self._log_buffer[-40000:]
@@ -10058,7 +10068,12 @@ class LoRATrainerGUI:
         return max_idx + 1
 
     def _log(self, text):
-        """Append text to the convert log (preserves user scroll position)."""
+        """Append text to the convert log (preserves user scroll position). Marshals to the
+        main thread — Tk widget writes from a worker are a hard crash, not an exception."""
+        import threading
+        if threading.current_thread() is not threading.main_thread():
+            self.master.after(0, self._log, text)
+            return
         self._append_global_log(text)
         try:
             at_bottom = self.convert_log.yview()[1] >= 0.999
@@ -10889,15 +10904,8 @@ class LoRATrainerGUI:
                     return
             self._explorer_engine.load_primary(path)
             n_active = len(self._explorer_engine.primary_block_ids)
-            # Detect format for user info
-            from safetensors.torch import load_file as _lf
-            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
-            _fmt = _df(_ek(_lf(path)))
-            if _fmt in ("lokr", "loha"):
-                messagebox.showinfo("LyCORIS LoRA loaded",
-                    f"This is a {_fmt.upper()} LoRA (LyCORIS format). "
-                    f"Everything works normally, and saving keeps the native "
-                    f"{_fmt.upper()} format — no conversion, no approximation.")
+            # LyCORIS loads and saves natively — nothing to announce on open; the save
+            # dialog states the format.
             self.explorer_status_var.set(
                 f"Loaded: {os.path.basename(path)} ({n_active}/32 blocks). Click Re-roll to start exploring.")
             # Initialize baseline state with user-specified LoRA strength
@@ -11014,10 +11022,18 @@ class LoRATrainerGUI:
             # Generate baseline (full forward, populates activation cache)
             engine._changed_blocks = set(baseline_state.blocks.keys())
             baseline_img = engine.generate_preview(baseline_state)
+            # Show the baseline the moment it exists — the image the user actually loaded
+            # must not wait behind four variant renders. Picking stays disabled until
+            # _explorer_on_results flips _explorer_generating, so early display is safe.
+            self.master.after(0, lambda: (
+                self._explorer_show_baseline(baseline_img),
+                self._explorer_update_state_text(baseline_state),
+                self._explorer_progress_var.set("Baseline ready — generating variant 1/4...")))
 
             # Generate 4 variants — each runs a full forward (invalidate activation
             # cache between variants so they don't contaminate each other).
             # The prompt cache is still shared, saving ~300-500ms per variant.
+            # Each variant appears in the gallery as soon as it renders.
             variant_images = []
             for i, vs in enumerate(variant_states):
                 self.master.after(0, lambda i=i: self._explorer_progress_var.set(
@@ -11026,6 +11042,7 @@ class LoRATrainerGUI:
                 engine._changed_blocks = set(vs.blocks.keys())
                 img = engine.generate_preview(vs)
                 variant_images.append(img)
+                self.master.after(0, lambda i=i, im=img: self._explorer_show_variant(i, im))
 
             self.master.after(0, lambda: self._explorer_on_results(
                 baseline_state, baseline_img, variant_states, variant_images))
@@ -12026,7 +12043,12 @@ class LoRATrainerGUI:
             self._update_extract_output_name()
 
     def _extract_log(self, text):
-        """Append to extract log (preserves user scroll position)."""
+        """Append to extract log (preserves user scroll position). Marshals to the main
+        thread — the extract worker calls this from its own thread."""
+        import threading
+        if threading.current_thread() is not threading.main_thread():
+            self.master.after(0, self._extract_log, text)
+            return
         self._append_global_log(text)
         self._smart_text_insert(self.extract_log, text)
 
@@ -13404,7 +13426,12 @@ class LoRATrainerGUI:
             webbrowser.open(self._profiler_report_path)
 
     def _profiler_log(self, text):
-        """Append to profiler log (preserves user scroll position)."""
+        """Append to profiler log (preserves user scroll position). Marshals to the main
+        thread — the profiler worker calls this from its own thread."""
+        import threading
+        if threading.current_thread() is not threading.main_thread():
+            self.master.after(0, self._profiler_log, text)
+            return
         self._append_global_log(text)
         self._smart_text_insert(self.profiler_results, text)
 
@@ -17361,18 +17388,11 @@ class LoRATrainerGUI:
         try:
             self.repair_status_var.set("Loading primary LoRA…")
             self.master.update_idletasks()
-            # Detect format for user info
-            from safetensors.torch import load_file as _lf
-            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
-            _fmt = _df(_ek(_lf(path)))
             self.repair_engine.load_primary(path)
             self._refresh_block_slider_activity()
             n_active = len(self.repair_engine.primary_block_ids)
-            if _fmt in ("lokr", "loha"):
-                messagebox.showinfo("LyCORIS LoRA loaded",
-                    f"This is a {_fmt.upper()} LoRA. Everything works normally, and saving "
-                    f"keeps the native {_fmt.upper()} format — lossless, no conversion. "
-                    f"Only donor-BLENDING a block converts that block via SVD.")
+            # LyCORIS loads and saves natively — no popup on open; the save dialog
+            # states the format (and the donor-blend SVD case warns at donor load).
             # Look up a matching Profiler sidecar by content hash and render
             # the inline info panel if one exists.
             self._find_repair_profile_match()
@@ -17400,17 +17420,9 @@ class LoRATrainerGUI:
         try:
             self.repair_status_var.set("Loading donor LoRA…")
             self.master.update_idletasks()
-            from safetensors.torch import load_file as _lf
-            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
-            _fmt_d = _df(_ek(_lf(path)))
             self.repair_engine.load_donor(path)
-            if _fmt_d in ("lokr", "loha"):
-                messagebox.showinfo("LyCORIS donor loaded",
-                    f"This donor is a {_fmt_d.upper()} LoRA (LyCORIS format). "
-                    f"Live preview works normally, and donor-only blocks save natively.\n\n"
-                    f"Only blocks where primary AND donor are both active get converted to "
-                    f"standard LoRA via SVD on save (Kronecker/Hadamard forms can't "
-                    f"rank-concatenate).")
+            # No popup on open (LyCORIS donors save natively; only blended blocks SVD, and
+            # the save dialog reports exactly how many were).
             self._repair_donor_loaded = True
             # Show donor sub-rows + master section toggles + enable the "Donor" master target radio
             for vars_ in self.repair_block_vars.values():

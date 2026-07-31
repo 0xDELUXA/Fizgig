@@ -68,6 +68,14 @@ root.update()
 ck("LoKR selected -> factor shown, rank/alpha hidden",
    _visible(g.entries["LOKR_FACTOR"]) and not _visible(g.entries["NETWORK_DIM"])
    and not _visible(g.entries["NETWORK_ALPHA"]))
+ck("  factor hint (sweet spot) rides with the factor row", _visible(g._lokr_factor_hint))
+g.entries["NETWORK_TYPE"].set("LoRA (standard)")
+g._on_network_type_changed()
+root.update()
+ck("  LoRA hides the factor hint again", not _visible(g._lokr_factor_hint))
+g.entries["NETWORK_TYPE"].set("LoKR (Kronecker)")
+g._on_network_type_changed()
+root.update()
 
 # Switching to Klein with LoKR selected must restore rank/alpha (Klein trains standard only).
 g.architecture_var.set(KLEIN)

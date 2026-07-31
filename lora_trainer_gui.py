@@ -2882,9 +2882,9 @@ class LoRATrainerGUI:
         self.labels["NETWORK_TYPE"] = _nt_label
         self.entries["NETWORK_TYPE"] = ttk.Combobox(
             training_content, values=["LoRA (standard)", "LoKR (Kronecker)"],
-            state="readonly", width=38)
+            state="readonly", width=18)
         self.entries["NETWORK_TYPE"].set(self.settings.get("NETWORK_TYPE", "LoRA (standard)"))
-        self.entries["NETWORK_TYPE"].grid(row=18, column=1, sticky=tk.EW, padx=5, pady=4)
+        self.entries["NETWORK_TYPE"].grid(row=18, column=1, sticky=tk.W, padx=5, pady=4)
         self.entries["NETWORK_TYPE"].bind("<<ComboboxSelected>>",
                                           lambda e: self._on_network_type_changed())
         self.rows["NETWORK_TYPE"] = {"row": 18, "label": _nt_label,
@@ -2897,6 +2897,15 @@ class LoRATrainerGUI:
             justify=tk.LEFT)
         self._network_type_hint.grid(row=18, column=2, sticky=tk.W, padx=(8, 12), pady=4)
         self._add_field_to_section(training_content, "LOKR_FACTOR", "LoKR Factor", "int", 19)
+        # A factor is one small number — shrink the stock full-width Entry to match.
+        self.entries["LOKR_FACTOR"].configure(width=8)
+        self.entries["LOKR_FACTOR"].grid(row=19, column=1, sticky=tk.W, padx=5, pady=4)
+        self._lokr_factor_hint = tk.Label(
+            training_content,
+            text="8 is the sweet spot · lower = stronger & bigger files · higher = smaller",
+            font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+            justify=tk.LEFT)
+        self._lokr_factor_hint.grid(row=19, column=2, sticky=tk.W, padx=(8, 12), pady=4)
 
         # Model Area to Train dropdown (blocks + timestep auto-fill)
         self._modelarea_label = ttk.Label(training_content, text="Model Area to Train:")
@@ -4381,6 +4390,7 @@ class LoRATrainerGUI:
             self.show_row("NETWORK_DIM")
             self.show_row("NETWORK_ALPHA")
             self.hide_row("LOKR_FACTOR")
+            self._lokr_factor_hint.grid_remove()
 
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
         # dropdown decide (only shown when the preset is "Custom").
@@ -5331,10 +5341,12 @@ class LoRATrainerGUI:
             self.hide_row("NETWORK_DIM")
             self.hide_row("NETWORK_ALPHA")
             self.show_row("LOKR_FACTOR")
+            self._lokr_factor_hint.grid()
         else:
             self.show_row("NETWORK_DIM")
             self.show_row("NETWORK_ALPHA")
             self.hide_row("LOKR_FACTOR")
+            self._lokr_factor_hint.grid_remove()
         self._save_last_used_paths()
 
     def toggle_scaled(self):

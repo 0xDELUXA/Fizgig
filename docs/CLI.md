@@ -159,6 +159,8 @@ A dataset is just a folder of images with caption sidecars — no manifest, no s
 
 The GUI's Image Prep tab (batch resize, PNG conversion, face-crop detection) is convenience, not requirement — anything that produces ordinary image files works.
 
+**Likeness at 0.25 MP: face crops are what make it work.** Training defaults to 0.25 MP (a 512×512 area in whatever aspect the image has), and the VAE compresses a further 8× on each axis — so a face that fills ~80 px of a full-body shot reaches the model as roughly 10×10 latent pixels, carrying almost no identity signal. A face crop of the same photo gives that face the entire frame instead — about **40× the face area** for the model to learn from. So if likeness is coming out soft, the first fix isn't raising the megapixels: add tight face crops alongside the wider shots (Image Prep's face-crop mode makes them in one pass). The crops feed identity, the wide shots teach body and context, and you keep 0.25 MP's fast steps. Raising the MP target helps too but costs speed and VRAM on every image — crops put the resolution only where the identity lives.
+
 ### Caption modes
 
 One `.txt` file per image, same basename (`portrait_012.png` → `portrait_012.txt`), plain text. The GUI's Captions tab offers three modes; all three produce plain sidecar files you can equally write yourself headless:

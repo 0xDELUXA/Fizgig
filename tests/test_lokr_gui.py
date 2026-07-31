@@ -43,8 +43,8 @@ KLEIN = next(k for k in G.ARCHITECTURES if not G.ARCHITECTURES[k].get("is_krea2"
 # --- 1. widgets + per-family visibility ---------------------------------------------------
 ck("NETWORK_TYPE and LOKR_FACTOR widgets exist",
    "NETWORK_TYPE" in g.entries and "LOKR_FACTOR" in g.entries)
-ck("  default is LoKR (the validated Krea 2 default)",
-   g.entries["NETWORK_TYPE"].get() == "LoKR (Kronecker)")
+ck("  default is standard LoRA (LoKR one pick away)",
+   g.entries["NETWORK_TYPE"].get() == "LoRA (standard)")
 ck("  default factor is 8", g.entries["LOKR_FACTOR"].get() == "8",
    g.entries["LOKR_FACTOR"].get())
 
@@ -59,18 +59,15 @@ g.architecture_var.set(KREA2)
 g.update_ui_for_architecture()
 root.update()
 ck("Krea 2: Network Type shown", _visible(g.entries["NETWORK_TYPE"]))
-ck("  default LoKR -> factor shown, rank/alpha hidden",
-   _visible(g.entries["LOKR_FACTOR"]) and not _visible(g.entries["NETWORK_DIM"])
-   and not _visible(g.entries["NETWORK_ALPHA"]))
-
-g.entries["NETWORK_TYPE"].set("LoRA (standard)")
-g._on_network_type_changed()
-root.update()
-ck("LoRA selected -> rank/alpha shown, factor hidden",
+ck("  default LoRA -> rank/alpha shown, factor hidden",
    _visible(g.entries["NETWORK_DIM"]) and not _visible(g.entries["LOKR_FACTOR"]))
+
 g.entries["NETWORK_TYPE"].set("LoKR (Kronecker)")
 g._on_network_type_changed()
 root.update()
+ck("LoKR selected -> factor shown, rank/alpha hidden",
+   _visible(g.entries["LOKR_FACTOR"]) and not _visible(g.entries["NETWORK_DIM"])
+   and not _visible(g.entries["NETWORK_ALPHA"]))
 
 # Switching to Klein with LoKR selected must restore rank/alpha (Klein trains standard only).
 g.architecture_var.set(KLEIN)
@@ -106,15 +103,15 @@ ck("preset sweep captures NETWORK_TYPE + LOKR_FACTOR",
 ck("NETWORK_TYPE is strict-combo protected (junk can't be .set() onto it)",
    "NETWORK_TYPE" in G.LoRATrainerGUI._STRICT_COMBO_KEYS)
 for name, preset in G.KREA2_BUILT_IN_PRESETS.items():
-    ck(f"  built-in '{name[:30]}...' pins LoKR (the default)",
-       preset.get("NETWORK_TYPE") == "LoKR (Kronecker)")
+    ck(f"  built-in '{name[:30]}...' pins standard LoRA",
+       preset.get("NETWORK_TYPE") == "LoRA (standard)")
 
-# Applying a built-in preset resets a standard-LoRA selection back to LoKR.
-g.entries["NETWORK_TYPE"].set("LoRA (standard)")
+# Applying a built-in preset resets a LoKR selection back to standard.
+g.entries["NETWORK_TYPE"].set("LoKR (Kronecker)")
 g._apply_preset_values(next(iter(G.KREA2_BUILT_IN_PRESETS.values())))
 root.update()
-ck("loading a built-in preset resets Network Type to LoKR",
-   g.entries["NETWORK_TYPE"].get() == "LoKR (Kronecker)", g.entries["NETWORK_TYPE"].get())
+ck("loading a built-in preset resets Network Type to standard",
+   g.entries["NETWORK_TYPE"].get() == "LoRA (standard)", g.entries["NETWORK_TYPE"].get())
 
 root.destroy()
 print()

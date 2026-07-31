@@ -445,8 +445,8 @@ BUILT_IN_PRESETS = {
 # ships a single sensible-defaults entry. Users can still save their own via Save Preset —
 # those land in the per-architecture preset folder and appear alongside this one.
 KREA2_BUILT_IN_PRESETS = {
-    "✨ Krea 2 Defaults (LoKR, full model)": {
-        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "NETWORK_TYPE": "LoKR (Kronecker)",
+    "✨ Krea 2 Defaults (rank 32, full model)": {
+        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "NETWORK_TYPE": "LoRA (standard)",
         "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 30, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
@@ -467,8 +467,8 @@ KREA2_BUILT_IN_PRESETS = {
     },
     # Rank 8 + Adaptive LR at an aggressive floor: fewer epochs to a usable LoRA. Everything
     # else identical to Krea 2 Defaults (which stays the preset applied on family switch).
-    "✨ Krea 2 Ultra Fast (LoKR, adaptive LR)": {
-        "NETWORK_DIM": 8, "NETWORK_ALPHA": 8, "NETWORK_TYPE": "LoKR (Kronecker)",
+    "✨ Krea 2 Ultra Fast (rank 8, adaptive LR)": {
+        "NETWORK_DIM": 8, "NETWORK_ALPHA": 8, "NETWORK_TYPE": "LoRA (standard)",
         "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
@@ -498,8 +498,8 @@ KREA2_BUILT_IN_PRESETS = {
     # Fewer epochs (15) because style overbakes fast, and on Krea 2 that shows up as
     # generations dragging toward the training set's COMPOSITIONS, not just its look —
     # so save every epoch and scrub for the sweet spot in LoRA Royale.
-    "✨ Krea 2 Style (LoKR, gentle LR)": {
-        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoKR (Kronecker)",
+    "✨ Krea 2 Style (rank 16, gentle LR)": {
+        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
         "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 15, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "5e-5", "ADAPTIVE_LR_MAX": "2e-4",
@@ -1036,9 +1036,9 @@ class LoRATrainerGUI:
             "LORA_LR_RATIO": 1,
             "NETWORK_DIM": 4,
             "NETWORK_ALPHA": 4,
-            # Krea 2 only (Klein hides it and trains standard). LoKR is the DEFAULT for
-            # Krea 2 — validated 31 Jul: highest likeness ever measured here, no skin sheen.
-            "NETWORK_TYPE": "LoKR (Kronecker)",
+            # Krea 2 only (Klein hides it and trains standard). LoRA default; LoKR is the
+            # quality pick (validated 31 Jul: highest likeness measured here, no skin sheen).
+            "NETWORK_TYPE": "LoRA (standard)",
             "LOKR_FACTOR": 8,
             "MAX_TRAIN_EPOCHS": 12,
             "SAVE_EVERY_N_EPOCHS": 1,
@@ -2881,9 +2881,9 @@ class LoRATrainerGUI:
         _nt_label.grid(row=18, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         self.labels["NETWORK_TYPE"] = _nt_label
         self.entries["NETWORK_TYPE"] = ttk.Combobox(
-            training_content, values=["LoKR (Kronecker)", "LoRA (standard)"],
+            training_content, values=["LoRA (standard)", "LoKR (Kronecker)"],
             state="readonly", width=38)
-        self.entries["NETWORK_TYPE"].set(self.settings.get("NETWORK_TYPE", "LoKR (Kronecker)"))
+        self.entries["NETWORK_TYPE"].set(self.settings.get("NETWORK_TYPE", "LoRA (standard)"))
         self.entries["NETWORK_TYPE"].grid(row=18, column=1, sticky=tk.EW, padx=5, pady=4)
         self.entries["NETWORK_TYPE"].bind("<<ComboboxSelected>>",
                                           lambda e: self._on_network_type_changed())

@@ -1,12 +1,12 @@
-# Fizgig 3.0 — LoKR training, and it's the new Krea 2 default
+# Fizgig 3.0 — LoKR training for Krea 2
 
 Fizgig now trains **LoKR** (LyCORIS Kronecker) on Krea 2 — the parametrization the community
-rates highest for character likeness — and after validation on real runs, it's the **default**:
-open Krea 2 training or pick any preset and you're training LoKR.
+rates highest for character likeness. Pick it from the new **Network Type** dropdown on the
+Training tab; standard LoRA remains the default.
 
-## Why we made it the default
+## Why you'll want to try it
 
-Same dataset, same settings, LoKR vs our standard-LoRA path:
+Same dataset, same settings, LoKR vs standard LoRA in our validation runs:
 
 - **The highest likeness we have ever measured** with Fizgig's own ArcFace scorer — beating
   every previous run on the same instrument.
@@ -14,17 +14,19 @@ Same dataset, same settings, LoKR vs our standard-LoRA path:
   from the earliest epochs and holding through convergence.
 
 Where LoRA squeezes learning through a thin low-rank slice, LoKR covers the whole weight matrix
-with structure. Identity seems to live in exactly the kind of change that captures.
+with structure. Identity seems to live in exactly the kind of change that captures. The
+straightforward trade, from our testing: **LoKR is slightly higher quality, LoRA is slightly
+faster** — the hint next to the dropdown says the same.
 
 ## How it works
 
 - **One dial.** The **Factor** field replaces rank and alpha. Lower factor = more capacity and
   bigger files (factor 8 ≈ 400 MB, factor 16 ≈ 100 MB). 8 is the validated default.
 - **Everything intelligent still applies** — per-image loss watch, adaptive LR, auto-recaption,
-  Context LoRA, pause/resume, live previews. No other LoKR trainer has any of that.
+  Context LoRA (any format context under any network type), pause/resume, live previews. No
+  other LoKR trainer has any of that.
 - **Straight into ComfyUI.** Output is standard LyCORIS format; epoch checkpoints too.
-- **Prefer standard LoRA?** It's the other entry in the Network Type dropdown. Klein is
-  unchanged and trains standard LoRA as always.
+- **Klein is unchanged** and trains standard LoRA as always.
 
 Headless: `--network_type lokr --lokr_factor 8` on `krea2_train.py`.
 

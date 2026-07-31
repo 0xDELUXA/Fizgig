@@ -216,6 +216,88 @@ with tempfile.TemporaryDirectory() as td:
        any(k.startswith("lora_unet_") and k.endswith(".lora_down.weight") for k in ssd)
        and detect_lora_format(ssd) == "kohya")
 
+# --- 5. lossless LoKR bake (Repair Studio / Explorer save path) ---------------------------
+from fizgig.repair_studio.bake import save_repaired_lora  # noqa: E402
+from fizgig.repair_studio.state import SliderState  # noqa: E402
+
+
+def _mk_lokr_sd():
+    """Two Krea 2-named LoKR modules (out 24 = 4x6, in 16 = 4x4), alpha 1.0."""
+    g = torch.Generator().manual_seed(7)
+    sd = {}
+    for blk in (0, 1):
+        sd[f"lora_unet_blocks_{blk}_attn_qkv.lokr_w1"] = torch.randn(4, 4, generator=g)
+        sd[f"lora_unet_blocks_{blk}_attn_qkv.lokr_w2"] = torch.randn(6, 4, generator=g)
+        sd[f"lora_unet_blocks_{blk}_attn_qkv.alpha"] = torch.tensor(1.0)
+    return sd
+
+
+def _dense(sd, blk):
+    return torch.kron(sd[f"lora_unet_blocks_{blk}_attn_qkv.lokr_w1"].float(),
+                      sd[f"lora_unet_blocks_{blk}_attn_qkv.lokr_w2"].float())
+
+
+with tempfile.TemporaryDirectory() as td:
+    src = os.path.join(td, "lokr_src.safetensors")
+    save_file(_mk_lokr_sd(), src)
+
+    # THE headline regression: a no-op edit keeps LoKR as LoKR, tensors byte-identical.
+    st = SliderState.default_krea2()
+    out1 = os.path.join(td, "noop.safetensors")
+    summary = save_repaired_lora(src, st, out1)
+    osd = load_file(out1)
+    ck("no-op bake: format stays lokr", detect_lora_format(osd) == "lokr")
+    ck("  summary reports lycoris out, zero SVD",
+       summary["format_out"] == "lycoris" and summary["lycoris_converted"] == 0, summary)
+    ck("  tensors byte-identical (alpha included)",
+       set(osd) == set(_mk_lokr_sd())
+       and all(torch.equal(osd[k], v) for k, v in _mk_lokr_sd().items()))
+
+    # Multiplier bake: dense delta of the baked module == m x original, with sentinel alpha.
+    st2 = SliderState.default_krea2()
+    st2.blocks["block_0"].primary_strength = 0.6
+    st2.blocks["block_1"].primary_enabled = False
+    out2 = os.path.join(td, "scaled.safetensors")
+    summary2 = save_repaired_lora(src, st2, out2)
+    osd2 = load_file(out2)
+    ck("scaled bake: still lokr, no SVD",
+       detect_lora_format(osd2) == "lokr" and summary2["lycoris_converted"] == 0)
+    ck("  disabled block dropped",
+       not any("blocks_1" in k for k in osd2) and "block_1" in summary2["dropped_blocks"])
+    ref = 0.6 * _dense(_mk_lokr_sd(), 0)
+    got = _dense(osd2, 0) * 1.0  # sentinel alpha -> scale 1.0 at load
+    ck("  baked dense delta == 0.6 x original",
+       torch.allclose(got, ref, atol=1e-5), f"max diff {(got - ref).abs().max():.2e}")
+    ck("  alpha is the >=1e6 sentinel (scale baked in)",
+       float(osd2["lora_unet_blocks_0_attn_qkv.alpha"]) >= 1e6)
+    # And the loader agrees: reload the baked file and check the module's effective scale.
+    from fizgig.networks.lora import lycoris_scale_from_keys
+    mod_keys = {k.split(".", 1)[1]: v for k, v in osd2.items() if k.startswith("lora_unet_blocks_0")}
+    ck("  lycoris_scale_from_keys reads the sentinel as 1.0",
+       lycoris_scale_from_keys(mod_keys) == 1.0)
+
+    # Standard-LoRA regression through the same path: behaviour unchanged.
+    std = {
+        "lora_unet_blocks_0_attn_qkv.lora_down.weight": torch.randn(2, 16),
+        "lora_unet_blocks_0_attn_qkv.lora_up.weight": torch.randn(24, 2),
+        "lora_unet_blocks_0_attn_qkv.alpha": torch.tensor(2.0),
+    }
+    src_std = os.path.join(td, "std_src.safetensors")
+    save_file(std, src_std)
+    st3 = SliderState.default_krea2()
+    st3.blocks["block_0"].primary_strength = 0.5
+    out3 = os.path.join(td, "std_out.safetensors")
+    s3 = save_repaired_lora(src_std, st3, out3)
+    osd3 = load_file(out3)
+    ref_std = 0.5 * (std["lora_unet_blocks_0_attn_qkv.lora_up.weight"].float()
+                     @ std["lora_unet_blocks_0_attn_qkv.lora_down.weight"].float())
+    got_std = (osd3["lora_unet_blocks_0_attn_qkv.lora_up.weight"].float()
+               @ osd3["lora_unet_blocks_0_attn_qkv.lora_down.weight"].float())
+    ck("standard-LoRA bake unchanged: 0.5 x delta, alpha = rank",
+       torch.allclose(got_std, ref_std, atol=1e-5)
+       and float(osd3["lora_unet_blocks_0_attn_qkv.alpha"]) == 2.0
+       and s3["format_out"] == "standard")
+
 print()
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
 sys.exit(1 if FAILS else 0)

@@ -10896,10 +10896,8 @@ class LoRATrainerGUI:
             if _fmt in ("lokr", "loha"):
                 messagebox.showinfo("LyCORIS LoRA loaded",
                     f"This is a {_fmt.upper()} LoRA (LyCORIS format). "
-                    f"Preview and profiling work normally.\n\n"
-                    f"If you save, each block will be converted to standard LoRA via SVD. "
-                    f"This may take a minute or two for large LoRAs (GPU-accelerated when available). "
-                    f"The result is a slight approximation of the original.")
+                    f"Everything works normally, and saving keeps the native "
+                    f"{_fmt.upper()} format — no conversion, no approximation.")
             self.explorer_status_var.set(
                 f"Loaded: {os.path.basename(path)} ({n_active}/32 blocks). Click Re-roll to start exploring.")
             # Initialize baseline state with user-specified LoRA strength
@@ -11495,22 +11493,7 @@ class LoRATrainerGUI:
         if not lora_path:
             return
 
-        # Warn if LyCORIS — saving will require SVD materialization
-        try:
-            from safetensors.torch import load_file as _lf
-            from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
-            _fmt = _df(_ek(_lf(lora_path)))
-            if _fmt in ("lokr", "loha"):
-                proceed = messagebox.askyesno(
-                    "LyCORIS LoRA",
-                    f"This is a {_fmt.upper()} LoRA. Preview and editing work normally, "
-                    f"but saving will require SVD conversion (may take a minute).\n\n"
-                    f"Consider using the Extract tab to convert to standard LoRA first "
-                    f"for faster saves.\n\nContinue anyway?")
-                if not proceed:
-                    return
-        except Exception:
-            pass
+        # LyCORIS files now save natively (lossless) — the old SVD-warning gate is gone.
 
         baseline = self._explorer_baseline_state
 
@@ -11591,8 +11574,11 @@ class LoRATrainerGUI:
         from fizgig.networks.lora import UnsupportedLoRAFormat
         try:
             summary = save_repaired_lora(primary_path, self._explorer_baseline_state, out)
+            _fmt_note = ("\n\nSaved natively in LyCORIS format — lossless, no conversion."
+                         if summary.get('format_out') == 'lycoris' else "")
             messagebox.showinfo("Explored LoRA saved",
-                                f"Saved: {out}\n\nKeys: {summary['keys_in']} -> {summary['keys_out']}")
+                                f"Saved: {out}\n\nKeys: {summary['keys_in']} -> {summary['keys_out']}"
+                                + _fmt_note)
         except UnsupportedLoRAFormat as ex:
             messagebox.showerror("Unsupported LoRA format", str(ex))
         except Exception:
@@ -17384,9 +17370,9 @@ class LoRATrainerGUI:
             n_active = len(self.repair_engine.primary_block_ids)
             if _fmt in ("lokr", "loha"):
                 messagebox.showinfo("LyCORIS LoRA loaded",
-                    f"This is a {_fmt.upper()} LoRA. Live preview works normally.\n\n"
-                    f"If you save, blocks will be converted to standard LoRA via SVD "
-                    f"(slight approximation).")
+                    f"This is a {_fmt.upper()} LoRA. Everything works normally, and saving "
+                    f"keeps the native {_fmt.upper()} format — lossless, no conversion. "
+                    f"Only donor-BLENDING a block converts that block via SVD.")
             # Look up a matching Profiler sidecar by content hash and render
             # the inline info panel if one exists.
             self._find_repair_profile_match()
@@ -17421,10 +17407,10 @@ class LoRATrainerGUI:
             if _fmt_d in ("lokr", "loha"):
                 messagebox.showinfo("LyCORIS donor loaded",
                     f"This donor is a {_fmt_d.upper()} LoRA (LyCORIS format). "
-                    f"Live preview works normally.\n\n"
-                    f"If you save with blended blocks, they will be converted to standard "
-                    f"LoRA via SVD. This may take a minute or two for large LoRAs "
-                    f"(GPU-accelerated when available).")
+                    f"Live preview works normally, and donor-only blocks save natively.\n\n"
+                    f"Only blocks where primary AND donor are both active get converted to "
+                    f"standard LoRA via SVD on save (Kronecker/Hadamard forms can't "
+                    f"rank-concatenate).")
             self._repair_donor_loaded = True
             # Show donor sub-rows + master section toggles + enable the "Donor" master target radio
             for vars_ in self.repair_block_vars.values():
@@ -17838,6 +17824,11 @@ class LoRATrainerGUI:
             )
             if summary['blended_blocks']:
                 msg += "\n\nNote: blended blocks have rank = rank_primary + rank_donor. File size grows proportionally."
+            if summary.get('format_out') == 'lycoris':
+                msg += "\n\nSaved natively in LyCORIS format (LoKR/LoHa) — lossless, no conversion."
+            elif summary.get('lycoris_converted'):
+                msg += (f"\n\n{summary['lycoris_converted']} blended LyCORIS module(s) were "
+                        f"converted to standard LoRA via SVD; everything else stayed native.")
             messagebox.showinfo("Repaired LoRA saved", msg)
         except UnsupportedLoRAFormat as ex:
             messagebox.showerror("Bake not supported for this LoRA format", str(ex))
@@ -17907,15 +17898,7 @@ class LoRATrainerGUI:
             from safetensors.torch import load_file as _lf
             from fizgig.networks.lora import ensure_kohya_lora_state_dict as _ek, detect_lora_format as _df
             _fmt = _df(_ek(_lf(lora_path)))
-            if _fmt in ("lokr", "loha"):
-                proceed = messagebox.askyesno(
-                    "LyCORIS LoRA",
-                    f"This is a {_fmt.upper()} LoRA. Explorer preview works normally, "
-                    f"but saving will require SVD conversion (may take a minute).\n\n"
-                    f"Consider using the Extract tab to convert to standard LoRA first "
-                    f"for faster saves.\n\nContinue anyway?")
-                if not proceed:
-                    return
+            # LyCORIS saves natively now (lossless) — no SVD gate needed on the handoff.
         except Exception:
             pass
 

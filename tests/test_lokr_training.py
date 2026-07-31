@@ -157,6 +157,65 @@ with tempfile.TemporaryDirectory() as td:
             ok = False
     ck("  reloaded deltas match trained deltas to 1e-6 (scale round-trips)", ok)
 
+# --- 4. comfy-format final save (trainer._save_lora) --------------------------------------
+# The final artifact ships LyCORIS-standard keys (diffusion_model.<dotted>.lokr_*) — the
+# format every ComfyUI LoKR in the wild uses — and must round-trip through our own loader.
+from fizgig.krea2.trainer import _save_lora  # noqa: E402
+
+net._network_type = "lokr"
+net._lokr_factor = 4
+net._dotted_names = {
+    f"lora_unet_{name.replace('.', '_')}": name
+    for name, m in dit.named_modules() if isinstance(m, torch.nn.Linear)
+}
+
+with tempfile.TemporaryDirectory() as td:
+    p = os.path.join(td, "final.safetensors")
+    _save_lora(net, p, 4, 1.0, torch.float32, comfy_format=True)
+    from safetensors import safe_open
+    with safe_open(p, framework="pt") as f:
+        meta = f.metadata()
+    csd = load_file(p)
+
+    ck("comfy save: keys are diffusion_model.<dotted>.lokr_*",
+       "diffusion_model.blocks.0.attn.qkv.lokr_w1" in csd
+       and "diffusion_model.blocks.0.attn.qkv.alpha" in csd, sorted(csd.keys())[:3])
+    ck("  no flattened lora_unet_ keys remain", not any(k.startswith("lora_unet_") for k in csd))
+    ck("  metadata records lokr module + factor",
+       meta.get("ss_network_module") == "fizgig.krea2 (lokr, all-Linear)"
+       and meta.get("ss_lokr_factor") == "4", meta)
+    ck("  detect_lora_format on the comfy file says lokr", detect_lora_format(csd) == "lokr")
+
+    back = ensure_kohya_lora_state_dict(dict(csd))
+    native = {k: v for k, v in net.state_dict().items()}
+    ck("  ensure_kohya round-trips comfy keys back to native names",
+       set(back.keys()) == set(native.keys()),
+       sorted(set(back.keys()) ^ set(native.keys()))[:4])
+    ck("  ...with identical tensors",
+       all(torch.equal(back[k], native[k].float()) or torch.allclose(back[k], native[k].to(back[k].dtype))
+           for k in back))
+
+    # And the full consumer chain: comfy file -> inf network -> same deltas as trained.
+    dit3 = ToyDiT()
+    inf3 = create_network_from_weights(None, 1.0, back, None, dit3, for_inference=True)
+    inf3.apply_to(text_encoders=None, unet=dit3, apply_text_encoder=False, apply_unet=True)
+    inf3.load_state_dict(back, strict=False)
+    ok = all(torch.allclose(torch.kron(m._w1(), m._w2()) * m.scale * m.multiplier,
+                            ref_deltas[m.lora_name], atol=1e-6) for m in inf3.unet_loras)
+    ck("  comfy file renders the trained deltas exactly", ok and len(inf3.unet_loras) == 4)
+
+# Standard-LoRA regression: comfy_format is a no-op for a normal network.
+dit4 = ToyDiT()
+lora_net = create_network(None, "lora_unet", 1.0, 4, 4.0, None, [], dit4)
+lora_net.apply_to(text_encoders=None, unet=dit4, apply_text_encoder=False, apply_unet=True)
+with tempfile.TemporaryDirectory() as td:
+    p = os.path.join(td, "std.safetensors")
+    _save_lora(lora_net, p, 4, 4.0, torch.float32, comfy_format=True)
+    ssd = load_file(p)
+    ck("standard LoRA with comfy_format=True still saves kohya keys",
+       any(k.startswith("lora_unet_") and k.endswith(".lora_down.weight") for k in ssd)
+       and detect_lora_format(ssd) == "kohya")
+
 print()
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILED: {FAILS}")
 sys.exit(1 if FAILS else 0)

@@ -1268,7 +1268,17 @@ def train_krea2(
     if str(compile_blocks).lower() == "auto":
         from fizgig.utils.capabilities import should_compile
         _steps_est = group.num_train_items * max_train_epochs
-        _do_compile, _why = should_compile(_steps_est, quant_4bit, quant_int8, blocks_to_swap)
+        # The largest ACTUAL bucket, not the Target Megapixels box — bucket_no_upscale can land
+        # buckets well below the target, and it's the real token count that sets compiled-path
+        # VRAM. Unreadable buckets fall back to 0.25, i.e. the pre-resolution-aware behaviour.
+        _mp_max = 0.25
+        try:
+            _mp_max = max(w * h / 1e6 for ds in group.datasets
+                          for (w, h) in ds.batch_manager.bucket_resos)
+        except Exception:
+            pass
+        _do_compile, _why = should_compile(_steps_est, quant_4bit, quant_int8, blocks_to_swap,
+                                           mp=_mp_max)
         logger.info("[compile] auto: %s — %s", "ENABLED" if _do_compile else "off", _why)
 
     # Preview setup: pre-encode prompts (frees the 8GB encoder) + load the VAE BEFORE the RAW DiT,

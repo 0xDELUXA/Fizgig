@@ -98,6 +98,36 @@ ok, why = should_compile(LONG, False, "bf16", 0, vram_gb=22.0, caps=CAPS, mp=0.2
 ck("int8 @0.25MP batch 2, 22 GB free -> DECLINED, reason names the batch",
    not ok and "batch 2" in why and "batch size" in why, why)
 
+# --- 2c. the memory strategy prices LoKR's factor -----------------------------------------
+# Full-matrix LoKR params scale 1/factor²; factor 4 is ~+4 GB of trainable state the rank-32
+# LoRA baseline doesn't carry. Defaults (lora, or lokr at factor >= 16) add exactly zero.
+from fizgig.utils.capabilities import (estimate_krea2_peak, _lokr_extra_gb,  # noqa: E402
+                                       recommend_krea2_strategy, _NF4_PEAK_GB)
+
+ck("lokr factor 16+ adds nothing", _lokr_extra_gb(16) == 0.0 and _lokr_extra_gb(32) == 0.0)
+ck("lokr factor 8 adds ~0.6 GB", abs(_lokr_extra_gb(8) - 0.6) < 0.05, _lokr_extra_gb(8))
+ck("lokr factor 4 adds ~4.2 GB", 3.5 < _lokr_extra_gb(4) < 5.0, _lokr_extra_gb(4))
+ck("estimate: lora path unchanged by the new params",
+   estimate_krea2_peak(16.2, 0.25, 1, 32)
+   == estimate_krea2_peak(16.2, 0.25, 1, 32, network_type="lora", lokr_factor=4))
+ck("estimate: lokr factor 8 == lora + 0.6",
+   abs(estimate_krea2_peak(16.2, 0.25, 1, 32, network_type="lokr", lokr_factor=8)
+       - (16.2 + 0.6)) < 0.05)
+
+# The scenario that matters: 16 GB card (~14.5 free), NF4. Factor 8 fits resident;
+# factor 4 must NOT be told it fits.
+CAPS_NO_INT8 = Capabilities(has_cuda=True, device_name="16gb", sm=(8, 6),
+                            vram_gb=16.0, vram_free_gb=14.5,
+                            fp8_matmul=False, int8_matmul_train=False, bitsandbytes=True)
+p8 = recommend_krea2_strategy(vram_gb=14.5, caps=CAPS_NO_INT8,
+                              network_type="lokr", lokr_factor=8)
+ck("16 GB + LoKR factor 8 -> NF4 no swap still fits", p8.quant_4bit and p8.blocks_to_swap == 0,
+   p8.reason)
+p4 = recommend_krea2_strategy(vram_gb=14.5, caps=CAPS_NO_INT8,
+                              network_type="lokr", lokr_factor=4)
+ck("16 GB + LoKR factor 4 -> NF4-resident no longer claimed to fit",
+   not (p4.quant_4bit and p4.blocks_to_swap == 0), p4.reason)
+
 # --- 3. the earlier gates still fire first, untouched by mp -------------------------------
 ok, why = sc("int8", 30.0, mp=2.0, swap=8)
 ck("block swap still declines before any VRAM math", not ok and "block swap" in why, why)

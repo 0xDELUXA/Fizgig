@@ -5004,6 +5004,16 @@ class LoRATrainerGUI:
                 _rk = int(self.entries["NETWORK_DIM"].get().strip() or 32)
             except (ValueError, KeyError, AttributeError):
                 _rk = 32
+            # LoKR: the hidden rank box is meaningless (baseline it at 32) and the factor
+            # carries the real state cost — params scale 1/factor², so factor 4 is ~+4 GB
+            # the budget must know about on tight cards.
+            _ntype = "lokr" if self._network_type_is_lokr() else "lora"
+            if _ntype == "lokr":
+                _rk = 32
+            try:
+                _lf = int(self.entries["LOKR_FACTOR"].get().strip() or 8)
+            except (ValueError, KeyError, AttributeError):
+                _lf = 8
             # If the user pinned the 4-bit control, the plan must be built AROUND that choice —
             # otherwise the swap count is sized for a quantisation that will not run. That
             # exact mismatch (fp8 given NF4's swap-0 plan) OOM'd 16 GB cards; reproduced and
@@ -5015,7 +5025,8 @@ class LoRATrainerGUI:
             # briefly making Off mean plain fp8 cost 20 GB+ cards the fastest path for nothing.
             _force = self._krea2_force_quant() if hasattr(self, "quant_4bit_mode_var") else None
             plan = recommend_krea2_strategy(caps=caps, mp=_mp, batch=_bs, rank=_rk,
-                                            force_quant=_force)
+                                            force_quant=_force,
+                                            network_type=_ntype, lokr_factor=_lf)
         except Exception:
             self._auto_quant_int8 = ""   # no strategy ran — a stale INT8 pick must not leak
             return self._auto_krea2_blocks_swap()

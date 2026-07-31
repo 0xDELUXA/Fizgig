@@ -6192,7 +6192,9 @@ class LoRATrainerGUI:
             self.update_caption_log("Loading processor...\n")
             self.master.update_idletasks()
 
-            self.florence_processor = AutoProcessor.from_pretrained(
+            from fizgig.utils.hf_cache import from_pretrained_cache_first
+            self.florence_processor = from_pretrained_cache_first(
+                AutoProcessor,
                 model_name,
                 trust_remote_code=True
             )
@@ -6204,7 +6206,8 @@ class LoRATrainerGUI:
             # accesses self.language_model — but transformers 4.50+ reads it during
             # __init__ before language_model exists, causing AttributeError.
             # attn_implementation="eager" bypasses the SDPA check entirely.
-            self.florence_model = AutoModelForCausalLM.from_pretrained(
+            self.florence_model = from_pretrained_cache_first(
+                AutoModelForCausalLM,
                 model_name,
                 torch_dtype=torch.float16 if device == "cuda" else torch.float32,
                 trust_remote_code=True,
@@ -6294,9 +6297,11 @@ class LoRATrainerGUI:
             import torch as _torch
             from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
             device = "cuda" if _torch.cuda.is_available() else "cpu"
+            from fizgig.utils.hf_cache import from_pretrained_cache_first
             model_id = "Helsinki-NLP/opus-mt-en-zh"
-            self._translator_tokenizer = AutoTokenizer.from_pretrained(model_id)
-            self._translator_model = AutoModelForSeq2SeqLM.from_pretrained(
+            self._translator_tokenizer = from_pretrained_cache_first(AutoTokenizer, model_id)
+            self._translator_model = from_pretrained_cache_first(
+                AutoModelForSeq2SeqLM,
                 model_id,
                 torch_dtype=_torch.float16 if device == "cuda" else _torch.float32,
             ).to(device)

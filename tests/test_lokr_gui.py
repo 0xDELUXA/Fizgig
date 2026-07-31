@@ -48,42 +48,36 @@ ck("  default is standard LoRA (LoKR one pick away)",
 ck("  default factor is 8", g.entries["LOKR_FACTOR"].get() == "8",
    g.entries["LOKR_FACTOR"].get())
 
+# The combo/entry are packed inside row frames (widget + hint side by side), so the frames
+# are what get shown/hidden — check those.
 g.architecture_var.set(KLEIN)
 g.update_ui_for_architecture()
 root.update()
-ck("Klein: Network Type hidden", not _visible(g.entries["NETWORK_TYPE"]))
+ck("Klein: Network Type hidden", not _visible(g._network_type_rowf))
 ck("  Klein: factor hidden, rank/alpha shown",
-   not _visible(g.entries["LOKR_FACTOR"]) and _visible(g.entries["NETWORK_DIM"]))
+   not _visible(g._lokr_factor_rowf) and _visible(g.entries["NETWORK_DIM"]))
 
 g.architecture_var.set(KREA2)
 g.update_ui_for_architecture()
 root.update()
-ck("Krea 2: Network Type shown", _visible(g.entries["NETWORK_TYPE"]))
-ck("  default LoRA -> rank/alpha shown, factor hidden",
-   _visible(g.entries["NETWORK_DIM"]) and not _visible(g.entries["LOKR_FACTOR"]))
+ck("Krea 2: Network Type shown", _visible(g._network_type_rowf))
+ck("  default LoRA -> rank/alpha shown, factor (and its hint) hidden",
+   _visible(g.entries["NETWORK_DIM"]) and not _visible(g._lokr_factor_rowf))
 
 g.entries["NETWORK_TYPE"].set("LoKR (Kronecker)")
 g._on_network_type_changed()
 root.update()
-ck("LoKR selected -> factor shown, rank/alpha hidden",
-   _visible(g.entries["LOKR_FACTOR"]) and not _visible(g.entries["NETWORK_DIM"])
+ck("LoKR selected -> factor row (entry + sweet-spot hint) shown, rank/alpha hidden",
+   _visible(g._lokr_factor_rowf) and not _visible(g.entries["NETWORK_DIM"])
    and not _visible(g.entries["NETWORK_ALPHA"]))
-ck("  factor hint (sweet spot) rides with the factor row", _visible(g._lokr_factor_hint))
-g.entries["NETWORK_TYPE"].set("LoRA (standard)")
-g._on_network_type_changed()
-root.update()
-ck("  LoRA hides the factor hint again", not _visible(g._lokr_factor_hint))
-g.entries["NETWORK_TYPE"].set("LoKR (Kronecker)")
-g._on_network_type_changed()
-root.update()
 
 # Switching to Klein with LoKR selected must restore rank/alpha (Klein trains standard only).
 g.architecture_var.set(KLEIN)
 g.update_ui_for_architecture()
 root.update()
 ck("Klein with LoKR still selected -> rank/alpha back, factor + combo hidden",
-   _visible(g.entries["NETWORK_DIM"]) and not _visible(g.entries["LOKR_FACTOR"])
-   and not _visible(g.entries["NETWORK_TYPE"]))
+   _visible(g.entries["NETWORK_DIM"]) and not _visible(g._lokr_factor_rowf)
+   and not _visible(g._network_type_rowf))
 g.architecture_var.set(KREA2)
 g.update_ui_for_architecture()
 root.update()

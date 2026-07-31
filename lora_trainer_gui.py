@@ -2880,32 +2880,46 @@ class LoRATrainerGUI:
                              fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         _nt_label.grid(row=18, column=0, sticky=tk.W, padx=(12, 8), pady=4)
         self.labels["NETWORK_TYPE"] = _nt_label
+        # Widget + hint share a row frame so the hint hugs the control instead of being
+        # pushed to the far column edge by the full-width rows above.
+        self._network_type_rowf = tk.Frame(training_content, bg=COLORS["bg_surface"])
+        self._network_type_rowf.grid(row=18, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
         self.entries["NETWORK_TYPE"] = ttk.Combobox(
-            training_content, values=["LoRA (standard)", "LoKR (Kronecker)"],
+            self._network_type_rowf, values=["LoRA (standard)", "LoKR (Kronecker)"],
             state="readonly", width=18)
         self.entries["NETWORK_TYPE"].set(self.settings.get("NETWORK_TYPE", "LoRA (standard)"))
-        self.entries["NETWORK_TYPE"].grid(row=18, column=1, sticky=tk.W, padx=5, pady=4)
+        self.entries["NETWORK_TYPE"].pack(side=tk.LEFT)
         self.entries["NETWORK_TYPE"].bind("<<ComboboxSelected>>",
                                           lambda e: self._on_network_type_changed())
-        self.rows["NETWORK_TYPE"] = {"row": 18, "label": _nt_label,
-                                     "entry": self.entries["NETWORK_TYPE"],
-                                     "browse": None, "parent": training_content}
         self._network_type_hint = tk.Label(
-            training_content,
+            self._network_type_rowf,
             text="LoKR: slightly higher quality · LoRA: slightly faster",
             font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             justify=tk.LEFT)
-        self._network_type_hint.grid(row=18, column=2, sticky=tk.W, padx=(8, 12), pady=4)
-        self._add_field_to_section(training_content, "LOKR_FACTOR", "LoKR Factor", "int", 19)
-        # A factor is one small number — shrink the stock full-width Entry to match.
-        self.entries["LOKR_FACTOR"].configure(width=8)
-        self.entries["LOKR_FACTOR"].grid(row=19, column=1, sticky=tk.W, padx=5, pady=4)
+        self._network_type_hint.pack(side=tk.LEFT, padx=(10, 0))
+        # rows entry is the FRAME (the gridded thing show_row/hide_row must toggle).
+        self.rows["NETWORK_TYPE"] = {"row": 18, "label": _nt_label,
+                                     "entry": self._network_type_rowf,
+                                     "browse": None, "parent": training_content}
+
+        _lf_label = tk.Label(training_content, text="LoKR Factor:", font=(FONT_FAMILY, 10),
+                             fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
+        _lf_label.grid(row=19, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.labels["LOKR_FACTOR"] = _lf_label
+        self._lokr_factor_rowf = tk.Frame(training_content, bg=COLORS["bg_surface"])
+        self._lokr_factor_rowf.grid(row=19, column=1, columnspan=2, sticky=tk.W, padx=5, pady=4)
+        self.entries["LOKR_FACTOR"] = ttk.Entry(self._lokr_factor_rowf, width=8)
+        self.entries["LOKR_FACTOR"].insert(0, str(self.settings.get("LOKR_FACTOR", 8)))
+        self.entries["LOKR_FACTOR"].pack(side=tk.LEFT)
         self._lokr_factor_hint = tk.Label(
-            training_content,
+            self._lokr_factor_rowf,
             text="8 is the sweet spot · lower = stronger & bigger files · higher = smaller",
             font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             justify=tk.LEFT)
-        self._lokr_factor_hint.grid(row=19, column=2, sticky=tk.W, padx=(8, 12), pady=4)
+        self._lokr_factor_hint.pack(side=tk.LEFT, padx=(10, 0))
+        self.rows["LOKR_FACTOR"] = {"row": 19, "label": _lf_label,
+                                    "entry": self._lokr_factor_rowf,
+                                    "browse": None, "parent": training_content}
 
         # Model Area to Train dropdown (blocks + timestep auto-fill)
         self._modelarea_label = ttk.Label(training_content, text="Model Area to Train:")
@@ -4379,8 +4393,8 @@ class LoRATrainerGUI:
                   # torch.compile is wired into krea2_train only.
                   self._compile_blocks_label, self.compile_blocks_check, self._compile_blocks_hint,
                   # Network Type (LoRA/LoKR) is a krea2_train flag; Klein trains standard only.
-                  self.labels["NETWORK_TYPE"], self.entries["NETWORK_TYPE"],
-                  self._network_type_hint):
+                  # The row frame carries the combo + hint together.
+                  self.labels["NETWORK_TYPE"], self._network_type_rowf):
             self._set_widget_visible(w, is_krea2)
         if is_krea2:
             # Restore the rank/alpha <-> factor row swap for the current selection.
@@ -4390,7 +4404,6 @@ class LoRATrainerGUI:
             self.show_row("NETWORK_DIM")
             self.show_row("NETWORK_ALPHA")
             self.hide_row("LOKR_FACTOR")
-            self._lokr_factor_hint.grid_remove()
 
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
         # dropdown decide (only shown when the preset is "Custom").
@@ -5340,13 +5353,11 @@ class LoRATrainerGUI:
         if self._network_type_is_lokr():
             self.hide_row("NETWORK_DIM")
             self.hide_row("NETWORK_ALPHA")
-            self.show_row("LOKR_FACTOR")
-            self._lokr_factor_hint.grid()
+            self.show_row("LOKR_FACTOR")   # hint lives inside the row frame, rides along
         else:
             self.show_row("NETWORK_DIM")
             self.show_row("NETWORK_ALPHA")
             self.hide_row("LOKR_FACTOR")
-            self._lokr_factor_hint.grid_remove()
         self._save_last_used_paths()
 
     def toggle_scaled(self):

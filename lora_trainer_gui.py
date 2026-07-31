@@ -446,7 +446,8 @@ BUILT_IN_PRESETS = {
 # those land in the per-architecture preset folder and appear alongside this one.
 KREA2_BUILT_IN_PRESETS = {
     "✨ Krea 2 Defaults (rank 32, full model)": {
-        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "LEARNING_RATE": 1e-4,
+        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "NETWORK_TYPE": "LoRA (standard)",
+        "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 30, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
@@ -467,7 +468,8 @@ KREA2_BUILT_IN_PRESETS = {
     # Rank 8 + Adaptive LR at an aggressive floor: fewer epochs to a usable LoRA. Everything
     # else identical to Krea 2 Defaults (which stays the preset applied on family switch).
     "✨ Krea 2 Ultra Fast (rank 8, adaptive LR)": {
-        "NETWORK_DIM": 8, "NETWORK_ALPHA": 8, "LEARNING_RATE": 1e-4,
+        "NETWORK_DIM": 8, "NETWORK_ALPHA": 8, "NETWORK_TYPE": "LoRA (standard)",
+        "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
@@ -497,7 +499,8 @@ KREA2_BUILT_IN_PRESETS = {
     # generations dragging toward the training set's COMPOSITIONS, not just its look —
     # so save every epoch and scrub for the sweet spot in LoRA Royale.
     "✨ Krea 2 Style (rank 16, gentle LR)": {
-        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "LEARNING_RATE": 1e-4,
+        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
+        "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 15, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "5e-5", "ADAPTIVE_LR_MAX": "2e-4",
         "TARGET_LAYERS": "Full Model", "MIN_TIMESTEP": "", "MAX_TIMESTEP": "",
@@ -1033,6 +1036,8 @@ class LoRATrainerGUI:
             "LORA_LR_RATIO": 1,
             "NETWORK_DIM": 4,
             "NETWORK_ALPHA": 4,
+            "NETWORK_TYPE": "LoRA (standard)",  # Krea 2 only; "LoKR (Kronecker) — experimental"
+            "LOKR_FACTOR": 8,
             "MAX_TRAIN_EPOCHS": 12,
             "SAVE_EVERY_N_EPOCHS": 1,
             "SEED": 42,
@@ -2856,6 +2861,25 @@ class LoRATrainerGUI:
         self._add_field_to_section(training_content, "SAVE_EVERY_N_EPOCHS", "Save Every N Epochs", "int", 8)
         self._add_field_to_section(training_content, "SEED", "Seed", "int", 9)
 
+        # Network Type (Krea 2 only): standard LoRA or LoKR (Kronecker). Rows 18/19 sit between
+        # the Target Megapixels hint (17) and the Krea 2 loss-watch block (20). LoKR replaces
+        # rank/alpha with a single Factor dial, so the rows swap with the selection.
+        _nt_label = tk.Label(training_content, text="Network Type:", font=(FONT_FAMILY, 10),
+                             fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
+        _nt_label.grid(row=18, column=0, sticky=tk.W, padx=(12, 8), pady=4)
+        self.labels["NETWORK_TYPE"] = _nt_label
+        self.entries["NETWORK_TYPE"] = ttk.Combobox(
+            training_content, values=["LoRA (standard)", "LoKR (Kronecker) — experimental"],
+            state="readonly", width=38)
+        self.entries["NETWORK_TYPE"].set(self.settings.get("NETWORK_TYPE", "LoRA (standard)"))
+        self.entries["NETWORK_TYPE"].grid(row=18, column=1, sticky=tk.EW, padx=5, pady=4)
+        self.entries["NETWORK_TYPE"].bind("<<ComboboxSelected>>",
+                                          lambda e: self._on_network_type_changed())
+        self.rows["NETWORK_TYPE"] = {"row": 18, "label": _nt_label,
+                                     "entry": self.entries["NETWORK_TYPE"],
+                                     "browse": None, "parent": training_content}
+        self._add_field_to_section(training_content, "LOKR_FACTOR", "LoKR Factor", "int", 19)
+
         # Model Area to Train dropdown (blocks + timestep auto-fill)
         self._modelarea_label = ttk.Label(training_content, text="Model Area to Train:")
         self._modelarea_label.grid(row=10, column=0, sticky=tk.W, padx=5, pady=2)
@@ -3650,7 +3674,8 @@ class LoRATrainerGUI:
     # current family doesn't offer (cross-family last-train leak, withdrawn LR floors,
     # removed optimizers) must NOT be .set() onto them — readonly Comboboxes accept any
     # value without complaint, and the bad name then dies (or misbehaves) at launch.
-    _STRICT_COMBO_KEYS = {"OPTIMIZER_TYPE", "ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX", "LR_SCHEDULER"}
+    _STRICT_COMBO_KEYS = {"OPTIMIZER_TYPE", "ADAPTIVE_LR_MIN", "ADAPTIVE_LR_MAX", "LR_SCHEDULER",
+                          "NETWORK_TYPE"}
 
     def _apply_preset_values(self, preset):
         """Apply preset values to the UI (shared by load_default_preset and load_custom_preset)"""
@@ -4325,8 +4350,18 @@ class LoRATrainerGUI:
                   self._krea2_autorecap_cb, self._krea2_warmuplook_cb,
                   self._krea2_losswatch_hint,
                   # torch.compile is wired into krea2_train only.
-                  self._compile_blocks_label, self.compile_blocks_check, self._compile_blocks_hint):
+                  self._compile_blocks_label, self.compile_blocks_check, self._compile_blocks_hint,
+                  # Network Type (LoRA/LoKR) is a krea2_train flag; Klein trains standard only.
+                  self.labels["NETWORK_TYPE"], self.entries["NETWORK_TYPE"]):
             self._set_widget_visible(w, is_krea2)
+        if is_krea2:
+            # Restore the rank/alpha <-> factor row swap for the current selection.
+            self._on_network_type_changed()
+        else:
+            # Klein always shows rank/alpha and never the factor, whatever the combo holds.
+            self.show_row("NETWORK_DIM")
+            self.show_row("NETWORK_ALPHA")
+            self.hide_row("LOKR_FACTOR")
 
         # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
         # dropdown decide (only shown when the preset is "Custom").
@@ -5252,6 +5287,25 @@ class LoRATrainerGUI:
             row_info["entry"].grid_remove()
             if row_info["browse"]:
                 row_info["browse"].grid_remove()
+
+    def _network_type_is_lokr(self) -> bool:
+        try:
+            return str(self.entries["NETWORK_TYPE"].get()).startswith("LoKR")
+        except (KeyError, tk.TclError):
+            return False
+
+    def _on_network_type_changed(self):
+        """LoKR has no rank/alpha — a single Factor dial replaces them, so the rows swap.
+        Only meaningful under Krea 2; the arch-visibility pass calls this on family switch."""
+        if self._network_type_is_lokr():
+            self.hide_row("NETWORK_DIM")
+            self.hide_row("NETWORK_ALPHA")
+            self.show_row("LOKR_FACTOR")
+        else:
+            self.show_row("NETWORK_DIM")
+            self.show_row("NETWORK_ALPHA")
+            self.hide_row("LOKR_FACTOR")
+        self._save_last_used_paths()
 
     def toggle_scaled(self):
         """Enable or disable the Scaled checkbox based on FP8 checkbox state"""
@@ -18559,6 +18613,8 @@ class LoRATrainerGUI:
             _check_num("Learning Rate", self.entries["LEARNING_RATE"].get(), float, 0)
         _check_num("Network Dim (Rank)", self.entries["NETWORK_DIM"].get(), int, 1)
         _check_num("Network Alpha", self.entries["NETWORK_ALPHA"].get(), float, 0)
+        if self._network_type_is_lokr():
+            _check_num("LoKR Factor", self.entries["LOKR_FACTOR"].get(), int, 2)
         _check_num("Max Train Epochs", self.entries["MAX_TRAIN_EPOCHS"].get(), int, 1)
         _check_num("Save Every N Epochs", self.entries["SAVE_EVERY_N_EPOCHS"].get(), int, 1)
         _check_num("Seed", self.entries["SEED"].get(), int)
@@ -18942,6 +18998,8 @@ class LoRATrainerGUI:
             "LORA_LR_RATIO": int(self.entries["LORA_LR_RATIO"].get()),
             "NETWORK_DIM": int(self.entries["NETWORK_DIM"].get()),
             "NETWORK_ALPHA": float(self.entries["NETWORK_ALPHA"].get()),
+            "NETWORK_TYPE": self.entries["NETWORK_TYPE"].get(),
+            "LOKR_FACTOR": int(self.entries["LOKR_FACTOR"].get() or 8),
             "MAX_TRAIN_EPOCHS": int(self.entries["MAX_TRAIN_EPOCHS"].get()),
             "SAVE_EVERY_N_EPOCHS": int(self.entries["SAVE_EVERY_N_EPOCHS"].get()),
             "SEED": int(self.entries["SEED"].get()),
@@ -19587,6 +19645,11 @@ class LoRATrainerGUI:
             "--seed", str(self.settings["SEED"]),
             "--discrete_flow_shift", "2.5",
         ]
+        # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
+        # the factor is the dial. Klein's builder never reads NETWORK_TYPE (standard only).
+        if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):
+            cmd += ["--network_type", "lokr",
+                    "--lokr_factor", str(self.settings.get("LOKR_FACTOR", 8))]
         # State saving. Krea 2 previously wrote state ONLY on Pause, so a crash or a run that
         # finished too early meant starting over. Pause still saves regardless of these flags.
         cmd += self._state_flags()

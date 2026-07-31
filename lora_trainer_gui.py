@@ -2893,7 +2893,7 @@ class LoRATrainerGUI:
                                           lambda e: self._on_network_type_changed())
         self._network_type_hint = tk.Label(
             self._network_type_rowf,
-            text="LoKR: slightly higher quality · LoRA: slightly faster",
+            text="LoKR: higher quality · LoRA: ~20% faster training",
             font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             justify=tk.LEFT)
         self._network_type_hint.pack(side=tk.LEFT, padx=(10, 0))
@@ -2913,7 +2913,7 @@ class LoRATrainerGUI:
         self.entries["LOKR_FACTOR"].pack(side=tk.LEFT)
         self._lokr_factor_hint = tk.Label(
             self._lokr_factor_rowf,
-            text="8 is the sweet spot · lower = stronger & bigger files · higher = smaller",
+            text="8 is the sweet spot · 4 = stronger, bigger files · above 8: just use LoRA",
             font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             justify=tk.LEFT)
         self._lokr_factor_hint.pack(side=tk.LEFT, padx=(10, 0))

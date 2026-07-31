@@ -201,9 +201,10 @@ def load_qwen3_vl_conditioner(
 ) -> "Qwen3VLConditioner":
     """Load the Qwen3-VL-4B conditioner used by K2: weights from ``model_path`` (safetensors),
     tokenizer from ``tokenizer_repo`` (Hub id or local dir)."""
+    from fizgig.utils.hf_cache import from_pretrained_cache_first
     qwen = _load_qwen3_vl_model(model_path, dtype=dtype, device=device, disable_mmap=disable_mmap)
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_repo, max_length=max_length)
-    processor = Qwen2TokenizerFast.from_pretrained(tokenizer_repo, max_length=max_length)
+    tokenizer = from_pretrained_cache_first(AutoTokenizer, tokenizer_repo, max_length=max_length)
+    processor = from_pretrained_cache_first(Qwen2TokenizerFast, tokenizer_repo, max_length=max_length)
     conditioner = Qwen3VLConditioner(qwen, tokenizer, processor, max_length=max_length,
                                      select_layers=select_layers, tokenizer_repo=tokenizer_repo)
     return conditioner.eval().requires_grad_(False)
@@ -490,8 +491,9 @@ class Qwen3VLConditioner(torch.nn.Module):
         so text-only training never pays for it."""
         if self._image_processor is None:
             from transformers import AutoProcessor
+            from fizgig.utils.hf_cache import from_pretrained_cache_first
             repo = self.tokenizer_repo or QWEN3_VL_4B_INSTRUCT_REPO_ID
-            self._image_processor = AutoProcessor.from_pretrained(repo)
+            self._image_processor = from_pretrained_cache_first(AutoProcessor, repo)
         return self._image_processor
 
     @staticmethod

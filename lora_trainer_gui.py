@@ -2890,6 +2890,12 @@ class LoRATrainerGUI:
         self.rows["NETWORK_TYPE"] = {"row": 18, "label": _nt_label,
                                      "entry": self.entries["NETWORK_TYPE"],
                                      "browse": None, "parent": training_content}
+        self._network_type_hint = tk.Label(
+            training_content,
+            text="LoKR: slightly higher quality · LoRA: slightly faster",
+            font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+            justify=tk.LEFT)
+        self._network_type_hint.grid(row=18, column=2, sticky=tk.W, padx=(8, 12), pady=4)
         self._add_field_to_section(training_content, "LOKR_FACTOR", "LoKR Factor", "int", 19)
 
         # Model Area to Train dropdown (blocks + timestep auto-fill)
@@ -4364,7 +4370,8 @@ class LoRATrainerGUI:
                   # torch.compile is wired into krea2_train only.
                   self._compile_blocks_label, self.compile_blocks_check, self._compile_blocks_hint,
                   # Network Type (LoRA/LoKR) is a krea2_train flag; Klein trains standard only.
-                  self.labels["NETWORK_TYPE"], self.entries["NETWORK_TYPE"]):
+                  self.labels["NETWORK_TYPE"], self.entries["NETWORK_TYPE"],
+                  self._network_type_hint):
             self._set_widget_visible(w, is_krea2)
         if is_krea2:
             # Restore the rank/alpha <-> factor row swap for the current selection.

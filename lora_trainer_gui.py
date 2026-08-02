@@ -4016,7 +4016,13 @@ class LoRATrainerGUI:
         try:
             with open(QUEUE_FILE, "r", encoding="utf-8") as f:
                 items = json.load(f)
-            return items if isinstance(items, list) else []
+            if not isinstance(items, list):
+                print(f"[queue] {QUEUE_FILE} does not hold a list — starting with an empty queue")
+                return []
+            good = [i for i in items if isinstance(i, dict) and isinstance(i.get("preset"), dict)]
+            if len(good) != len(items):
+                print(f"[queue] dropped {len(items) - len(good)} unreadable entr(ies) from {QUEUE_FILE}")
+            return good
         except FileNotFoundError:
             return []
         except Exception as e:
@@ -4101,6 +4107,7 @@ class LoRATrainerGUI:
         self.training_queue.append(item)
         self._save_training_queue()
         self._refresh_queue_button()
+        self._render_queue_window()
         name = item["preset"].get("LORA_NAME") or os.path.basename(item["image_folder"])
         self.update_console(f"[queue] added '{name}' — position {len(self.training_queue)} in the "
                             f"queue. It starts automatically when the current run finishes.\n")
@@ -4111,6 +4118,40 @@ class LoRATrainerGUI:
         if _proc is not None and _proc.poll() is None:
             return
         if not self.training_queue:
+            return
+        # A training subprocess isn't the only thing that owns the GPU: a Royale export, a
+        # caption batch, an Extract or a live preview are all in-process threads the process
+        # check can't see. Launching a run on top of them OOMs it (and a failed run HOLDS
+        # the queue — the worst outcome for an unattended batch). Wait and retry instead.
+        try:
+            if self._is_any_busy():
+                self.update_console("[queue] GPU work in progress elsewhere in the app — "
+                                    "next run retries in 15 s.\n")
+                self.master.after(15000, self._start_next_queued)
+                return
+        except Exception:
+            pass
+        head = self.training_queue[0]
+        # Malformed item (hand-edited/corrupted queue file): remove it LOUDLY, then move on
+        # to the next — one bad entry must not wedge the whole queue or crash the advance.
+        if not isinstance(head, dict) or not isinstance(head.get("preset"), dict):
+            self.training_queue.pop(0)
+            self._save_training_queue()
+            self._refresh_queue_button()
+            self.update_console("[queue] removed an unreadable queue entry (corrupt or "
+                                "hand-edited queue file) — continuing with the next.\n")
+            self.master.after(100, self._start_next_queued)
+            return
+        # Dataset gone (deleted/renamed/moved since queueing): without this check the stale
+        # TOML silently trains the PREVIOUS job's dataset under this job's name. HOLD with
+        # the item still queued so nothing is lost.
+        folder = (head.get("image_folder") or "").strip()
+        if not os.path.isdir(folder):
+            self.update_console(f"[queue] HELD — the next run's image folder no longer exists:\n"
+                                f"        {folder}\n"
+                                f"        Restore the folder (or edit/delete the queued job in "
+                                f"the queue window), then 'Start next now'.\n")
+            self._render_queue_window()
             return
         item = self.training_queue.pop(0)
         self._save_training_queue()
@@ -4128,6 +4169,7 @@ class LoRATrainerGUI:
             self._refresh_queue_button()
             self.update_console("[queue] run did not start — it stays at the head of the queue. "
                                 "Fix the issue and use the queue window's 'Start next' button.\n")
+        self._render_queue_window()
 
     def _refresh_queue_button(self):
         btn = getattr(self, "_queue_btn", None)
@@ -4246,16 +4288,35 @@ class LoRATrainerGUI:
         _active = getattr(self, "_active_run_item", None)
         _show_active = _active is not None and (_busy or _state in ("running", "pausing", "paused"))
         try:
-            self._queue_start_next_btn.config(
-                state=(tk.DISABLED if (_busy or not self.training_queue) else tk.NORMAL))
             n = len(self.training_queue)
-            self._queue_win_status.config(
-                text=(f"{n} run(s) queued — a run is active; the queue continues when it finishes cleanly."
-                      if _busy and n else
-                      f"{n} run(s) queued — nothing is training; use 'Start next now' to begin."
-                      if n else
-                      "Queue is empty. While a run is active, the Start Training button becomes "
-                      "'Queue Train' — click it to add the currently configured run."))
+            # Starting the next run while one is PAUSED would silently abandon the paused
+            # run (its state dir resumes nothing once another run overwrites the GUI), so
+            # paused disables the button just like busy does.
+            _blocked = _busy or _state in ("pausing", "paused")
+            self._queue_start_next_btn.config(
+                state=(tk.DISABLED if (_blocked or not n) else tk.NORMAL))
+            if _busy and _state == "pausing":
+                txt = (f"{n} run(s) queued — the current run is pausing at the epoch end. "
+                       f"A pause HOLDS the queue: Resume from the Training tab, or start the "
+                       f"next run from here after it exits.") if n else \
+                      "The current run is pausing at the epoch end."
+            elif _busy:
+                txt = (f"{n} run(s) queued — a run is active; the queue continues when it "
+                       f"finishes cleanly." if n else
+                       "A run is active and nothing is queued. The Start Training button reads "
+                       "'Queue Train' — click it to add the currently configured run.")
+            elif _state == "paused":
+                txt = (f"{n} run(s) queued — a run is PAUSED. Resume it from the Training tab; "
+                       f"'Start next now' is disabled because it would abandon the paused run."
+                       if n else
+                       "A run is paused — Resume it from the Training tab.")
+            elif n:
+                txt = (f"{n} run(s) queued — nothing is training. The queue HOLDS after a "
+                       f"failure or Stop; use 'Start next now' to begin or continue.")
+            else:
+                txt = ("Queue is empty. While a run is active, the Start Training button "
+                       "becomes 'Queue Train' — click it to add the currently configured run.")
+            self._queue_win_status.config(text=txt)
         except Exception:
             pass
 
@@ -4305,6 +4366,20 @@ class LoRATrainerGUI:
         if not self.training_queue:
             return
         for i, item in enumerate(list(self.training_queue)):
+            # One corrupt entry (hand-edited file, interrupted write) must not take the
+            # whole window down — render it as removable wreckage instead.
+            if not isinstance(item, dict) or not isinstance(item.get("preset"), dict):
+                bad = tk.Frame(rows, bg=COLORS["bg_surface"],
+                               highlightbackground=COLORS["error"], highlightthickness=1)
+                bad.pack(fill=tk.X, pady=(0, 8))
+                tk.Label(bad, text=f"{i + 1}.  ⚠ unreadable queue entry (corrupt or hand-edited "
+                                   f"queue file)", font=(FONT_FAMILY, 10),
+                         bg=COLORS["bg_surface"], fg=COLORS["error"]).pack(side=tk.LEFT, padx=10, pady=10)
+                tk.Button(bad, text="✕", font=(FONT_FAMILY, 10), width=3,
+                          bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+                          activebackground=COLORS["border"], relief="flat", bd=0, cursor="hand2",
+                          command=lambda i=i: self._queue_delete(i)).pack(side=tk.RIGHT, padx=10)
+                continue
             card = tk.Frame(rows, bg=COLORS["bg_surface"],
                             highlightbackground=COLORS["border"], highlightthickness=1)
             card.pack(fill=tk.X, pady=(0, 8))
@@ -19719,6 +19794,11 @@ class LoRATrainerGUI:
         # Check caption files exist in the dataset folder
         image_dir = self.image_folder_var.get().strip()
         caption_ext = self.dataset_caption_ext_var.get().strip()
+        # A SET folder that no longer exists is an error, not a skip: the TOML regenerator
+        # early-returns on a missing folder, so proceeding trains whatever dataset the TOML
+        # last pointed at — silently, under this run's name.
+        if image_dir and not os.path.isdir(image_dir):
+            errors.append(f"Training image folder does not exist: {image_dir}")
         if image_dir and os.path.isdir(image_dir) and caption_ext:
             import glob as _glob
             # glob.escape is load-bearing here: a folder like "[subject] photos" made this
@@ -19737,6 +19817,23 @@ class LoRATrainerGUI:
             return False
 
         return True
+
+    @staticmethod
+    def _pipeline_exit_routes_to_state_machine(name, returncode):
+        """Which subprocess exits the pause/queue state machine must hear about.
+
+        Training exits: always (clean finish, failure, stop, pause all carry state).
+        Caching phases ("Cache Preparation" / "Text Encoder Caching"): only NONZERO exits —
+        a clean cache exit continues the pipeline via its callback and the run is still
+        alive. Before this predicate existed, a failed or stopped caching phase left
+        training_state stranded at "running" with no process: the Start button read
+        "Queue Train" but launched, Pause pointed at nothing, the queue window pinned a
+        dead run, and a queued job that died in caching vanished without the HELD notice.
+        """
+        n = (name or "").lower()
+        if "training" in n:
+            return True
+        return "cach" in n and returncode != 0
 
     def run_subprocess(self, cmd, name, callback=None):
         """Run a subprocess and handle its output with UTF-8 encoding"""
@@ -19789,8 +19886,9 @@ class LoRATrainerGUI:
             process.wait()
             self.master.after(0, self.update_console, f"{name} process completed.\n")
             self.current_process = None
-            # Route training-subprocess exit through the pause/resume state machine
-            if name and "training" in name.lower():
+            # Route pipeline exits through the pause/resume state machine (see the predicate
+            # for which ones — a dead caching phase used to strand the app in "running").
+            if self._pipeline_exit_routes_to_state_machine(name, process.returncode):
                 self.master.after(0, self._on_training_subprocess_exited, process.returncode)
             if process.returncode != 0:
                 self.master.after(0, self.update_console,
@@ -19875,6 +19973,16 @@ class LoRATrainerGUI:
         # Unload Florence model to free VRAM before training
         if self.florence_model is not None:
             self.unload_florence_model(silent=True)
+        # ...and the tool-tab engines (Repair Studio / Explorer / Royale, 10-20 GB each).
+        # A manual Start implies a switch to the Training tab, which unloads them via
+        # on_tab_changed — but a queue auto-advance or the queue window's "Start next now"
+        # involves NO tab switch, and training would otherwise launch against a full card.
+        # All three are idle-guarded internally, so this is safe and idempotent.
+        for _unl in ("_unload_repair_studio_models", "_unload_explorer_models", "_royale_unload"):
+            try:
+                getattr(self, _unl)()
+            except Exception:
+                pass
 
         # Start samples watcher for live gallery updates
         if self.sample_enabled_var.get():
@@ -20883,6 +20991,13 @@ class LoRATrainerGUI:
             self._start_training_btn.config(
                 text="Queue Train" if self.training_state in ("running", "pausing")
                 else "Start Training")
+        except Exception:
+            pass
+        # Every state transition passes through here, so it's the one hook that keeps an
+        # OPEN queue window truthful (finish, advance, failure-hold, pause) — the render
+        # no-ops when the window isn't up.
+        try:
+            self._render_queue_window()
         except Exception:
             pass
         # Pause: visible while running (Krea 2 now saves full state at the epoch boundary, so

@@ -70,13 +70,26 @@ def _local_tokenizer_dir(model_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(model_path)), "qwen3vl_tokenizer")
 
 
+def _bundled_tokenizer_dir() -> str:
+    """The copy Fizgig SHIPS (src/fizgig/assets/qwen3vl_tokenizer — Apache 2.0, see its
+    ATTRIBUTION.md). ~11 MB of config/vocab, no weights: with these in the repo, text
+    encoding and captioning need the Hub for nothing at all."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "assets", "qwen3vl_tokenizer")
+
+
 def _resolve_tokenizer_source(model_path: str, tokenizer_repo: str) -> str:
-    """Prefer a local qwen3vl_tokenizer/ folder next to the checkpoint over fetching
-    `tokenizer_repo` from the Hub, if the caller didn't explicitly ask for something else."""
+    """Pick where tokenizer/processor files come from, most-specific first — but only when
+    the caller didn't explicitly ask for something other than the default repo:
+
+    1. a `qwen3vl_tokenizer/` folder next to the checkpoint (user override / sneakernet)
+    2. the copy bundled with Fizgig (the normal case — fully offline, nothing to fetch)
+    3. the Hub repo id, cache-first (fallback if the bundled files are ever missing)
+    """
     if tokenizer_repo == QWEN3_VL_4B_INSTRUCT_REPO_ID:
-        local_dir = _local_tokenizer_dir(model_path)
-        if os.path.isfile(os.path.join(local_dir, "tokenizer_config.json")):
-            return local_dir
+        for cand in (_local_tokenizer_dir(model_path), _bundled_tokenizer_dir()):
+            if os.path.isfile(os.path.join(cand, "tokenizer_config.json")):
+                return os.path.normpath(cand)
     return tokenizer_repo
 
 

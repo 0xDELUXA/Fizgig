@@ -4124,6 +4124,23 @@ class LoRATrainerGUI:
             except Exception:
                 pass
 
+    @staticmethod
+    def _queue_signature(item):
+        """What makes two queue entries THE SAME RUN: everything except id/queued_at."""
+        try:
+            return json.dumps({k: item.get(k) for k in
+                               ("architecture", "image_folder", "preset", "samples")},
+                              sort_keys=True, default=str)
+        except Exception:
+            return repr(item)
+
+    @staticmethod
+    def _queue_output_key(item):
+        """(output dir, LoRA name) — two runs writing here overwrite each other's files."""
+        p = item.get("preset", {}) if isinstance(item.get("preset"), dict) else {}
+        return (str(p.get("LORA_OUTPUT_DIR", "")).strip().lower().replace("\\", "/").rstrip("/"),
+                str(p.get("LORA_NAME", "")).strip().lower())
+
     def _queue_current_run(self):
         """Snapshot the current config to the end of the queue (Start pressed mid-run)."""
         item = self._queue_snapshot()
@@ -4133,6 +4150,36 @@ class LoRATrainerGUI:
                 "Pick a training image folder on the Start tab first — a queued run "
                 "needs to know its dataset.")
             return
+        # An exact duplicate (same everything) is never useful — it would just train the
+        # identical run twice. Point at the existing entry instead of adding another.
+        sig = self._queue_signature(item)
+        for pos, q in enumerate(self.training_queue):
+            if self._queue_signature(q) == sig:
+                messagebox.showinfo(
+                    "Already queued",
+                    f"This exact run is already in the queue (position {pos + 1}).\n\n"
+                    "Change something — the dataset, the output name, any setting — "
+                    "to queue a different run.")
+                return
+        # Same output dir + name as another queued job (or the run in progress) with
+        # DIFFERENT settings: the later run would overwrite the earlier one's checkpoints,
+        # state dirs and samples. Flag it; queueing anyway is a legitimate choice.
+        okey = self._queue_output_key(item)
+        if okey != ("", ""):
+            clash = next((f"queued job {pos + 1}" for pos, q in enumerate(self.training_queue)
+                          if self._queue_output_key(q) == okey), None)
+            if clash is None:
+                _active = getattr(self, "_active_run_item", None)
+                if (_active is not None
+                        and getattr(self, "training_state", "idle") in ("running", "pausing")
+                        and self._queue_output_key(_active) == okey):
+                    clash = "the run in progress"
+            if clash is not None and not messagebox.askyesno(
+                    "Same output name",
+                    f"This run writes to the same output folder and LoRA name as {clash} — "
+                    f"its checkpoints, state dirs and samples would be overwritten.\n\n"
+                    f"Queue it anyway? (Change the Output Name to keep both.)"):
+                return
         self.training_queue.append(item)
         self._save_training_queue()
         self._refresh_queue_button()
@@ -4384,17 +4431,17 @@ class LoRATrainerGUI:
             else:
                 tk.Label(card, text="🖼", font=(FONT_FAMILY, 20), width=3,
                          bg=COLORS["bg_surface"], fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=10, pady=8)
+            act = tk.Frame(card, bg=COLORS["bg_surface"])
+            act.pack(side=tk.RIGHT, padx=10, pady=8)
             name, summary = self._queue_row_summary(_active)
             txt = tk.Frame(card, bg=COLORS["bg_surface"])
             txt.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=8)
             tk.Label(txt, text=f"{badge}  —  {name}", font=(FONT_FAMILY, 11, "bold"),
                      bg=COLORS["bg_surface"], fg=COLORS["accent"], anchor="w",
-                     justify=tk.LEFT).pack(anchor=tk.W)
+                     wraplength=520, justify=tk.LEFT).pack(anchor=tk.W)
             tk.Label(txt, text=summary.split("\n")[0], font=(FONT_FAMILY, 8),
                      bg=COLORS["bg_surface"], fg=COLORS["text_muted"], anchor="w",
-                     justify=tk.LEFT).pack(anchor=tk.W)
-            act = tk.Frame(card, bg=COLORS["bg_surface"])
-            act.pack(side=tk.RIGHT, padx=10, pady=8)
+                     wraplength=520, justify=tk.LEFT).pack(anchor=tk.W)
             abtn = tk.Button(act, text="✎", font=(FONT_FAMILY, 10), width=3,
                              bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
                              activebackground=COLORS["border"], relief="flat", bd=0,
@@ -4438,17 +4485,20 @@ class LoRATrainerGUI:
             else:
                 tk.Label(card, text="🖼", font=(FONT_FAMILY, 20), width=3,
                          bg=COLORS["bg_surface"], fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=10, pady=8)
+            # Buttons pack FIRST (from the right): pack allocates space in order, so a long
+            # unwrapped summary used to squeeze the ↑↓✎⤓✕ column clean off the card —
+            # "my queued jobs have no delete button".
+            btns = tk.Frame(card, bg=COLORS["bg_surface"])
+            btns.pack(side=tk.RIGHT, padx=10, pady=8)
             name, summary = self._queue_row_summary(item)
             txt = tk.Frame(card, bg=COLORS["bg_surface"])
             txt.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=8)
             tk.Label(txt, text=f"{i + 1}.  {name}", font=(FONT_FAMILY, 11, "bold"),
                      bg=COLORS["bg_surface"], fg=COLORS["text_primary"], anchor="w",
-                     justify=tk.LEFT).pack(anchor=tk.W)
+                     wraplength=520, justify=tk.LEFT).pack(anchor=tk.W)
             tk.Label(txt, text=summary, font=(FONT_FAMILY, 8),
                      bg=COLORS["bg_surface"], fg=COLORS["text_muted"], anchor="w",
-                     justify=tk.LEFT).pack(anchor=tk.W)
-            btns = tk.Frame(card, bg=COLORS["bg_surface"])
-            btns.pack(side=tk.RIGHT, padx=10, pady=8)
+                     wraplength=520, justify=tk.LEFT).pack(anchor=tk.W)
 
             def _mk(parent, label, cmd, tip):
                 b = tk.Button(parent, text=label, font=(FONT_FAMILY, 10), width=3,

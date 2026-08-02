@@ -1,7 +1,6 @@
 # Contributors
 
-Fizgig is written by [Peter Neill (shootthesound)](https://github.com/shootthesound), with
-substantial use of Claude for development.
+Fizgig is written by [Peter Neill (shootthesound)](https://github.com/shootthesound).
 
 ## FNGarvin
 

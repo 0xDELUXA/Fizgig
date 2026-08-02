@@ -1292,8 +1292,22 @@ class LoRATrainerGUI:
         self.image_folder_var.trace_add("write", self._on_caption_folder_changed)
 
         # Prevent mousewheel from accidentally changing Combobox/Spinbox values
-        self.master.bind_class("TCombobox", "<MouseWheel>", lambda e: "break")
-        self.master.bind_class("TSpinbox", "<MouseWheel>", lambda e: "break")
+        # ONE global wheel router instead of per-panel bind_all tug-of-wars (which broke in
+        # both directions: an open tool window stole the main window's wheel, and a stray
+        # <Leave> killed the tool window's). The router sends the wheel wherever the POINTER
+        # is: a Text (console) or Listbox scrolls itself natively; otherwise the nearest
+        # scrollable Canvas up the ancestry scrolls — an inner panel when hovered, the tab's
+        # main scrollbar everywhere else. Button-4/5 are the X11 wheel (pods).
+        for _seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.master.bind_all(_seq, self._route_mousewheel)
+            # Dropdowns/spinboxes must NEVER change value on wheel (an accidental flick over
+            # the LR box mid-scroll is how a run gets silently mis-configured) — but they
+            # must not be dead zones either: route the scroll to the page, then break so
+            # the widget's own value-spin binding never runs. The old bare-"break" bindings
+            # covered <MouseWheel> only, leaving X11 pods spinning values via Button-4/5.
+            self.master.bind_class("TCombobox", _seq, self._wheel_over_dropdown)
+            self.master.bind_class("TSpinbox", _seq, self._wheel_over_dropdown)
+            self.master.bind_class("Spinbox", _seq, self._wheel_over_dropdown)
 
         # Start status indicator polling
         self._update_status_indicator()
@@ -1341,6 +1355,53 @@ class LoRATrainerGUI:
             '_royale_rendering', '_royale_traveling', '_royale_pt_running',
             '_royale_lora_running', '_royale_exporting', '_royale_scoring',
             '_royale_cmp_running'))
+
+    @staticmethod
+    def _wheel_units(event):
+        """Scroll units from either wheel encoding: Windows <MouseWheel> delta (±120 per
+        notch, high-res mice send smaller values) or X11 Button-4/5 (pods)."""
+        num = getattr(event, "num", 0)
+        if num == 4:
+            return -3
+        if num == 5:
+            return 3
+        d = getattr(event, "delta", 0)
+        if not d:
+            return 0
+        return int(-1 * (d / 120)) if abs(d) >= 120 else (-1 if d > 0 else 1)
+
+    def _route_mousewheel(self, event):
+        """Global wheel dispatch — see the install site for the routing rules."""
+        try:
+            w = self.master.winfo_containing(event.x_root, event.y_root)
+        except Exception:
+            w = None
+        if w is None:
+            return
+        units = self._wheel_units(event)
+        if not units:
+            return
+        node, hops = w, 0
+        while node is not None and hops < 40:
+            # Native scrollers own the wheel while hovered — their class bindings already
+            # scroll them, and routing the page underneath as well would double-scroll.
+            if isinstance(node, (tk.Text, tk.Listbox, ttk.Treeview)):
+                return
+            if isinstance(node, tk.Canvas):
+                try:
+                    if node.cget("yscrollcommand"):
+                        node.yview_scroll(units, "units")
+                        return "break"
+                except tk.TclError:
+                    pass
+            node = getattr(node, "master", None)
+            hops += 1
+        return
+
+    def _wheel_over_dropdown(self, event):
+        """Wheel over a Combobox/Spinbox: scroll the page, never the value."""
+        self._route_mousewheel(event)
+        return "break"
 
     def _is_render_busy(self):
         """In-process GPU render on a tab that unloads its engine on switch (Repair
@@ -2296,18 +2357,9 @@ class LoRATrainerGUI:
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        # Enable mousewheel scrolling
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", on_mousewheel)
-
-        def unbind_mousewheel(event):
-            canvas.unbind_all("<MouseWheel>")
-
-        scrollable_frame.bind("<Enter>", bind_mousewheel)
-        scrollable_frame.bind("<Leave>", unbind_mousewheel)
+        # Mousewheel: handled by the global router (_route_mousewheel) — it finds this
+        # canvas through the pointer's ancestry, so no per-tab bind_all is needed (the old
+        # Enter/Leave bind_all dance is what made scrollable areas fight each other).
 
         return scrollable_frame, canvas
 
@@ -4324,9 +4376,8 @@ class LoRATrainerGUI:
         cw = canvas.create_window((0, 0), window=rows, anchor="nw")
         rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(cw, width=e.width))
-        canvas.bind_all("<MouseWheel>",
-                        lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
-        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
+        # Wheel: global router — scrolls this canvas when the pointer is over the window,
+        # the main app everywhere else, with no bind_all steal in either direction.
         self._queue_rows_frame = rows
 
         foot = tk.Frame(win, bg=COLORS["bg_deep"])
@@ -5200,12 +5251,7 @@ class LoRATrainerGUI:
         rows_id = canvas.create_window((0, 0), window=rows, anchor="nw")
         rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(rows_id, width=e.width))
-        # Enter/Leave bind_all swapping (the app-wide pattern): a lifetime bind_all would be
-        # silently clobbered the moment the mouse crosses any main-window scrollable frame.
-        _pw_wheel = lambda e: canvas.yview_scroll(-1 * int(e.delta / 120), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _pw_wheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
-        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
+        # Wheel: global router (_route_mousewheel) finds this canvas via the pointer.
         self._problem_rows = rows
         self._problem_canvas = canvas
 
@@ -10329,11 +10375,7 @@ class LoRATrainerGUI:
         rows_id = canvas.create_window((0, 0), window=rows, anchor="nw")
         rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(rows_id, width=e.width))
-        # Enter/Leave bind_all swapping (the app-wide pattern — see Problem Images window).
-        _ff_wheel = lambda e: canvas.yview_scroll(-1 * int(e.delta / 120), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _ff_wheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
-        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
+        # Wheel: global router (_route_mousewheel) finds this canvas via the pointer.
         self._ff_rows = rows
 
     def _ff_set_status(self, text):
@@ -14982,10 +15024,7 @@ class LoRATrainerGUI:
             self._schedule_repair_preview_redraws()
         outer_canvas.bind("<Configure>", _on_canvas_config)
 
-        def _on_wheel(e):
-            outer_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        outer_canvas.bind("<Enter>", lambda e: outer_canvas.bind_all("<MouseWheel>", _on_wheel))
-        outer_canvas.bind("<Leave>", lambda e: outer_canvas.unbind_all("<MouseWheel>"))
+        # Wheel: global router (_route_mousewheel) finds this canvas via the pointer.
 
         self.repair_outer_canvas = outer_canvas
         return inner
@@ -15461,11 +15500,7 @@ class LoRATrainerGUI:
             canvas.itemconfigure(inner_id, width=e.width)
         canvas.bind("<Configure>", _on_canvas_config)
 
-        # Mousewheel scrolling when hovering the panel
-        def _on_mousewheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        # Wheel: global router (_route_mousewheel) finds this canvas via the pointer.
 
         inner.columnconfigure(0, weight=1)
         inner.columnconfigure(1, weight=1)
@@ -15513,10 +15548,7 @@ class LoRATrainerGUI:
         inner.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.bind("<Configure>", lambda e: canvas.itemconfigure(inner_id, width=e.width))
 
-        def _on_mousewheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
-        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        # Wheel: global router (_route_mousewheel) finds this canvas via the pointer.
 
         inner.columnconfigure(0, weight=1)
         inner.columnconfigure(1, weight=1)

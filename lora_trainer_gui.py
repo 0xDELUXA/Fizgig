@@ -12594,6 +12594,18 @@ class LoRATrainerGUI:
             "helper models (Florence-2 captioner, face model for the Look Filter and likeness "
             "scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to download later. No "
             "HuggingFace account needed — none of these are gated.")
+        _offline_tip = tk.Label(
+            krea_card,
+            text="💡 Already have these files for ComfyUI? Filling the paths in by hand works "
+                 "perfectly — the download button is a convenience, not a requirement. The first "
+                 "time you caption or train while online, Fizgig quietly fetches a few tiny "
+                 "helper files and keeps them, and from then on everything runs fully offline. "
+                 "Setting up a machine that will never see the internet? Paste a complete "
+                 "HuggingFace model folder into the text encoder field instead of a single file "
+                 "and nothing needs downloading at all.",
+            font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+            wraplength=760, justify=tk.LEFT)
+        _offline_tip.grid(row=kr + 2, column=0, columnspan=3, sticky=tk.W, pady=(12, 2))
 
         # Card 2: Inference Performance
         inf_card = self._start_section_card(

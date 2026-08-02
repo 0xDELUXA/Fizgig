@@ -4242,6 +4242,9 @@ class LoRATrainerGUI:
         self._queue_thumb_refs = []
         _busy = getattr(self, "current_process", None)
         _busy = _busy is not None and _busy.poll() is None
+        _state = getattr(self, "training_state", "idle")
+        _active = getattr(self, "_active_run_item", None)
+        _show_active = _active is not None and (_busy or _state in ("running", "pausing", "paused"))
         try:
             self._queue_start_next_btn.config(
                 state=(tk.DISABLED if (_busy or not self.training_queue) else tk.NORMAL))
@@ -4255,6 +4258,40 @@ class LoRATrainerGUI:
                       "'Queue Train' — click it to add the currently configured run."))
         except Exception:
             pass
+
+        # The run in progress, pinned on top — it isn't a queue item (never saved, can't be
+        # reordered or deleted), but after editing a queued job in the Training tab, its ✎ is
+        # the way BACK to the settings that are actually running.
+        if _show_active:
+            badge = ("⏸ paused" if _state == "paused" else
+                     "⏸ pausing at epoch end" if _state == "pausing" else "▶ training now")
+            card = tk.Frame(rows, bg=COLORS["bg_surface"],
+                            highlightbackground=COLORS["accent"], highlightthickness=2)
+            card.pack(fill=tk.X, pady=(0, 8))
+            thumb = self._queue_thumbnail(_active.get("image_folder", ""))
+            if thumb is not None:
+                self._queue_thumb_refs.append(thumb)
+                tk.Label(card, image=thumb, bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=10, pady=8)
+            else:
+                tk.Label(card, text="🖼", font=(FONT_FAMILY, 20), width=3,
+                         bg=COLORS["bg_surface"], fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=10, pady=8)
+            name, summary = self._queue_row_summary(_active)
+            txt = tk.Frame(card, bg=COLORS["bg_surface"])
+            txt.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=8)
+            tk.Label(txt, text=f"{badge}  —  {name}", font=(FONT_FAMILY, 11, "bold"),
+                     bg=COLORS["bg_surface"], fg=COLORS["accent"], anchor="w",
+                     justify=tk.LEFT).pack(anchor=tk.W)
+            tk.Label(txt, text=summary.split("\n")[0], font=(FONT_FAMILY, 8),
+                     bg=COLORS["bg_surface"], fg=COLORS["text_muted"], anchor="w",
+                     justify=tk.LEFT).pack(anchor=tk.W)
+            abtn = tk.Button(card, text="✎", font=(FONT_FAMILY, 10), width=3,
+                             bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+                             activebackground=COLORS["border"], relief="flat", bd=0,
+                             cursor="hand2", command=self._queue_restore_active)
+            abtn.pack(side=tk.RIGHT, padx=10, pady=8)
+            ToolTip(abtn, "Load this run's settings back into the Training tab — the way back "
+                          "after editing a queued job")
+
         if not self.training_queue:
             return
         for i, item in enumerate(list(self.training_queue)):
@@ -4310,6 +4347,15 @@ class LoRATrainerGUI:
             self._save_training_queue()
             self._refresh_queue_button()
             self._render_queue_window()
+
+    def _queue_restore_active(self):
+        """Put the RUNNING job's settings back into the Training tab (the ✎ on the pinned
+        'training now' card) — the undo for having edited a queued job in the tab."""
+        item = getattr(self, "_active_run_item", None)
+        if item is None:
+            return
+        self._apply_queue_item(item)
+        self.update_console("[queue] Training tab restored to the run in progress.\n")
 
     def _queue_edit(self, i):
         """Load the item into the Training tab. The item stays queued — after editing,
@@ -19793,6 +19839,9 @@ class LoRATrainerGUI:
 
         # Snapshot current settings for the "Load Last Train" button
         self._save_last_train_settings()
+        # ...and as the queue window's pinned "training now" card: editing a queued job loads
+        # its settings into this tab, so the window needs a way back to the run in progress.
+        self._active_run_item = self._queue_snapshot()
 
         # Unload Florence model to free VRAM before training
         if self.florence_model is not None:

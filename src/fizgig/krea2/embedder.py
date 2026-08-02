@@ -493,7 +493,23 @@ class Qwen3VLConditioner(torch.nn.Module):
             from transformers import AutoProcessor
             from fizgig.utils.hf_cache import from_pretrained_cache_first
             repo = self.tokenizer_repo or QWEN3_VL_4B_INSTRUCT_REPO_ID
-            self._image_processor = from_pretrained_cache_first(AutoProcessor, repo)
+            proc = from_pretrained_cache_first(AutoProcessor, repo)
+            # A PARTIAL local cache — tokenizer files cached by earlier text-encoding runs,
+            # but no chat_template.json — loads "successfully" here and then fails at
+            # apply_chat_template with "this processor does not have a chat template"
+            # (issue #37). Detect the gap and complete the cache from the network; offline,
+            # say what to do instead of surfacing the template error per image.
+            if not getattr(proc, "chat_template", None) and \
+               not getattr(getattr(proc, "tokenizer", None), "chat_template", None):
+                try:
+                    proc = AutoProcessor.from_pretrained(repo)  # fills the missing cache files
+                except Exception as e:
+                    raise RuntimeError(
+                        "The Qwen3-VL caption template files aren't in the local cache yet. "
+                        "Connect to the internet once and either run captioning again or use "
+                        "Preferences → 'Download models for me' — after that, captioning "
+                        "works fully offline.") from e
+            self._image_processor = proc
         return self._image_processor
 
     @staticmethod

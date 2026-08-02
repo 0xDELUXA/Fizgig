@@ -12651,7 +12651,7 @@ class LoRATrainerGUI:
                  "Setting up a machine that will never see the internet? Paste a complete "
                  "HuggingFace model folder into the text encoder field instead of a single file "
                  "and nothing needs downloading at all.",
-            font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+            font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             wraplength=760, justify=tk.LEFT)
         _offline_tip.grid(row=kr + 2, column=0, columnspan=3, sticky=tk.W, pady=(12, 2))
 

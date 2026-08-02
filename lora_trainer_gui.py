@@ -1363,6 +1363,8 @@ class LoRATrainerGUI:
             return True
         if getattr(self, '_translating', False):
             return True
+        if getattr(self, '_fetch_running', False):
+            return True   # model download in flight — a queued run must not read partial files
         if getattr(self, '_repair_preview_in_flight', False):
             return True
         if getattr(self, '_explorer_generating', False):
@@ -4019,7 +4021,7 @@ class LoRATrainerGUI:
             if not isinstance(items, list):
                 print(f"[queue] {QUEUE_FILE} does not hold a list — starting with an empty queue")
                 return []
-            good = [i for i in items if isinstance(i, dict) and isinstance(i.get("preset"), dict)]
+            good = [i for i in items if self._queue_item_valid(i)]
             if len(good) != len(items):
                 print(f"[queue] dropped {len(items) - len(good)} unreadable entr(ies) from {QUEUE_FILE}")
             return good
@@ -4040,6 +4042,32 @@ class LoRATrainerGUI:
             os.replace(tmp, QUEUE_FILE)
         except Exception as e:
             print(f"[queue] failed to save: {e}")
+
+    @staticmethod
+    def _queue_item_valid(item):
+        """Deep-enough validation for anything about to flow into apply/summary/advance.
+        Shallow checks (dict with a dict preset) let hand-edited variants through that then
+        crashed AFTER the item was popped and saved away — losing it before the traceback."""
+        return (isinstance(item, dict)
+                and isinstance(item.get("preset"), dict)
+                and isinstance(item.get("image_folder", ""), str)
+                and isinstance(item.get("architecture", ""), str)
+                and isinstance(item.get("samples", {}), dict))
+
+    def _schedule_queue_advance(self, delay_ms):
+        """The ONE way to arm a queue-advance timer. A generation counter makes every
+        previously-armed timer a no-op: Stop, Pause, a failure-HOLD, or a manual start bumps
+        the generation, so a stale after() callback from before the state change can never
+        fire into a paused/held queue or double-launch across a pipeline phase gap."""
+        gen = getattr(self, "_queue_advance_gen", 0)
+
+        def _tick():
+            if getattr(self, "_queue_advance_gen", 0) == gen:
+                self._start_next_queued()
+        self.master.after(delay_ms, _tick)
+
+    def _cancel_pending_queue_advance(self):
+        self._queue_advance_gen = getattr(self, "_queue_advance_gen", 0) + 1
 
     _QUEUE_SAMPLE_KEYS = ("SAMPLE_ENABLED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
                           "SAMPLE_SEED", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_EVERY_N_STEPS",
@@ -4070,17 +4098,18 @@ class LoRATrainerGUI:
     def _apply_queue_item(self, item):
         """Load a queue item's settings back into the GUI (arch first — it swaps the UI)."""
         arch = item.get("architecture", "")
-        if arch and arch in ARCHITECTURES and self.architecture_var.get() != arch:
+        if isinstance(arch, str) and arch and arch in ARCHITECTURES and self.architecture_var.get() != arch:
             self.architecture_var.set(arch)
             try:
                 self.update_ui_for_architecture()
             except Exception as e:
                 self.update_console(f"[queue] arch switch to {arch!r} failed: {e}\n")
         self._apply_preset_values(item.get("preset", {}))
-        folder = (item.get("image_folder") or "").strip()
+        folder = str(item.get("image_folder") or "").strip()
         if folder:
             self.image_folder_var.set(folder)   # traces regenerate Fizgig_train.toml
-        for k, v in (item.get("samples") or {}).items():
+        _samples = item.get("samples")
+        for k, v in (_samples.items() if isinstance(_samples, dict) else ()):
             entry = self.entries.get(k)
             if entry is None:
                 continue
@@ -4117,30 +4146,46 @@ class LoRATrainerGUI:
         _proc = getattr(self, "current_process", None)
         if _proc is not None and _proc.poll() is None:
             return
+        # Process-gone is NOT idle: between pipeline phases current_process is briefly None
+        # while training_state is still "running", and paused/pausing runs own the GPU's
+        # future. A stale timer or an eager click must not launch into any of those.
+        if getattr(self, "training_state", "idle") in ("running", "pausing", "paused"):
+            return
         if not self.training_queue:
             return
         # A training subprocess isn't the only thing that owns the GPU: a Royale export, a
         # caption batch, an Extract or a live preview are all in-process threads the process
         # check can't see. Launching a run on top of them OOMs it (and a failed run HOLDS
-        # the queue — the worst outcome for an unattended batch). Wait and retry instead.
+        # the queue — the worst outcome for an unattended batch). Wait and retry — capped,
+        # so a stuck busy flag can't spin forever: after ~10 minutes the queue HOLDs loudly.
         try:
             if self._is_any_busy():
+                self._queue_busy_retries = getattr(self, "_queue_busy_retries", 0) + 1
+                if self._queue_busy_retries > 40:
+                    self._queue_busy_retries = 0
+                    self.update_console("[queue] HELD — the app has reported other GPU work "
+                                        "for 10+ minutes. Finish or cancel it, then use "
+                                        "'Start next now' in the queue window.\n")
+                    self._render_queue_window()
+                    return
                 self.update_console("[queue] GPU work in progress elsewhere in the app — "
                                     "next run retries in 15 s.\n")
-                self.master.after(15000, self._start_next_queued)
+                self._schedule_queue_advance(15000)
                 return
         except Exception:
             pass
+        self._queue_busy_retries = 0
         head = self.training_queue[0]
         # Malformed item (hand-edited/corrupted queue file): remove it LOUDLY, then move on
         # to the next — one bad entry must not wedge the whole queue or crash the advance.
-        if not isinstance(head, dict) or not isinstance(head.get("preset"), dict):
+        if not self._queue_item_valid(head):
             self.training_queue.pop(0)
             self._save_training_queue()
             self._refresh_queue_button()
+            self._render_queue_window()
             self.update_console("[queue] removed an unreadable queue entry (corrupt or "
                                 "hand-edited queue file) — continuing with the next.\n")
-            self.master.after(100, self._start_next_queued)
+            self._schedule_queue_advance(100)
             return
         # Dataset gone (deleted/renamed/moved since queueing): without this check the stale
         # TOML silently trains the PREVIOUS job's dataset under this job's name. HOLD with
@@ -4167,6 +4212,9 @@ class LoRATrainerGUI:
             self.training_queue.insert(0, item)
             self._save_training_queue()
             self._refresh_queue_button()
+            # Invalidate any timer armed before this decline — otherwise a pending advance
+            # re-pops the same head and repeats the same modal validation error in a loop.
+            self._cancel_pending_queue_advance()
             self.update_console("[queue] run did not start — it stays at the head of the queue. "
                                 "Fix the issue and use the queue window's 'Start next' button.\n")
         self._render_queue_window()
@@ -4255,8 +4303,8 @@ class LoRATrainerGUI:
             self._render_queue_window()
 
     def _queue_row_summary(self, item):
-        p = item.get("preset", {})
-        folder = item.get("image_folder", "")
+        p = item.get("preset", {}) if isinstance(item.get("preset"), dict) else {}
+        folder = str(item.get("image_folder") or "")
         try:
             from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
             _exts = {e.lower() for e in IMAGE_EXTENSIONS}
@@ -17028,6 +17076,10 @@ class LoRATrainerGUI:
         eng.load_primary(path)
 
     def _royale_unload(self):
+        # Same internal guard as the Repair/Explorer unloads: resetting under a live CUDA
+        # worker hard-hangs, and callers (tab switch, pre-training hygiene) can't know.
+        if self._royale_is_busy():
+            return
         if getattr(self, "royale_engine", None) is not None:
             try:
                 self.royale_engine.reset()
@@ -21188,6 +21240,9 @@ class LoRATrainerGUI:
         # Only a run that finished on its own. Pause exits 0 too (state "pausing"); Stop and
         # crashes arrive non-zero. Each of the three conditions excludes a real case, and getting
         # it wrong shuts the machine down under someone who is still using it.
+        # Every run exit invalidates whatever advance/retry timers were armed before it —
+        # a stale tick must never fire into the state this exit is about to establish.
+        self._cancel_pending_queue_advance()
         _queue_advancing = False
         if return_code == 0 and was_state == "running":
             if getattr(self, "training_queue", None):
@@ -21195,20 +21250,27 @@ class LoRATrainerGUI:
                 # LAST queued run finishes — that final run's clean exit lands here with an
                 # empty queue and fires the auto-stop as usual.
                 _queue_advancing = True
+                self._queue_busy_retries = 0
                 self.update_console(f"\n[queue] run finished — next of "
                                     f"{len(self.training_queue)} queued run(s) starts in 5 s.\n")
-                self.master.after(5000, self._start_next_queued)
+                self._schedule_queue_advance(5000)
             else:
                 self._maybe_stop_pod_after_training()
         elif getattr(self, "training_queue", None):
             # Failure, Stop, or Pause with runs still waiting: never cascade into the queue —
             # a crash loop through N queued runs would burn hours producing nothing. The queue
             # holds; the user restarts it from the queue window.
-            why = ("paused" if was_state == "pausing" and return_code == 0 else
-                   f"did not finish cleanly (exit {return_code})")
-            self.update_console(f"[queue] run {why} — {len(self.training_queue)} queued run(s) "
-                                f"are HELD. Open the queue (📋, bottom right) and use "
-                                f"'Start next now' when ready.\n")
+            if was_state == "pausing" and return_code == 0:
+                self.update_console(f"[queue] run paused — {len(self.training_queue)} queued "
+                                    f"run(s) are HELD. Resume the paused run from the Training "
+                                    f"tab first; the queue continues after it finishes.\n")
+            else:
+                self.update_console(
+                    f"[queue] run did not finish cleanly (exit {return_code}) — "
+                    f"{len(self.training_queue)} queued run(s) are HELD. The FAILED run is not "
+                    f"in the queue: its settings are still loaded in the Training tab (fix and "
+                    f"Start Training to retry it), or open the queue (📋, bottom right) and "
+                    f"'Start next now' to skip to the next job.\n")
         if getattr(self, "training_state", "idle") == "pausing" and return_code == 0:
             # Successful graceful exit — record paused state
             state_dir = self._detect_latest_state_dir()
@@ -21270,17 +21332,24 @@ class LoRATrainerGUI:
                 entry.insert(0, state_path)
         except Exception:
             pass
-        # Clean up paused sidecar — we're consuming it
-        try:
-            sidecar = self._paused_sidecar_path()
-            if os.path.exists(sidecar):
-                os.remove(sidecar)
-        except Exception:
-            pass
         self.update_console(f"\n=== RESUMING from {state_path} ===\n\n")
-        self.training_state = "running"
-        self._refresh_training_buttons()
         self.start_training()
+        # Only a start that actually LAUNCHED consumes the pause. start_training can decline
+        # (validation, disk headroom, epochs-left) — destroying the sidecar and flipping the
+        # state beforehand stranded a declinable resume with no way back to the paused run.
+        _proc = getattr(self, "current_process", None)
+        if getattr(self, "training_state", "idle") == "running" and _proc is not None and _proc.poll() is None:
+            try:
+                sidecar = self._paused_sidecar_path()
+                if os.path.exists(sidecar):
+                    os.remove(sidecar)
+            except Exception:
+                pass
+        else:
+            self.training_state = "paused"
+            self._refresh_training_buttons()
+            self.update_console("[resume] start declined — the run is still PAUSED and can be "
+                                "resumed once the issue above is fixed.\n")
 
     def _check_for_paused_state_on_startup(self):
         """On GUI launch, detect a leftover paused state and restore the Resume button."""
@@ -21338,26 +21407,34 @@ class LoRATrainerGUI:
         """Stop the current running process"""
         # Stop samples watcher
         self.stop_samples_watcher()
-
-        if self.current_process and self.current_process.poll() is None:
+        # A user Stop invalidates any armed queue-advance/retry timer immediately — the
+        # exit handler bumps too, but for non-pipeline kills this is the only bump.
+        try:
+            self._cancel_pending_queue_advance()
+        except Exception:
+            pass
+        # Snapshot: check_process's worker nulls self.current_process the instant the kill
+        # lands, racing the .wait(timeout=5) below into an AttributeError on None.
+        _proc = self.current_process
+        if _proc and _proc.poll() is None:
             try:
                 if os.name == 'nt':
                     # CREATE_NO_WINDOW prevents CTRL_BREAK_EVENT from working,
                     # so terminate the process tree via taskkill instead.
                     subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(self.current_process.pid)],
+                        ["taskkill", "/F", "/T", "/PID", str(_proc.pid)],
                         capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                 else:
-                    os.killpg(os.getpgid(self.current_process.pid), signal.SIGTERM)
+                    os.killpg(os.getpgid(_proc.pid), signal.SIGTERM)
             except Exception as e:
                 self.update_console("Error stopping process: " + str(e) + "\n")
             try:
-                self.current_process.wait(timeout=5)
+                _proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
-                    self.current_process.kill()
-                    self.current_process.wait()
+                    _proc.kill()
+                    _proc.wait()
                 except Exception as e:
                     self.update_console("Error killing process: " + str(e) + "\n")
             self.current_process = None

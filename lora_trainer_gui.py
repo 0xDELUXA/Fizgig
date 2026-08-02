@@ -4284,13 +4284,23 @@ class LoRATrainerGUI:
             tk.Label(txt, text=summary.split("\n")[0], font=(FONT_FAMILY, 8),
                      bg=COLORS["bg_surface"], fg=COLORS["text_muted"], anchor="w",
                      justify=tk.LEFT).pack(anchor=tk.W)
-            abtn = tk.Button(card, text="✎", font=(FONT_FAMILY, 10), width=3,
+            act = tk.Frame(card, bg=COLORS["bg_surface"])
+            act.pack(side=tk.RIGHT, padx=10, pady=8)
+            abtn = tk.Button(act, text="✎", font=(FONT_FAMILY, 10), width=3,
                              bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
                              activebackground=COLORS["border"], relief="flat", bd=0,
                              cursor="hand2", command=self._queue_restore_active)
-            abtn.pack(side=tk.RIGHT, padx=10, pady=8)
+            abtn.pack(side=tk.LEFT, padx=2)
             ToolTip(abtn, "Load this run's settings back into the Training tab — the way back "
                           "after editing a queued job")
+            if _busy:
+                cbtn = tk.Button(act, text="■", font=(FONT_FAMILY, 10), width=3,
+                                 bg=COLORS["bg_surface"], fg=COLORS["error"],
+                                 activebackground=COLORS["border"], relief="flat", bd=0,
+                                 cursor="hand2", command=self._queue_cancel_active)
+                cbtn.pack(side=tk.LEFT, padx=2)
+                ToolTip(cbtn, "Stop this run (no save). Queued runs HOLD — they won't "
+                              "auto-start after a cancel")
 
         if not self.training_queue:
             return
@@ -4347,6 +4357,25 @@ class LoRATrainerGUI:
             self._save_training_queue()
             self._refresh_queue_button()
             self._render_queue_window()
+
+    def _queue_cancel_active(self):
+        """Stop the run in progress from the queue window's pinned card. Confirmed first —
+        the Training tab's own Stop button stays instant, but here a misclick between rows
+        would kill hours of work. The existing hold policy applies: queued runs do NOT
+        auto-start after a cancel."""
+        _proc = getattr(self, "current_process", None)
+        if _proc is None or _proc.poll() is not None:
+            self._render_queue_window()
+            return
+        name = (getattr(self, "_active_run_item", None) or {}).get("preset", {}).get("LORA_NAME", "this run")
+        if not messagebox.askyesno(
+                "Stop training?",
+                f"Stop '{name}' now? Progress since the last checkpoint is lost, and queued "
+                f"runs will HOLD rather than auto-start.\n\n(To finish the epoch and save "
+                f"first, use Pause Training on the Training tab instead.)"):
+            return
+        self.stop_training()
+        self._render_queue_window()
 
     def _queue_restore_active(self):
         """Put the RUNNING job's settings back into the Training tab (the ✎ on the pinned

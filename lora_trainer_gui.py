@@ -3235,6 +3235,15 @@ class LoRATrainerGUI:
                        "the scores with your dataset. Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._krea2_losswatch_hint.grid(row=24, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        # Answers "when do changes take effect?" (issue #40) right where people wonder it.
+        ttk.Label(training_content,
+                  text="When do changes apply? Settings are read when a run launches — changing "
+                       "them mid-run does nothing. Pause → Resume relaunches with your current "
+                       "settings, so these can be changed at a pause. Dataset/caption changes "
+                       "need a fresh run (Resume skips re-caching).",
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 8, "italic"),
+                  justify=tk.LEFT, wraplength=720).grid(
+            row=25, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 6))
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)

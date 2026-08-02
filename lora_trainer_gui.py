@@ -384,6 +384,9 @@ PRESETS_DIR = os.path.join(os.path.dirname(__file__), "presets")
 
 # Snapshot of settings from the most recent training launch — restorable via "Load Last Train" button
 LAST_TRAIN_FILE = os.path.join(PRESETS_DIR, ".last_train_settings.json")
+# Training queue: full settings snapshots waiting to run back-to-back. Survives restart;
+# never auto-starts on launch (a queue found at startup waits for the user's first Start).
+QUEUE_FILE = os.path.join(PRESETS_DIR, "training_queue.json")
 
 # Built-in presets — always available in the Load Preset dropdown, prefixed with ✨ to distinguish
 # from user-saved presets. Defined in code so they ship with the app and can't be deleted accidentally.
@@ -1121,6 +1124,10 @@ class LoRATrainerGUI:
         if self.last_used.get("lora_output_dir"):
             self.settings["LORA_OUTPUT_DIR"] = self.last_used["lora_output_dir"]
 
+        # Training queue — loaded before any UI so the status-bar button can show its count.
+        # A queue restored from a previous session waits for the user; it never auto-starts.
+        self.training_queue = self._load_training_queue()
+
         # Klein's trainer resolves these itself (name-or-module-path). Krea 2 goes through
         # fizgig.training.optimizers, which offers a different set — filtered to what's actually
         # installed — so the dropdown is re-populated when the Base Model selector changes.
@@ -1716,9 +1723,24 @@ class LoRATrainerGUI:
                                      highlightthickness=0)
         self._ram_canvas.pack(side=tk.TOP)
 
+        # --- far right: training-queue button (lower-right corner of the app) ---
+        # Packed BEFORE the override panel so it owns the corner; the override panel's
+        # expand soaks up whatever is left in the middle.
+        qcol = tk.Frame(bar, bg=COLORS["bg_deep"])
+        qcol.pack(side=tk.RIGHT, padx=(0, 14), pady=10)
+        self._queue_btn = tk.Button(
+            qcol, text="📋 Queue", font=(FONT_FAMILY, 9, "bold"),
+            bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+            activebackground=COLORS["border"], activeforeground=COLORS["text_primary"],
+            relief="flat", bd=0, padx=12, pady=14, cursor="hand2",
+            command=self._open_queue_window)
+        self._queue_btn.pack(fill=tk.BOTH, expand=True)
+        self._refresh_queue_button()
+
         # --- right: live sample override (surface-coloured mini panel) ---
+        # Widths trimmed vs the original layout to make room for the queue button.
         ov = tk.Frame(bar, bg=COLORS["bg_surface"])
-        ov.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 14), pady=10, ipadx=8, ipady=4)
+        ov.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), pady=10, ipadx=8, ipady=4)
         _sbg = COLORS["bg_surface"]
         r1 = tk.Frame(ov, bg=_sbg); r1.pack(fill=tk.X, padx=8, pady=(4, 0))
         self.sample_override_var = tk.BooleanVar(value=False)
@@ -1726,29 +1748,29 @@ class LoRATrainerGUI:
                         command=self._on_sample_override_changed,
                         style="Surface.TCheckbutton").pack(side=tk.LEFT)
         tk.Label(r1, text="seed", bg=_sbg, fg=COLORS["text_muted"],
-                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(16, 3))
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(10, 3))
         self.sample_override_seed_var = tk.StringVar(value="1234")
-        ttk.Entry(r1, textvariable=self.sample_override_seed_var, width=8).pack(side=tk.LEFT)
+        ttk.Entry(r1, textvariable=self.sample_override_seed_var, width=6).pack(side=tk.LEFT)
         # Same list as the Samples tab (SAMPLE_RESOLUTIONS) — these two had drifted, and
         # the override's lower ceiling silently downgraded a 1280/1536 preview.
         _res_vals = SAMPLE_RESOLUTIONS
         tk.Label(r1, text="W", bg=_sbg, fg=COLORS["text_muted"],
-                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(14, 3))
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(8, 3))
         self.sample_override_w_var = tk.StringVar(value="768")
         ttk.Combobox(r1, textvariable=self.sample_override_w_var, values=_res_vals,
-                     state="readonly", width=6).pack(side=tk.LEFT)
+                     state="readonly", width=5).pack(side=tk.LEFT)
         tk.Label(r1, text="H", bg=_sbg, fg=COLORS["text_muted"],
-                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(12, 3))
+                 font=(FONT_FAMILY, 8)).pack(side=tk.LEFT, padx=(8, 3))
         self.sample_override_h_var = tk.StringVar(value="768")
         ttk.Combobox(r1, textvariable=self.sample_override_h_var, values=_res_vals,
-                     state="readonly", width=6).pack(side=tk.LEFT)
+                     state="readonly", width=5).pack(side=tk.LEFT)
         # Reference image — auto-capped to ~0.20 MP by the trainer so a big image can't OOM the
         # sample. Shown for BOTH families: Klein uses it as edit conditioning, Krea 2 routes it
         # through the Qwen3-VL vision path. (This comment used to claim it was hidden under
         # Krea 2 — it never was; there is no hide call for these widgets anywhere.)
         self._override_ref_caption = tk.Label(r1, text="Ref", bg=_sbg, fg=COLORS["text_muted"],
                  font=(FONT_FAMILY, 8))
-        self._override_ref_caption.pack(side=tk.LEFT, padx=(14, 3))
+        self._override_ref_caption.pack(side=tk.LEFT, padx=(8, 3))
         self.sample_override_ref_var = tk.StringVar(value="")
         # Compact button so it matches the seed/resolution input height (the
         # default ttk.Button padding is taller and pushes the prompt row down).
@@ -3923,6 +3945,338 @@ class LoRATrainerGUI:
             messagebox.showinfo("Loaded", "Restored settings from your last training launch.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load last train settings:\n{e}")
+
+    # ------------------------------------------------------------
+    # Training queue — settings snapshots that run back-to-back
+    # ------------------------------------------------------------
+    # A queue item is everything a run needs that the GUI would otherwise read live:
+    # the preset snapshot (_collect_preset_values), the architecture (presets are
+    # per-arch and deliberately don't carry it), the Start-tab dataset folder, and the
+    # Samples-tab entries (presets deliberately skip those too). Restoring an item is
+    # "load these into the GUI, then press Start" — the queue never bypasses
+    # start_training, so validation, TOML regeneration, snapshotting and the pause
+    # machinery all behave exactly as for a hand-started run.
+
+    def _load_training_queue(self):
+        if _persist_disabled():
+            return []
+        try:
+            with open(QUEUE_FILE, "r", encoding="utf-8") as f:
+                items = json.load(f)
+            return items if isinstance(items, list) else []
+        except FileNotFoundError:
+            return []
+        except Exception as e:
+            print(f"[queue] failed to load {QUEUE_FILE}: {e}")
+            return []
+
+    def _save_training_queue(self):
+        if _persist_disabled():
+            return
+        try:
+            os.makedirs(PRESETS_DIR, exist_ok=True)
+            tmp = QUEUE_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.training_queue, f, indent=2, default=str)
+            os.replace(tmp, QUEUE_FILE)
+        except Exception as e:
+            print(f"[queue] failed to save: {e}")
+
+    _QUEUE_SAMPLE_KEYS = ("SAMPLE_ENABLED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
+                          "SAMPLE_SEED", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_EVERY_N_STEPS",
+                          "SAMPLE_AT_FIRST", "SAMPLE_FLOW_SHIFT", "SAMPLE_NEGATIVE",
+                          "SAMPLE_CFG_SCALE")
+
+    def _queue_snapshot(self):
+        """Capture the currently configured run as a queue item."""
+        import time as _time
+        samples = {}
+        for k in self._QUEUE_SAMPLE_KEYS:
+            entry = self.entries.get(k)
+            if entry is None:
+                continue
+            try:
+                samples[k] = entry.get()
+            except Exception:
+                pass
+        return {
+            "id": f"q{int(_time.time() * 1000)}",
+            "queued_at": _time.strftime("%Y-%m-%d %H:%M"),
+            "architecture": self.architecture_var.get(),
+            "image_folder": self.image_folder_var.get().strip(),
+            "preset": self._collect_preset_values(),
+            "samples": samples,
+        }
+
+    def _apply_queue_item(self, item):
+        """Load a queue item's settings back into the GUI (arch first — it swaps the UI)."""
+        arch = item.get("architecture", "")
+        if arch and arch in ARCHITECTURES and self.architecture_var.get() != arch:
+            self.architecture_var.set(arch)
+            try:
+                self.update_ui_for_architecture()
+            except Exception as e:
+                self.update_console(f"[queue] arch switch to {arch!r} failed: {e}\n")
+        self._apply_preset_values(item.get("preset", {}))
+        folder = (item.get("image_folder") or "").strip()
+        if folder:
+            self.image_folder_var.set(folder)   # traces regenerate Fizgig_train.toml
+        for k, v in (item.get("samples") or {}).items():
+            entry = self.entries.get(k)
+            if entry is None:
+                continue
+            try:
+                if isinstance(entry, (tk.BooleanVar, tk.StringVar, tk.IntVar, tk.DoubleVar)):
+                    entry.set(v)
+                elif isinstance(entry, ttk.Combobox):
+                    entry.set(str(v))
+                else:
+                    entry.delete(0, tk.END)
+                    entry.insert(0, str(v))
+            except Exception:
+                pass
+
+    def _queue_current_run(self):
+        """Snapshot the current config to the end of the queue (Start pressed mid-run)."""
+        item = self._queue_snapshot()
+        if not item["image_folder"]:
+            messagebox.showwarning(
+                "Nothing to queue",
+                "Pick a training image folder on the Start tab first — a queued run "
+                "needs to know its dataset.")
+            return
+        self.training_queue.append(item)
+        self._save_training_queue()
+        self._refresh_queue_button()
+        name = item["preset"].get("LORA_NAME") or os.path.basename(item["image_folder"])
+        self.update_console(f"[queue] added '{name}' — position {len(self.training_queue)} in the "
+                            f"queue. It starts automatically when the current run finishes.\n")
+
+    def _start_next_queued(self):
+        """Pop the head of the queue into the GUI and start it. Never called while busy."""
+        _proc = getattr(self, "current_process", None)
+        if _proc is not None and _proc.poll() is None:
+            return
+        if not self.training_queue:
+            return
+        item = self.training_queue.pop(0)
+        self._save_training_queue()
+        self._refresh_queue_button()
+        name = item.get("preset", {}).get("LORA_NAME") or os.path.basename(item.get("image_folder", "?"))
+        self.update_console(f"\n[queue] starting next run: '{name}' "
+                            f"({len(self.training_queue)} still queued)\n")
+        self._apply_queue_item(item)
+        self.start_training()
+        # start_training can decline (validation, disk warning declined). The item's settings
+        # are in the GUI either way; put it back at the head so nothing is silently lost.
+        if getattr(self, "training_state", "idle") != "running":
+            self.training_queue.insert(0, item)
+            self._save_training_queue()
+            self._refresh_queue_button()
+            self.update_console("[queue] run did not start — it stays at the head of the queue. "
+                                "Fix the issue and use the queue window's 'Start next' button.\n")
+
+    def _refresh_queue_button(self):
+        btn = getattr(self, "_queue_btn", None)
+        if btn is None:
+            return
+        n = len(getattr(self, "training_queue", []))
+        try:
+            btn.config(text=f"📋 Queue ({n})" if n else "📋 Queue",
+                       fg=COLORS["accent"] if n else COLORS["text_primary"])
+        except Exception:
+            pass
+
+    def _queue_thumbnail(self, folder, size=56):
+        """PhotoImage of the first image in `folder`, or None. Caller keeps the reference."""
+        try:
+            from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
+            exts = {e.lower() for e in IMAGE_EXTENSIONS}
+            first = next((f for f in sorted(os.listdir(folder))
+                          if os.path.splitext(f)[1].lower() in exts), None)
+            if first is None:
+                return None
+            img = Image.open(os.path.join(folder, first))
+            img.thumbnail((size, size), Image.LANCZOS)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            return None
+
+    def _open_queue_window(self):
+        """The queue manager: one row per queued run — thumbnail, key settings, and the
+        operations (reorder / edit in tab / update from tab / delete / start next)."""
+        win = getattr(self, "_queue_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift()
+            self._render_queue_window()
+            return
+        win = tk.Toplevel(self.master)
+        win.title("Training Queue")
+        win.geometry("860x560")
+        win.configure(bg=COLORS["bg_deep"])
+        self._queue_win = win
+
+        tk.Label(win, text="Training Queue", font=(FONT_FAMILY, 16, "bold"),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_primary"]).pack(anchor=tk.W, padx=16, pady=(14, 0))
+        self._queue_win_status = tk.Label(win, text="", font=(FONT_FAMILY, 9),
+                                          bg=COLORS["bg_deep"], fg=COLORS["text_muted"],
+                                          justify=tk.LEFT)
+        self._queue_win_status.pack(anchor=tk.W, padx=16, pady=(2, 8))
+
+        holder = tk.Frame(win, bg=COLORS["bg_deep"])
+        holder.pack(fill=tk.BOTH, expand=True, padx=16)
+        canvas = tk.Canvas(holder, bg=COLORS["bg_deep"], highlightthickness=0)
+        vsb = ttk.Scrollbar(holder, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        rows = tk.Frame(canvas, bg=COLORS["bg_deep"])
+        cw = canvas.create_window((0, 0), window=rows, anchor="nw")
+        rows.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(cw, width=e.width))
+        canvas.bind_all("<MouseWheel>",
+                        lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+        win.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>") if e.widget is win else None)
+        self._queue_rows_frame = rows
+
+        foot = tk.Frame(win, bg=COLORS["bg_deep"])
+        foot.pack(fill=tk.X, padx=16, pady=12)
+        self._queue_start_next_btn = ttk.Button(foot, text="▶ Start next now",
+                                                command=self._start_next_queued, style="Primary.TButton")
+        self._queue_start_next_btn.pack(side=tk.LEFT)
+        ttk.Button(foot, text="Clear queue", command=self._queue_clear_all).pack(side=tk.LEFT, padx=(12, 0))
+        tk.Label(foot, text="Queued runs start automatically when the current run finishes cleanly. "
+                            "After a failure, a Stop, or an app restart, the queue waits for you.",
+                 font=(FONT_FAMILY, 8), bg=COLORS["bg_deep"], fg=COLORS["text_explain"],
+                 wraplength=420, justify=tk.LEFT).pack(side=tk.RIGHT)
+        self._render_queue_window()
+
+    def _queue_clear_all(self):
+        if self.training_queue and messagebox.askyesno(
+                "Clear queue", f"Remove all {len(self.training_queue)} queued run(s)?"):
+            self.training_queue.clear()
+            self._save_training_queue()
+            self._refresh_queue_button()
+            self._render_queue_window()
+
+    def _queue_row_summary(self, item):
+        p = item.get("preset", {})
+        folder = item.get("image_folder", "")
+        try:
+            from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
+            _exts = {e.lower() for e in IMAGE_EXTENSIONS}
+            n_imgs = sum(1 for f in os.listdir(folder)
+                         if os.path.splitext(f)[1].lower() in _exts) if os.path.isdir(folder) else 0
+        except Exception:
+            n_imgs = 0
+        name = p.get("LORA_NAME") or os.path.basename(folder) or "(unnamed)"
+        bits = [f"{item.get('architecture', '?')}",
+                f"{os.path.basename(folder) or '?'} ({n_imgs} images)"]
+        for label, key in (("LR", "LEARNING_RATE"), ("epochs", "MAX_TRAIN_EPOCHS"),
+                           ("dim", "NETWORK_DIM"), ("type", "NETWORK_TYPE"),
+                           ("area", "TARGET_LAYERS")):
+            v = p.get(key)
+            if v not in (None, ""):
+                bits.append(f"{label} {v}")
+        return name, "  ·  ".join(str(b) for b in bits) + f"\nqueued {item.get('queued_at', '?')}"
+
+    def _render_queue_window(self):
+        rows = getattr(self, "_queue_rows_frame", None)
+        if rows is None or not rows.winfo_exists():
+            return
+        for w in rows.winfo_children():
+            w.destroy()
+        self._queue_thumb_refs = []
+        _busy = getattr(self, "current_process", None)
+        _busy = _busy is not None and _busy.poll() is None
+        try:
+            self._queue_start_next_btn.config(
+                state=(tk.DISABLED if (_busy or not self.training_queue) else tk.NORMAL))
+            n = len(self.training_queue)
+            self._queue_win_status.config(
+                text=(f"{n} run(s) queued — a run is active; the queue continues when it finishes cleanly."
+                      if _busy and n else
+                      f"{n} run(s) queued — nothing is training; use 'Start next now' to begin."
+                      if n else
+                      "Queue is empty. While a run is active, the Start Training button becomes "
+                      "'Queue Train' — click it to add the currently configured run."))
+        except Exception:
+            pass
+        if not self.training_queue:
+            return
+        for i, item in enumerate(list(self.training_queue)):
+            card = tk.Frame(rows, bg=COLORS["bg_surface"],
+                            highlightbackground=COLORS["border"], highlightthickness=1)
+            card.pack(fill=tk.X, pady=(0, 8))
+            thumb = self._queue_thumbnail(item.get("image_folder", ""))
+            if thumb is not None:
+                self._queue_thumb_refs.append(thumb)
+                tk.Label(card, image=thumb, bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=10, pady=8)
+            else:
+                tk.Label(card, text="🖼", font=(FONT_FAMILY, 20), width=3,
+                         bg=COLORS["bg_surface"], fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=10, pady=8)
+            name, summary = self._queue_row_summary(item)
+            txt = tk.Frame(card, bg=COLORS["bg_surface"])
+            txt.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=8)
+            tk.Label(txt, text=f"{i + 1}.  {name}", font=(FONT_FAMILY, 11, "bold"),
+                     bg=COLORS["bg_surface"], fg=COLORS["text_primary"], anchor="w",
+                     justify=tk.LEFT).pack(anchor=tk.W)
+            tk.Label(txt, text=summary, font=(FONT_FAMILY, 8),
+                     bg=COLORS["bg_surface"], fg=COLORS["text_muted"], anchor="w",
+                     justify=tk.LEFT).pack(anchor=tk.W)
+            btns = tk.Frame(card, bg=COLORS["bg_surface"])
+            btns.pack(side=tk.RIGHT, padx=10, pady=8)
+
+            def _mk(parent, label, cmd, tip):
+                b = tk.Button(parent, text=label, font=(FONT_FAMILY, 10), width=3,
+                              bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+                              activebackground=COLORS["border"], relief="flat", bd=0,
+                              cursor="hand2", command=cmd)
+                b.pack(side=tk.LEFT, padx=2)
+                ToolTip(b, tip)
+                return b
+            _mk(btns, "↑", lambda i=i: self._queue_move(i, -1), "Move up")
+            _mk(btns, "↓", lambda i=i: self._queue_move(i, +1), "Move down")
+            _mk(btns, "✎", lambda i=i: self._queue_edit(i),
+                "Load this run's settings into the Training tab to edit them")
+            _mk(btns, "⤓", lambda i=i: self._queue_update_from_tab(i),
+                "Overwrite this queued run with the Training tab's current settings")
+            _mk(btns, "✕", lambda i=i: self._queue_delete(i), "Remove from queue")
+
+    def _queue_move(self, i, delta):
+        j = i + delta
+        if 0 <= i < len(self.training_queue) and 0 <= j < len(self.training_queue):
+            q = self.training_queue
+            q[i], q[j] = q[j], q[i]
+            self._save_training_queue()
+            self._render_queue_window()
+
+    def _queue_delete(self, i):
+        if 0 <= i < len(self.training_queue):
+            self.training_queue.pop(i)
+            self._save_training_queue()
+            self._refresh_queue_button()
+            self._render_queue_window()
+
+    def _queue_edit(self, i):
+        """Load the item into the Training tab. The item stays queued — after editing,
+        use ⤓ on the same row to write the changes back."""
+        if not (0 <= i < len(self.training_queue)):
+            return
+        self._apply_queue_item(self.training_queue[i])
+        self.update_console(f"[queue] loaded run {i + 1} into the Training tab — edit, then use "
+                            f"the ⤓ button on its queue row to save the changes back.\n")
+
+    def _queue_update_from_tab(self, i):
+        if not (0 <= i < len(self.training_queue)):
+            return
+        old = self.training_queue[i]
+        item = self._queue_snapshot()
+        item["id"], item["queued_at"] = old.get("id", item["id"]), old.get("queued_at", item["queued_at"])
+        self.training_queue[i] = item
+        self._save_training_queue()
+        self._render_queue_window()
+        self.update_console(f"[queue] run {i + 1} updated from the Training tab's current settings.\n")
 
     # Keys in self.entries that belong to OTHER tabs — skipped when collecting
     # a training-tab preset. Everything else in self.entries is fair game.
@@ -18930,11 +19284,9 @@ class LoRATrainerGUI:
         _proc = getattr(self, "current_process", None)
         try:
             if _proc is not None and _proc.poll() is None:
-                messagebox.showinfo(
-                    "Already Running",
-                    "A training/caching run is already active.\n\n"
-                    "Stop it (or let it finish) before starting another."
-                )
+                # A run is active, so Start means QUEUE: capture the currently configured
+                # run and append it. (The button already reads "Queue Train" in this state.)
+                self._queue_current_run()
                 return
         except Exception:
             pass
@@ -19973,6 +20325,14 @@ class LoRATrainerGUI:
         """Show/hide Pause and Resume buttons based on self.training_state."""
         if not hasattr(self, "training_state"):
             self.training_state = "idle"
+        # While a run is active the Start button queues instead of starting — say so on
+        # the button itself rather than surprising the user with a popup.
+        try:
+            self._start_training_btn.config(
+                text="Queue Train" if self.training_state in ("running", "pausing")
+                else "Start Training")
+        except Exception:
+            pass
         # Pause: visible while running (Krea 2 now saves full state at the epoch boundary, so
         # graceful Pause/Resume works the same as Klein).
         if self.training_state == "running":
@@ -20161,8 +20521,27 @@ class LoRATrainerGUI:
         # Only a run that finished on its own. Pause exits 0 too (state "pausing"); Stop and
         # crashes arrive non-zero. Each of the three conditions excludes a real case, and getting
         # it wrong shuts the machine down under someone who is still using it.
+        _queue_advancing = False
         if return_code == 0 and was_state == "running":
-            self._maybe_stop_pod_after_training()
+            if getattr(self, "training_queue", None):
+                # Queue takes precedence over pod auto-stop: the pod must stay up until the
+                # LAST queued run finishes — that final run's clean exit lands here with an
+                # empty queue and fires the auto-stop as usual.
+                _queue_advancing = True
+                self.update_console(f"\n[queue] run finished — next of "
+                                    f"{len(self.training_queue)} queued run(s) starts in 5 s.\n")
+                self.master.after(5000, self._start_next_queued)
+            else:
+                self._maybe_stop_pod_after_training()
+        elif getattr(self, "training_queue", None):
+            # Failure, Stop, or Pause with runs still waiting: never cascade into the queue —
+            # a crash loop through N queued runs would burn hours producing nothing. The queue
+            # holds; the user restarts it from the queue window.
+            why = ("paused" if was_state == "pausing" and return_code == 0 else
+                   f"did not finish cleanly (exit {return_code})")
+            self.update_console(f"[queue] run {why} — {len(self.training_queue)} queued run(s) "
+                                f"are HELD. Open the queue (📋, bottom right) and use "
+                                f"'Start next now' when ready.\n")
         if getattr(self, "training_state", "idle") == "pausing" and return_code == 0:
             # Successful graceful exit — record paused state
             state_dir = self._detect_latest_state_dir()

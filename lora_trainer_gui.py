@@ -898,7 +898,7 @@ class LoRATrainerGUI:
     def __init__(self, master):
         self.master = master
         master.title("Fizgig — Klein 9B & Krea 2 LoRA Studio")
-        master.geometry("1360x1124")  # wide enough that the IDLE/BUSY light clears the last tab ("Preferences"); +100 height for the bottom status bar
+        master.geometry("1450x1124")  # wide enough that the IDLE/BUSY light clears the last tab ("Preferences") with the Metadata tab in the strip; +100 height for the bottom status bar
         master.minsize(1180, 900)  # keeps the tab row clear of the status light + tab content not cut off
         master.configure(bg=BG_COLOR)
         # Closing the window must not orphan a training subprocess: Tk's default destroy

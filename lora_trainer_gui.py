@@ -604,6 +604,26 @@ _FIZGIG_DIR = os.path.dirname(os.path.abspath(__file__))
 # file comes from, not who it is for.
 FLORENCE_DEFAULT_MODEL = "MiaoshouAI/Florence-2-base-PromptGen"
 FLORENCE_MODELS = [FLORENCE_DEFAULT_MODEL, "microsoft/Florence-2-base", "microsoft/Florence-2-large"]
+# Florence-2 isn't a native transformers architecture, so loading it means trust_remote_code=True
+# — downloading and EXECUTING whatever Python is currently on that repo's default branch, with no
+# pin. Pinned here to the commit each was audited against, so a compromised account (or a repo
+# that just changes later) can't silently change what gets executed on someone's next first-run.
+# To refresh a pin: check https://huggingface.co/api/models/<repo> for the current "sha".
+FLORENCE_REVISIONS = {
+    "MiaoshouAI/Florence-2-base-PromptGen": "da7ac9f3deac56a928e2fd4d94d8bb985d231299",
+    "microsoft/Florence-2-base": "5ca5edf5bd017b9919c05d08aebef5e4c7ac3bac",
+    "microsoft/Florence-2-large": "21a599d414c4d928c9032694c424fb94458e3594",
+}
+# PromptGen's config doesn't carry its own modeling code — its auto_map points at
+# "microsoft/Florence-2-base-ft--modeling_florence2...", so transformers fetches the code that
+# actually EXECUTES from that second, different repo. Our `revision` above only pins PromptGen
+# itself; transformers only carries it over to the code repo automatically when the two repos
+# are the same one (they aren't here), so the redirected repo needs its own explicit pin via
+# code_revision or it silently stays on "main". The two microsoft/ models don't redirect
+# (their auto_map has no repo prefix, just the module path), so they don't need an entry here.
+FLORENCE_CODE_REVISIONS = {
+    "MiaoshouAI/Florence-2-base-PromptGen": "f6c1a25888ffc1d945ee8a1a77ac833c7303d46e",  # microsoft/Florence-2-base-ft
+}
 FLORENCE_TASKS = ["<CAPTION>", "<DETAILED_CAPTION>", "<MORE_DETAILED_CAPTION>"]
 QWEN_CAPTION_MODEL = "Qwen3-VL 4B (Krea 2 text encoder)"
 QWEN_CUSTOM_TASK = "Custom…"
@@ -881,7 +901,7 @@ class LoRATrainerGUI:
     def __init__(self, master):
         self.master = master
         master.title("Fizgig — Klein 9B & Krea 2 LoRA Studio")
-        master.geometry("1360x1124")  # wide enough that the IDLE/BUSY light clears the last tab ("Preferences"); +100 height for the bottom status bar
+        master.geometry("1450x1124")  # wide enough that the IDLE/BUSY light clears the last tab ("Preferences") with the Metadata tab in the strip; +100 height for the bottom status bar
         master.minsize(1180, 900)  # keeps the tab row clear of the status light + tab content not cut off
         master.configure(bg=BG_COLOR)
         # Closing the window must not orphan a training subprocess: Tk's default destroy
@@ -1081,6 +1101,8 @@ class LoRATrainerGUI:
             "METADATA_DESCRIPTION": "",
             "METADATA_LICENSE": "",
             "METADATA_TAGS": "",
+            "METADATA_TRIGGER_PHRASE": "",
+            "METADATA_THUMBNAIL": "",
             "FP8": True,  # Default FP8 setting (--fp8_base)
             "SCALED": True,  # Default Scaled setting (--fp8_scaled, recommended with fp8_base)
             "QUANT_4BIT": False,  # 4-bit NF4 base (low-VRAM); supersedes fp8 when on
@@ -1200,6 +1222,10 @@ class LoRATrainerGUI:
         self.extract_tab.bind("<Button-1>", self.remove_focus)
         self.notebook.add(self.extract_tab, text="Extract")
 
+        self.metadata_tab = ttk.Frame(self.notebook)
+        self.metadata_tab.bind("<Button-1>", self.remove_focus)
+        self.notebook.add(self.metadata_tab, text="Metadata")
+
         self.prefs_tab = ttk.Frame(self.notebook)
         self.prefs_tab.bind("<Button-1>", self.remove_focus)
         self.notebook.add(self.prefs_tab, text="Preferences")
@@ -1218,6 +1244,7 @@ class LoRATrainerGUI:
         self.create_explorer_tab()
         self.create_lora_royale_tab()
         self.create_extract_tab()
+        self.create_metadata_tab()
         self.create_prefs_tab()
         # Restore remembered Repair Studio / Explorer Setup fields + attach save traces.
         # After ALL tabs exist: restoring fires their traces, which touch other tabs' widgets.
@@ -2178,6 +2205,32 @@ class LoRATrainerGUI:
             selectbackground=[("readonly", COLORS["bg_surface"]), ("!disabled", COLORS["bg_surface"])],
             selectforeground=[("readonly", COLORS["text_primary"]), ("!disabled", COLORS["text_primary"])],
             bordercolor=[("focus", COLORS["border_focus"])]
+        )
+
+        # Treeview (the Metadata tab's custom-fields table). Nothing styled this before it —
+        # "clam" falls back to a stock white row background with no matching foreground, so
+        # rows rendered as near-invisible light-grey-on-white against an otherwise dark app.
+        style.configure(
+            "Treeview",
+            background=COLORS["bg_surface"],
+            fieldbackground=COLORS["bg_surface"],
+            foreground=COLORS["text_primary"],
+            bordercolor=COLORS["border"],
+            font=(FONT_FAMILY, 10),
+            rowheight=24,
+        )
+        style.map("Treeview",
+            background=[("selected", COLORS["accent"])],
+            foreground=[("selected", "white")]
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=COLORS["bg_header"],
+            foreground=COLORS["text_primary"],
+            font=(FONT_FAMILY, 10, "bold"),
+        )
+        style.map("Treeview.Heading",
+            background=[("active", COLORS["bg_hover"])]
         )
 
         # Scrollbar. `background` is the thumb — the part you drag — and it used to be bg_header
@@ -5952,6 +6005,25 @@ class LoRATrainerGUI:
         self.entries["METADATA_TAGS"].grid(row=row, column=1, sticky=tk.EW, padx=5, pady=2)
         row += 1
 
+        ttk.Label(parent, text="Metadata Trigger Phrase:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        self.entries["METADATA_TRIGGER_PHRASE"] = ttk.Entry(parent, width=40)
+        self.entries["METADATA_TRIGGER_PHRASE"].grid(row=row, column=1, sticky=tk.EW, padx=5, pady=2)
+        row += 1
+        ttk.Label(parent, text="Blank uses the Captions tab's trigger word.",
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
+            row=row, column=0, columnspan=3, sticky=tk.W, padx=5)
+        row += 1
+
+        ttk.Label(parent, text="Metadata Thumbnail:").grid(row=row, column=0, sticky=tk.W, padx=5, pady=2)
+        self.entries["METADATA_THUMBNAIL"] = ttk.Entry(parent, width=40)
+        self.entries["METADATA_THUMBNAIL"].grid(row=row, column=1, sticky=tk.EW, padx=5, pady=2)
+        ttk.Button(parent, text="Browse", command=lambda: self.browse_file("METADATA_THUMBNAIL", "file")).grid(row=row, column=2, sticky=tk.W, padx=5)
+        row += 1
+        ttk.Label(parent, text="Blank auto-embeds the latest sample preview; type 'off' to disable.",
+                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
+            row=row, column=0, columnspan=3, sticky=tk.W, padx=5)
+        row += 1
+
         return row
 
     def create_caption_generator(self):
@@ -6011,6 +6083,10 @@ class LoRATrainerGUI:
         self.caption_model_combo.grid(row=3, column=1, sticky=tk.W, pady=4)
         self.caption_model_combo.bind("<<ComboboxSelected>>",
                                       lambda e: self._on_caption_model_changed())
+        self.caption_model_hint_label = tk.Label(
+            settings_card, text=self._qwen_captioner_hint(),
+            font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+        self.caption_model_hint_label.grid(row=3, column=2, sticky=tk.W, padx=(10, 0))
         # The Qwen3-VL entry appears as soon as the Krea 2 text encoder path is filled in on
         # Preferences — no restart. It's a captioner for ANY dataset, Klein included; the file
         # just happens to ship with the Krea 2 models.
@@ -6376,6 +6452,17 @@ class LoRATrainerGUI:
         p = self._krea2_pref("krea2_text_encoder") if hasattr(self, "prefs_vars") else ""
         return p if (p and os.path.isfile(p)) else ""
 
+    def _qwen_captioner_hint(self) -> str:
+        """Small nudge next to the Model dropdown when Qwen3-VL isn't offered -- someone who
+        already has the weights (from ComfyUI, a pod image, wherever) has no other way to
+        learn that this is an unset/broken Preferences path rather than a missing feature."""
+        if self._qwen_captioner_path():
+            return ""
+        raw = self._krea2_pref("krea2_text_encoder") if hasattr(self, "prefs_vars") else ""
+        if raw:
+            return f"(Qwen3-VL path set but not found: {os.path.basename(raw)} — check Preferences)"
+        return "(Already have the Qwen3-VL weights? Set the path in Preferences to caption with it)"
+
     def _caption_model_values(self):
         """Model dropdown contents. Qwen3-VL is offered whenever its file exists — it captions to
         .txt like Florence does, so it serves Klein datasets just as well as Krea 2 ones."""
@@ -6411,6 +6498,8 @@ class LoRATrainerGUI:
                 # selection that no longer resolves to anything loadable.
                 self.caption_model_var.set(FLORENCE_DEFAULT_MODEL)
                 self._on_caption_model_changed()
+            if hasattr(self, "caption_model_hint_label"):
+                self.caption_model_hint_label.configure(text=self._qwen_captioner_hint())
         except tk.TclError:
             pass
 
@@ -6654,9 +6743,13 @@ class LoRATrainerGUI:
             self.master.update_idletasks()
 
             from fizgig.utils.hf_cache import from_pretrained_cache_first
+            florence_revision = FLORENCE_REVISIONS.get(model_name)
+            florence_code_revision = FLORENCE_CODE_REVISIONS.get(model_name)
             self.florence_processor = from_pretrained_cache_first(
                 AutoProcessor,
                 model_name,
+                revision=florence_revision,
+                code_revision=florence_code_revision,
                 trust_remote_code=True
             )
 
@@ -6670,6 +6763,8 @@ class LoRATrainerGUI:
             self.florence_model = from_pretrained_cache_first(
                 AutoModelForCausalLM,
                 model_name,
+                revision=florence_revision,
+                code_revision=florence_code_revision,
                 torch_dtype=torch.float16 if device == "cuda" else torch.float32,
                 trust_remote_code=True,
                 attn_implementation="eager"
@@ -6963,10 +7058,15 @@ class LoRATrainerGUI:
             self.update_caption_log(f"Qwen3-VL captioner ready on {device}.\n")
             return True
         except Exception as e:
-            self.update_caption_log(
-                f"Could not load the Qwen3-VL captioner: {type(e).__name__}: {e}\n"
-                "Check the Krea 2 text-encoder path in Preferences — Fizgig reads the bf16 and "
-                "fp8_scaled Qwen3-VL-4B files from Comfy-Org/Krea-2.\n")
+            # The embedder's own RuntimeError already carries precise instructions (the offline
+            # sneakernet shopping list) — appending the check-your-path hint to it sent an
+            # offline user hunting through a path that was fine. Only add the path hint for
+            # errors that don't explain themselves.
+            _msg = f"Could not load the Qwen3-VL captioner: {type(e).__name__}: {e}\n"
+            if not isinstance(e, RuntimeError):
+                _msg += ("Check the Krea 2 text-encoder path in Preferences — Fizgig reads the "
+                         "bf16 and fp8_scaled Qwen3-VL-4B files from Comfy-Org/Krea-2.\n")
+            self.update_caption_log(_msg)
             self.qwen_captioner = None
             return False
 
@@ -12816,6 +12916,344 @@ class LoRATrainerGUI:
 
     # endregion
 
+    # region Metadata Tab
+
+    def create_metadata_tab(self):
+        """Create the Metadata tab — view and edit the modelspec metadata on any .safetensors
+        file: LoRAs, DiTs, text encoders, embeddings, whatever — including ones Fizgig didn't
+        train, or trained before these fields existed."""
+        scrollable_frame, _ = self.create_scrollable_frame(self.metadata_tab)
+
+        outer = tk.Frame(scrollable_frame, bg=COLORS["bg_deep"])
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        self._add_tab_banner(
+            outer,
+            "Metadata",
+            "View and edit the SAI ModelSpec metadata embedded in a .safetensors file — title, "
+            "author, description, trigger phrase, thumbnail, and anything else ComfyUI's model "
+            "browser reads. Works on any .safetensors file — LoRA, DiT, text encoder, "
+            "embedding — not just ones Fizgig trained.",
+        )
+
+        self._metadata_editor_path = None
+        self._metadata_editor_thumbnail_uri = None  # current thumbnail data URI, or None
+        self._metadata_editor_custom = {}  # every key outside the standard fields below
+        self._metadata_thumb_photo = None  # keeps the PhotoImage alive; Tk drops it otherwise
+
+        # --- Load ---
+        load_card = self._start_section_card(
+            outer, "File",
+            "Pick any .safetensors file — LoRA, DiT, text encoder, embedding — its current "
+            "metadata loads below.",
+        )
+        load_card.grid_columnconfigure(1, weight=1)
+        ttk.Label(load_card, text="File:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.metadata_file_var = tk.StringVar()
+        ttk.Entry(load_card, textvariable=self.metadata_file_var, width=60).grid(
+            row=0, column=1, sticky=tk.EW, pady=4)
+        ttk.Button(load_card, text="Browse", command=self._browse_metadata_file).grid(
+            row=0, column=2, sticky=tk.W, padx=(8, 0), pady=4)
+        self._metadata_status_label = tk.Label(
+            load_card, text="No file loaded.", font=(FONT_FAMILY, 9, "italic"),
+            fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
+        self._metadata_status_label.grid(row=1, column=1, sticky=tk.W, pady=(2, 0))
+
+        # --- Standard fields ---
+        fields_card = self._start_section_card(
+            outer, "Standard Fields",
+            "The fields ComfyUI's model browser (and other spec-aware tools) render specially.",
+        )
+        fields_card.grid_columnconfigure(1, weight=1)
+
+        def _field_row(label_text, row):
+            ttk.Label(fields_card, text=label_text).grid(
+                row=row, column=0, sticky=tk.NW, padx=(0, 10), pady=4)
+            var = tk.StringVar()
+            ttk.Entry(fields_card, textvariable=var, width=60).grid(
+                row=row, column=1, sticky=tk.EW, pady=4)
+            return var
+
+        self.metadata_title_var = _field_row("Title:", 0)
+        self.metadata_author_var = _field_row("Author:", 1)
+        self.metadata_license_var = _field_row("License:", 2)
+        self.metadata_tags_var = _field_row("Tags:", 3)
+        self.metadata_trigger_var = _field_row("Trigger Phrase:", 4)
+        self.metadata_usage_hint_var = _field_row("Usage Hint:", 5)
+
+        ttk.Label(fields_card, text="Description:").grid(
+            row=6, column=0, sticky=tk.NW, padx=(0, 10), pady=4)
+        self.metadata_description_text = tk.Text(
+            fields_card, width=60, height=5, wrap=tk.WORD,
+            bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+            insertbackground=COLORS["text_primary"], font=(FONT_FAMILY, 10),
+            relief="flat", highlightthickness=1,
+            highlightbackground=COLORS["border"], highlightcolor=COLORS["border_focus"],
+        )
+        self.metadata_description_text.grid(row=6, column=1, sticky=tk.EW, pady=4)
+
+        # --- Thumbnail ---
+        thumb_card = self._start_section_card(
+            outer, "Thumbnail",
+            "The image ComfyUI shows as card art. Fizgig auto-embeds the latest training sample "
+            "when it trains a LoRA — replace or clear it here for any file.",
+        )
+        self._metadata_thumb_label = tk.Label(thumb_card, bg=COLORS["bg_surface"],
+                                              text="(no thumbnail)", fg=COLORS["text_muted"])
+        self._metadata_thumb_label.pack(anchor=tk.W, pady=(0, 8))
+        thumb_btn_row = tk.Frame(thumb_card, bg=COLORS["bg_surface"])
+        thumb_btn_row.pack(anchor=tk.W)
+        ttk.Button(thumb_btn_row, text="Replace...",
+                   command=self._browse_metadata_thumbnail).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(thumb_btn_row, text="Clear",
+                   command=self._clear_metadata_thumbnail).pack(side=tk.LEFT)
+
+        # --- Custom fields ---
+        custom_card = self._start_section_card(
+            outer, "Custom Fields",
+            "Like ID3 tags on an MP3 — the format isn't limited to a fixed list, and a reader "
+            "just ignores whatever it doesn't recognize. Add anything you want: author_email, "
+            "a colorspace profile note, whatever's useful to you. Not part of the SAI ModelSpec "
+            "standard, so tools other than Fizgig won't render these specially, but they're "
+            "stored in the file like any other metadata. Also shows any non-standard keys "
+            "already in the file — nothing gets silently dropped on save.",
+        )
+        tree_frame = tk.Frame(custom_card, bg=COLORS["bg_surface"])
+        tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.metadata_custom_tree = ttk.Treeview(
+            tree_frame, columns=("key", "value"), show="headings", height=6)
+        self.metadata_custom_tree.heading("key", text="Key")
+        self.metadata_custom_tree.heading("value", text="Value")
+        self.metadata_custom_tree.column("key", width=220, anchor=tk.W)
+        self.metadata_custom_tree.column("value", width=420, anchor=tk.W)
+        self.metadata_custom_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL,
+                                    command=self.metadata_custom_tree.yview)
+        tree_scroll.pack(side=tk.LEFT, fill=tk.Y)
+        self.metadata_custom_tree.configure(yscrollcommand=tree_scroll.set)
+
+        custom_btn_row = tk.Frame(custom_card, bg=COLORS["bg_surface"])
+        custom_btn_row.pack(anchor=tk.W, pady=(8, 0))
+        ttk.Button(custom_btn_row, text="Add field...",
+                   command=self._add_metadata_custom_field).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(custom_btn_row, text="Remove selected",
+                   command=self._remove_metadata_custom_field).pack(side=tk.LEFT)
+
+        # --- Save ---
+        save_row = tk.Frame(outer, bg=COLORS["bg_deep"])
+        save_row.pack(fill=tk.X, padx=36, pady=(0, 20))
+        ttk.Button(save_row, text="Save",
+                   command=lambda: self._save_metadata_file(save_as=False)).pack(
+            side=tk.LEFT, padx=(0, 8))
+        ttk.Button(save_row, text="Save As...",
+                   command=lambda: self._save_metadata_file(save_as=True)).pack(side=tk.LEFT)
+        self._metadata_save_status = tk.Label(
+            save_row, text="", font=(FONT_FAMILY, 9, "italic"),
+            fg=COLORS["text_muted"], bg=COLORS["bg_deep"])
+        self._metadata_save_status.pack(side=tk.LEFT, padx=(16, 0))
+
+    def _browse_metadata_file(self):
+        filepath = filedialog.askopenfilename(
+            title="Select a .safetensors file",
+            filetypes=[("SafeTensors", "*.safetensors"), ("All files", "*.*")],
+            initialdir=self._lora_initialdir(),
+        )
+        if filepath:
+            self.metadata_file_var.set(filepath)
+            self._load_metadata_file(filepath)
+
+    def _load_metadata_file(self, path):
+        from fizgig.training.metadata import load_metadata_from_safetensors
+        try:
+            meta = load_metadata_from_safetensors(path)
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read metadata:\n{e}")
+            return
+
+        self._metadata_editor_path = path
+        standard = {
+            "modelspec.title": self.metadata_title_var,
+            "modelspec.author": self.metadata_author_var,
+            "modelspec.license": self.metadata_license_var,
+            "modelspec.tags": self.metadata_tags_var,
+            "modelspec.trigger_phrase": self.metadata_trigger_var,
+            "modelspec.usage_hint": self.metadata_usage_hint_var,
+        }
+        for key, var in standard.items():
+            var.set(meta.get(key, "") or "")
+
+        self.metadata_description_text.delete("1.0", tk.END)
+        self.metadata_description_text.insert("1.0", meta.get("modelspec.description", "") or "")
+
+        self._metadata_editor_thumbnail_uri = meta.get("modelspec.thumbnail")
+        self._show_metadata_thumbnail_preview(self._metadata_editor_thumbnail_uri)
+
+        skip_keys = set(standard.keys()) | {"modelspec.description", "modelspec.thumbnail"}
+        self._metadata_editor_custom = {k: v for k, v in meta.items() if k not in skip_keys}
+        self._refresh_metadata_custom_tree()
+
+        n = len(meta)
+        self._metadata_status_label.config(
+            text=f"Loaded — {n} metadata key{'s' if n != 1 else ''} found.",
+            fg=COLORS["text_secondary"])
+        self._metadata_save_status.config(text="")
+
+    def _show_metadata_thumbnail_preview(self, data_uri):
+        if not data_uri or not str(data_uri).startswith("data:image"):
+            self._metadata_thumb_label.config(image="", text="(no thumbnail)")
+            self._metadata_thumb_photo = None
+            return
+        try:
+            import base64
+            from io import BytesIO
+            b64 = data_uri.split(",", 1)[1]
+            img = Image.open(BytesIO(base64.b64decode(b64)))
+            img.thumbnail((256, 256))
+            photo = ImageTk.PhotoImage(img)
+            self._metadata_thumb_photo = photo  # reference kept alive deliberately
+            self._metadata_thumb_label.config(image=photo, text="")
+        except Exception:
+            self._metadata_thumb_label.config(image="", text="(couldn't decode thumbnail)")
+            self._metadata_thumb_photo = None
+
+    def _browse_metadata_thumbnail(self):
+        filepath = filedialog.askopenfilename(
+            title="Select a thumbnail image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp"), ("All files", "*.*")],
+        )
+        if not filepath:
+            return
+        from fizgig.training.metadata import thumbnail_data_uri
+        uri = thumbnail_data_uri(filepath)
+        if not uri:
+            messagebox.showerror("Error", "Could not read that image.")
+            return
+        self._metadata_editor_thumbnail_uri = uri
+        self._show_metadata_thumbnail_preview(uri)
+
+    def _clear_metadata_thumbnail(self):
+        self._metadata_editor_thumbnail_uri = None
+        self._show_metadata_thumbnail_preview(None)
+
+    def _refresh_metadata_custom_tree(self):
+        self.metadata_custom_tree.delete(*self.metadata_custom_tree.get_children())
+        for k, v in sorted(self._metadata_editor_custom.items()):
+            display_v = v if len(str(v)) <= 120 else str(v)[:117] + "..."
+            self.metadata_custom_tree.insert("", tk.END, iid=k, values=(k, display_v))
+
+    def _add_metadata_custom_field(self):
+        dlg = tk.Toplevel(self.master)
+        dlg.title("Add custom field")
+        dlg.configure(bg=BG_COLOR)
+        dlg.transient(self.master)
+        tk.Label(dlg, text="Key:", bg=BG_COLOR, fg=COLORS["text_secondary"]).grid(
+            row=0, column=0, sticky=tk.W, padx=10, pady=(10, 2))
+        key_entry = ttk.Entry(dlg, width=40)
+        key_entry.grid(row=0, column=1, padx=10, pady=(10, 2))
+        tk.Label(dlg, text="Value:", bg=BG_COLOR, fg=COLORS["text_secondary"]).grid(
+            row=1, column=0, sticky=tk.W, padx=10, pady=2)
+        val_entry = ttk.Entry(dlg, width=40)
+        val_entry.grid(row=1, column=1, padx=10, pady=2)
+
+        def ok():
+            k = key_entry.get().strip()
+            v = val_entry.get().strip()
+            if k:
+                self._metadata_editor_custom[k] = v
+                self._refresh_metadata_custom_tree()
+            dlg.destroy()
+
+        btn_row = tk.Frame(dlg, bg=BG_COLOR)
+        btn_row.grid(row=2, column=0, columnspan=2, pady=10)
+        ttk.Button(btn_row, text="Cancel", command=dlg.destroy).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_row, text="Add", command=ok).pack(side=tk.LEFT, padx=5)
+        key_entry.bind("<Return>", lambda e: ok())
+        key_entry.focus_set()
+        dlg.grab_set()
+
+    def _remove_metadata_custom_field(self):
+        for k in self.metadata_custom_tree.selection():
+            self._metadata_editor_custom.pop(k, None)
+        self._refresh_metadata_custom_tree()
+
+    def _save_metadata_file(self, save_as=False):
+        if not self._metadata_editor_path:
+            messagebox.showinfo("No file loaded", "Load a .safetensors file first.")
+            return
+
+        dest = self._metadata_editor_path
+        if save_as:
+            dest = filedialog.asksaveasfilename(
+                title="Save file as",
+                defaultextension=".safetensors",
+                filetypes=[("SafeTensors", "*.safetensors")],
+                initialfile=os.path.basename(self._metadata_editor_path),
+            )
+            if not dest:
+                return
+        elif not messagebox.askyesno(
+                "Overwrite?",
+                f"Save metadata changes to:\n{dest}\n\nThis overwrites the file in place."):
+            return
+
+        try:
+            from safetensors.torch import load_file, save_file
+            # .clone() forces a real copy out of the mmap'd view load_file returns. Without
+            # this, saving back onto the SAME path fails on Windows with "the requested
+            # operation cannot be performed on a file with a user-mapped section open"
+            # (error 1224) — the mapping from this exact load is still active, and Windows
+            # (unlike Linux) refuses to overwrite a file while it's mapped. Cloning breaks
+            # that dependency before we ever try to write.
+            tensors = {k: v.clone() for k, v in load_file(self._metadata_editor_path).items()}
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not read the file's tensors:\n{e}")
+            return
+
+        new_meta = dict(self._metadata_editor_custom)
+        field_map = {
+            "modelspec.title": self.metadata_title_var.get().strip(),
+            "modelspec.author": self.metadata_author_var.get().strip(),
+            "modelspec.license": self.metadata_license_var.get().strip(),
+            "modelspec.tags": self.metadata_tags_var.get().strip(),
+            "modelspec.trigger_phrase": self.metadata_trigger_var.get().strip(),
+            "modelspec.usage_hint": self.metadata_usage_hint_var.get().strip(),
+            "modelspec.description": self.metadata_description_text.get("1.0", "end-1c").strip(),
+        }
+        for k, v in field_map.items():
+            if v:
+                new_meta[k] = v
+        if self._metadata_editor_thumbnail_uri:
+            new_meta["modelspec.thumbnail"] = self._metadata_editor_thumbnail_uri
+
+        # A metadata-only edit still goes through a full resave, which isn't guaranteed to be
+        # byte-identical to the original — so hashes computed over the old bytes can no longer
+        # be trusted. Same move bake.py already makes whenever it changes a file's contents.
+        for stale in ("sshs_model_hash", "sshs_legacy_hash", "modelspec.hash_sha256"):
+            new_meta.pop(stale, None)
+
+        # Write to a temp file and swap it in atomically, so a failed/interrupted save can
+        # never leave the original file half-written.
+        tmp_dest = dest + ".tmp"
+        try:
+            save_file(tensors, tmp_dest, metadata=new_meta)
+            os.replace(tmp_dest, dest)
+        except Exception as e:
+            try:
+                if os.path.exists(tmp_dest):
+                    os.remove(tmp_dest)
+            except OSError:
+                pass
+            messagebox.showerror("Error", f"Could not save:\n{e}")
+            return
+
+        self._metadata_save_status.config(text=f"Saved {os.path.basename(dest)}",
+                                          fg=COLORS["text_secondary"])
+        if save_as:
+            self.metadata_file_var.set(dest)
+            self._metadata_editor_path = dest
+
+    # endregion
+
     # region Preferences Tab
 
     def create_prefs_tab(self):
@@ -12948,6 +13386,18 @@ class LoRATrainerGUI:
             "helper models (Florence-2 captioner, face model for the Look Filter and likeness "
             "scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to download later. No "
             "HuggingFace account needed — none of these are gated.")
+        _offline_tip = tk.Label(
+            krea_card,
+            text="💡 Already have these files for ComfyUI? Filling the paths in by hand works "
+                 "perfectly — the download button is a convenience, not a requirement. The first "
+                 "time you caption or train while online, Fizgig quietly fetches a few tiny "
+                 "helper files and keeps them, and from then on everything runs fully offline. "
+                 "Setting up a machine that will never see the internet? Paste a complete "
+                 "HuggingFace model folder into the text encoder field instead of a single file "
+                 "and nothing needs downloading at all.",
+            font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+            wraplength=760, justify=tk.LEFT)
+        _offline_tip.grid(row=kr + 2, column=0, columnspan=3, sticky=tk.W, pady=(12, 2))
 
         # Card 2: Inference Performance
         inf_card = self._start_section_card(
@@ -13395,9 +13845,13 @@ class LoRATrainerGUI:
         if family == "klein":
             # Klein's repos are gated: BFL require each user to accept the licence themselves,
             # which is exactly why these can't be bundled or pre-fetched on anyone's behalf.
-            token = self._ask_hf_token()
+            # An HF_TOKEN already in the environment (the container's documented env var for
+            # exactly this) satisfies the gate with no prompt — only ask when there isn't one.
+            token = os.environ.get("HF_TOKEN", "").strip()
             if not token:
-                return
+                token = self._ask_hf_token()
+                if not token:
+                    return
 
         btn = getattr(self, f"_fetch_btn_{family}", None)
         status = getattr(self, f"_fetch_status_{family}", None)
@@ -19456,6 +19910,8 @@ class LoRATrainerGUI:
             "METADATA_DESCRIPTION": self.entries["METADATA_DESCRIPTION"].get(),
             "METADATA_LICENSE": self.entries["METADATA_LICENSE"].get(),
             "METADATA_TAGS": self.entries["METADATA_TAGS"].get(),
+            "METADATA_TRIGGER_PHRASE": self.entries["METADATA_TRIGGER_PHRASE"].get(),
+            "METADATA_THUMBNAIL": self.entries["METADATA_THUMBNAIL"].get(),
             "FP8": self.fp8_var.get(),
             "SCALED": self.scaled_var.get(),
             "QUANT_4BIT": self.quant_4bit_var.get(),
@@ -19854,6 +20310,15 @@ class LoRATrainerGUI:
         if metadata_tags:
             command.extend(["--metadata_tags", metadata_tags])
 
+        metadata_trigger_phrase = self.settings["METADATA_TRIGGER_PHRASE"].strip() or \
+            (self.caption_trigger_var.get().strip() if hasattr(self, "caption_trigger_var") else "")
+        if metadata_trigger_phrase and metadata_trigger_phrase.lower() != "trigger_word":
+            command.extend(["--metadata_trigger_phrase", metadata_trigger_phrase])
+
+        metadata_thumbnail = self.settings["METADATA_THUMBNAIL"].strip()
+        if metadata_thumbnail:
+            command.extend(["--metadata_thumbnail", metadata_thumbnail])
+
         if self.settings["RESUME_TRAINING"].strip():
             command.append(f"--resume={self.settings['RESUME_TRAINING']}")
 
@@ -20141,6 +20606,15 @@ class LoRATrainerGUI:
             _mval = str(self.settings.get(_mkey, "") or "").strip()
             if _mval:
                 cmd += [_mflag, _mval]
+        # Trigger phrase falls back to the Captions tab's trigger word — independent of
+        # --trigger_word above, which is only ever sent when auto-recaption is on.
+        _mtrig = self.settings.get("METADATA_TRIGGER_PHRASE", "").strip() or \
+            (self.caption_trigger_var.get().strip() if hasattr(self, "caption_trigger_var") else "")
+        if _mtrig and _mtrig.lower() != "trigger_word":
+            cmd += ["--metadata_trigger_phrase", _mtrig]
+        _mthumb = self.settings.get("METADATA_THUMBNAIL", "").strip()
+        if _mthumb:
+            cmd += ["--metadata_thumbnail", _mthumb]
         # Base weight optimization. 4-bit NF4 supersedes fp8 (mutually exclusive): it quantizes the
         # frozen base to ~5.6 GB so a full LoRA trains on a 10-12 GB card with NO block swap (the
         # trainer forces blocks_to_swap=0 under 4-bit). Otherwise fp8 Base (the default) unless the

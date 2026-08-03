@@ -15,6 +15,7 @@ So the training target for the model's output is `x0 - noise`.
 
 import argparse
 import logging
+import math
 import os
 import time
 from multiprocessing import Value
@@ -74,19 +75,34 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1):
     return blocks, True
 
 
-def sample_sigmas(batch: int, device, shift: float = 12.0, generator=None) -> torch.Tensor:
-    """Noise levels in (0,1) with H3's resolution/video shift baked in.
+def sample_sigmas(batch: int, device, shift: float = None, generator=None,
+                  image_tokens: int = None) -> torch.Tensor:
+    """Noise levels in (0,1) for training.
 
-    Base u ~ U(0,1), then the same sigma-shift map the model uses for its video schedule
-    (sigma_shift_video=12.0): sigma = shift*u / (1 + (shift-1)*u). The shift concentrates
-    training toward the high-noise end, as H3's sampler does. shift=1 recovers uniform.
+    shift=None (the default): the validated IMAGE recipe — logit-normal base
+    (sigmoid(randn), the SD3/Flux/Krea 2 density) with a resolution-dependent shift
+    (shift = exp(mu), mu linear in the image-token count: 256 tokens -> 0.5, 6400 -> 1.15 —
+    the same mapping Krea 2 trains with). At 0.25 MP (~225 tokens) that's shift ~1.65:
+    median sigma ~0.62 with real coverage of the low-sigma zone where identity detail lives.
+
+    shift=<float>: legacy uniform-u + shift map (sigma = s*u/(1+(s-1)*u)). NOTE: H3's
+    sigma_shift_video=12.0 is the SAMPLER'S step-spacing schedule for full VIDEO token counts —
+    training image LoRAs with it put 57% of steps at sigma>0.9 and only ~4% below 0.3, which
+    produced structurally poor likeness at every checkpoint (real-run finding). Left available
+    for experiments only.
     """
-    u = torch.rand(batch, device=device, generator=generator)
-    return (shift * u) / (1.0 + (shift - 1.0) * u)
+    if shift is None:
+        tokens = float(image_tokens or 225)                       # ~0.25 MP default
+        mu = 0.5 + (tokens - 256.0) * (1.15 - 0.5) / (6400.0 - 256.0)
+        shift = math.exp(mu)
+        base = torch.sigmoid(torch.randn(batch, device=device, generator=generator))
+    else:
+        base = torch.rand(batch, device=device, generator=generator)
+    return (shift * base) / (1.0 + (shift - 1.0) * base)
 
 
 def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
-                 sigma: torch.Tensor = None, shift: float = 12.0, generator=None,
+                 sigma: torch.Tensor = None, shift: float = None, generator=None,
                  noise: torch.Tensor = None):
     """One image-training step's loss.
 
@@ -114,7 +130,9 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
     else:
         noise = noise.to(device=device, dtype=torch.float32)[..., :x0.shape[-2], :x0.shape[-1]]
     if sigma is None:
-        sigma = sample_sigmas(1, device, shift=shift, generator=generator)
+        # Resolution-aware auto schedule: token count from the (cropped) latent's patch grid.
+        _tokens = (x0.shape[-2] // _ph) * (x0.shape[-1] // _pw)
+        sigma = sample_sigmas(1, device, shift=shift, generator=generator, image_tokens=_tokens)
     s = sigma.reshape(1, 1, 1, 1, 1).to(torch.float32)
 
     noised = (1.0 - s) * x0 + s * noise
@@ -341,7 +359,7 @@ def train_minimax(
     optimizer_args: str = "",
     include_patterns: list = None,
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
-    shift: float = 12.0,
+    shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
     blocks_to_swap="auto",           # "auto" | int — park the last N blocks on CPU between uses
     gradient_checkpointing="auto",   # "auto" | "on" | "off" — forced on when swap > 0
     adaptive_lr: bool = False,
@@ -384,6 +402,13 @@ def train_minimax(
     if group.num_train_items == 0:
         raise RuntimeError("No training items — run minimax_cache_latents then minimax_cache_text first.")
     logger.info(f"MiniMax H3 training: {group.num_train_items} items, {max_train_epochs} epochs")
+    if shift is None:
+        logger.info("[timesteps] auto image schedule: logit-normal + resolution shift "
+                    "(~1.65 @0.25MP — full coverage of the identity-detail zone)")
+    else:
+        logger.warning(f"[timesteps] explicit shift={shift} — uniform-u legacy map. Note: 12.0 is "
+                       "the VIDEO sampler schedule and trains almost entirely at high noise; the "
+                       "auto default (omit --shift) is right for image LoRAs.")
 
     # ---- VRAM plan: block swap + gradient checkpointing (before the base loads) ----
     _mp = 0.25

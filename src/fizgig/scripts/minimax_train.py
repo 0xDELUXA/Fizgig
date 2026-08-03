@@ -50,7 +50,10 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--gradient_checkpointing", default="auto", choices=["auto", "on", "off"],
                    help="Recompute blocks in backward to cut activation VRAM. Auto: off when "
                         "everything fits (faster), on otherwise; forced on when swap > 0.")
-    p.add_argument("--shift", type=float, default=12.0, help="H3 flow sigma-shift (video schedule).")
+    p.add_argument("--shift", type=float, default=None,
+                   help="Override the timestep schedule with a fixed uniform-u sigma-shift. "
+                        "Default (unset) is the auto image schedule: logit-normal + resolution "
+                        "shift — use that; 12.0 is the VIDEO sampler schedule and ruins likeness.")
     # Adaptive LR — bi-directional plateau tracker (starts at the geometric midpoint of min/max;
     # the Learning Rate box is ignored while it's on).
     p.add_argument("--adaptive_lr", action="store_true")

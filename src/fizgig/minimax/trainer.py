@@ -46,14 +46,17 @@ DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
 # free VRAM and the run's real token load (bucket megapixels x batch). Simpler than Krea 2's:
 # one quant mode (NF4), batch is 1, no preview co-residency.
 # ---------------------------------------------------------------------------
-# Measured anchors (5090, 496px batch 1, rank 16): NF4 base resident 17.3 GB; full training
-# step peak 22.7 GB WITHOUT checkpointing => ~5.4 GB of activations+grads+optimizer at 0.25 MP.
-# With checkpointing only ~1 block's activations live at once — estimated ~2 GB at 0.25 MP
-# (PROVISIONAL until the GPU validation pass; err on the conservative side).
-_RESIDENT_GB = 17.5          # full NF4 base resident (measured 17.3)
-_PER_BLOCK_GB = 0.27         # one parked block's GPU share (50 blocks dominate the residency)
-_ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 5.4)
-_ACT_GB_CKPT = 2.0           # step overhead at 0.25 MP batch 1, checkpointed (provisional)
+# Measured anchors (5090, real 33B, rank 16, ~0.2 MP batch 1 — GPU validation pass, 4 Aug):
+#   no swap, no ckpt : resident 17.6, step peak 22.7  (overhead ~5.1)
+#   no swap, ckpt    : resident 17.5, step peak 18.3  (overhead 0.9 — and only ~+0.1 s/step)
+#   swap 16 + ckpt   : resident 11.9 (0.34 GB/block), steady 12.8, step peak 19.3 — the swap
+#                      path carries a ~7.4 GB backward transient (checkpoint recompute segments
+#                      held by the engine), which the planner must budget on top of residency.
+_RESIDENT_GB = 17.5          # full NF4 base resident (measured 17.3-17.6)
+_PER_BLOCK_GB = 0.34         # one parked block's GPU share (measured: (17.5-11.9)/16)
+_ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 5.1)
+_ACT_GB_CKPT = 2.0           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.9; margin)
+_SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active (measured 7.4 @ n=16)
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
 
 
@@ -62,7 +65,9 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1):
 
     Token load scales the activation term linearly (tokens ∝ mp x batch). Checkpointing is
     preferred OFF (faster) when everything fits without it; forced ON whenever swap is needed
-    (without recompute, autograd would pin every swapped block's weights through backward)."""
+    (without recompute, autograd would pin every swapped block's weights through backward).
+    Swap additionally budgets _SWAP_TRANSIENT_GB: the backward pass transiently holds
+    recompute segments beyond the parked residency (measured, see anchors above)."""
     scale = max(0.25, float(mp)) / 0.25 * max(1, int(batch))
     need_nockpt = _RESIDENT_GB + _ACT_GB_NOCKPT * scale + _RESERVE_GB
     if free_gb >= need_nockpt:
@@ -70,7 +75,7 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1):
     need_ckpt = _RESIDENT_GB + _ACT_GB_CKPT * scale + _RESERVE_GB
     if free_gb >= need_ckpt:
         return 0, True
-    deficit = need_ckpt - free_gb
+    deficit = need_ckpt + _SWAP_TRANSIENT_GB - free_gb
     blocks = min(40, int(deficit / _PER_BLOCK_GB + 0.999))
     return blocks, True
 
@@ -474,7 +479,7 @@ def train_minimax(
     if n_swap > 0:
         n_swap = dit.enable_block_swap(n_swap)                  # sets the JIT-move boundary
         logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "
-                    f"(~{n_swap * 0.27:.1f} GB VRAM freed, packed NF4 in RAM)")
+                    f"(~{n_swap * 0.34:.1f} GB VRAM freed, packed NF4 in RAM)")
     if use_ckpt:
         dit.enable_gradient_checkpointing()
         logger.info("[vram] gradient checkpointing ON")

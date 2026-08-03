@@ -287,21 +287,28 @@ class FinalLayer(nn.Module):
 
 # --- model -------------------------------------------------------------------------------
 
-def _run_block(block, swapped, h, t_emb, mod_row, cos, sin):
+def _run_block(blocks, i, swap_from, h, t_emb, mod_row, cos, sin):
     """One DiT block, optionally CPU-parked ('block swap').
 
     Lives at module level (not a closure) and is the unit torch.utils.checkpoint re-runs in
     backward — which is exactly what makes swap work with bnb NF4: the packed weights move to
-    GPU just-in-time HERE, so the recompute pass re-fetches them too. Moving the module back to
-    CPU right after is safe in both passes: the no-graph first pass holds no reference to the
-    GPU tensors (freed immediately), and the recompute pass's autograd ctx keeps the old GPU
-    tensors alive exactly until this block's backward finishes. Net effect: at most one or two
-    swapped blocks' weights are resident at any moment."""
+    GPU just-in-time HERE, so the recompute pass re-fetches them too.
+
+    TWO park sites, because non-reentrant checkpoint EARLY-STOPS its recompute the moment the
+    needed tensors are recovered — the tail of this function never executes during backward
+    (measured: relying on the tail alone re-accumulated every swapped block on GPU, +9 GB by
+    step 3). Backward visits blocks in reverse, so when block i recomputes, block i+1's
+    backward has already finished — parking the SUCCESSOR at entry is the site the early-stop
+    can't skip. The self-park at the tail still runs in the plain forward pass (no early-stop
+    there), keeping the forward's footprint at ~one swapped block too."""
+    swapped = i >= swap_from
     if swapped:
-        block.to(h.device)
-    out = block(h, t_emb, mod_row, cos, sin)
+        blocks[i].to(h.device)
+        if i + 1 < len(blocks):
+            blocks[i + 1].to("cpu")            # successor's backward is done (reverse order)
+    out = blocks[i](h, t_emb, mod_row, cos, sin)
     if swapped:
-        block.to("cpu")
+        blocks[i].to("cpu")                     # forward-pass park (skipped by recompute)
     return out
 
 
@@ -399,13 +406,13 @@ class MiniMaxH3DiT(nn.Module):
         # LoRA training (grads flow through it regardless), so a training-mode gate would
         # silently disable checkpointing for exactly the runs that need it.
         use_ckpt = self._gradient_checkpointing and torch.is_grad_enabled()
-        for i, block in enumerate(self.blocks):
-            swapped = i >= self._swap_from
+        for i in range(len(self.blocks)):
             if use_ckpt:
                 h = torch.utils.checkpoint.checkpoint(
-                    _run_block, block, swapped, h, t_emb, mod_row, cos, sin, use_reentrant=False)
+                    _run_block, self.blocks, i, self._swap_from, h, t_emb, mod_row, cos, sin,
+                    use_reentrant=False)
             else:
-                h = _run_block(block, swapped, h, t_emb, mod_row, cos, sin)
+                h = _run_block(self.blocks, i, self._swap_from, h, t_emb, mod_row, cos, sin)
 
         v = self.final_layer(h[text_len:], t_emb)                                # [n_video, video_patch_dim]
         out = unpatchify_video(v, latent_t, lat_h // self.patch_size[1], lat_w // self.patch_size[2],

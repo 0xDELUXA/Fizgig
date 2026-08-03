@@ -2619,7 +2619,15 @@ class LoRATrainerGUI:
                  bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 4))
         tk.Label(pad, text=f"Version {_git_describe_version() or 'unknown'}",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"],
-                 bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 10))
+                 bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 2))
+        # Always shown — how THIS install updates, whether or not one is pending right now.
+        _how = ("On RunPod, Fizgig updates itself every time you restart the pod — just stop "
+                "and start it to get the latest."
+                if _running_on_pod() else
+                "To update: close Fizgig and run update_fizgig.bat.")
+        tk.Label(pad, text=_how, font=(FONT_FAMILY, 9), fg=COLORS["text_muted"],
+                 bg=COLORS["bg_deep"], wraplength=WRAP, justify=tk.LEFT).pack(
+            anchor=tk.W, pady=(0, 10))
 
         # Update banner — its own frame so the "Check for updates" button below can rebuild it
         # live without reopening the dialog. Rendered per the current self._update_info.
@@ -2638,9 +2646,10 @@ class LoRATrainerGUI:
             tk.Label(card, text=f"⬆  Fizgig {tag} is available",
                      font=(FONT_FAMILY, 11, "bold"), fg=COLORS["text_primary"],
                      bg=COLORS["accent_subtle"]).pack(anchor=tk.W, padx=12, pady=(10, 0))
-            tk.Label(card, text=f"You're on {_git_describe_version() or 'an older build'}. "
-                                "To update: close Fizgig and run update_fizgig.bat (Windows) — "
-                                "on RunPod, just stop and start the pod.",
+            _upd = ("Restart the pod (stop and start it) to update."
+                    if _running_on_pod() else
+                    "Close Fizgig and run update_fizgig.bat to update.")
+            tk.Label(card, text=f"You're on {_git_describe_version() or 'an older build'}. {_upd}",
                      font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["accent_subtle"],
                      wraplength=WRAP - 24, justify=tk.LEFT).pack(anchor=tk.W, padx=12, pady=(2, 8))
             notes = tk.Label(card, text="📖  Read the release notes",

@@ -355,6 +355,14 @@ class MiniMaxH3VideoVAEDecoder(nn.Module):
         self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1),
                              persistent=False)
 
+    # Spatial tiling. NOT optional above 256 px: because create_token_ids normalises coordinates
+    # over the actual H/W, a single-pass decode of a larger image drifts off the trained regime
+    # and leaves visible 16-px patch seams. Measured seam energy (1.0 = none): 256 px single-pass
+    # 1.09, but 512 px single-pass 2.31 — a mesh you can see. Tiled, 512 px comes back to ~1.1.
+    _TILE_PX = 256
+    _TILE_OVERLAP_MIN = 64
+    vae_ratio = 16          # spatial compression, same constant the encoder uses
+
     # One temporal GROUP. FRAME_PER_TOKEN = (1, 4, 4, 4, 4): five latent tokens cover 17 pixel
     # frames, which is the unit this decoder was calibrated on.
     _T_GROUP = 5
@@ -378,10 +386,89 @@ class MiniMaxH3VideoVAEDecoder(nn.Module):
                 "reference's temporal chunking, which is not ported.")
         lm = self.latents_mean.view(1, -1, 1, 1, 1).to(z)
         ls = self.latents_std.view(1, -1, 1, 1, 1).to(z)
+        # Follow the module's own dtype rather than forcing fp32: this decoder is 2.4 B params,
+        # so fp32 residency is 9.7 GB against bf16's 4.8 GB — a difference that matters when it
+        # is loaded on top of the resident base for a preview.
+        w_dtype = self.post_quant_conv.weight.dtype
         # post_quant_conv is a real learned 1x1x1 channel mix, NOT an identity — skipping it
         # leaves the image structurally recognisable but badly wrong (measured: 7 dB PSNR).
-        zz = self.post_quant_conv(z * ls + lm).repeat(1, 1, self._T_GROUP, 1, 1)
-        dec = self.decoder(zz)                          # -> [B, 3, 4*T_GROUP, H*16, W*16]
-        dec = dec[:, :, self._LEAD_IN]                  # first real frame -> [B, 3, H*16, W*16]
+        zz = self.post_quant_conv((z * ls + lm).to(w_dtype)).repeat(1, 1, self._T_GROUP, 1, 1)
+        dec = self._tiled_decode(zz)                    # -> [B, 3, H*16, W*16]
         dec = dec.float() * self.pixel_std.to(dec)[:, :, 0] + self.pixel_mean.to(dec)[:, :, 0]
         return dec.clamp_(0.0, 1.0)
+
+    def _decode_tile(self, zz):
+        """One tile: full temporal group in, the single real frame out."""
+        return self.decoder(zz)[:, :, self._LEAD_IN]
+
+    def _split_tiles(self, input_len):
+        """Tile starts/lengths/overlaps in PIXELS, matching the reference's layout."""
+        tile = self._TILE_PX
+        if tile >= input_len:
+            return [0], [input_len], []
+        n = math.ceil(input_len / tile)
+        while True:
+            overlaps = [self._TILE_OVERLAP_MIN] * (n - 1)
+            remaining = tile * n - sum(overlaps) - input_len
+            if remaining < 0:
+                n += 1
+            else:
+                break
+        for i in range(remaining // self.vae_ratio):
+            overlaps[i % (n - 1)] += self.vae_ratio
+        starts = [0]
+        for i in range(n - 1):
+            starts.append(starts[-1] + tile - overlaps[i])
+        return starts, [tile] * n, overlaps
+
+    @staticmethod
+    def _blend(a, b, extent, dim):
+        extent = min(a.shape[dim], b.shape[dim], extent)
+        pos = torch.arange(extent, device=b.device, dtype=b.dtype)
+        shape = [1] * a.ndim
+        shape[dim] = extent
+        wa, wb = (1 - pos / extent).view(shape), (pos / extent).view(shape)
+        sa = [slice(None)] * a.ndim; sa[dim] = slice(-extent, None)
+        sb = [slice(None)] * b.ndim; sb[dim] = slice(0, extent)
+        blended = a[tuple(sa)] * wa + b[tuple(sb)] * wb
+        if extent < b.shape[dim]:
+            rest = [slice(None)] * b.ndim; rest[dim] = slice(extent, None)
+            return torch.cat([blended, b[tuple(rest)]], dim=dim)
+        return blended
+
+    def _tiled_decode(self, zz):
+        """Decode in overlapping 256-px tiles, cross-faded — the reference's scheme. Collapses to
+        a single pass (no seams to blend) whenever the image already fits one tile."""
+        r = self.vae_ratio
+        height, width = zz.shape[-2] * r, zz.shape[-1] * r
+        y_idx, y_len, y_ov = self._split_tiles(height)
+        x_idx, x_len, x_ov = self._split_tiles(width)
+        if len(y_idx) == 1 and len(x_idx) == 1:
+            return self._decode_tile(zz)
+        canvas, row_tails, out_y = None, [], 0
+        for i, (ip, il) in enumerate(zip(y_idx, y_len)):
+            zi, zl = ip // r, il // r
+            new_tails, left_tail, out_x = [], None, 0
+            for j, (jp, jl) in enumerate(zip(x_idx, x_len)):
+                zj, zw = jp // r, jl // r
+                tile = self._decode_tile(zz[..., zi:zi + zl, zj:zj + zw])
+                if i < len(y_idx) - 1:
+                    new_tails.append(tile[..., -y_ov[i]:, :].clone())
+                next_left = tile[..., :, -x_ov[j]:].clone() if j < len(x_idx) - 1 else None
+                if i > 0:
+                    tile = self._blend(row_tails[j], tile, y_ov[i - 1], dim=-2)
+                if j > 0:
+                    tile = self._blend(left_tail, tile, x_ov[j - 1], dim=-1)
+                left_tail = next_left
+                if i < len(y_idx) - 1:
+                    tile = tile[..., :-y_ov[i], :]
+                if j < len(x_idx) - 1:
+                    tile = tile[..., :, :-x_ov[j]]
+                if canvas is None:
+                    canvas = torch.empty(*tile.shape[:-2], height, width,
+                                         dtype=tile.dtype, device=tile.device)
+                canvas[..., out_y:out_y + tile.shape[-2], out_x:out_x + tile.shape[-1]].copy_(tile)
+                out_x += tile.shape[-1]
+            row_tails = new_tails
+            out_y += tile.shape[-2]
+        return canvas

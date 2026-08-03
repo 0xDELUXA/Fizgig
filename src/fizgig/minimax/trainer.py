@@ -696,7 +696,9 @@ def train_minimax(
                 decoder = MiniMaxH3VideoVAEDecoder()
                 with _safe_open(vae_path, framework="pt", device="cpu") as _f:
                     decoder.load_state_dict({k: _f.get_tensor(k) for k in _f.keys()}, strict=False)
-                decoder = decoder.to(device, torch.float32).eval()
+                # bf16, NOT fp32: 2.4 B params is 4.8 GB vs 9.7 GB, and this sits on top of the
+                # already-resident base. decode() follows the module dtype.
+                decoder = decoder.to(device, dtype).eval()
             _seed = sample_seed if sample_seed != 0 else random.randint(1, 2 ** 31 - 1)
             ts = _time.strftime("%Y%m%d%H%M%S")
             for i, txt in enumerate(encoded_prompts):

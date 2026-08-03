@@ -581,7 +581,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     "✨ MiniMax H3 Defaults (rank 16)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
         "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         "OPTIMIZER_TYPE": "adamw8bit",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
@@ -590,7 +590,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     "✨ MiniMax H3 Adaptive LR (rank 16)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
         "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "OPTIMIZER_TYPE": "adamw8bit",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,

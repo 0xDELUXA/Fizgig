@@ -483,7 +483,10 @@ def train_minimax(
     sample_at_first: bool = False,
     sample_width: int = 512,
     sample_height: int = 512,
-    sample_steps: int = 8,
+    # 28, matching the reference pipeline's default. 8 leaves the latent well off the
+    # encoder's manifold, which is exactly where the decoder produces patchy output
+    # (measured seam energy 4.0 on an off-manifold latent vs 1.05 on a real one).
+    sample_steps: int = 28,
     sample_cfg_scale: float = 1.0,
     sample_negative: str = None,
     sample_seed: int = 42,

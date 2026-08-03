@@ -80,7 +80,8 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample_at_first", action="store_true", help="Render an epoch-0 preview")
     p.add_argument("--sample_width", type=int, default=512)
     p.add_argument("--sample_height", type=int, default=512)
-    p.add_argument("--sample_steps", type=int, default=8)
+    p.add_argument("--sample_steps", type=int, default=28,
+                   help="Denoise steps per preview (the reference pipeline uses 28; fewer leaves the latent off-manifold and the decode patchy)")
     p.add_argument("--sample_cfg_scale", type=float, default=1.0,
                    help=">1 enables CFG (a 2nd forward per step); the shipped H3 workflows use none")
     p.add_argument("--sample_negative", default=None, help="Only used when --sample_cfg_scale > 1")

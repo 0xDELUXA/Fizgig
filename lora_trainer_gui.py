@@ -397,7 +397,7 @@ ARCHITECTURES = {
         "supports_samples": True,
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
-        "sample_steps_default": 8,
+        "sample_steps_default": 28,   # the reference pipeline default
         "sample_width_default": 1024,
         "sample_height_default": 1024,
         "lora_name_suffix": "mmh3",

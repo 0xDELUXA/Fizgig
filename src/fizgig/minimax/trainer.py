@@ -40,6 +40,40 @@ DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
                             r"token_refiner\.blocks\..*"]
 
 
+# ---------------------------------------------------------------------------
+# VRAM planner — resolves "auto" block swap + gradient checkpointing from the card's actual
+# free VRAM and the run's real token load (bucket megapixels x batch). Simpler than Krea 2's:
+# one quant mode (NF4), batch is 1, no preview co-residency.
+# ---------------------------------------------------------------------------
+# Measured anchors (5090, 496px batch 1, rank 16): NF4 base resident 17.3 GB; full training
+# step peak 22.7 GB WITHOUT checkpointing => ~5.4 GB of activations+grads+optimizer at 0.25 MP.
+# With checkpointing only ~1 block's activations live at once — estimated ~2 GB at 0.25 MP
+# (PROVISIONAL until the GPU validation pass; err on the conservative side).
+_RESIDENT_GB = 17.5          # full NF4 base resident (measured 17.3)
+_PER_BLOCK_GB = 0.27         # one parked block's GPU share (50 blocks dominate the residency)
+_ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 5.4)
+_ACT_GB_CKPT = 2.0           # step overhead at 0.25 MP batch 1, checkpointed (provisional)
+_RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
+
+
+def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1):
+    """Pure planner: (blocks_to_swap, gradient_checkpointing) from free VRAM + token load.
+
+    Token load scales the activation term linearly (tokens ∝ mp x batch). Checkpointing is
+    preferred OFF (faster) when everything fits without it; forced ON whenever swap is needed
+    (without recompute, autograd would pin every swapped block's weights through backward)."""
+    scale = max(0.25, float(mp)) / 0.25 * max(1, int(batch))
+    need_nockpt = _RESIDENT_GB + _ACT_GB_NOCKPT * scale + _RESERVE_GB
+    if free_gb >= need_nockpt:
+        return 0, False
+    need_ckpt = _RESIDENT_GB + _ACT_GB_CKPT * scale + _RESERVE_GB
+    if free_gb >= need_ckpt:
+        return 0, True
+    deficit = need_ckpt - free_gb
+    blocks = min(40, int(deficit / _PER_BLOCK_GB + 0.999))
+    return blocks, True
+
+
 def sample_sigmas(batch: int, device, shift: float = 12.0, generator=None) -> torch.Tensor:
     """Noise levels in (0,1) with H3's resolution/video shift baked in.
 
@@ -308,6 +342,8 @@ def train_minimax(
     include_patterns: list = None,
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = 12.0,
+    blocks_to_swap="auto",           # "auto" | int — park the last N blocks on CPU between uses
+    gradient_checkpointing="auto",   # "auto" | "on" | "off" — forced on when swap > 0
     adaptive_lr: bool = False,
     adaptive_lr_min: float = 1e-5,
     adaptive_lr_max: float = 4e-4,
@@ -349,9 +385,41 @@ def train_minimax(
         raise RuntimeError("No training items — run minimax_cache_latents then minimax_cache_text first.")
     logger.info(f"MiniMax H3 training: {group.num_train_items} items, {max_train_epochs} epochs")
 
+    # ---- VRAM plan: block swap + gradient checkpointing (before the base loads) ----
+    _mp = 0.25
+    try:
+        _mp = max(w * h / 1e6 for ds in group.datasets for (w, h) in ds.batch_manager.bucket_resos)
+    except Exception:
+        pass
+    _ckpt_req = str(gradient_checkpointing).lower()
+    if str(blocks_to_swap).lower() == "auto":
+        if torch.cuda.is_available() and quantize:
+            _free_gb = torch.cuda.mem_get_info()[0] / 1e9
+            n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp)
+            logger.info(f"[vram] auto plan: free {_free_gb:.1f} GB, largest bucket {_mp:.2f} MP "
+                        f"-> blocks_to_swap={n_swap}, checkpointing={'on' if _ckpt_auto else 'off'}")
+        else:
+            n_swap, _ckpt_auto = 0, False
+    else:
+        n_swap = max(0, int(blocks_to_swap))
+        _ckpt_auto = n_swap > 0
+    use_ckpt = {"on": True, "off": False}.get(_ckpt_req, _ckpt_auto)
+    if n_swap > 0 and not use_ckpt:
+        logger.info("[vram] block swap needs gradient checkpointing (autograd would pin swapped "
+                    "weights through backward) — forcing it on.")
+        use_ckpt = True
+
     # ---- base (NF4-frozen) + trainable LoRA over the transformer blocks ----
-    dit = load_minimax_h3_dit(dit_path, device=device, compute_dtype=dtype, quantize=quantize)
+    dit = load_minimax_h3_dit(dit_path, device=device, compute_dtype=dtype, quantize=quantize,
+                              blocks_to_swap=n_swap)
     dit.requires_grad_(False)                                   # frozen base (QLoRA-style)
+    if n_swap > 0:
+        n_swap = dit.enable_block_swap(n_swap)                  # sets the JIT-move boundary
+        logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "
+                    f"(~{n_swap * 0.27:.1f} GB VRAM freed, packed NF4 in RAM)")
+    if use_ckpt:
+        dit.enable_gradient_checkpointing()
+        logger.info("[vram] gradient checkpointing ON")
     network = create_network(None, "lora_unet", 1.0, network_dim, network_alpha, None, [], dit,
                              include_patterns=include_patterns)
     network.apply_to(text_encoders=None, unet=dit, apply_text_encoder=False, apply_unet=True)

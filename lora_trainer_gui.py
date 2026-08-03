@@ -379,7 +379,7 @@ ARCHITECTURES = {
         "timestep_sampling": "shift",
         "discrete_flow_shift": 12.0,   # H3 video sigma-shift (fixed; the Timestep section is hidden)
         "weighting_scheme": "none",
-        "blocks_swap_max": 0,          # NF4 base is fully resident — no block swap (setting ignored)
+        "blocks_swap_max": 40,         # bnb NF4 blocks swap packed (uint8) — planner caps at 40 of 50
         "fp8_text_encoder_flag": None,
         "uses_clip": False,
         "uses_t5": False,
@@ -20582,17 +20582,24 @@ class LoRATrainerGUI:
         # Validate blocks swap
         try:
             is_auto = self.entries["BLOCKS_SWAP"].get().strip().lower().startswith("auto")
-            blocks_swap = self._parse_blocks_swap()
-            if is_auto:
-                self.update_console(f"Block Swap: Auto detected → {blocks_swap} (based on GPU VRAM)\n")
-            if blocks_swap > config["blocks_swap_max"]:
-                messagebox.showwarning(
-                    "Warning",
-                    f"Blocks Swap value ({blocks_swap}) exceeds maximum for {arch} ({config['blocks_swap_max']}). Using maximum value."
-                )
-                blocks_swap = config["blocks_swap_max"]
-                self.entries["BLOCKS_SWAP"].delete(0, tk.END)
-                self.entries["BLOCKS_SWAP"].insert(0, str(blocks_swap))
+            if config.get("is_minimax") and is_auto:
+                # MiniMax resolves "auto" in the TRAINER from real free VRAM at run time (correct
+                # for queued runs too) — the Klein/Krea2 tier tables here don't fit its NF4 base.
+                blocks_swap = "auto"
+                self.update_console("Block Swap: Auto — the trainer plans swap + checkpointing "
+                                    "from free VRAM at launch\n")
+            else:
+                blocks_swap = self._parse_blocks_swap()
+                if is_auto:
+                    self.update_console(f"Block Swap: Auto detected → {blocks_swap} (based on GPU VRAM)\n")
+                if blocks_swap > config["blocks_swap_max"]:
+                    messagebox.showwarning(
+                        "Warning",
+                        f"Blocks Swap value ({blocks_swap}) exceeds maximum for {arch} ({config['blocks_swap_max']}). Using maximum value."
+                    )
+                    blocks_swap = config["blocks_swap_max"]
+                    self.entries["BLOCKS_SWAP"].delete(0, tk.END)
+                    self.entries["BLOCKS_SWAP"].insert(0, str(blocks_swap))
         except ValueError:
             blocks_swap = config["blocks_swap_max"]
 
@@ -21564,6 +21571,10 @@ class LoRATrainerGUI:
             "--save_every_n_epochs", str(self.settings["SAVE_EVERY_N_EPOCHS"]),
             "--seed", str(self.settings["SEED"]),
         ]
+        # Blocks Swap: "Auto (detect from GPU)" resolves in the TRAINER (it reads real free VRAM
+        # at run time — correct for queued runs too); an explicit number passes through.
+        _bs = str(self.settings.get("BLOCKS_SWAP", "auto") or "auto").strip()
+        cmd += ["--blocks_to_swap", "auto" if _bs.lower().startswith("auto") else _bs]
         # Adaptive LR — bi-directional plateau tracker (model-agnostic). Min/Max combo values can
         # carry a trailing note (e.g. "2e-4 - rank 4/8 only"); take the leading token.
         if self.settings.get("ADAPTIVE_LR"):

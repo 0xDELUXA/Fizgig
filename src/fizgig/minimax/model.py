@@ -287,6 +287,24 @@ class FinalLayer(nn.Module):
 
 # --- model -------------------------------------------------------------------------------
 
+def _run_block(block, swapped, h, t_emb, mod_row, cos, sin):
+    """One DiT block, optionally CPU-parked ('block swap').
+
+    Lives at module level (not a closure) and is the unit torch.utils.checkpoint re-runs in
+    backward — which is exactly what makes swap work with bnb NF4: the packed weights move to
+    GPU just-in-time HERE, so the recompute pass re-fetches them too. Moving the module back to
+    CPU right after is safe in both passes: the no-graph first pass holds no reference to the
+    GPU tensors (freed immediately), and the recompute pass's autograd ctx keeps the old GPU
+    tensors alive exactly until this block's backward finishes. Net effect: at most one or two
+    swapped blocks' weights are resident at any moment."""
+    if swapped:
+        block.to(h.device)
+    out = block(h, t_emb, mod_row, cos, sin)
+    if swapped:
+        block.to("cpu")
+    return out
+
+
 class MiniMaxH3DiT(nn.Module):
     """Image-only training forward for the MiniMax H3 DiT. Names match the bf16 checkpoint."""
 
@@ -316,6 +334,25 @@ class MiniMaxH3DiT(nn.Module):
             for _ in range(c.num_layers)])
         self.final_layer = FinalLayer(c.hidden_size, c.time_embed_dim, video_patch_dim,
                                       c.audio_latents_dim, c.final_norm_eps)
+        self._gradient_checkpointing = False
+        self._swap_from = len(self.blocks)          # blocks >= this index live on CPU between uses
+
+    def enable_gradient_checkpointing(self, enabled: bool = True):
+        """Recompute each block in backward instead of storing activations. Required when block
+        swap is active (without it, autograd's saved tensors would pin every swapped block's GPU
+        weights through the whole backward, saving nothing)."""
+        self._gradient_checkpointing = enabled
+
+    def enable_block_swap(self, blocks_to_swap: int):
+        """Park the LAST n blocks on CPU; each is moved to GPU just-in-time for its forward
+        (and again for its checkpoint recompute) then parked again. bnb NF4 weights stay packed
+        (uint8, 0.5 B/param) through the moves, so a parked block costs ~¼ of its GPU footprint
+        in system RAM and one PCIe round-trip per pass."""
+        n = max(0, min(int(blocks_to_swap), len(self.blocks) - 2))   # keep >=2 resident
+        self._swap_from = len(self.blocks) - n
+        for i in range(self._swap_from, len(self.blocks)):
+            self.blocks[i].to("cpu")
+        return n
 
     def forward(self, video_latent: torch.Tensor, t: torch.Tensor,
                 text_embeds: torch.Tensor) -> torch.Tensor:
@@ -358,8 +395,17 @@ class MiniMaxH3DiT(nn.Module):
         cos, sin = rope_cos_sin(pos, self.rope.inv_freq.to(device))
         cos, sin = cos.to(dtype), sin.to(dtype)
 
-        for block in self.blocks:
-            h = block(h, t_emb, mod_row, cos, sin)
+        # Gate on grad-enabled only, NOT self.training: the frozen base stays in eval() during
+        # LoRA training (grads flow through it regardless), so a training-mode gate would
+        # silently disable checkpointing for exactly the runs that need it.
+        use_ckpt = self._gradient_checkpointing and torch.is_grad_enabled()
+        for i, block in enumerate(self.blocks):
+            swapped = i >= self._swap_from
+            if use_ckpt:
+                h = torch.utils.checkpoint.checkpoint(
+                    _run_block, block, swapped, h, t_emb, mod_row, cos, sin, use_reentrant=False)
+            else:
+                h = _run_block(block, swapped, h, t_emb, mod_row, cos, sin)
 
         v = self.final_layer(h[text_len:], t_emb)                                # [n_video, video_patch_dim]
         out = unpatchify_video(v, latent_t, lat_h // self.patch_size[1], lat_w // self.patch_size[2],

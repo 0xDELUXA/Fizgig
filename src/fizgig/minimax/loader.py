@@ -32,8 +32,10 @@ def _is_nf4_target(name: str) -> bool:
 
 
 def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
-                        quantize=True) -> MiniMaxH3DiT:
-    """Return a MiniMaxH3DiT with the real weights loaded; block matmul linears NF4 (frozen)."""
+                        quantize=True, blocks_to_swap: int = 0) -> MiniMaxH3DiT:
+    """Return a MiniMaxH3DiT with the real weights loaded; block matmul linears NF4 (frozen).
+    blocks_to_swap parks the LAST n blocks on CPU at load (see the loop below) — pair it with
+    model.enable_block_swap(n) so the forward moves them just-in-time."""
     from bitsandbytes.nn import Linear4bit, Params4bit
 
     with torch.device("meta"):
@@ -54,6 +56,18 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
                         setattr(module, child_name, q)
 
     dev = torch.device(device)
+    # Block swap: params of the LAST n blocks are parked on CPU at load time — quantized on the
+    # GPU (Params4bit quantizes on the .to(cuda) move) then immediately moved off, so the packed
+    # weights never accumulate. Loading everything resident first and parking afterwards would
+    # transiently need the full ~17 GB, OOMing exactly the cards that asked for swap.
+    n_layers = len(model.blocks)
+    swap_from = n_layers - max(0, min(int(blocks_to_swap or 0), n_layers - 2))
+
+    def _parked(name: str) -> bool:
+        if not name.startswith("blocks."):
+            return False
+        return int(name.split(".")[1]) >= swap_from
+
     with MemoryEfficientSafeOpen(path) as f:
         keys = set(f.keys())
         for name, param in model.named_parameters():
@@ -66,10 +80,13 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
                 # NF4-quantize this weight onto the GPU; frozen (no grad).
                 # NF4 quantization happens on the .to(cuda) move (Params4bit.cuda()).
                 p = Params4bit(w.to(compute_dtype), requires_grad=False, quant_type="nf4").to(dev)
+                if _parked(name):
+                    p = p.to("cpu")            # stays packed (uint8) + keeps quant_state
                 setattr(parent, leaf, p)
             else:
                 keep = w.to(torch.float32) if w.dtype == torch.float32 else w.to(compute_dtype)
-                setattr(parent, leaf, nn.Parameter(keep.to(dev), requires_grad=False))
+                target = torch.device("cpu") if _parked(name) else dev
+                setattr(parent, leaf, nn.Parameter(keep.to(target), requires_grad=False))
         # buffers (rope.inv_freq)
         for name, _ in model.named_buffers():
             if name in keys:

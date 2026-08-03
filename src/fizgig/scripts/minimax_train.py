@@ -44,6 +44,12 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
     p.add_argument("--no_quantize", action="store_true",
                    help="Train on the bf16 base (no NF4) — needs ~66 GB VRAM.")
+    p.add_argument("--blocks_to_swap", default="auto",
+                   help="'auto' (plan from free VRAM + bucket MP) or an integer — park the last "
+                        "N blocks on CPU between uses. 0 disables. Auto picks 0 on 32 GB cards.")
+    p.add_argument("--gradient_checkpointing", default="auto", choices=["auto", "on", "off"],
+                   help="Recompute blocks in backward to cut activation VRAM. Auto: off when "
+                        "everything fits (faster), on otherwise; forced on when swap > 0.")
     p.add_argument("--shift", type=float, default=12.0, help="H3 flow sigma-shift (video schedule).")
     # Adaptive LR — bi-directional plateau tracker (starts at the geometric midpoint of min/max;
     # the Learning Rate box is ignored while it's on).
@@ -79,6 +85,8 @@ def main():
         include_patterns=args.include_patterns,
         quantize=not args.no_quantize,
         shift=args.shift,
+        blocks_to_swap=args.blocks_to_swap,
+        gradient_checkpointing=args.gradient_checkpointing,
         adaptive_lr=args.adaptive_lr,
         adaptive_lr_min=args.adaptive_lr_min,
         adaptive_lr_max=args.adaptive_lr_max,

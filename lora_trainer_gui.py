@@ -10834,8 +10834,29 @@ class LoRATrainerGUI:
                   f"writing {os.path.basename(candidate)} instead\n")
         return candidate
 
+    def _stash_original_if_inplace(self, filepath, output_path, output_folder, replace_originals):
+        """Call BEFORE saving. Keep-safe mode + in-place PNG output means the save OVERWRITES
+        the original — by the time _handle_original ran, there was nothing left to move
+        (issue #43: PNG originals silently destroyed while JPGs were kept). A COPY rather
+        than a move, because PIL may still hold the source file open at this point and a
+        move of an open file fails on Windows; the end state is identical — original
+        content in originals/, processed image at the original name."""
+        if replace_originals or filepath != output_path or not os.path.exists(filepath):
+            return
+        if not hasattr(self, '_originals_dir_cache'):
+            self._originals_dir_cache = {}
+        if output_folder not in self._originals_dir_cache:
+            self._originals_dir_cache[output_folder] = self._get_originals_dir(output_folder)
+        originals_dir = self._originals_dir_cache[output_folder]
+        os.makedirs(originals_dir, exist_ok=True)
+        import shutil
+        shutil.copy2(filepath, os.path.join(originals_dir, os.path.basename(filepath)))
+
     def _handle_original(self, filepath, output_path, output_folder, replace_originals):
-        """Handle the original file: delete if replacing, move to subfolder if preserving."""
+        """Handle the original file: delete if replacing, move to subfolder if preserving.
+        The in-place keep-safe case is covered by _stash_original_if_inplace BEFORE the save
+        — by this point the overwrite has already happened, correctly for replace mode and
+        harmlessly for keep-safe (the original is already copied out)."""
         if filepath == output_path:
             return  # Output overwrote original, nothing to do
         if replace_originals:
@@ -11163,6 +11184,7 @@ class LoRATrainerGUI:
                     continue
 
                 output_path = self._safe_output_path(filepath, output_path)
+                self._stash_original_if_inplace(filepath, output_path, output_folder, replace_originals)
                 self._atomic_png_save(img, output_path)
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if resized else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]\n")
@@ -11222,6 +11244,7 @@ class LoRATrainerGUI:
                     continue
 
                 output_path = self._safe_output_path(filepath, output_path)
+                self._stash_original_if_inplace(filepath, output_path, output_folder, replace_originals)
                 self._atomic_png_save(img, output_path)
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if (resized or cropped) else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]{crop_info}\n")

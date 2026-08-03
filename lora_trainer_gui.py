@@ -73,6 +73,12 @@ COLORS = {
     "accent_hover": "#60A5FA",   # Accent hover
     "accent_subtle": "#1E3A5F",  # Accent backgrounds
 
+    # Training-queue button (status bar, lower right). Deliberately a LIGHT blue: on a dark
+    # bar a pale block reads as a distinct control, where another dark-surface panel just
+    # blends into the furniture. Text on it is bg_deep (8.6:1) — text_primary would vanish.
+    "queue_blue": "#93C5FD",
+    "queue_blue_hover": "#BFDBFE",
+
     "border": "#3A4555",         # Borders, dividers
     "border_focus": "#3B82F6",   # Focus rings
 
@@ -1816,13 +1822,17 @@ class LoRATrainerGUI:
         # --- far right: training-queue button (lower-right corner of the app) ---
         # Packed BEFORE the override panel so it owns the corner; the override panel's
         # expand soaks up whatever is left in the middle.
+        # fill=Y on both this column and the override panel below is what makes the two
+        # blocks exactly the same height (the bar is a fixed 82 px with pack_propagate off,
+        # so each ends up 82 - 2*pady). Without it each block sizes to its own content and
+        # the button sat visibly shorter than the panel beside it.
         qcol = tk.Frame(bar, bg=COLORS["bg_deep"])
-        qcol.pack(side=tk.RIGHT, padx=(0, 14), pady=10)
+        qcol.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 14), pady=10)
         self._queue_btn = tk.Button(
             qcol, text="📋 Queue", font=(FONT_FAMILY, 9, "bold"),
-            bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
-            activebackground=COLORS["border"], activeforeground=COLORS["text_primary"],
-            relief="flat", bd=0, padx=12, pady=14, cursor="hand2",
+            bg=COLORS["queue_blue"], fg=COLORS["bg_deep"],
+            activebackground=COLORS["queue_blue_hover"], activeforeground=COLORS["bg_deep"],
+            relief="flat", bd=0, padx=12, cursor="hand2",
             command=self._open_queue_window)
         self._queue_btn.pack(fill=tk.BOTH, expand=True)
         self._refresh_queue_button()
@@ -1830,7 +1840,7 @@ class LoRATrainerGUI:
         # --- right: live sample override (surface-coloured mini panel) ---
         # Widths trimmed vs the original layout to make room for the queue button.
         ov = tk.Frame(bar, bg=COLORS["bg_surface"])
-        ov.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10), pady=10, ipadx=8, ipady=4)
+        ov.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10), pady=10, ipadx=8, ipady=4)
         _sbg = COLORS["bg_surface"]
         r1 = tk.Frame(ov, bg=_sbg); r1.pack(fill=tk.X, padx=8, pady=(4, 0))
         self.sample_override_var = tk.BooleanVar(value=False)
@@ -4333,8 +4343,11 @@ class LoRATrainerGUI:
             return
         n = len(getattr(self, "training_queue", []))
         try:
+            # Dark text on the light blue in BOTH states — the old accent-blue-when-queued
+            # would now be mid-blue on baby blue (~2:1, unreadable). The count carries the
+            # signal instead.
             btn.config(text=f"📋 Queue ({n})" if n else "📋 Queue",
-                       fg=COLORS["accent"] if n else COLORS["text_primary"])
+                       bg=COLORS["queue_blue"], fg=COLORS["bg_deep"])
         except Exception:
             pass
 

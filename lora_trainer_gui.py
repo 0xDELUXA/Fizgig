@@ -1149,10 +1149,13 @@ class LoRATrainerGUI:
         self.dataset_megapixels_var = tk.StringVar(value="0.25")
         # Image Prep's target area. Training buckets by AREA and never upscales, so prepping to a
         # longest-edge cap silently pushed every non-square image below the training target and
-        # threw away detail training could not get back (issue #44). Seeded from the Training
-        # tab's target so the two agree out of the box; remembered across restarts thereafter.
+        # threw away detail training could not get back (issue #44). Defaults to 1.0 MP — NOT the
+        # Training tab's 0.25 default: prepping above the training target is free (training just
+        # downscales at cache time), so the default keeps resolution in hand for training at any
+        # target up to 1.0 MP. The inline warning covers the one harmful direction (prep < train).
+        # Remembered across restarts.
         self.prep_megapixels_var = tk.StringVar(
-            value=str(self.last_used.get("prep_megapixels", self.dataset_megapixels_var.get())))
+            value=str(self.last_used.get("prep_megapixels", "1.0")))
         self.dataset_batch_size_var = tk.StringVar(value="1")
         self.dataset_num_repeats_var = tk.StringVar(value="1")
         self.dataset_enable_bucket_var = tk.BooleanVar(value=True)
@@ -10519,7 +10522,7 @@ class LoRATrainerGUI:
 
     def _update_prep_note(self, *args):
         """The 'What will happen' summary — computed from ALL the settings (mode, originals
-        choice, max size, live folder contents). The one-line note this replaces ignored the
+        choice, target megapixels, live folder contents). The one-line note this replaces ignored the
         output folder entirely and taught users the wrong answer to 'does this touch my
         folder?'."""
         if not hasattr(self, '_prep_note_var'):
@@ -10529,7 +10532,7 @@ class LoRATrainerGUI:
         try:
             prep_mp = float(self.prep_megapixels_var.get())
         except (ValueError, tk.TclError):
-            prep_mp = 0.25
+            prep_mp = 1.0
         target_area = self._prep_target_area(prep_mp)
         n, median_area, median_size = self._prep_source_stats()
 
@@ -11259,6 +11262,10 @@ class LoRATrainerGUI:
         """The resolution grid training buckets on (RESOLUTION_STEPS). Read from the dataset
         module so prep and bucketing can never drift apart; 16 if the import isn't available."""
         try:
+            import sys as _sys
+            _src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
+            if _src not in _sys.path:
+                _sys.path.insert(0, _src)
             from fizgig.dataset.image_dataset import RESOLUTION_STEPS
             return int(RESOLUTION_STEPS)
         except Exception:
@@ -11508,7 +11515,7 @@ class LoRATrainerGUI:
         try:
             target_area = self._prep_target_area(float(self.prep_megapixels_var.get()))
         except (ValueError, tk.TclError):
-            target_area = self._prep_target_area(0.25)
+            target_area = self._prep_target_area(1.0)
         replace_originals = self.delete_originals_var.get()
         prep_mode = self.prep_mode_var.get()
         face_mode = self._get_face_selection_mode()

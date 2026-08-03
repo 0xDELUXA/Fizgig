@@ -835,6 +835,85 @@ def _app_commit() -> str:
         return ""
 
 
+def _git(*args, timeout=8) -> str:
+    """Run a git command in the repo, return stripped stdout or "" on any failure."""
+    try:
+        import subprocess as _sp
+        r = _sp.run(["git", "-C", FIZGIG_DIR, *args],
+                    capture_output=True, text=True, timeout=timeout,
+                    creationflags=(0x08000000 if os.name == "nt" else 0))
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def _git_describe_version() -> str:
+    """Human version of the running checkout: 'v3.1.1' exactly on a tag,
+    'v3.1.1-2-gee3a7fa' in between, or the bare short SHA if tags aren't local."""
+    return _git("describe", "--tags", "--always") or _app_commit()
+
+
+def _latest_release_tag():
+    """Highest vX.Y.Z release tag on origin as (tag, sha), or None when unreachable.
+
+    ls-remote is a single read-only round-trip — no fetch, no GitHub API, no tokens or
+    rate limits. Returning None (offline, no origin, ZIP download) means 'unknown':
+    the caller shows nothing rather than a false nag."""
+    out = _git("ls-remote", "--tags", "--refs", "origin", "v*", timeout=15)
+    if not out:
+        return None
+    best, best_key = None, None
+    for line in out.splitlines():
+        try:
+            sha, ref = line.split(None, 1)
+            tag = ref.strip().rsplit("/", 1)[-1]
+            key = tuple(int(p) for p in tag.lstrip("v").split("."))
+        except (ValueError, IndexError):
+            continue    # not a plain vX.Y.Z tag — ignore
+        if best_key is None or key > best_key:
+            best, best_key = (tag, sha), key
+    return best
+
+
+def _update_status_from(latest, has_obj: bool, is_ancestor: bool) -> str:
+    """Pure decision: 'up_to_date' | 'update_available' | 'unknown'.
+
+    Up to date means HEAD CONTAINS the latest release tag's commit — true both exactly on
+    the tag and ahead of it (a user who pulled newer master must not be nagged). A tag whose
+    commit we don't even have locally, or have but isn't an ancestor, means the release is
+    newer than this checkout."""
+    if latest is None:
+        return "unknown"
+    if has_obj and is_ancestor:
+        return "up_to_date"
+    return "update_available"
+
+
+def _git_ok(*args, timeout=8) -> bool:
+    """Run git for its EXIT CODE (merge-base --is-ancestor answers that way)."""
+    try:
+        import subprocess as _sp
+        r = _sp.run(["git", "-C", FIZGIG_DIR, *args],
+                    capture_output=True, text=True, timeout=timeout,
+                    creationflags=(0x08000000 if os.name == "nt" else 0))
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _check_for_update():
+    """Full check (network + local git). Returns ('update_available', tag) /
+    ('up_to_date', current) / ('unknown', '')."""
+    latest = _latest_release_tag()
+    if latest is None:
+        return "unknown", ""
+    tag, sha = latest
+    has_obj = _git_ok("cat-file", "-e", f"{sha}^{{commit}}")
+    is_anc = has_obj and _git_ok("merge-base", "--is-ancestor", sha, "HEAD")
+    status = _update_status_from(latest, has_obj, is_anc)
+    return status, (tag if status == "update_available" else _git_describe_version())
+
+
 def _pod_stop_key_env() -> str:
     """A stop-capable key from the environment, or "".
 
@@ -1155,6 +1234,10 @@ class LoRATrainerGUI:
         # Training queue — loaded before any UI so the status-bar button can show its count.
         # A queue restored from a previous session waits for the user; it never auto-starts.
         self.training_queue = self._load_training_queue()
+
+        # Startup update check: which newer tag (if any) is available. Populated on a daemon
+        # thread a couple of seconds after launch (see the after() call at the end of __init__).
+        self._update_info = None
 
         # Klein's trainer resolves these itself (name-or-module-path). Krea 2 goes through
         # fizgig.training.optimizers, which offers a different set — filtered to what's actually
@@ -2444,8 +2527,10 @@ class LoRATrainerGUI:
                 command=lambda: __import__("webbrowser").open(self._runpod_deploy_url()),
             )
             runpod.pack(side=tk.LEFT, padx=(12, 0))
+            # width sized for "⬆ Update Available" so the label can flip to it after the
+            # startup update check without shifting the whole button row.
             about = tk.Button(
-                row, text="About",
+                row, text="About", width=16,
                 font=(FONT_FAMILY, 12, "bold"),
                 fg="#FFFFFF", bg=COLORS["accent"],
                 activeforeground="#FFFFFF", activebackground=COLORS["accent_hover"],
@@ -2453,6 +2538,47 @@ class LoRATrainerGUI:
                 command=self._open_about_dialog,
             )
             about.pack(side=tk.LEFT, padx=(12, 0))
+            self._about_btn = about
+
+    # ------------------------------------------------------------
+    # Update check (startup + manual from the About dialog)
+    # ------------------------------------------------------------
+
+    def _start_update_check(self, on_done=None):
+        """Run the git-based release check on a daemon thread; marshal the result back to
+        the Tk thread. Silent by design: 'unknown' (offline, no origin) shows nothing —
+        never a false nag, never an error popup."""
+        def _worker():
+            status, info = _check_for_update()
+            self.master.after(0, lambda: self._apply_update_status(status, info, on_done))
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _apply_update_status(self, status, info, on_done=None):
+        if status == "update_available":
+            self._update_info = info                     # the newer tag, e.g. "v3.1.2"
+            btn = getattr(self, "_about_btn", None)
+            if btn is not None:
+                try:
+                    btn.config(text="⬆ Update Available",
+                               bg=COLORS["warning"], activebackground="#D97706",
+                               fg="#1E2530", activeforeground="#1E2530")
+                except Exception:
+                    pass
+        elif status == "up_to_date":
+            self._update_info = None
+            btn = getattr(self, "_about_btn", None)
+            if btn is not None:
+                try:
+                    btn.config(text="About", bg=COLORS["accent"],
+                               activebackground=COLORS["accent_hover"],
+                               fg="#FFFFFF", activeforeground="#FFFFFF")
+                except Exception:
+                    pass
+        if on_done:
+            try:
+                on_done(status, info)
+            except Exception:
+                pass
 
     def _open_about_dialog(self):
         """A small, personal About window: who made Fizgig, why, and a no-pressure
@@ -2490,7 +2616,41 @@ class LoRATrainerGUI:
         heading("Fizgig", 22)
         tk.Label(pad, text="Klein 9B & Krea 2 LoRA Studio — by Peter Neill",
                  font=(FONT_FAMILY, 11), fg=COLORS["text_explain"],
-                 bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 14))
+                 bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 4))
+        tk.Label(pad, text=f"Version {_git_describe_version() or 'unknown'}",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"],
+                 bg=COLORS["bg_deep"]).pack(anchor=tk.W, pady=(0, 10))
+
+        # Update banner — its own frame so the "Check for updates" button below can rebuild it
+        # live without reopening the dialog. Rendered per the current self._update_info.
+        update_box = tk.Frame(pad, bg=COLORS["bg_deep"])
+        update_box.pack(fill=tk.X, pady=(0, 8))
+
+        def _render_update_box():
+            for w in update_box.winfo_children():
+                w.destroy()
+            tag = getattr(self, "_update_info", None)
+            if not tag:
+                return
+            card = tk.Frame(update_box, bg=COLORS["accent_subtle"],
+                            highlightbackground=COLORS["warning"], highlightthickness=1)
+            card.pack(fill=tk.X)
+            tk.Label(card, text=f"⬆  Fizgig {tag} is available",
+                     font=(FONT_FAMILY, 11, "bold"), fg=COLORS["text_primary"],
+                     bg=COLORS["accent_subtle"]).pack(anchor=tk.W, padx=12, pady=(10, 0))
+            tk.Label(card, text=f"You're on {_git_describe_version() or 'an older build'}. "
+                                "To update: close Fizgig and run update_fizgig.bat (Windows) — "
+                                "on RunPod, just stop and start the pod.",
+                     font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["accent_subtle"],
+                     wraplength=WRAP - 24, justify=tk.LEFT).pack(anchor=tk.W, padx=12, pady=(2, 8))
+            notes = tk.Label(card, text="📖  Read the release notes",
+                             font=(FONT_FAMILY, 10, "underline"), fg=COLORS["accent_hover"],
+                             bg=COLORS["accent_subtle"], cursor="hand2")
+            notes.pack(anchor=tk.W, padx=12, pady=(0, 10))
+            notes.bind("<Button-1>", lambda e: webbrowser.open(
+                "https://github.com/shootthesound/Fizgig/releases/latest"))
+
+        _render_update_box()
 
         para("By trade I'm a photographer and videographer — mostly live music, portraits, and a "
              "bit of teaching — and an AI tinkerer by night. I build a lot of open-source tooling "
@@ -2521,6 +2681,31 @@ class LoRATrainerGUI:
                   activeforeground=COLORS["text_primary"], activebackground=COLORS["border"],
                   relief="flat", bd=0, padx=18, pady=8, cursor="hand2",
                   command=win.destroy).pack(side=tk.LEFT)
+
+        check_btn = tk.Button(btn_row, text="Check for updates", font=(FONT_FAMILY, 11),
+                              fg=COLORS["text_primary"], bg=COLORS["bg_surface"],
+                              activeforeground=COLORS["text_primary"],
+                              activebackground=COLORS["border"],
+                              relief="flat", bd=0, padx=18, pady=8, cursor="hand2")
+        check_btn.pack(side=tk.LEFT, padx=(12, 0))
+
+        def _manual_check():
+            if not win.winfo_exists():
+                return
+            check_btn.config(text="Checking…", state=tk.DISABLED)
+
+            def _done(status, info):
+                if not win.winfo_exists():
+                    return
+                _render_update_box()
+                check_btn.config(
+                    state=tk.NORMAL,
+                    text=("Up to date ✓" if status == "up_to_date"
+                          else "Couldn't check" if status == "unknown"
+                          else "Check for updates"))
+            self._start_update_check(on_done=_done)
+
+        check_btn.config(command=_manual_check)
 
         win.update_idletasks()
         # Centre over the main window.
@@ -21649,6 +21834,12 @@ if __name__ == "__main__":
     # Detect leftover paused training state from a prior session
     try:
         gui._check_for_paused_state_on_startup()
+    except Exception:
+        pass
+    # Quiet update check a couple of seconds in — off the critical launch path, and it only
+    # ever surfaces as the About-button label flipping to "Update Available".
+    try:
+        root.after(2500, gui._start_update_check)
     except Exception:
         pass
     root.mainloop()

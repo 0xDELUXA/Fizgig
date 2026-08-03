@@ -42,7 +42,33 @@ from fizgig.krea2.safetensors_utils import load_split_weights
 logger = logging.getLogger(__name__)
 
 
+# Only the tokenizer is still fetched by repo id (small, HF-cached after first use) —
+# unless a local qwen3vl_tokenizer/ folder is found first; see _local_tokenizer_dir.
 QWEN3_VL_4B_INSTRUCT_REPO_ID = "Qwen/Qwen3-VL-4B-Instruct"
+
+# The non-weight files this repo carries — everything apply_chat_template / the image
+# processor need, none of the multi-GB weight shards (those come from the local checkpoint).
+# Named explicitly so a fully offline install has a precise shopping list: download these from
+# https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct/tree/main and drop them into the folder
+# _local_tokenizer_dir names.
+QWEN3_VL_TOKENIZER_FILES = (
+    "chat_template.json",
+    "generation_config.json",
+    "merges.txt",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "video_preprocessor_config.json",
+    "vocab.json",
+)
+
+
+def _local_tokenizer_dir(model_path: str) -> str:
+    """Where a sneakernet'd copy of QWEN3_VL_TOKENIZER_FILES lives: a `qwen3vl_tokenizer/`
+    folder next to the checkpoint itself, so it travels with the checkpoint regardless of
+    where the user's models directory is."""
+    return os.path.join(os.path.dirname(os.path.abspath(model_path)), "qwen3vl_tokenizer")
+
 
 def _bundled_tokenizer_dir() -> str:
     """The copy Fizgig SHIPS (src/fizgig/assets/qwen3vl_tokenizer — Apache 2.0, see its
@@ -65,6 +91,22 @@ def _resolve_tokenizer_source(model_path: str, tokenizer_repo: str) -> str:
             if os.path.isfile(os.path.join(cand, "tokenizer_config.json")):
                 return os.path.normpath(cand)
     return tokenizer_repo
+
+
+def _offline_tokenizer_error(local_dir: str, tokenizer_repo: str, err: Exception) -> RuntimeError:
+    """Turn a bare ConnectionError (etc.) from the Hub into the sneakernet instructions: which
+    files, from where, and exactly which local folder to drop them into."""
+    files = "\n".join(f"  - {name}" for name in QWEN3_VL_TOKENIZER_FILES)
+    local_dir = local_dir or "a qwen3vl_tokenizer/ folder next to the text-encoder file"
+    return RuntimeError(
+        f"Couldn't load the Qwen3-VL tokenizer/chat-template ({tokenizer_repo}): "
+        f"{type(err).__name__}: {err}\n"
+        "No internet connection, and no local copy was found. To caption fully offline, "
+        f"download these files from https://huggingface.co/Qwen/Qwen3-VL-4B-Instruct/tree/main "
+        f"on any machine with internet:\n{files}\n"
+        f"...and place them in:\n  {local_dir}"
+    )
+
 # Vendored copy of the Qwen3-VL-4B-Instruct config.json so the text encoder is built
 # without fetching the config from the Hugging Face Hub. Qwen3-VL is natively supported by
 # transformers (no auto_map / remote code), so Qwen3VLConfig.from_dict reproduces

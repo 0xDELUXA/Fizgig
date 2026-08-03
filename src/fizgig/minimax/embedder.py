@@ -84,14 +84,18 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
     with torch.device("meta"):
         model = build_qwen3_te()
 
-    if quantize:
-        for mod_name, module in list(model.named_modules()):
-            for child_name, child in list(module.named_children()):
-                full = f"{mod_name}.{child_name}" if mod_name else child_name
-                if isinstance(child, nn.Linear) and (full + ".weight").endswith(_NF4_SUFFIXES):
-                    q = Linear4bit(child.in_features, child.out_features, bias=child.bias is not None,
-                                   compute_dtype=compute_dtype, quant_type="nf4")
-                    setattr(module, child_name, q)
+        # Swap the NF4-target Linears for Linear4bit shells INSIDE the meta context. Outside it,
+        # each Linear4bit eagerly allocates a full fp32 CPU weight (nn.Linear default) — across the
+        # 32B Qwen3-VL that is well over 100 GB of throwaway tensors the allocator then holds for
+        # the whole caching pass. On meta the shells are 0 bytes; real weights stream in below.
+        if quantize:
+            for mod_name, module in list(model.named_modules()):
+                for child_name, child in list(module.named_children()):
+                    full = f"{mod_name}.{child_name}" if mod_name else child_name
+                    if isinstance(child, nn.Linear) and (full + ".weight").endswith(_NF4_SUFFIXES):
+                        q = Linear4bit(child.in_features, child.out_features, bias=child.bias is not None,
+                                       compute_dtype=compute_dtype, quant_type="nf4")
+                        setattr(module, child_name, q)
 
     dev = torch.device(device)
     model_keys = {n for n, _ in model.named_parameters()}

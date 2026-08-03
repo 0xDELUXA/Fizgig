@@ -39,15 +39,19 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
     with torch.device("meta"):
         model = MiniMaxH3DiT(MiniMaxH3Config())
 
-    # Swap the NF4-target Linears for Linear4bit shells (still on meta) before loading.
-    if quantize:
-        for mod_name, module in list(model.named_modules()):
-            for child_name, child in list(module.named_children()):
-                full = f"{mod_name}.{child_name}" if mod_name else child_name
-                if isinstance(child, nn.Linear) and _is_nf4_target(f"{full}.weight"):
-                    q = Linear4bit(child.in_features, child.out_features, bias=child.bias is not None,
-                                   compute_dtype=compute_dtype, quant_type="nf4")
-                    setattr(module, child_name, q)
+        # Swap the NF4-target Linears for Linear4bit shells — INSIDE the meta context. Outside it,
+        # each Linear4bit constructor eagerly allocates a full fp32 weight on CPU (nn.Linear's
+        # default), which across the 33B of NF4-target Linears is ~118 GB of throwaway tensors
+        # that the process allocator then holds for the whole run. On meta the shells are 0 bytes;
+        # the real weights are streamed in below.
+        if quantize:
+            for mod_name, module in list(model.named_modules()):
+                for child_name, child in list(module.named_children()):
+                    full = f"{mod_name}.{child_name}" if mod_name else child_name
+                    if isinstance(child, nn.Linear) and _is_nf4_target(f"{full}.weight"):
+                        q = Linear4bit(child.in_features, child.out_features, bias=child.bias is not None,
+                                       compute_dtype=compute_dtype, quant_type="nf4")
+                        setattr(module, child_name, q)
 
     dev = torch.device(device)
     with MemoryEfficientSafeOpen(path) as f:

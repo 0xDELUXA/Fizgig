@@ -20,7 +20,11 @@ logger = logging.getLogger(__name__)
 ARCHITECTURE_KLEIN_9B = "klein9b"
 ARCHITECTURE_KLEIN_9B_FULL = "klein_9b"
 ARCHITECTURE_KREA2 = "krea2"  # Krea 2 single-stream MMDiT (Qwen-Image VAE + Qwen3-VL-4B)
-ARCHITECTURE_MINIMAX = "minimax_h3"  # MiniMax H3 omni DiT (video VAE + Qwen3-VL-32B), image-only training
+# NOTE: no underscore — the dataset cache filename is {basename}_{WxH}_{arch}.safetensors, parsed
+# by split("_") with the size at tokens[-2]. An arch string with an underscore (e.g. "minimax_h3")
+# shifts that index and breaks size parsing, so the cache-facing id is a single token (same reason
+# Klein uses "klein9b", not "klein_9b").
+ARCHITECTURE_MINIMAX = "minimaxh3"  # MiniMax H3 omni DiT (video VAE + Qwen3-VL-32B), image-only training
 
 # SAI model spec architecture strings
 ARCH_KLEIN_9B = "Flux.2-klein-9b"

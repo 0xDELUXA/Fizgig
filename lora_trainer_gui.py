@@ -365,6 +365,42 @@ ARCHITECTURES = {
         "sample_height_default": 1024,
         "lora_name_suffix": "krea2",
     },
+    "MiniMax H3 (experimental)": {
+        # MiniMax H3 trains natively via fizgig.scripts.minimax_* (single-process). The command
+        # builders branch on "is_minimax". Barebones IMAGE-ONLY: no samples, no preview, no
+        # per-image loss watch, no LoKR — the most minimal training surface. The Klein-shaped keys
+        # below are kept so start_training / Samples / validate_inputs read the same shape.
+        "train_script": "src/fizgig/scripts/minimax_train.py",
+        "cache_latents_script": "src/fizgig/scripts/minimax_cache_latents.py",
+        "cache_text_script": "src/fizgig/scripts/minimax_cache_text.py",
+        "is_minimax": True,
+        "network_module": "fizgig.networks.lora_klein",  # unused — minimax trainer builds its own net
+        "use_fizgig_venv": True,
+        "timestep_sampling": "shift",
+        "discrete_flow_shift": 12.0,   # H3 video sigma-shift (fixed; the Timestep section is hidden)
+        "weighting_scheme": "none",
+        "blocks_swap_max": 40,         # bnb NF4 blocks swap packed (uint8) — planner caps at 40 of 50
+        "fp8_text_encoder_flag": None,
+        "uses_clip": False,
+        "uses_t5": False,
+        "uses_text_encoder": True,
+        "uses_model_type": False,
+        "uses_model_version": False,
+        "model_version": "minimax-h3",
+        "vae_label": "MiniMax H3 Video VAE",
+        "text_encoder_label": "Qwen3-VL-32B",
+        "is_distilled": False,
+        "supports_weighting_scheme": False,
+        "supports_discrete_flow_shift": False,
+        # No in-training samples — image-only barebones trainer, no inference/preview pipeline.
+        "supports_samples": False,
+        "sample_cfg_default": 1.0,
+        "sample_flow_shift_default": None,
+        "sample_steps_default": 8,
+        "sample_width_default": 1024,
+        "sample_height_default": 1024,
+        "lora_name_suffix": "mmh3",
+    },
 }
 
 ARCHITECTURE_LIST = list(ARCHITECTURES.keys())
@@ -538,6 +574,30 @@ SEED_TRAVEL_PRESETS = {
     "Free ride":      dict(ref_strength="0.0",  ref_mp="1.0", sequential=False, waypoints="8"),
 }
 
+# MiniMax H3 built-in presets — barebones image-only LoRA. Only the knobs the H3 trainer reads
+# apply (rank/alpha/lr/epochs/save/seed/adaptive/optimizer/grad-accum/max-grad-norm/megapixels);
+# the H3 base is always NF4 (no swap / fp8 / quant knobs). The first entry is applied on switch.
+MINIMAX_BUILT_IN_PRESETS = {
+    "✨ MiniMax H3 Defaults (rank 16)": {
+        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
+        "LEARNING_RATE": 1e-4,
+        "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
+        "OPTIMIZER_TYPE": "adamw8bit",
+        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
+        "DATASET_MEGAPIXELS": "0.25",
+    },
+    "✨ MiniMax H3 Adaptive LR (rank 16)": {
+        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
+        "LEARNING_RATE": 1e-4,
+        "MAX_TRAIN_EPOCHS": 20, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "5e-5", "ADAPTIVE_LR_MAX": "4e-4",
+        "OPTIMIZER_TYPE": "adamw8bit",
+        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
+        "DATASET_MEGAPIXELS": "0.25",
+    },
+}
+
 # Directory for dataset configurations
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "dataset")
 
@@ -697,6 +757,11 @@ DEFAULT_PREFS = {
     # model, so samples can render on the resident training DiT instead of loading the
     # separate Turbo checkpoint (saves the park-to-CPU shuffle during previews).
     "krea2_turbo_lora": "",
+    # MiniMax H3 model paths (experimental third family — barebones image-only LoRA training).
+    # bf16 DiT is the training base (NF4-quantized at load); Qwen3-VL-32B TE + video VAE cache.
+    "minimax_dit": "",
+    "minimax_text_encoder": "",
+    "minimax_vae": "",
     # Output directories — relative to repo root, portable across clones/moves.
     # Resolved to absolute in load_prefs(); in-memory pref values are absolute.
     # All three live as top-level folders inside the repo:
@@ -4024,6 +4089,8 @@ class LoRATrainerGUI:
         defaults entry (Klein's block/timestep/adaptive presets don't apply); everything
         else gets the full Klein built-in set."""
         cfg = ARCHITECTURES.get(arch, {})
+        if cfg.get("is_minimax"):
+            return MINIMAX_BUILT_IN_PRESETS
         return KREA2_BUILT_IN_PRESETS if cfg.get("is_krea2") else BUILT_IN_PRESETS
 
     def refresh_preset_combobox(self):
@@ -5188,6 +5255,9 @@ class LoRATrainerGUI:
     def _is_krea2_arch(self) -> bool:
         return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)
 
+    def _is_minimax_arch(self) -> bool:
+        return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_minimax", False)
+
     def _set_widget_visible(self, w, show: bool):
         """Show/hide a single widget, working for both grid- and pack-managed widgets.
         grid widgets use grid_remove()/grid() (position preserved); pack widgets stash their
@@ -5275,6 +5345,13 @@ class LoRATrainerGUI:
         # Guard: this may run via update_ui_for_architecture before the Training tab is built.
         if not hasattr(self, "_adaptive_cb"):
             return
+        # MiniMax H3 is a THIRD, even-more-minimal native family. It shares Krea 2's "hide the
+        # Klein-only controls" set, and ALSO hides Krea 2's own extras (base-precision dropdown,
+        # per-image loss watch, torch.compile, LoKR network type) — it's LoRA-over-NF4 only, no
+        # samples. `native` = "not Klein" (hide Klein-only); `is_krea2` still gates the Krea-2-only
+        # widgets, so MiniMax (is_krea2 False) hides them too.
+        is_minimax = self._is_minimax_arch()
+        native = is_krea2 or is_minimax
         # Per-widget groups across the Training Parameters + Memory & FP8 sections.
         widgets = [
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,
@@ -5292,7 +5369,7 @@ class LoRATrainerGUI:
             self.labels.get("NETWORK_DROPOUT"), self.entries.get("NETWORK_DROPOUT"),
         ]
         for w in widgets:
-            self._set_widget_visible(w, not is_krea2)
+            self._set_widget_visible(w, not native)
 
         # Base precision is the inverse: Krea 2 ONLY. Its options (Auto / INT8 / NF4 / fp8) and
         # the memory strategy behind them are entirely krea2_train's; Klein's trainer has no
@@ -5305,7 +5382,9 @@ class LoRATrainerGUI:
         # the selector. A name valid for one may not exist in the other (Klein takes module paths;
         # krea2 takes catalog names), so fall back to the shared default rather than carrying a
         # value across that the trainer would then have to reject.
-        self._refresh_optimizer_choices(is_krea2)
+        # MiniMax resolves optimizer names the same catalog-based way Krea 2 does (its trainer
+        # takes catalog names too), so it shares Krea 2's dropdown contents.
+        self._refresh_optimizer_choices(native)
 
         # Krea 2-ONLY controls (inverse of the above): the per-image loss watch toggles are only
         # wired into krea2_train for now — hide them under Klein.
@@ -5327,10 +5406,10 @@ class LoRATrainerGUI:
             self.show_row("NETWORK_ALPHA")
             self.hide_row("LOKR_FACTOR")
 
-        # Custom block picker: always hidden under Krea 2; under Klein, let the Model-Area
-        # dropdown decide (only shown when the preset is "Custom").
+        # Custom block picker: always hidden under the native families (no Krea 2 / MiniMax block
+        # map); under Klein, let the Model-Area dropdown decide (only shown when preset = "Custom").
         try:
-            if is_krea2:
+            if native:
                 self._training_custom_frame.grid_remove()
             else:
                 self._on_training_preset_changed()
@@ -5342,7 +5421,7 @@ class LoRATrainerGUI:
         # Optimizer section now stays visible for Krea 2 (Gradient Accumulation + Max Grad Norm
         # are wired); its unwired fields are hidden individually above.
         self._set_training_section_visible("optimizer", "scheduler", True)
-        self._set_training_section_visible("timestep", "optimizer", not is_krea2)
+        self._set_training_section_visible("timestep", "optimizer", not native)
 
     # ── Problem Images window (per-image loss watch) ────────────────────
 
@@ -14069,6 +14148,47 @@ class LoRATrainerGUI:
 
         self._add_runpod_card(outer)
 
+        # Card (bottom): MiniMax H3 model paths — experimental third family, kept at the very
+        # bottom under everything else since it's barebones image-only LoRA training (no samples,
+        # no inference). The bf16 DiT is the training base; it's NF4-quantized at load.
+        mm_card = self._start_section_card(
+            outer, "Model Paths (MiniMax H3 — experimental)",
+            "Barebones image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the bf16 "
+            "DiT (quantized to NF4 at load — fits a 32 GB card). The Qwen3-VL-32B text encoder and "
+            "the video VAE are only needed for the one-time caching pass — the compact nvfp4 TE "
+            "(the same file ComfyUI uses) is recommended. No samples, no preview.",
+        )
+        mm_card.columnconfigure(1, weight=1)
+        mr = 0
+        mr = self._add_pref_row(
+            mm_card, mr, "DiT (bf16):", "minimax_dit",
+            "MiniMax H3 bf16 DiT — the training base (minimax_h3_fl2va_bf16.safetensors, ~66 GB). "
+            "Quantized to NF4 at load, so the resident base is ~17 GB.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+            download_note="~66GB bf16 — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_bf16.safetensors (the fl2va text→AV variant is the trainable one)",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
+            "Qwen3-VL-32B text encoder — nvfp4 (the compact ComfyUI file) or bf16 both work; the "
+            "loader detects which you gave it. NF4 on GPU either way (~14 GB), used only while "
+            "caching caption embeddings, then offloaded before training. (The int8_convrot TE "
+            "variant is NOT supported — its rotated weights can't be dequantized here.)",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            download_label="Download nvfp4 (recommended)",
+            download_note="~15.7GB nvfp4-awq — the same TE ComfyUI uses, so you may already have it; "
+                          "identical conditioning to bf16 (validated), just a slower one-off load",
+            download_url2="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+            download_label2="bf16",
+            download_note2="~51.5GB bf16 — the full-precision original; loads faster, 3.3x the disk",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "Video VAE:", "minimax_vae",
+            "The H3 video VAE — encodes each training image to a 24-channel latent (used only "
+            "during caching).",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors",
+            download_note="~4.9GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_fp16.safetensors",
+        )
+
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)
         action_row = tk.Frame(actions_card, bg=COLORS["bg_surface"])
@@ -20084,7 +20204,20 @@ class LoRATrainerGUI:
         elif not os.path.exists(dataset_config):
             errors.append(f"Dataset config file does not exist: {dataset_config}")
 
-        if config.get("is_krea2"):
+        if config.get("is_minimax"):
+            # MiniMax H3 reads its three model paths from Preferences (minimax_*). All are
+            # required: the bf16 DiT to train, the video VAE + Qwen3-VL-32B TE for caching.
+            for pref_key, label in (
+                ("minimax_dit", "MiniMax H3 DiT (bf16)"),
+                ("minimax_vae", "MiniMax H3 Video VAE"),
+                ("minimax_text_encoder", "Qwen3-VL-32B text encoder"),
+            ):
+                path = self._krea2_pref(pref_key)
+                if not path:
+                    errors.append(f"{label} path is empty (set it on the Preferences tab)")
+                elif not os.path.exists(path):
+                    errors.append(f"{label} file does not exist: {path}")
+        elif config.get("is_krea2"):
             # Krea 2 reads its own four model paths from Preferences (krea2_*). The
             # Turbo DiT is only required when in-training previews are enabled.
             krea2_required = [
@@ -20449,17 +20582,24 @@ class LoRATrainerGUI:
         # Validate blocks swap
         try:
             is_auto = self.entries["BLOCKS_SWAP"].get().strip().lower().startswith("auto")
-            blocks_swap = self._parse_blocks_swap()
-            if is_auto:
-                self.update_console(f"Block Swap: Auto detected → {blocks_swap} (based on GPU VRAM)\n")
-            if blocks_swap > config["blocks_swap_max"]:
-                messagebox.showwarning(
-                    "Warning",
-                    f"Blocks Swap value ({blocks_swap}) exceeds maximum for {arch} ({config['blocks_swap_max']}). Using maximum value."
-                )
-                blocks_swap = config["blocks_swap_max"]
-                self.entries["BLOCKS_SWAP"].delete(0, tk.END)
-                self.entries["BLOCKS_SWAP"].insert(0, str(blocks_swap))
+            if config.get("is_minimax") and is_auto:
+                # MiniMax resolves "auto" in the TRAINER from real free VRAM at run time (correct
+                # for queued runs too) — the Klein/Krea2 tier tables here don't fit its NF4 base.
+                blocks_swap = "auto"
+                self.update_console("Block Swap: Auto — the trainer plans swap + checkpointing "
+                                    "from free VRAM at launch\n")
+            else:
+                blocks_swap = self._parse_blocks_swap()
+                if is_auto:
+                    self.update_console(f"Block Swap: Auto detected → {blocks_swap} (based on GPU VRAM)\n")
+                if blocks_swap > config["blocks_swap_max"]:
+                    messagebox.showwarning(
+                        "Warning",
+                        f"Blocks Swap value ({blocks_swap}) exceeds maximum for {arch} ({config['blocks_swap_max']}). Using maximum value."
+                    )
+                    blocks_swap = config["blocks_swap_max"]
+                    self.entries["BLOCKS_SWAP"].delete(0, tk.END)
+                    self.entries["BLOCKS_SWAP"].insert(0, str(blocks_swap))
         except ValueError:
             blocks_swap = config["blocks_swap_max"]
 
@@ -20666,6 +20806,8 @@ class LoRATrainerGUI:
         """Build the training command based on architecture configuration"""
         if config.get("is_krea2"):
             return self._build_krea2_train_command()
+        if config.get("is_minimax"):
+            return self._build_minimax_train_command()
         arch = self.settings["ARCHITECTURE"]
         # Same reasoning as _venv_python: fall back to whatever is on PATH when the bundled venv
         # is not a sibling of the repo, rather than pointing at a file that is not there.
@@ -20996,6 +21138,9 @@ class LoRATrainerGUI:
         if config.get("is_krea2"):
             return self._build_krea2_cache_command("krea2_cache_latents.py",
                                                    "--vae", self._krea2_pref("krea2_vae"))
+        if config.get("is_minimax"):
+            return self._build_krea2_cache_command("minimax_cache_latents.py",
+                                                   "--vae", self._krea2_pref("minimax_vae"))
         arch = self.settings["ARCHITECTURE"]
         python_path = self._venv_python()
         cache_script_path = self._resolve_script(config, "cache_latents_script")
@@ -21022,6 +21167,9 @@ class LoRATrainerGUI:
         if config.get("is_krea2"):
             return self._build_krea2_cache_command("krea2_cache_text.py",
                                                    "--text_encoder", self._krea2_pref("krea2_text_encoder"))
+        if config.get("is_minimax"):
+            return self._build_krea2_cache_command("minimax_cache_text.py",
+                                                   "--text_encoder", self._krea2_pref("minimax_text_encoder"))
         arch = self.settings["ARCHITECTURE"]
         python_path = self._venv_python()
         cache_script_path = self._resolve_script(config, "cache_text_script")
@@ -21402,6 +21550,65 @@ class LoRATrainerGUI:
                     cmd += ["--sample_prompts", prompt_file]
                 if ref_img:
                     cmd += ["--sample_ref_image", ref_img]
+        return cmd
+
+    def _build_minimax_train_command(self):
+        """Build the native MiniMax H3 training command — barebones image-only LoRA over an
+        NF4-quantized frozen base. No samples, no block swap, no context LoRA, no LoKR, no
+        per-image loss watch: just the core knobs (rank/alpha/lr/epochs/save/seed/optimizer) plus
+        adaptive LR and output metadata. Model paths come from Preferences (minimax_*)."""
+        cmd = [
+            self._venv_python(),
+            self._krea2_script("minimax_train.py"),
+            "--dit", self._krea2_pref("minimax_dit"),
+            "--dataset_config", self.settings["DATASET_CONFIG"],
+            "--output_dir", self.settings["LORA_OUTPUT_DIR"],
+            "--output_name", self.settings["LORA_NAME"],
+            "--network_dim", str(self.settings["NETWORK_DIM"]),
+            "--network_alpha", str(self.settings["NETWORK_ALPHA"]),
+            "--learning_rate", str(self.settings["LEARNING_RATE"]),
+            "--max_train_epochs", str(self.settings["MAX_TRAIN_EPOCHS"]),
+            "--save_every_n_epochs", str(self.settings["SAVE_EVERY_N_EPOCHS"]),
+            "--seed", str(self.settings["SEED"]),
+        ]
+        # Blocks Swap: "Auto (detect from GPU)" resolves in the TRAINER (it reads real free VRAM
+        # at run time — correct for queued runs too); an explicit number passes through.
+        _bs = str(self.settings.get("BLOCKS_SWAP", "auto") or "auto").strip()
+        cmd += ["--blocks_to_swap", "auto" if _bs.lower().startswith("auto") else _bs]
+        # Adaptive LR — bi-directional plateau tracker (model-agnostic). Min/Max combo values can
+        # carry a trailing note (e.g. "2e-4 - rank 4/8 only"); take the leading token.
+        if self.settings.get("ADAPTIVE_LR"):
+            min_lr = str(self.settings.get("ADAPTIVE_LR_MIN", "1e-5")).split(" ")[0]
+            max_lr = str(self.settings.get("ADAPTIVE_LR_MAX", "4e-4")).split(" ")[0]
+            cmd += ["--adaptive_lr", "--adaptive_lr_min", min_lr, "--adaptive_lr_max", max_lr]
+        # Grad clipping + optimizer (Optimizer section). 1.0 is the trainer default — send only
+        # when the user changed it, keeping the launched command a faithful record otherwise.
+        _mgn = str(self.settings.get("MAX_GRAD_NORM", "") or "").strip()
+        if _mgn:
+            try:
+                if abs(float(_mgn) - 1.0) > 1e-9:
+                    cmd += ["--max_grad_norm", str(float(_mgn))]
+            except ValueError:
+                pass
+        _opt = str(self.settings.get("OPTIMIZER_TYPE", "") or "").strip()
+        if _opt:
+            cmd += ["--optimizer_type", _opt]
+        _opt_args = str(self.settings.get("OPTIMIZER_ARGS", "") or "").strip()
+        if _opt_args:
+            cmd += ["--optimizer_args", _opt_args]
+        # Output metadata (Other Options → Metadata) — recorded in the saved LoRA.
+        for _mkey, _mflag in (("METADATA_TITLE", "--metadata_title"),
+                              ("METADATA_AUTHOR", "--metadata_author"),
+                              ("METADATA_DESCRIPTION", "--metadata_description"),
+                              ("METADATA_LICENSE", "--metadata_license"),
+                              ("METADATA_TAGS", "--metadata_tags")):
+            _mval = str(self.settings.get(_mkey, "") or "").strip()
+            if _mval:
+                cmd += [_mflag, _mval]
+        _mtrig = self.settings.get("METADATA_TRIGGER_PHRASE", "").strip() or \
+            (self.caption_trigger_var.get().strip() if hasattr(self, "caption_trigger_var") else "")
+        if _mtrig and _mtrig.lower() != "trigger_word":
+            cmd += ["--metadata_trigger_phrase", _mtrig]
         return cmd
 
     # === Pause / Resume support ===

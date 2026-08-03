@@ -1,0 +1,106 @@
+"""MiniMax H3 image-only LoRA training CLI (wraps fizgig.minimax.trainer.train_minimax).
+
+The GUI drives the full run as three steps: minimax_cache_latents -> minimax_cache_text ->
+minimax_train. Trains a LoRA over an NF4-quantized frozen base (QLoRA). No samples, no preview.
+"""
+
+import argparse
+import logging
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
+
+# CUDA allocator policy, set before torch is imported below (the backend is fixed at CUDA init).
+# The 33B base + per-step tensor churn fragments the default allocator; expandable segments hold
+# the NF4 base within a 5090's budget. GUI sets this too; this covers headless runs.
+if not os.environ.get("PYTORCH_CUDA_ALLOC_CONF") and os.environ.get("FIZGIG_NO_EXPANDABLE") != "1":
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ.setdefault("KMP_BLOCKTIME", "0")
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+
+from fizgig.minimax.trainer import train_minimax
+from fizgig.training.optimizers import available_optimizers
+
+logging.basicConfig(level=logging.INFO)
+
+
+def setup_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="MiniMax H3 image-only LoRA training (NF4 base, no samples)")
+    p.add_argument("--dit", required=True, help="H3 bf16 DiT (minimax_h3_fl2va_bf16.safetensors)")
+    p.add_argument("--dataset_config", required=True, help="Dataset .toml")
+    p.add_argument("--output_dir", required=True)
+    p.add_argument("--output_name", required=True)
+    p.add_argument("--network_dim", type=int, default=16)
+    p.add_argument("--network_alpha", type=float, default=16)
+    p.add_argument("--learning_rate", type=float, default=1e-4)
+    p.add_argument("--max_train_epochs", type=int, default=10)
+    p.add_argument("--save_every_n_epochs", type=int, default=0)
+    p.add_argument("--max_grad_norm", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--optimizer_type", default="adamw8bit", choices=available_optimizers())
+    p.add_argument("--optimizer_args", default="", help='Free-form kwargs, e.g. "weight_decay=0.01"')
+    p.add_argument("--include_patterns", nargs="*", default=None,
+                   help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
+    p.add_argument("--no_quantize", action="store_true",
+                   help="Train on the bf16 base (no NF4) — needs ~66 GB VRAM.")
+    p.add_argument("--blocks_to_swap", default="auto",
+                   help="'auto' (plan from free VRAM + bucket MP) or an integer — park the last "
+                        "N blocks on CPU between uses. 0 disables. Auto picks 0 on 32 GB cards.")
+    p.add_argument("--gradient_checkpointing", default="auto", choices=["auto", "on", "off"],
+                   help="Recompute blocks in backward to cut activation VRAM. Auto: off when "
+                        "everything fits (faster), on otherwise; forced on when swap > 0.")
+    p.add_argument("--shift", type=float, default=None,
+                   help="Override the timestep schedule with a fixed uniform-u sigma-shift. "
+                        "Default (unset) is the auto image schedule: logit-normal + resolution "
+                        "shift — use that; 12.0 is the VIDEO sampler schedule and ruins likeness.")
+    # Adaptive LR — bi-directional plateau tracker (starts at the geometric midpoint of min/max;
+    # the Learning Rate box is ignored while it's on).
+    p.add_argument("--adaptive_lr", action="store_true")
+    p.add_argument("--adaptive_lr_min", type=float, default=1e-5)
+    p.add_argument("--adaptive_lr_max", type=float, default=4e-4)
+    # Output metadata
+    p.add_argument("--metadata_title", default=None)
+    p.add_argument("--metadata_author", default=None)
+    p.add_argument("--metadata_description", default=None)
+    p.add_argument("--metadata_license", default=None)
+    p.add_argument("--metadata_tags", default=None)
+    p.add_argument("--metadata_trigger_phrase", default=None)
+    return p
+
+
+def main():
+    args = setup_parser().parse_args()
+    train_minimax(
+        dataset_config=args.dataset_config,
+        output_dir=args.output_dir,
+        output_name=args.output_name,
+        dit_path=args.dit,
+        network_dim=args.network_dim,
+        network_alpha=args.network_alpha,
+        learning_rate=args.learning_rate,
+        max_train_epochs=args.max_train_epochs,
+        save_every_n_epochs=args.save_every_n_epochs,
+        max_grad_norm=args.max_grad_norm,
+        seed=args.seed,
+        optimizer_type=args.optimizer_type,
+        optimizer_args=args.optimizer_args,
+        include_patterns=args.include_patterns,
+        quantize=not args.no_quantize,
+        shift=args.shift,
+        blocks_to_swap=args.blocks_to_swap,
+        gradient_checkpointing=args.gradient_checkpointing,
+        adaptive_lr=args.adaptive_lr,
+        adaptive_lr_min=args.adaptive_lr_min,
+        adaptive_lr_max=args.adaptive_lr_max,
+        metadata_title=args.metadata_title,
+        metadata_author=args.metadata_author,
+        metadata_description=args.metadata_description,
+        metadata_license=args.metadata_license,
+        metadata_tags=args.metadata_tags,
+        metadata_trigger_phrase=args.metadata_trigger_phrase,
+    )
+
+
+if __name__ == "__main__":
+    main()

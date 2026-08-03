@@ -1,0 +1,413 @@
+"""MiniMax H3 DiT — pure-PyTorch port for image-only training.
+
+Faithful, weight-name-compatible port of ComfyUI's comfy/ldm/minimax/model.py, with the
+ComfyUI plumbing replaced by plain PyTorch so it trains under Fizgig's LoRA / rotating-FT
+machinery:
+
+  operations.Linear / RMSNorm      -> nn.Linear / RMSNorm
+  comfy.quant_ops rms_rope_split_half -> pure-torch RMSNorm + split-half RoPE (below)
+  comfy.ops.linear_input_act(swiglu)  -> fc2(silu(a) * b)
+  optimized_attention                 -> F.scaled_dot_product_attention
+  prefetch / patcher wrappers         -> dropped
+
+Scope: IMAGE ONLY. A still image is a single video frame (T=1); the audio stream is not
+exercised, so the packed sequence collapses to [text | video] with one timestep — the whole
+audio / refs / keyframes / cond-row apparatus of the reference is omitted. The audio-side
+modules (audio_patch_proj, final_layer.audio_out) are still BUILT so the official checkpoint
+loads with no missing/unexpected keys; they just don't run in the image forward.
+
+Module + parameter names match the checkpoint exactly (blocks.N.attn.qkv_proj.weight,
+adaln_proj.linear.weight, video_patch_proj, condition_proj, time_embedder.proj_in, rope.inv_freq,
+token_refiner.blocks.N..., final_layer...), so a LoRA/FT trained here maps back onto the base.
+"""
+
+import math
+from dataclasses import dataclass, field
+from typing import Optional
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+# --- config ------------------------------------------------------------------------------
+
+@dataclass
+class MiniMaxH3Config:
+    """From FL2VA/transformer/config.json (MiniMaxH3DiTModel). Defaults are the real model;
+    tests pass a tiny override so a forward runs on CPU in milliseconds."""
+    hidden_size: int = 5376
+    num_layers: int = 50
+    token_refiner_num_layers: int = 2
+    num_attention_heads: int = 56
+    attention_head_dim: int = 128
+    ffn_hidden_size: int = 14336
+    latents_dim: int = 24
+    audio_latents_dim: int = 32
+    patch_size: tuple = (1, 2, 2)
+    text_dim: int = 5120
+    timestep_input_dim: int = 256
+    time_embed_hidden_size: int = 5376
+    time_embed_dim: int = 2688
+    rope_inv_freq_len: int = 16
+    norm_eps: float = 1e-5
+    qk_norm_eps: float = 1e-5
+    final_norm_eps: float = 1e-5
+
+
+# --- helpers (ported verbatim in intent from the reference) ------------------------------
+
+def patchify_video(latent: torch.Tensor, patch_size=(1, 2, 2)) -> torch.Tensor:
+    """[B, C, T, H, W] -> [B*t*h*w, C*pt*ph*pw]  (row-major t,h,w; channel-major within a patch)."""
+    b, c, t_full, h_full, w_full = latent.shape
+    pt, ph, pw = patch_size
+    t, h, w = t_full // pt, h_full // ph, w_full // pw
+    x = latent.reshape(b, c, t, pt, h, ph, w, pw)
+    x = torch.einsum("nctrhpwq->nthwcrpq", x)
+    return x.reshape(b * t * h * w, c * pt * ph * pw)
+
+
+def unpatchify_video(rows: torch.Tensor, t, h, w, c=24, patch_size=(1, 2, 2)) -> torch.Tensor:
+    pt, ph, pw = patch_size
+    x = rows.reshape(-1, t, h, w, c, pt, ph, pw)
+    x = torch.einsum("nthwcrpq->nctrhpwq", x)
+    return x.reshape(-1, c, t * pt, h * ph, w * pw)
+
+
+FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
+FRAME_RESCALE = 5.0 / 3.0
+
+
+def _axis_from_sqrt_area(dim, patch, sqrt_area):
+    ratio = dim / sqrt_area
+    n = dim // patch
+    return (torch.arange(n, dtype=torch.float64) * (ratio / n) + (1.0 - ratio) / 2.0) * 32.0
+
+
+def _frame_grid(h, w):
+    """Area-normalized (h, w) coords of one latent frame's 2x2-patch rows: [(h//2)*(w//2), 2]."""
+    area = math.sqrt(h * w)
+    hh, ww = torch.meshgrid(_axis_from_sqrt_area(h, 2, area), _axis_from_sqrt_area(w, 2, area), indexing="ij")
+    return torch.stack([hh.reshape(-1), ww.reshape(-1)], dim=-1)
+
+
+def _video_t_spans(n):
+    return [FRAME_RESCALE * FRAME_PER_TOKEN[k % 5] for k in range(n)]
+
+
+def _video_t_grid(n, origin):
+    spans = torch.tensor(_video_t_spans(n), dtype=torch.float64)
+    return float(origin) + torch.cat([torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)])
+
+
+def image_position_ids(text_len, latent_h, latent_w) -> torch.Tensor:
+    """3-axis (t, h, w) position ids for a [text | single-video-frame] packed sequence.
+
+    Text rows: t = 0..text_len-1, h=w=0. Video rows: t pinned at the origin `text_len`
+    (single frame), (h, w) from the area-normalized frame grid. Mirrors the reference's
+    PackedLayout for the no-audio / no-cond case. Returns [S, 3] float64."""
+    frame = _frame_grid(latent_h, latent_w)                 # [(h//2)*(w//2), 2]
+    frame_rows = frame.shape[0]
+    text = torch.zeros(text_len, 3, dtype=torch.float64)
+    text[:, 0] = torch.arange(text_len, dtype=torch.float64)
+    t_grid = _video_t_grid(1, text_len)                     # [1], = [text_len]
+    vid = torch.empty(frame_rows, 3, dtype=torch.float64)
+    vid[:, 0] = t_grid[0]
+    vid[:, 1:] = frame
+    return torch.cat([text, vid], dim=0)
+
+
+# --- RoPE --------------------------------------------------------------------------------
+
+def rope_cos_sin(position_ids: torch.Tensor, inv_freq: torch.Tensor):
+    """position_ids [S,3] (t,h,w) x inv_freq[16] -> cos, sin each [S, 48].
+
+    Split-half convention: the 48 angles are [t(16) | h(16) | w(16)]; the attention rope
+    rotates head dims (0..47) against (48..95) using these, leaving dims 96..127 untouched."""
+    pos = position_ids.to(torch.float32)
+    ang = (pos.unsqueeze(-1) * inv_freq.to(torch.float32).view(1, 1, -1)).reshape(pos.shape[0], -1)  # [S,48]
+    return torch.cos(ang), torch.sin(ang)
+
+
+def apply_rope_split_half(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    """x [S, heads, head_dim]; cos/sin [S, rot_half]. Rotates the first 2*rot_half dims in
+    split-half style (dim i with dim i+rot_half); the tail passes through unrotated."""
+    rot_half = cos.shape[-1]
+    rot = 2 * rot_half
+    xr, xp = x[..., :rot], x[..., rot:]
+    x1, x2 = xr[..., :rot_half], xr[..., rot_half:]
+    c = cos.unsqueeze(1)                                    # [S,1,rot_half] -> broadcast over heads
+    s = sin.unsqueeze(1)
+    rotated = torch.cat([x1 * c - x2 * s, x1 * s + x2 * c], dim=-1)
+    return torch.cat([rotated, xp], dim=-1)
+
+
+# --- blocks ------------------------------------------------------------------------------
+
+class TimeEmbedder(nn.Module):
+    def __init__(self, freq_dim, hidden, out):
+        super().__init__()
+        self.freq_dim = freq_dim
+        self.proj_in = nn.Linear(freq_dim, hidden, bias=True)
+        self.proj_out = nn.Linear(hidden, out, bias=True)
+
+    def forward(self, t):
+        half = self.freq_dim // 2
+        freqs = torch.exp(-math.log(10000.0) * torch.arange(half, dtype=torch.float32, device=t.device) / half)
+        args = t.to(torch.float32)[:, None] * freqs[None]
+        emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        return self.proj_out(F.silu(self.proj_in(emb)))
+
+
+class Attention(nn.Module):
+    def __init__(self, hidden, heads, head_dim, eps):
+        super().__init__()
+        self.heads = heads
+        self.head_dim = head_dim
+        inner = heads * head_dim
+        self.qkv_proj = nn.Linear(hidden, inner * 3, bias=False)
+        self.q_norm = nn.RMSNorm(head_dim, eps=eps)
+        self.k_norm = nn.RMSNorm(head_dim, eps=eps)
+        self.out_proj = nn.Linear(inner, hidden, bias=False)
+
+    def forward(self, x, cos=None, sin=None):
+        s = x.shape[0]
+        q, k, v = self.qkv_proj(x).split(self.heads * self.head_dim, dim=-1)
+        q = self.q_norm(q.view(s, self.heads, self.head_dim))
+        k = self.k_norm(k.view(s, self.heads, self.head_dim))
+        v = v.view(s, self.heads, self.head_dim)
+        if cos is not None:
+            q = apply_rope_split_half(q, cos, sin)
+            k = apply_rope_split_half(k, cos, sin)
+        # [S, H, D] -> [1, H, S, D] for SDPA
+        q = q.transpose(0, 1).unsqueeze(0)
+        k = k.transpose(0, 1).unsqueeze(0)
+        v = v.transpose(0, 1).unsqueeze(0)
+        out = F.scaled_dot_product_attention(q, k, v)       # [1, H, S, D]
+        out = out.squeeze(0).transpose(0, 1).reshape(s, self.heads * self.head_dim)
+        return self.out_proj(out)
+
+
+class MLP(nn.Module):
+    def __init__(self, hidden, ffn):
+        super().__init__()
+        self.fc1 = nn.Linear(hidden, ffn * 2, bias=False)
+        self.fc2 = nn.Linear(ffn, hidden, bias=False)
+
+    def forward(self, x):
+        a, b = self.fc1(x).chunk(2, dim=-1)
+        return self.fc2(F.silu(a) * b)                       # swiglu
+
+
+class AdalnProj(nn.Module):
+    """t_dim -> `expand` modulation tensors, each [M*modalities, hidden]."""
+    def __init__(self, t_dim, hidden, expand, modalities, apply_silu=True):
+        super().__init__()
+        self.expand = expand
+        self.modalities = modalities
+        self.hidden = hidden
+        self.apply_silu = apply_silu
+        self.linear = nn.Linear(t_dim, expand * hidden * modalities, bias=True)
+
+    def forward(self, t_emb):
+        x = self.linear(F.silu(t_emb) if self.apply_silu else t_emb)
+        x = x.view(x.shape[0] * self.modalities, self.expand * self.hidden)
+        return x.chunk(self.expand, dim=-1)
+
+
+def _mod_scale_shift(h, shift, scale, mod_row):
+    """h [S,hidden] modulated per row: h*(1+scale[row]) + shift[row]. mod_row [S] long indexes
+    the [modalities, hidden] modulation tensors. Fully out-of-place (autograd-safe)."""
+    return h * (1.0 + scale[mod_row].to(h.dtype)) + shift[mod_row].to(h.dtype)
+
+
+def _mod_gate(x, gate, other, mod_row):
+    """Gated residual add: x + other*gate[row], per row. Out-of-place."""
+    return x + other * gate[mod_row].to(x.dtype)
+
+
+class RefinerBlock(nn.Module):
+    def __init__(self, hidden, heads, head_dim, ffn, eps, qk_eps):
+        super().__init__()
+        self.norm1 = nn.RMSNorm(hidden, eps=eps)
+        self.norm2 = nn.RMSNorm(hidden, eps=eps)
+        self.attn = Attention(hidden, heads, head_dim, qk_eps)
+        self.mlp = MLP(hidden, ffn)
+
+    def forward(self, x):
+        x = self.attn(self.norm1(x)) + x
+        return self.mlp(self.norm2(x)) + x
+
+
+class TokenRefiner(nn.Module):
+    def __init__(self, num_layers, hidden, heads, head_dim, ffn, eps, qk_eps, final_eps):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            RefinerBlock(hidden, heads, head_dim, ffn, eps, qk_eps) for _ in range(num_layers)])
+        self.final_norm = nn.RMSNorm(hidden, eps=final_eps)
+
+    def forward(self, x):
+        for block in self.blocks:
+            x = block(x)
+        return self.final_norm(x)
+
+
+class DiTBlock(nn.Module):
+    def __init__(self, hidden, heads, head_dim, ffn, t_dim, eps, qk_eps, apply_silu=True):
+        super().__init__()
+        self.norm1 = nn.RMSNorm(hidden, eps=eps)
+        self.norm2 = nn.RMSNorm(hidden, eps=eps)
+        self.attn = Attention(hidden, heads, head_dim, qk_eps)
+        self.mlp = MLP(hidden, ffn)
+        self.adaln_proj = AdalnProj(t_dim, hidden, 6, 3, apply_silu=apply_silu)
+
+    def forward(self, x, t_emb, mod_row, cos, sin):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
+        h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_row)
+        x = _mod_gate(x, gate_msa, self.attn(h, cos=cos, sin=sin), mod_row)
+        h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_row)
+        return _mod_gate(x, gate_mlp, self.mlp(h), mod_row)
+
+
+class FinalLayer(nn.Module):
+    def __init__(self, hidden, t_dim, video_dim, audio_dim, eps, apply_silu=True):
+        super().__init__()
+        self.norm = nn.RMSNorm(hidden, eps=eps)
+        self.adaln_proj = AdalnProj(t_dim, hidden, 2, 1, apply_silu=apply_silu)
+        # fp32 output heads, matching the checkpoint's fp32 island
+        self.video_out = nn.Linear(hidden, video_dim, bias=True)
+        self.audio_out = nn.Linear(hidden, audio_dim, bias=True)
+
+    def forward(self, x_video, t_emb):
+        """x_video [n_video, hidden] — just the video segment. modalities=1 -> row 0."""
+        shift, scale = self.adaln_proj(t_emb)
+        hv = self.norm(x_video) * (1.0 + scale[0]) + shift[0]
+        return self.video_out(hv.to(self.video_out.weight.dtype))
+
+
+# --- model -------------------------------------------------------------------------------
+
+def _run_block(block, swapped, h, t_emb, mod_row, cos, sin):
+    """One DiT block, optionally CPU-parked ('block swap').
+
+    Lives at module level (not a closure) and is the unit torch.utils.checkpoint re-runs in
+    backward — which is exactly what makes swap work with bnb NF4: the packed weights move to
+    GPU just-in-time HERE, so the recompute pass re-fetches them too. Moving the module back to
+    CPU right after is safe in both passes: the no-graph first pass holds no reference to the
+    GPU tensors (freed immediately), and the recompute pass's autograd ctx keeps the old GPU
+    tensors alive exactly until this block's backward finishes. Net effect: at most one or two
+    swapped blocks' weights are resident at any moment."""
+    if swapped:
+        block.to(h.device)
+    out = block(h, t_emb, mod_row, cos, sin)
+    if swapped:
+        block.to("cpu")
+    return out
+
+
+class MiniMaxH3DiT(nn.Module):
+    """Image-only training forward for the MiniMax H3 DiT. Names match the bf16 checkpoint."""
+
+    def __init__(self, config: Optional[MiniMaxH3Config] = None):
+        super().__init__()
+        c = config or MiniMaxH3Config()
+        self.config = c
+        self.hidden_size = c.hidden_size
+        self.patch_size = tuple(c.patch_size)
+        self.latents_dim = c.latents_dim
+        video_patch_dim = c.latents_dim * self.patch_size[0] * self.patch_size[1] * self.patch_size[2]
+
+        self.video_patch_proj = nn.Linear(video_patch_dim, c.hidden_size, bias=True)
+        self.audio_patch_proj = nn.Linear(c.audio_latents_dim, c.hidden_size, bias=True)  # loaded, not run
+        self.condition_proj = nn.Linear(c.text_dim, c.hidden_size, bias=True)
+        self.time_embedder = TimeEmbedder(c.timestep_input_dim, c.time_embed_hidden_size, c.time_embed_dim)
+        self.rope = nn.Module()
+        self.rope.register_buffer("inv_freq",
+                                  1.0 / (10000.0 ** (torch.arange(0, c.rope_inv_freq_len, dtype=torch.float32)
+                                                     / c.rope_inv_freq_len)))
+        self.token_refiner = TokenRefiner(c.token_refiner_num_layers, c.hidden_size, c.num_attention_heads,
+                                          c.attention_head_dim, c.ffn_hidden_size, c.norm_eps, c.qk_norm_eps,
+                                          c.final_norm_eps)
+        self.blocks = nn.ModuleList([
+            DiTBlock(c.hidden_size, c.num_attention_heads, c.attention_head_dim, c.ffn_hidden_size,
+                     c.time_embed_dim, c.norm_eps, c.qk_norm_eps)
+            for _ in range(c.num_layers)])
+        self.final_layer = FinalLayer(c.hidden_size, c.time_embed_dim, video_patch_dim,
+                                      c.audio_latents_dim, c.final_norm_eps)
+        self._gradient_checkpointing = False
+        self._swap_from = len(self.blocks)          # blocks >= this index live on CPU between uses
+
+    def enable_gradient_checkpointing(self, enabled: bool = True):
+        """Recompute each block in backward instead of storing activations. Required when block
+        swap is active (without it, autograd's saved tensors would pin every swapped block's GPU
+        weights through the whole backward, saving nothing)."""
+        self._gradient_checkpointing = enabled
+
+    def enable_block_swap(self, blocks_to_swap: int):
+        """Park the LAST n blocks on CPU; each is moved to GPU just-in-time for its forward
+        (and again for its checkpoint recompute) then parked again. bnb NF4 weights stay packed
+        (uint8, 0.5 B/param) through the moves, so a parked block costs ~¼ of its GPU footprint
+        in system RAM and one PCIe round-trip per pass."""
+        n = max(0, min(int(blocks_to_swap), len(self.blocks) - 2))   # keep >=2 resident
+        self._swap_from = len(self.blocks) - n
+        for i in range(self._swap_from, len(self.blocks)):
+            self.blocks[i].to("cpu")
+        return n
+
+    def forward(self, video_latent: torch.Tensor, t: torch.Tensor,
+                text_embeds: torch.Tensor) -> torch.Tensor:
+        """
+        video_latent : [1, C=latents_dim, T=1, H, W]  — one image as a single video frame.
+        t            : scalar or [1] flow time in [0, 1] (the value fed to the time embedder;
+                       the trainer owns noising and the flow target).
+        text_embeds  : [1, L, text_dim] Qwen3-VL hidden states (or already [1, L, hidden]).
+        returns      : [1, C, T, H, W] video velocity prediction (same shape as video_latent).
+        """
+        if video_latent.shape[0] != 1:
+            raise ValueError("MiniMax H3 image training is batch size 1 (pack one image per step)")
+        device = video_latent.device
+        dtype = text_embeds.dtype
+        _, _, latent_t, lat_h, lat_w = video_latent.shape
+        text_len = text_embeds.shape[1]
+
+        # text: condition_proj -> refiner (skip if already hidden-width)
+        text_states = text_embeds[0]
+        if text_states.shape[-1] != self.hidden_size:
+            text_states = self.token_refiner(self.condition_proj(text_states))
+        # video: patchify -> patch proj
+        video_rows = patchify_video(video_latent.to(torch.float32), self.patch_size)
+        video_embed = self.video_patch_proj(video_rows).to(dtype)
+
+        # pack [text | video]
+        h = torch.cat([text_states.to(dtype), video_embed], dim=0)
+        seq_len = h.shape[0]
+        n_video = video_embed.shape[0]
+
+        # single timestep -> one modulation row-set (M=1 -> [modalities=3, hidden]). Per-row
+        # modality index: text rows tag 1, video rows tag 0.
+        t_val = t.reshape(-1)[:1].to(torch.float32) if torch.is_tensor(t) else torch.tensor([float(t)], device=device)
+        t_emb = self.time_embedder(t_val.to(device)).to(dtype)                    # [1, t_dim]
+        mod_row = torch.zeros(seq_len, dtype=torch.long, device=device)
+        mod_row[:text_len] = 1                                                    # text -> row 1
+
+        # rope
+        pos = image_position_ids(text_len, lat_h, lat_w).to(device)
+        cos, sin = rope_cos_sin(pos, self.rope.inv_freq.to(device))
+        cos, sin = cos.to(dtype), sin.to(dtype)
+
+        # Gate on grad-enabled only, NOT self.training: the frozen base stays in eval() during
+        # LoRA training (grads flow through it regardless), so a training-mode gate would
+        # silently disable checkpointing for exactly the runs that need it.
+        use_ckpt = self._gradient_checkpointing and torch.is_grad_enabled()
+        for i, block in enumerate(self.blocks):
+            swapped = i >= self._swap_from
+            if use_ckpt:
+                h = torch.utils.checkpoint.checkpoint(
+                    _run_block, block, swapped, h, t_emb, mod_row, cos, sin, use_reentrant=False)
+            else:
+                h = _run_block(block, swapped, h, t_emb, mod_row, cos, sin)
+
+        v = self.final_layer(h[text_len:], t_emb)                                # [n_video, video_patch_dim]
+        out = unpatchify_video(v, latent_t, lat_h // self.patch_size[1], lat_w // self.patch_size[2],
+                               self.latents_dim, self.patch_size)
+        return out.to(video_latent.dtype)

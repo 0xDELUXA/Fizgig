@@ -837,7 +837,11 @@ class LoRANetwork(torch.nn.Module):
                         module = root_module  # search all modules
 
                     for child_name, child_module in module.named_modules():
-                        is_linear = child_module.__class__.__name__ == "Linear"
+                        # bitsandbytes 4-bit/8-bit linears are Linears for LoRA purposes: they
+                        # expose in_features/out_features and LoRAModule only wraps their
+                        # forward. Needed to LoRA-train on an NF4-quantized frozen base
+                        # (MiniMax H3's 33B DiT), which Fizgig loads as Linear4bit.
+                        is_linear = child_module.__class__.__name__ in ("Linear", "Linear4bit", "Linear8bitLt")
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
                         is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
 

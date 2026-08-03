@@ -178,6 +178,9 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
                         setattr(module, child_name, q)
 
     dev = torch.device(device)
+    print("[load] streaming the Qwen3-VL-32B text encoder — a couple of quiet minutes here is "
+          "normal (nvfp4 dequant is the slower one; a bitsandbytes 'expandable_segments not "
+          "supported' warning on Windows is harmless).", flush=True)
     model_keys = {n for n, _ in model.named_parameters()}
     with MemoryEfficientSafeOpen(path) as f:
         ckpt = set(f.keys())

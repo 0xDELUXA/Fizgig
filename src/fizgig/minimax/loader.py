@@ -56,6 +56,9 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
                         setattr(module, child_name, q)
 
     dev = torch.device(device)
+    print("[load] streaming the 66 GB MiniMax H3 base and quantizing to NF4 — a couple of "
+          "quiet minutes here is normal (as is a bitsandbytes 'expandable_segments not "
+          "supported' warning on Windows).", flush=True)
     # Block swap: params of the LAST n blocks are parked on CPU at load time — quantized on the
     # GPU (Params4bit quantizes on the .to(cuda) move) then immediately moved off, so the packed
     # weights never accumulate. Loading everything resident first and parking afterwards would

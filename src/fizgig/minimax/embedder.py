@@ -46,24 +46,42 @@ _NF4_SUFFIXES = (".self_attn.q_proj.weight", ".self_attn.k_proj.weight",
 # at load, then NF4-quantize it on GPU exactly like the bf16 path, so nothing downstream changes.
 #
 # nvfp4 (comfy/float.py): W = fp4_e2m1 * block_scale * global_scale, block size 16 along the input
-# dim. Stored as: weight U8 [out, in/2] (2 E2M1 values/byte), weight_scale FP8-E4M3 [out, in/16],
+# dim. Stored as: weight U8 [out, in/2] (2 E2M1 values/byte, HIGH nibble = first/even element),
+# weight_scale FP8-E4M3 [out, in/16] in ComfyUI's cuBLAS `to_blocked` swizzle (128x4 tiles ->
+# (-1,32,16); see comfy/float.py::to_blocked — must be inverted to row-major before use),
 # weight_scale_2 F32 scalar. AWQ layers (o_proj/down_proj) also carry pre_quant_scale [in]: comfy
 # applies it as `input = input * pre_quant_scale` (ops.py), i.e. y=(x*s)@W^T = x@(W*s)^T — so we
-# fold it into the weight columns by MULTIPLYING. int8_tensorwise: W = int8 * weight_scale (scalar).
+# fold it into the weight columns by MULTIPLYING. For the other Linears (q/k/v, gate/up) the AWQ
+# scale was folded into the PRECEDING norm weight at quantization time, so the checkpoint is
+# self-consistent: load its norm weights as-is and no unfold is needed (validated per-column
+# against the bf16 file: ratio W_dq/W_ref == ln_ref/ln_nvfp4 to <1%, all layer shapes).
+# int8_tensorwise: W = int8 * weight_scale (per-tensor scalar).
 # ---------------------------------------------------------------------------
 # E2M1 magnitude for the low 3 bits (sign is bit 3): {0, .5, 1, 1.5, 2, 3, 4, 6}.
 _E2M1_MAG = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 
 
+def _from_blocked(blocked, rows, cols):
+    """Invert ComfyUI's to_blocked (comfy/float.py): (-1, 32, 16) tiles -> row-major [rows, cols].
+    Verified as an exact roundtrip of to_blocked for the shapes in this checkpoint."""
+    nrb = -(-rows // 128)
+    ncb = -(-cols // 4)
+    x = blocked.reshape(-1, 32, 4, 4).transpose(1, 2)
+    x = x.reshape(nrb, ncb, 128, 4).permute(0, 2, 1, 3).reshape(nrb * 128, ncb * 4)
+    return x[:rows, :cols].contiguous()
+
+
 def _nvfp4_dequant(packed, block_scale_fp8, global_scale):
     """packed U8 [out, in/2] -> bf16 [out, in].  W = e2m1(code) * block_scale * global_scale."""
     out, in2 = packed.shape
-    lo = (packed & 0x0F).to(torch.long)          # even input index (low nibble)
-    hi = (packed >> 4).to(torch.long)            # odd input index (high nibble)
-    codes = torch.stack([lo, hi], dim=-1).reshape(out, in2 * 2)   # [out, in]
+    inp = in2 * 2
+    lo = (packed & 0x0F).to(torch.long)
+    hi = (packed >> 4).to(torch.long)
+    codes = torch.stack([hi, lo], dim=-1).reshape(out, inp)       # HIGH nibble first (verified)
     sign = torch.where((codes & 0x8) > 0, -1.0, 1.0)
     vals = sign * _E2M1_MAG.to(codes.device)[codes & 0x7]         # decoded fp4, f32
-    bs = block_scale_fp8.to(torch.float32).repeat_interleave(16, dim=1)   # [out, in/16] -> [out, in]
+    bs = _from_blocked(block_scale_fp8.to(torch.float32).reshape(-1, 32, 16), out, inp // 16)
+    bs = bs.repeat_interleave(16, dim=1)                          # [out, in/16] -> [out, in]
     return (vals * bs * global_scale.to(torch.float32)).to(torch.bfloat16)
 
 
@@ -147,24 +165,23 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
     with MemoryEfficientSafeOpen(path) as f:
         ckpt = set(f.keys())
         # The comfy nvfp4-awq TE (15 GB) stores packed quant weights + scales instead of plain
-        # bf16. The dequant is decoded and MOSTLY correct (fp4 codes exact, AWQ o_proj/down_proj
-        # exact), BUT the per-block scale is stored in ComfyUI's native comfy_kitchen swizzle,
-        # which the pure-python to_blocked reproduces for some layer shapes (q_proj) and not
-        # others (gate_proj) — so we cannot guarantee a correct TE across all layers without the
-        # compiled comfy_kitchen. Refuse it rather than silently poison training. Use the bf16 TE.
-        if any(k.endswith(".comfy_quant") for k in ckpt):
-            raise NotImplementedError(
-                "This looks like a ComfyUI comfy-quant text encoder (nvfp4/int8 — the ~15 GB file). "
-                "MiniMax H3 training needs the bf16 Qwen3-VL-32B TE "
-                "(qwen3vl_32b_minimax_h3_bf16.safetensors). The nvfp4 dequant is decoded but its "
-                "per-block scale layout isn't bit-exact across all layers yet, so it would degrade "
-                "training. Point the 'Qwen3-VL-32B TE' path at the bf16 file.")
+        # bf16 — detect once, then dequantize each Linear weight from its
+        # `<mod>.weight/.weight_scale[/_2]/.pre_quant_scale` family back to bf16. Everything
+        # else (norms, embed) loads as usual; the checkpoint's norm weights already carry the
+        # folded AWQ scales, so the model function matches the bf16 TE up to 4-bit noise.
+        is_comfy_quant = any(k.endswith(".comfy_quant") for k in ckpt)
+        if is_comfy_quant:
+            print("[minimax-te] comfy-quant checkpoint (nvfp4-awq) — dequantizing to bf16 per tensor")
         for name in model_keys:
             src = "model." + name                          # checkpoint prefixes the LM with model.
-            if src not in ckpt:
-                continue                                   # e.g. norm (Identity) has no params
-            w = f.get_tensor(src)
+            file_mod = src.rsplit(".", 1)[0]
             leaf = name.rsplit(".", 1)[1]
+            if is_comfy_quant and leaf == "weight" and (file_mod + ".comfy_quant") in ckpt:
+                w = _dequant_comfy_weight(f, file_mod, ckpt)   # -> bf16 [out, in]
+            elif src in ckpt:
+                w = f.get_tensor(src)
+            else:
+                continue                                   # e.g. norm (Identity) has no params
             parent = model.get_submodule(name.rsplit(".", 1)[0])
             if quantize and (name.endswith(_NF4_SUFFIXES)):
                 p = Params4bit(w.to(compute_dtype), requires_grad=False, quant_type="nf4").to(dev)

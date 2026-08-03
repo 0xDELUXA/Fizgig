@@ -1122,7 +1122,8 @@ class LoRATrainerGUI:
         # Always empty since the Output Folder UI was removed — prep always writes into the
         # training folder. Kept because the convert pipeline reads it ("or source_folder").
         self.convert_output_var = tk.StringVar()
-        self.max_size_var = tk.StringVar(value="1024")
+        # Image Prep's size target is a MEGAPIXEL AREA, not a longest edge — declared with the
+        # dataset vars below (it seeds from the Training tab's Target Megapixels).
         # Default flipped to KEEP (False) 2026-07-28 — safe-by-default like the Look Filter and
         # the Captions Remove button; remembered across restarts now that it's a real choice.
         self.delete_originals_var = tk.BooleanVar(
@@ -1146,6 +1147,12 @@ class LoRATrainerGUI:
         self.dataset_caption_ext_var = tk.StringVar(value=".txt")
         self.dataset_jsonl_file_var = tk.StringVar()
         self.dataset_megapixels_var = tk.StringVar(value="0.25")
+        # Image Prep's target area. Training buckets by AREA and never upscales, so prepping to a
+        # longest-edge cap silently pushed every non-square image below the training target and
+        # threw away detail training could not get back (issue #44). Seeded from the Training
+        # tab's target so the two agree out of the box; remembered across restarts thereafter.
+        self.prep_megapixels_var = tk.StringVar(
+            value=str(self.last_used.get("prep_megapixels", self.dataset_megapixels_var.get())))
         self.dataset_batch_size_var = tk.StringVar(value="1")
         self.dataset_num_repeats_var = tk.StringVar(value="1")
         self.dataset_enable_bucket_var = tk.BooleanVar(value=True)
@@ -1175,6 +1182,12 @@ class LoRATrainerGUI:
         self.caption_text_var.trace_add("write", self._save_last_used_paths)
         self.prep_mode_var.trace_add("write", self._save_last_used_paths)
         self.delete_originals_var.trace_add("write", self._save_last_used_paths)
+        self.prep_megapixels_var.trace_add("write", self._save_last_used_paths)
+        # Prep's target area and the Training tab's target are independent, but prepping BELOW
+        # the training target is the one harmful direction — refresh the summary (which carries
+        # that warning) whenever either side moves.
+        self.prep_megapixels_var.trace_add("write", self._update_prep_note)
+        self.dataset_megapixels_var.trace_add("write", self._update_prep_note)
         # The Image Prep summary shows a live image count + resolution check for the folder,
         # so a folder change on the Start tab must refresh it. Guarded: fires before the
         # Image Prep tab exists during startup, and _update_prep_note no-ops then.
@@ -1826,6 +1839,7 @@ class LoRATrainerGUI:
         data.update({
             "prep_mode": self.prep_mode_var.get(),
             "prep_replace_originals": bool(self.delete_originals_var.get()),
+            "prep_megapixels": self.prep_megapixels_var.get(),
             "image_folder": self.image_folder_var.get(),
             "caption_trigger": self.caption_text_var.get(),
             "dataset_cache_dir": self.dataset_cache_dir_var.get(),
@@ -10300,13 +10314,14 @@ class LoRATrainerGUI:
         # so the layout doesn't jump and users learn they exist).
         opts_row = tk.Frame(mode_card, bg=COLORS["bg_surface"])
         opts_row.pack(anchor=tk.W, pady=(12, 0))
-        ttk.Label(opts_row, text="Max size:").pack(side=tk.LEFT, padx=(0, 4))
-        _max_combo = ttk.Combobox(opts_row, textvariable=self.max_size_var,
-                                  values=["256", "512", "640", "768", "1024", "1280", "1536", "2048"],
+        ttk.Label(opts_row, text="Target megapixels:").pack(side=tk.LEFT, padx=(0, 4))
+        _max_combo = ttk.Combobox(opts_row, textvariable=self.prep_megapixels_var,
+                                  values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0", "2.4",
+                                          "3.0", "4.2"],
                                   state="readonly", width=6)
         _max_combo.pack(side=tk.LEFT)
         _max_combo.bind("<<ComboboxSelected>>", lambda e: self._update_prep_note())
-        tk.Label(opts_row, text="px  (larger images shrink to fit; smaller are left alone)",
+        tk.Label(opts_row, text="MP  (larger images shrink to fit; smaller are left alone)",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).pack(
             side=tk.LEFT, padx=(4, 16))
         self._face_target_label = ttk.Label(opts_row, text="Face:")
@@ -10333,6 +10348,24 @@ class LoRATrainerGUI:
             self._face_unavail_label.pack(side=tk.LEFT, padx=(8, 0))
         else:
             self._face_unavail_label = None
+
+        # Why this is megapixels and not a "max size" any more. Training picks its resolution by
+        # AREA, so a longest-edge cap quietly shrank every non-square image below the training
+        # target — a 3:4 photo kept only 75% of the pixels it could have trained at, 16:9 just 56%.
+        tk.Label(mode_card,
+                 text="Sizing is by target area (megapixels), not longest side — this matches how "
+                      "training buckets your images, so prepping no longer costs you resolution. "
+                      "Aspect ratio is preserved; nothing is cropped.",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT).pack(anchor=tk.W, pady=(8, 0))
+        # Only shown when prep is set BELOW the Training tab's target — the one harmful direction
+        # (prepping higher is free: training simply downscales at cache time).
+        self._prep_mp_warn_var = tk.StringVar(value="")
+        self._prep_mp_warn_label = tk.Label(
+            mode_card, textvariable=self._prep_mp_warn_var,
+            font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
+            wraplength=760, justify=tk.LEFT)
+        # packed/unpacked by _update_prep_note
 
         # Card 3: Your originals — the one real destination question, as an explicit choice
         # (replaces the old inverted "Replace originals" checkbox). Keep-safe is the default.
@@ -10458,27 +10491,31 @@ class LoRATrainerGUI:
         self._update_prep_note()
 
     def _prep_source_stats(self, max_sample=40):
-        """(image_count, median_longest_edge) for the training folder's top-level images.
+        """(image_count, median_area_px, median_size) for the training folder's top-level images.
 
-        Edge read from image HEADERS only (PIL .size — no pixel decode), sampled at most
+        AREA rather than longest edge, because that's what both prep and training size by.
+        Read from image HEADERS only (PIL .size — no pixel decode), sampled at most
         `max_sample` files, so it's cheap enough to run on every settings change. Returns
-        (0, None) when the folder is unset/empty."""
+        (0, None, None) when the folder is unset/empty."""
         folder = self.image_folder_var.get().strip()
         exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
         try:
             files = [os.path.join(folder, f) for f in os.listdir(folder)
                      if os.path.splitext(f)[1].lower() in exts]
         except OSError:
-            return 0, None
-        edges = []
+            return 0, None, None
+        sizes = []
         for p in files[:max_sample]:
             try:
                 with Image.open(p) as im:
-                    edges.append(max(im.size))
+                    sizes.append(im.size)
             except Exception:
                 pass
-        median = sorted(edges)[len(edges) // 2] if edges else None
-        return len(files), median
+        if not sizes:
+            return len(files), None, None
+        sizes.sort(key=lambda wh: wh[0] * wh[1])
+        median_size = sizes[len(sizes) // 2]
+        return len(files), median_size[0] * median_size[1], median_size
 
     def _update_prep_note(self, *args):
         """The 'What will happen' summary — computed from ALL the settings (mode, originals
@@ -10490,20 +10527,29 @@ class LoRATrainerGUI:
         mode = self.prep_mode_var.get()
         replace = self.delete_originals_var.get()
         try:
-            max_px = int(self.max_size_var.get())
+            prep_mp = float(self.prep_megapixels_var.get())
         except (ValueError, tk.TclError):
-            max_px = 1024
-        n, median_edge = self._prep_source_stats()
+            prep_mp = 0.25
+        target_area = self._prep_target_area(prep_mp)
+        n, median_area, median_size = self._prep_source_stats()
+
+        # A worked example in the user's own aspect ratio, so "1.0 MP" is a concrete size.
+        example = ""
+        if median_size:
+            _w, _h = self._prep_output_size(median_size, target_area)
+            if (_w, _h) != tuple(median_size):
+                example = f" (your typical {median_size[0]}×{median_size[1]} → {_w}×{_h})"
 
         count = f"your {n} images" if n else "your images"
+        sized = f"resized to about {prep_mp:g} MP{example} and saved as PNG"
         if mode == "Auto Prep (Face Crops)":
-            what = (f"{count} → resized to fit {max_px} px and saved as PNG, plus one face "
+            what = (f"{count} → {sized}, plus one face "
                     f"close-up each{f' (≈{n * 2} files)' if n else ''}")
         elif mode == "Face Crop Only":
             what = (f"{count} → replaced by just the cropped face from each photo, "
                     f"saved as PNG")
         else:
-            what = f"{count} → resized to fit {max_px} px and saved as PNG"
+            what = f"{count} → {sized}"
 
         where = "Everything lands in your training folder."
         if replace:
@@ -10514,15 +10560,34 @@ class LoRATrainerGUI:
 
         lines = [f"{what}. {where} {originals}"]
         # Soft-crop warning: face modes cropping from images that are already training-size
-        # produce small, blurry faces. Header-read median across a sample of the folder.
-        if mode != "Resize Only" and median_edge is not None and median_edge <= max_px:
-            lines.append(f"⚠ Your images are already ≤ {max_px} px — face "
+        # produce small, blurry faces. Header-read median AREA across a sample of the folder.
+        if mode != "Resize Only" and median_area is not None and median_area <= target_area:
+            lines.append(f"⚠ Your images are already at or below {prep_mp:g} MP — face "
                          f"close-ups cut from them will be soft. If you have higher-res "
                          f"versions, prep from those instead.")
         if mode != "Resize Only":
             lines.append("Next: eyeball the face close-ups on the Captions tab and Remove any "
                          "blurry ones before captioning.")
         self._prep_note_var.set("\n".join(lines))
+
+        # Prep BELOW the training target is the one harmful direction: training never upscales,
+        # so those pixels are gone for good. Prepping higher is free — training just downscales.
+        if hasattr(self, "_prep_mp_warn_label"):
+            try:
+                train_mp = float(self.dataset_megapixels_var.get())
+            except (ValueError, tk.TclError):
+                train_mp = prep_mp
+            if prep_mp < train_mp:
+                self._prep_mp_warn_var.set(
+                    f"⚠ Training is set to {train_mp:g} MP but prep is set to {prep_mp:g} MP — "
+                    f"your images would be shrunk below what training asks for, and training "
+                    f"cannot get that detail back. Match them, or prep higher.")
+                if not self._prep_mp_warn_label.winfo_manager():
+                    self._prep_mp_warn_label.pack(anchor=tk.W, pady=(4, 0))
+            else:
+                self._prep_mp_warn_var.set("")
+                if self._prep_mp_warn_label.winfo_manager():
+                    self._prep_mp_warn_label.pack_forget()
 
         # The Run button carries the live count — "Prepare 34 Images Now" answers "run on what?"
         if hasattr(self, "prepare_images_btn"):
@@ -11189,18 +11254,63 @@ class LoRATrainerGUI:
             img = img.convert('RGB')
         return img
 
-    def _resize_image(self, img, max_size):
-        """Resize image maintaining aspect ratio. Never upscales. Returns (img, resized_bool)."""
+    @staticmethod
+    def _bucket_step():
+        """The resolution grid training buckets on (RESOLUTION_STEPS). Read from the dataset
+        module so prep and bucketing can never drift apart; 16 if the import isn't available."""
+        try:
+            from fizgig.dataset.image_dataset import RESOLUTION_STEPS
+            return int(RESOLUTION_STEPS)
+        except Exception:
+            return 16
+
+    def _prep_target_area(self, mp):
+        """Training's real target AREA for a megapixel setting.
+
+        Derived exactly as the dataset TOML writer derives `resolution` — floor the square side
+        to the bucket grid (1.0 MP -> 992x992 = 984 064 px, not 1 000 000). Matching it means
+        prep lands at or just UNDER what training asks for, which keeps training's no-upscale
+        path: the cache step then resamples and crops nothing at all."""
+        step = self._bucket_step()
+        side = max(step, int(math.sqrt(max(0.0, mp) * 1_000_000)) // step * step)
+        return side * side
+
+    def _prep_output_size(self, size, target_area):
+        """The (w, h) `_resize_image` would produce for `size` — same maths, no pixels touched.
+        Used by the summary card to show a worked example before anything is written."""
+        width, height = size
+        cur_area = width * height
+        if cur_area <= target_area:
+            return width, height
+        step = self._bucket_step()
+        scale = math.sqrt(target_area / cur_area)
+        return (max(step, int(width * scale) // step * step),
+                max(step, int(height * scale) // step * step))
+
+    def _resize_image(self, img, target_area):
+        """Resize to ~`target_area` PIXELS, preserving aspect ratio. Never upscales.
+        Returns (img, resized_bool).
+
+        Area, not longest edge: training chooses its resolution by area and — with No Upscale on,
+        the default — leaves any image already at or under the target exactly as it is. A
+        longest-edge cap therefore pushed every non-square image permanently below the training
+        target (a 3:4 photo trained at 75% of the pixels it could have, 16:9 at 56%; issue #44).
+
+        Both sides are floored to the bucket step (16). Training floors to that grid anyway, so
+        doing it here makes the saved file exactly what trains, and lands just under the target
+        area — which keeps training's no-upscale path and means the cache step resamples and
+        crops nothing at all."""
         width, height = img.size
-        if width > max_size or height > max_size:
-            if width > height:
-                new_width = max_size
-                new_height = int(height * (max_size / width))
-            else:
-                new_height = max_size
-                new_width = int(width * (max_size / height))
-            return img.resize((new_width, new_height), Image.LANCZOS), True
-        return img, False
+        cur_area = width * height
+        if cur_area <= target_area:
+            return img, False                      # never upscale — it would only invent detail
+        step = self._bucket_step()
+        scale = math.sqrt(target_area / cur_area)
+        new_width = max(step, int(width * scale) // step * step)
+        new_height = max(step, int(height * scale) // step * step)
+        if (new_width, new_height) == (width, height):
+            return img, False
+        return img.resize((new_width, new_height), Image.LANCZOS), True
 
     def _select_face(self, faces, face_mode):
         """Select a face from detected faces based on face_mode. Returns (FaceInfo, note_str) or (None, note_str)."""
@@ -11394,7 +11504,11 @@ class LoRATrainerGUI:
         self._originals_dir_cache = {}  # Reset per run
         source_folder = self.image_folder_var.get()
         output_folder = self.convert_output_var.get() or source_folder
-        max_size = int(self.max_size_var.get())
+        # Target AREA in pixels, from the megapixel selector (see _resize_image for why area).
+        try:
+            target_area = self._prep_target_area(float(self.prep_megapixels_var.get()))
+        except (ValueError, tk.TclError):
+            target_area = self._prep_target_area(0.25)
         replace_originals = self.delete_originals_var.get()
         prep_mode = self.prep_mode_var.get()
         face_mode = self._get_face_selection_mode()
@@ -11423,16 +11537,16 @@ class LoRATrainerGUI:
         self.convert_log.delete(1.0, tk.END)
 
         if prep_mode == "Auto Prep (Face Crops)":
-            self._auto_prep_images(source_folder, output_folder, max_size, face_mode, face_padding, replace_originals)
+            self._auto_prep_images(source_folder, output_folder, target_area, face_mode, face_padding, replace_originals)
         elif prep_mode == "Resize Only":
-            self._resize_only_images(source_folder, output_folder, max_size, replace_originals)
+            self._resize_only_images(source_folder, output_folder, target_area, replace_originals)
         elif prep_mode == "Face Crop Only":
-            self._face_crop_only_images(source_folder, output_folder, max_size, face_mode, face_padding, replace_originals)
+            self._face_crop_only_images(source_folder, output_folder, target_area, face_mode, face_padding, replace_originals)
 
         self.convert_log.configure(state="disabled")
         self.convert_log.see(tk.END)
 
-    def _resize_only_images(self, source_folder, output_folder, max_size, replace_originals):
+    def _resize_only_images(self, source_folder, output_folder, target_area, replace_originals):
         """Resize Only mode: convert/resize images, no face detection."""
         self._log("Mode: Resize Only\n\n")
         files = self._get_image_files(source_folder)
@@ -11444,7 +11558,7 @@ class LoRATrainerGUI:
             try:
                 img = self._load_image(filepath)
                 original_size = img.size
-                img, resized = self._resize_image(img, max_size)
+                img, resized = self._resize_image(img, target_area)
                 w, h = img.size
 
                 base_name = os.path.splitext(filename)[0]
@@ -11472,7 +11586,7 @@ class LoRATrainerGUI:
 
         self._log(f"\n--- Summary ---\nConverted: {converted} | Skipped: {skipped} | Errors: {errors}\n")
 
-    def _face_crop_only_images(self, source_folder, output_folder, max_size, face_mode, face_padding, replace_originals):
+    def _face_crop_only_images(self, source_folder, output_folder, target_area, face_mode, face_padding, replace_originals):
         """Face Crop Only mode: face crop replaces the output."""
         self._log(f"Mode: Face Crop Only ({face_mode}, padding {face_padding}%)\n\n")
         files = self._get_image_files(source_folder)
@@ -11504,7 +11618,7 @@ class LoRATrainerGUI:
                 except Exception as fe:
                     self._log(f"  Face error ({filename}): {fe}\n")
 
-                img, resized = self._resize_image(img, max_size)
+                img, resized = self._resize_image(img, target_area)
                 w, h = img.size
 
                 base_name = os.path.splitext(filename)[0]
@@ -11533,7 +11647,7 @@ class LoRATrainerGUI:
         self._log(f"\n--- Summary ---\nConverted: {converted} | Skipped: {skipped} | Errors: {errors}\n")
         self._log(f"Face crops: {face_crops} | No face: {no_face}\n")
 
-    def _auto_prep_images(self, source_folder, output_folder, max_size, face_mode, face_padding, replace_originals):
+    def _auto_prep_images(self, source_folder, output_folder, target_area, face_mode, face_padding, replace_originals):
         """Auto Prep mode: resize originals + generate face crops from the HIGH-RES original
         (before it gets overwritten/moved), then handle originals."""
         self._log(f"Mode: Auto Prep (Face Crops)\n")
@@ -11570,7 +11684,7 @@ class LoRATrainerGUI:
                             self._log(note)
                         if selected:
                             cropped = crop_to_face(original_img, selected, face_padding)
-                            cropped, _ = self._resize_image(cropped, max_size)
+                            cropped, _ = self._resize_image(cropped, target_area)
                             crop_name = f"FaceCrop_{crop_index:03d}.png"
                             crop_path = os.path.join(output_folder, crop_name)
                             cropped.save(crop_path, "PNG")
@@ -11588,7 +11702,7 @@ class LoRATrainerGUI:
                     self._log(f"Face crop error ({filename}): {e}\n")
 
                 # --- Resize and save the main image ---
-                resized_img, resized = self._resize_image(original_img, max_size)
+                resized_img, resized = self._resize_image(original_img, target_area)
                 w, h = resized_img.size
                 output_path = os.path.join(output_folder, base_name + ".png")
 
@@ -11599,6 +11713,10 @@ class LoRATrainerGUI:
                     continue
 
                 output_path = self._safe_output_path(filepath, output_path)
+                # Keep-safe + in-place PNG means this save OVERWRITES the original and
+                # _handle_original below has nothing left to move — the issue #43 failure, which
+                # was fixed in the other two modes but not here, i.e. in the DEFAULT one.
+                self._stash_original_if_inplace(filepath, output_path, output_folder, replace_originals)
                 self._atomic_png_save(resized_img, output_path)
                 size_info = f"{original_size[0]}x{original_size[1]} -> {w}x{h}" if resized else f"{w}x{h}"
                 self._log(f"Converted: {filename} [{size_info}]\n")

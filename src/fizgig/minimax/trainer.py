@@ -17,6 +17,7 @@ import argparse
 import logging
 import math
 import os
+import random
 import sys
 import time
 from multiprocessing import Value
@@ -472,6 +473,19 @@ def train_minimax(
     adaptive_lr: bool = False,
     adaptive_lr_min: float = 1e-5,
     adaptive_lr_max: float = 4e-4,
+    # In-training previews. Prompts come from the Samples tab; the text encoder is loaded ONCE
+    # before the DiT (it must never be resident alongside it) and freed.
+    sample_prompts: list = None,
+    te_path: str = None,
+    vae_path: str = None,
+    sample_every_n_epochs: int = 0,
+    sample_at_first: bool = False,
+    sample_width: int = 512,
+    sample_height: int = 512,
+    sample_steps: int = 8,
+    sample_cfg_scale: float = 1.0,
+    sample_negative: str = None,
+    sample_seed: int = 42,
     # Output metadata (recorded in the saved LoRA).
     metadata_title: str = None,
     metadata_author: str = None,
@@ -540,6 +554,29 @@ def train_minimax(
         logger.info("[vram] block swap needs gradient checkpointing (autograd would pin swapped "
                     "weights through backward) — forcing it on.")
         use_ckpt = True
+
+    # ---- previews: encode the prompts BEFORE the DiT loads ----
+    # Order matters more here than anywhere else in Fizgig: the Qwen3-VL-32B text encoder is
+    # ~14 GB even at NF4, and the DiT is ~17 GB. They must never be resident together, so the
+    # prompts are encoded once, up front, and the encoder is freed before the base streams in.
+    do_previews = bool((sample_every_n_epochs or sample_at_first) and sample_prompts and te_path)
+    encoded_prompts = encoded_negative = sample_dir = None
+    if do_previews:
+        from fizgig.minimax.sampling import encode_sample_prompts
+        logger.info(f"[preview] pre-encoding {len(sample_prompts)} sample prompt(s) "
+                    f"(the text encoder is freed before the DiT loads)...")
+        try:
+            encoded_prompts = encode_sample_prompts(te_path, sample_prompts, device=device,
+                                                    quantize=quantize)
+            if sample_negative and sample_cfg_scale and sample_cfg_scale > 1.0:
+                encoded_negative = encode_sample_prompts(te_path, [sample_negative],
+                                                         device=device, quantize=quantize)[0]
+            sample_dir = os.path.join(output_dir, "sample")
+            os.makedirs(sample_dir, exist_ok=True)
+        except Exception as _e:
+            logger.warning(f"[preview] prompt encoding failed ({type(_e).__name__}: {_e}) — "
+                           f"previews disabled; training continues normally.")
+            do_previews = False
 
     # ---- base (NF4-frozen) + trainable LoRA over the transformer blocks ----
     dit = load_minimax_h3_dit(dit_path, device=device, compute_dtype=dtype, quantize=quantize,
@@ -635,8 +672,52 @@ def train_minimax(
     def _state_extra():
         return {"adaptive_lr_state": adaptive.state_dict()} if adaptive else None
 
+    def _render_previews(epoch):
+        """Render one still per prompt on the RESIDENT training DiT and write them where the
+        samples gallery looks. The filename format is the gallery/likeness/Visualiser contract
+        (parse_sample_filename in the GUI) — do not change it casually.
+
+        The DiT never moves: only eval mode is toggled, and block swap's JIT .to() is already
+        forward-safe, so there is no swap-mode dance like Krea 2 needs."""
+        import time as _time
+        from PIL import Image
+        from fizgig.minimax import sampling
+        was_training = dit.training
+        try:
+            dit.eval()
+            _seed = sample_seed if sample_seed != 0 else random.randint(1, 2 ** 31 - 1)
+            ts = _time.strftime("%Y%m%d%H%M%S")
+            for i, txt in enumerate(encoded_prompts):
+                lat = sampling.sample_image(
+                    dit, txt.to(device, dtype),
+                    width=sample_width, height=sample_height, steps=sample_steps,
+                    cfg_scale=sample_cfg_scale,
+                    uncond_embeds=(encoded_negative.to(device, dtype)
+                                   if encoded_negative is not None else None),
+                    seed=_seed + i, device=device, dtype=dtype)
+                # PROVISIONAL renderer: the 24ch->RGB linear approximation, i.e. a 1/16-scale
+                # rough look. The real ViT3D decoder is the next piece of work; when it lands,
+                # only this line changes.
+                arr = sampling.latent_to_rgb(lat)
+                img = Image.fromarray(arr).resize((sample_width, sample_height), Image.NEAREST)
+                img.save(os.path.join(
+                    sample_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}.png"))
+            logger.info(f"[preview] epoch {epoch}: wrote {len(encoded_prompts)} sample(s) "
+                        f"to {sample_dir}")
+        finally:
+            if was_training:
+                dit.train()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     # ---- epoch loop ----
     loss_recorder = LossRecorder()
+    if do_previews and sample_at_first and start_epoch == 0:
+        try:
+            _render_previews(0)
+        except Exception as _e0:
+            logger.warning(f"[preview] Sample at Start failed ({type(_e0).__name__}) — training "
+                           f"continues; per-epoch previews will still be attempted.")
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="minimax-h3")
     for epoch in range(start_epoch, max_train_epochs):
@@ -670,6 +751,19 @@ def train_minimax(
                                      epoch=epoch + 1, global_step=global_step,
                                      dtype=dtype, extra=_state_extra())
                 prune_state_dirs(output_dir, output_name, keep_last_n_states)
+        if do_previews and sample_every_n_epochs and (epoch + 1) % sample_every_n_epochs == 0:
+            try:
+                _render_previews(epoch + 1)
+            except Exception as _pe:
+                # Latch previews OFF for the rest of the run rather than re-failing (and
+                # re-OOMing) every epoch. Training and checkpoints are never at risk.
+                _oom = "out of memory" in str(_pe).lower()
+                logger.warning(
+                    f"[preview] epoch {epoch + 1} preview failed "
+                    f"({'CUDA OOM' if _oom else type(_pe).__name__}); disabling previews for the "
+                    f"rest of the run. Training continues and LoRAs still save normally.")
+                do_previews = False
+            network.train()
         if os.path.exists(pause_flag):
             # Pause = graceful epoch-end exit with FULL state (regardless of the save-state
             # toggles), so Resume continues exactly here — matching Klein/Krea 2. The final

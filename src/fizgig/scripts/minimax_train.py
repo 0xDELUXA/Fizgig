@@ -74,6 +74,20 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--adaptive_lr", action="store_true")
     p.add_argument("--adaptive_lr_min", type=float, default=1e-5)
     p.add_argument("--adaptive_lr_max", type=float, default=4e-4)
+    # In-training previews (Samples tab). Prompts file: one prompt per line, # comments ignored.
+    p.add_argument("--sample_prompts", default=None, help="Prompt file, one per line")
+    p.add_argument("--sample_every_n_epochs", type=int, default=0)
+    p.add_argument("--sample_at_first", action="store_true", help="Render an epoch-0 preview")
+    p.add_argument("--sample_width", type=int, default=512)
+    p.add_argument("--sample_height", type=int, default=512)
+    p.add_argument("--sample_steps", type=int, default=8)
+    p.add_argument("--sample_cfg_scale", type=float, default=1.0,
+                   help=">1 enables CFG (a 2nd forward per step); the shipped H3 workflows use none")
+    p.add_argument("--sample_negative", default=None, help="Only used when --sample_cfg_scale > 1")
+    p.add_argument("--sample_seed", type=int, default=42, help="0 = random each preview")
+    p.add_argument("--text_encoder", default=None,
+                   help="Qwen3-VL-32B TE — needed only to pre-encode preview prompts")
+    p.add_argument("--vae", default=None, help="H3 video VAE (reserved for the full decoder)")
     # Output metadata
     p.add_argument("--metadata_title", default=None)
     p.add_argument("--metadata_author", default=None)
@@ -82,6 +96,15 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--metadata_tags", default=None)
     p.add_argument("--metadata_trigger_phrase", default=None)
     return p
+
+
+def _read_prompts(path):
+    """One prompt per line; blanks and # comments skipped. None when unset/missing."""
+    if not path or not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        out = [ln.strip() for ln in f if ln.strip() and not ln.strip().startswith("#")]
+    return out or None
 
 
 def main():
@@ -120,6 +143,17 @@ def main():
         metadata_license=args.metadata_license,
         metadata_tags=args.metadata_tags,
         metadata_trigger_phrase=args.metadata_trigger_phrase,
+        sample_prompts=_read_prompts(args.sample_prompts),
+        te_path=args.text_encoder,
+        vae_path=args.vae,
+        sample_every_n_epochs=args.sample_every_n_epochs,
+        sample_at_first=args.sample_at_first,
+        sample_width=args.sample_width,
+        sample_height=args.sample_height,
+        sample_steps=args.sample_steps,
+        sample_cfg_scale=args.sample_cfg_scale,
+        sample_negative=args.sample_negative,
+        sample_seed=args.sample_seed,
     )
 
 

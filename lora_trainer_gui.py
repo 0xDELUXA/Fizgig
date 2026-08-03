@@ -392,8 +392,9 @@ ARCHITECTURES = {
         "is_distilled": False,
         "supports_weighting_scheme": False,
         "supports_discrete_flow_shift": False,
-        # No in-training samples — image-only barebones trainer, no inference/preview pipeline.
-        "supports_samples": False,
+        # In-training previews render one still per prompt on the resident training DiT
+        # (latent_t=1, the training distribution). Per-epoch only, like Krea 2.
+        "supports_samples": True,
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 8,
@@ -21377,7 +21378,7 @@ class LoRATrainerGUI:
             model_flag, model_path,
         ]
 
-    def _write_krea2_sample_prompts(self):
+    def _write_krea2_sample_prompts(self, filename="krea2_prompts.txt"):
         """Write the Samples-tab prompts as clean lines (one prompt per line) for krea2_train.
 
         Klein's prompt file carries inline flags (`--w`/`--h`/`--s`/...); krea2_train takes
@@ -21395,7 +21396,7 @@ class LoRATrainerGUI:
                 lines.append(ln)
         if not lines:
             return None
-        path = os.path.join(samples_dir, "krea2_prompts.txt")
+        path = os.path.join(samples_dir, filename)
         with open(path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
         return path
@@ -21713,6 +21714,55 @@ class LoRATrainerGUI:
         if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):
             cmd += ["--network_type", "lokr",
                     "--lokr_factor", str(self.settings.get("LOKR_FACTOR", 8))]
+        # In-training previews. Prompts come from the Samples tab (same widgets every family
+        # uses); the trainer pre-encodes them with the 32B TE before the DiT loads.
+        if self.sample_enabled_var.get():
+            # plain one-prompt-per-line file (same writer Krea 2 uses; own filename so a
+            # MiniMax output dir doesn't sprout a "krea2_" artefact)
+            prompt_file = self._write_krea2_sample_prompts("minimax_prompts.txt")
+            _every = self.sample_every_n_epochs_var.get().strip()
+            _every_n = int(_every) if _every.isdigit() else 0
+            _at_first = bool(getattr(self, "sample_at_first_var", None)
+                             and self.sample_at_first_var.get())
+            # H3 previews are per-EPOCH only; a steps-only config would otherwise silently
+            # produce nothing (same constraint, and same warning, as Krea 2).
+            _steps_only = self.sample_every_n_steps_var.get().strip()
+            if _every_n <= 0 and _steps_only.isdigit() and int(_steps_only) > 0:
+                self.update_console("[samples] MiniMax H3 previews are per-epoch — 'Every N Steps' "
+                                    "has no effect. Set 'Every N Epochs' to enable previews.\n")
+            _te = self._krea2_pref("minimax_text_encoder")
+            if prompt_file and (_every_n > 0 or _at_first) and _te:
+                try:
+                    _seed = str(int(self.sample_seed_var.get().strip()))
+                except (ValueError, AttributeError):
+                    _seed = str(self.settings.get("SAMPLE_SEED", 42))
+                cmd += [
+                    "--sample_prompts", prompt_file,
+                    "--sample_every_n_epochs", str(_every_n),
+                    "--sample_width", (self.sample_width_var.get().strip() or "512"),
+                    "--sample_height", (self.sample_height_var.get().strip() or "512"),
+                    "--sample_seed", _seed,
+                    "--text_encoder", _te,
+                    "--vae", self._krea2_pref("minimax_vae"),
+                ]
+                _st = self.sample_steps_var.get().strip()
+                if _st.isdigit() and int(_st) > 0:
+                    cmd += ["--sample_steps", _st]
+                try:
+                    _cfg = float(self.sample_cfg_scale_var.get().strip())
+                except (ValueError, AttributeError):
+                    _cfg = 1.0
+                if abs(_cfg - 1.0) > 1e-9:
+                    cmd += ["--sample_cfg_scale", str(_cfg)]
+                    _neg = (self.sample_negative_var.get().strip()
+                            if getattr(self, "sample_negative_var", None) else "")
+                    if _neg:
+                        cmd += ["--sample_negative", _neg]
+                if _at_first:
+                    cmd.append("--sample_at_first")
+            elif prompt_file and (_every_n > 0 or _at_first) and not _te:
+                self.update_console("[samples] previews need the Qwen3-VL-32B text encoder path "
+                                    "— set it in Preferences. Training continues without them.\n")
         # Resumable state saving + resume — identical flag names across all three families.
         cmd += self._state_flags()
         resume_path = (self.settings.get("RESUME_TRAINING") or "").strip()

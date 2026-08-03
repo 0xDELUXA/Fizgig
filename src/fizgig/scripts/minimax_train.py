@@ -45,6 +45,11 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--no_quantize", action="store_true",
                    help="Train on the bf16 base (no NF4) — needs ~66 GB VRAM.")
     p.add_argument("--shift", type=float, default=12.0, help="H3 flow sigma-shift (video schedule).")
+    # Adaptive LR — bi-directional plateau tracker (starts at the geometric midpoint of min/max;
+    # the Learning Rate box is ignored while it's on).
+    p.add_argument("--adaptive_lr", action="store_true")
+    p.add_argument("--adaptive_lr_min", type=float, default=1e-5)
+    p.add_argument("--adaptive_lr_max", type=float, default=4e-4)
     # Output metadata
     p.add_argument("--metadata_title", default=None)
     p.add_argument("--metadata_author", default=None)
@@ -74,6 +79,9 @@ def main():
         include_patterns=args.include_patterns,
         quantize=not args.no_quantize,
         shift=args.shift,
+        adaptive_lr=args.adaptive_lr,
+        adaptive_lr_min=args.adaptive_lr_min,
+        adaptive_lr_max=args.adaptive_lr_max,
         metadata_title=args.metadata_title,
         metadata_author=args.metadata_author,
         metadata_description=args.metadata_description,

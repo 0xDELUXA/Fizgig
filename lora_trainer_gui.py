@@ -6432,6 +6432,12 @@ class LoRATrainerGUI:
         ttk.Checkbutton(
             settings_card, text="Overwrite existing caption files", variable=self.overwrite_captions_var,
         ).grid(row=6, column=0, columnspan=3, sticky=tk.W, pady=(10, 0))
+        tk.Label(settings_card,
+                 text="Untick to caption ONLY images that don't have a .txt yet — e.g. after "
+                      "adding new images or face-cropping, existing captions stay untouched.",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                 bg=COLORS["bg_surface"], wraplength=680, justify=tk.LEFT).grid(
+            row=7, column=0, columnspan=3, sticky=tk.W, pady=(0, 2))
 
         # Card 2: Generate Captions
         actions_card = self._start_section_card(outer, "Generate Captions", None)
@@ -6689,64 +6695,120 @@ class LoRATrainerGUI:
             self.refresh_caption_images()
 
     def show_edit_caption_dialog(self, img_path):
-        """Show dialog to edit caption for an image"""
+        """Live caption editor: no Save button, no confirmation popups. Edits save themselves
+        when you navigate or close; ◀ ▶ (or Ctrl+←/→ — plain arrows stay cursor movement)
+        walk the whole folder without leaving the window. Shaped by user feedback: the old
+        flow was nine clicks per image and people were editing captions in other apps."""
+        folder = os.path.dirname(img_path)
+        from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
+        _exts = {e.lower() for e in IMAGE_EXTENSIONS}
+        try:
+            files = sorted(f for f in os.listdir(folder)
+                           if os.path.splitext(f)[1].lower() in _exts)
+        except Exception:
+            files = [os.path.basename(img_path)]
+        state = {"path": img_path, "loaded": "", "dirty_grid": False}
+
         dialog = tk.Toplevel(self.master)
-        dialog.title(f"Edit Caption - {os.path.basename(img_path)}")
         dialog.configure(bg=BG_COLOR)
-        # No fixed geometry: content height varies (a portrait thumbnail is up to 300 px tall),
-        # and the old 600x500 clipped the buttons under exactly that case. The dialog sizes to
-        # its content; the button row is packed side=BOTTOM *first*, so pack gives it its space
-        # before anything else and it can never be pushed off the edge.
-        dialog.minsize(600, 360)
+        # No fixed geometry: content height varies (a portrait thumbnail is up to 300 px tall).
+        # The button row packs side=BOTTOM *first* so it can never be clipped off the edge.
+        dialog.minsize(600, 380)
 
         btn_frame = ttk.Frame(dialog)
         btn_frame.pack(side=tk.BOTTOM, pady=10)
+        status = tk.Label(dialog, text="Edits save automatically when you move to another "
+                                       "image or close.", font=(FONT_FAMILY, 9),
+                          fg=COLORS["text_explain"], bg=BG_COLOR)
+        status.pack(side=tk.BOTTOM, pady=(0, 2))
 
-        # Image preview
-        try:
-            with Image.open(img_path) as img:
-                _w, _h = img.size
-                img.thumbnail((300, 300), Image.LANCZOS)
-                photo = ImageTk.PhotoImage(img)
-                img_label = ttk.Label(dialog, image=photo)
-                img_label.image = photo
-                img_label.pack(pady=(10, 2))
-                ttk.Label(dialog, text=f"{_w}×{_h} px",
-                          foreground=COLORS["text_muted"]).pack()
-        except Exception:
-            ttk.Label(dialog, text="Could not load image preview").pack(pady=10)
-
-        # Caption text area
+        img_label = ttk.Label(dialog)
+        img_label.pack(pady=(10, 2))
+        size_label = ttk.Label(dialog, foreground=COLORS["text_muted"])
+        size_label.pack()
         ttk.Label(dialog, text="Caption:").pack(anchor=tk.W, padx=10)
-        caption_text = tk.Text(dialog, height=5, width=60, bg=COLORS["bg_surface"], fg=COLORS["text_primary"], font=(FONT_FAMILY, 10), wrap="word")
+        caption_text = tk.Text(dialog, height=5, width=60, bg=COLORS["bg_surface"],
+                               fg=COLORS["text_primary"], font=(FONT_FAMILY, 10), wrap="word",
+                               insertbackground=COLORS["text_primary"])
         caption_text.pack(padx=10, pady=5, fill=tk.X)
 
-        # Load existing caption
-        caption_path = os.path.splitext(img_path)[0] + ".txt"
-        if os.path.exists(caption_path):
-            try:
-                with open(caption_path, 'r', encoding='utf-8') as f:
-                    caption_text.insert("1.0", f.read())
-            except Exception:
-                pass
+        def _cap_path():
+            return os.path.splitext(state["path"])[0] + ".txt"
 
-        def save_caption():
-            text = caption_text.get("1.0", tk.END).strip()
+        def _load(path):
+            state["path"] = path
+            dialog.title(f"Edit Caption — {os.path.basename(path)}"
+                         + (f"   ({files.index(os.path.basename(path)) + 1} / {len(files)})"
+                            if os.path.basename(path) in files else ""))
             try:
-                with open(caption_path, 'w', encoding='utf-8') as f:
+                with Image.open(path) as img:
+                    _w, _h = img.size
+                    img.thumbnail((300, 300), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    img_label.configure(image=photo)
+                    img_label.image = photo
+                    size_label.configure(text=f"{_w}×{_h} px")
+            except Exception:
+                img_label.configure(image="")
+                img_label.image = None
+                size_label.configure(text="(image preview unavailable)")
+            caption = ""
+            if os.path.exists(_cap_path()):
+                try:
+                    with open(_cap_path(), 'r', encoding='utf-8-sig', errors="replace") as f:
+                        caption = f.read().strip()
+                except Exception:
+                    pass
+            caption_text.delete("1.0", tk.END)
+            caption_text.insert("1.0", caption)
+            state["loaded"] = caption
+
+        def _save():
+            """Write the caption if it changed. Silent and inline — never a popup."""
+            text = caption_text.get("1.0", tk.END).strip()
+            if text == state["loaded"]:
+                return
+            if not text:
+                status.config(fg="#E74C3C",
+                              text="Caption box is empty — not saved (the previous caption "
+                                   "is kept). Type something or move on.")
+                return
+            try:
+                with open(_cap_path(), 'w', encoding='utf-8') as f:
                     f.write(text)
-                messagebox.showinfo("Saved", "Caption saved successfully")
-                self.refresh_caption_images()
+                state["loaded"] = text
+                state["dirty_grid"] = True
+                status.config(fg="#2ECC71", text=f"Saved ✓  {os.path.basename(_cap_path())}")
             except Exception as e:
-                messagebox.showerror("Error", f"Failed to save caption: {e}")
+                status.config(fg="#E74C3C", text=f"Save failed: {e}")
+
+        def _nav(step):
+            _save()
+            base = os.path.basename(state["path"])
+            if base not in files or len(files) < 2:
+                return
+            _load(os.path.join(folder, files[(files.index(base) + step) % len(files)]))
+
+        def _close():
+            _save()
+            if state["dirty_grid"]:
+                self.refresh_caption_images()   # once, on close — not per save (scroll reset)
+            dialog.destroy()
 
         def regenerate():
+            _save()
             dialog.destroy()
-            self.caption_single_image(img_path)
+            self.caption_single_image(state["path"])
 
-        ttk.Button(btn_frame, text="Save", command=save_caption).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Regenerate (AI)", command=regenerate).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="◀ Prev", command=lambda: _nav(-1)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Next ▶", command=lambda: _nav(+1)).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Regenerate (AI)", command=regenerate).pack(side=tk.LEFT, padx=(20, 5))
+        ttk.Button(btn_frame, text="Close", command=_close).pack(side=tk.LEFT, padx=5)
+        # Ctrl+arrows so plain arrows keep moving the text cursor while typing.
+        dialog.bind("<Control-Left>", lambda e: (_nav(-1), "break")[1])
+        dialog.bind("<Control-Right>", lambda e: (_nav(+1), "break")[1])
+        dialog.protocol("WM_DELETE_WINDOW", _close)
+        _load(img_path)
 
     # region Caption model selection (Florence-2 / Qwen3-VL)
 

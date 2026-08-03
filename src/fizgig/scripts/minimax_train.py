@@ -41,6 +41,16 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--learning_rate", type=float, default=1e-4)
     p.add_argument("--max_train_epochs", type=int, default=10)
     p.add_argument("--save_every_n_epochs", type=int, default=0)
+    p.add_argument("--save_state", action="store_true",
+                   help="Write a resumable <name>-NNNNNN-state/ dir at every checkpoint.")
+    p.add_argument("--save_state_on_train_end", action="store_true",
+                   help="Write a resumable state dir when the run finishes, so a completed LoRA "
+                        "can be trained further by raising --max_train_epochs.")
+    p.add_argument("--keep_last_n_states", type=int, default=2,
+                   help="Keep only the N newest state dirs.")
+    p.add_argument("--resume", default=None,
+                   help="Resume from a saved <name>-NNNNNN-state dir (optimizer + RNG + "
+                        "adaptive-LR state restored).")
     p.add_argument("--max_grad_norm", type=float, default=1.0)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--optimizer_type", default="adamw8bit", choices=available_optimizers())
@@ -88,6 +98,10 @@ def main():
         learning_rate=args.learning_rate,
         max_train_epochs=args.max_train_epochs,
         save_every_n_epochs=args.save_every_n_epochs,
+        save_state=args.save_state,
+        save_state_on_train_end=args.save_state_on_train_end,
+        keep_last_n_states=max(1, args.keep_last_n_states),
+        resume_state_dir=args.resume,
         max_grad_norm=args.max_grad_norm,
         seed=args.seed,
         optimizer_type=args.optimizer_type,

@@ -5416,6 +5416,12 @@ class LoRATrainerGUI:
         # The row frame carries the combo + hint together.
         for w in (self.labels["NETWORK_TYPE"], self._network_type_rowf):
             self._set_widget_visible(w, native)
+
+        # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
+        # rather than show a picker the trainer silently ignores.
+        for w in (self._contextlora_label, self._contextlora_frame,
+                  self._contextlora_desc_label, self._contextlora_warn_label):
+            self._set_widget_visible(w, not is_minimax)
         if native:
             # Restore the rank/alpha <-> factor row swap for the current selection.
             self._on_network_type_changed()
@@ -21707,6 +21713,11 @@ class LoRATrainerGUI:
         if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):
             cmd += ["--network_type", "lokr",
                     "--lokr_factor", str(self.settings.get("LOKR_FACTOR", 8))]
+        # Resumable state saving + resume — identical flag names across all three families.
+        cmd += self._state_flags()
+        resume_path = (self.settings.get("RESUME_TRAINING") or "").strip()
+        if resume_path:
+            cmd += ["--resume", resume_path]
         # Adaptive LR — bi-directional plateau tracker (model-agnostic). Min/Max combo values can
         # carry a trailing note (e.g. "2e-4 - rank 4/8 only"); take the leading token.
         if self.settings.get("ADAPTIVE_LR"):

@@ -17,6 +17,7 @@ import argparse
 import logging
 import math
 import os
+import sys
 import time
 from multiprocessing import Value
 
@@ -335,6 +336,68 @@ class _Collator:
         return examples[0]
 
 
+def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, global_step,
+                         dtype, extra=None):
+    """Save a resumable training-state dir matching Klein/Krea 2 naming: <name>-<NNNNNN>-state/.
+
+    NNNNNN is the number of COMPLETED epochs (= the next 0-indexed epoch to run). Holds the
+    network weights in NATIVE state_dict naming (never the LyCORIS comfy-format rewrite — resume
+    load_state_dict needs the module keys), the optimizer state, RNG, and a small JSON. The
+    GUI's _detect_latest_state_dir finds the highest-numbered dir and passes it to --resume."""
+    import json
+    state_dir = os.path.join(output_dir, f"{output_name}-{epoch:06d}-state")
+    os.makedirs(state_dir, exist_ok=True)
+    network.save_weights(os.path.join(state_dir, "lora.safetensors"), dtype,
+                         {"ss_architecture": ARCHITECTURE_MINIMAX,
+                          "ss_network_module": "fizgig.minimax (state dir, native keys)"})
+    torch.save(optimizer.state_dict(), os.path.join(state_dir, "optimizer.pt"))
+    rng = {"torch": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        rng["cuda"] = torch.cuda.get_rng_state_all()
+    torch.save(rng, os.path.join(state_dir, "rng.pt"))
+    meta = {"epoch": epoch, "global_step": global_step}
+    if extra:
+        meta.update(extra)
+    with open(os.path.join(state_dir, "training_state.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f)
+    logger.info(f"[state] saved -> {state_dir}")
+    return state_dir
+
+
+def _load_training_state(state_dir, network, optimizer, *, device):
+    """Restore network + optimizer + RNG from a state dir. Returns (start_epoch, global_step, meta)."""
+    import json
+    from safetensors.torch import load_file
+    # strict=False tolerates benign key drift, but if NOTHING matched the network silently stays
+    # at its zero init and the run "succeeds" while training from scratch — then overwrites the
+    # finished LoRA with a no-op. Refuse that outright.
+    _incompat = network.load_state_dict(load_file(os.path.join(state_dir, "lora.safetensors")), strict=False)
+    _missing = getattr(_incompat, "missing_keys", [])
+    if _missing and len(_missing) >= len(network.state_dict()):
+        raise RuntimeError(
+            f"[state] {state_dir} matched none of this network's {len(network.state_dict())} keys — "
+            f"refusing to resume into a zero-initialised network. The state was almost certainly "
+            f"saved with a different config (rank/alpha/factor, network type, or target modules).")
+    opt_path = os.path.join(state_dir, "optimizer.pt")
+    if os.path.exists(opt_path):
+        optimizer.load_state_dict(torch.load(opt_path, map_location=device))
+    rng_path = os.path.join(state_dir, "rng.pt")
+    if os.path.exists(rng_path):
+        try:
+            rng = torch.load(rng_path)
+            torch.set_rng_state(rng["torch"].to("cpu", dtype=torch.uint8) if hasattr(rng["torch"], "to") else rng["torch"])
+            if "cuda" in rng and torch.cuda.is_available():
+                torch.cuda.set_rng_state_all(rng["cuda"])
+        except Exception:
+            logger.warning("[state] RNG restore failed; continuing with fresh RNG", exc_info=True)
+    meta_path = os.path.join(state_dir, "training_state.json")
+    meta = {}
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    return int(meta.get("epoch", 0)), int(meta.get("global_step", 0)), meta
+
+
 def _save_lora(network, path, network_dim, network_alpha, dtype, extra_metadata=None):
     is_lokr = getattr(network, "_network_type", "lora") == "lokr"
     if is_lokr:
@@ -391,6 +454,12 @@ def train_minimax(
     learning_rate: float = 1e-4,
     max_train_epochs: int = 10,
     save_every_n_epochs: int = 0,
+    # Resumable state dirs (network + optimizer + RNG + adaptive scalars). Pause saves state
+    # regardless of these — they govern only the automatic per-checkpoint / end-of-run saves.
+    save_state: bool = False,
+    save_state_on_train_end: bool = False,
+    keep_last_n_states: int = 2,
+    resume_state_dir: str = None,
     max_grad_norm: float = 1.0,
     seed: int = 42,
     optimizer_type: str = "adamw8bit",
@@ -537,6 +606,24 @@ def train_minimax(
     os.makedirs(output_dir, exist_ok=True)
     pause_flag = os.path.join(output_dir, ".pause_requested")
 
+    # ---- resume: restore network + optimizer + RNG + (epoch, step) + adaptive scalars ----
+    from fizgig.training.train_utils import prune_state_dirs
+    global_step = 0
+    start_epoch = 0
+    if resume_state_dir and os.path.isdir(resume_state_dir):
+        start_epoch, global_step, _resume_meta = _load_training_state(
+            resume_state_dir, network, optimizer, device=device)
+        if adaptive:
+            adaptive.load_state_dict(_resume_meta.get("adaptive_lr_state"))
+        logger.info(f"[resume] from {resume_state_dir}: continuing at epoch "
+                    f"{start_epoch + 1}/{max_train_epochs} (global_step {global_step})")
+        if start_epoch >= max_train_epochs:
+            # Pausing ON the last epoch exits before the final LoRA is written — Resume is what
+            # completes it, so this fall-through writes the final file from the restored state.
+            logger.warning(f"[resume] state is at epoch {start_epoch} of {max_train_epochs} — "
+                           f"nothing left to train. Writing the final LoRA from the restored "
+                           f"state. To train further, raise Max Train Epochs and resume again.")
+
     def _meta():
         return build_metadata(
             None, ARCHITECTURE_MINIMAX, time.time(),
@@ -545,11 +632,14 @@ def train_minimax(
             author=metadata_author, description=metadata_description,
             license=metadata_license, tags=metadata_tags, trigger_phrase=metadata_trigger_phrase)
 
+    def _state_extra():
+        return {"adaptive_lr_state": adaptive.state_dict()} if adaptive else None
+
     # ---- epoch loop ----
     loss_recorder = LossRecorder()
-    progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, desc="minimax-h3")
-    paused = False
-    for epoch in range(max_train_epochs):
+    progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
+                        desc="minimax-h3")
+    for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         network.train()
         for i, batch in enumerate(loader):
@@ -563,6 +653,7 @@ def train_minimax(
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)
             progress_bar.update(1)
@@ -574,15 +665,35 @@ def train_minimax(
             ckpt = os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors")
             _save_lora(network, ckpt, network_dim, network_alpha, dtype, _meta())
             logger.info(f"saved {ckpt}")
+            if save_state:
+                _save_training_state(output_dir, output_name, network, optimizer,
+                                     epoch=epoch + 1, global_step=global_step,
+                                     dtype=dtype, extra=_state_extra())
+                prune_state_dirs(output_dir, output_name, keep_last_n_states)
         if os.path.exists(pause_flag):
-            logger.info("[pause] requested — saving the final LoRA and exiting cleanly.")
-            paused = True
-            break
+            # Pause = graceful epoch-end exit with FULL state (regardless of the save-state
+            # toggles), so Resume continues exactly here — matching Klein/Krea 2. The final
+            # LoRA is deliberately NOT written; Resume (or the natural run end) writes it.
+            _save_training_state(output_dir, output_name, network, optimizer,
+                                 epoch=epoch + 1, global_step=global_step,
+                                 dtype=dtype, extra=_state_extra())
+            try:
+                os.remove(pause_flag)
+            except OSError:
+                pass
+            progress_bar.close()
+            logger.info(f"[pause] requested — state saved at epoch {epoch + 1}. Exiting cleanly.")
+            sys.exit(0)
 
     progress_bar.close()
     final = os.path.join(output_dir, f"{output_name}.safetensors")
     _save_lora(network, final, network_dim, network_alpha, dtype, _meta())
-    logger.info(f"{'[pause] ' if paused else ''}saved final LoRA: {final}")
+    logger.info(f"saved final LoRA: {final}")
+    if save_state_on_train_end and max_train_epochs > start_epoch:
+        _save_training_state(output_dir, output_name, network, optimizer,
+                             epoch=max_train_epochs, global_step=global_step,
+                             dtype=dtype, extra=_state_extra())
+        prune_state_dirs(output_dir, output_name, keep_last_n_states)
     try:
         os.remove(pause_flag)
     except OSError:

@@ -142,7 +142,7 @@ The text encoder and VAE are only loaded for the one-time caching pass, then fre
 **Current caveats — this is deliberately minimal for now:**
 - **Image datasets only.** H3 is an omni audio + video model, but Fizgig trains it from still images only (each treated as a single video frame) — **no video-clip training and no audio training yet**. The LoRAs you get are learned from stills; you can still deploy them in ComfyUI's video workflows.
 - **No in-training samples or previews.** Evaluate checkpoints in ComfyUI — the trainer saves per-epoch `.safetensors` as usual.
-- **Training only.** The workbench tools (Repair Studio, Explorer, Royale, Profiler, Extract) don't support H3 yet, and Pause/Resume and Context LoRA aren't wired for it.
+- **Training only.** The workbench tools (Repair Studio, Explorer, Royale, Profiler, Extract) don't support H3 yet, and Context LoRA isn't wired for it. Pause/Resume and resumable state saving work as on the other families.
 - **Batch size 1**, and the Training tab hides the controls that don't apply — what you see is what's wired.
 
 ---

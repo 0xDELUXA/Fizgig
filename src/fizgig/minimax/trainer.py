@@ -331,14 +331,45 @@ class _Collator:
 
 
 def _save_lora(network, path, network_dim, network_alpha, dtype, extra_metadata=None):
-    metadata = {
-        "ss_network_module": "fizgig.minimax (lora_unet, transformer blocks)",
-        "ss_network_dim": str(network_dim),
-        "ss_network_alpha": str(network_alpha),
-        "ss_architecture": ARCHITECTURE_MINIMAX,
-    }
+    is_lokr = getattr(network, "_network_type", "lora") == "lokr"
+    if is_lokr:
+        metadata = {
+            "ss_network_module": "fizgig.minimax (lokr, transformer blocks)",
+            "ss_lokr_factor": str(getattr(network, "_lokr_factor", "")),
+            "ss_architecture": ARCHITECTURE_MINIMAX,
+        }
+    else:
+        metadata = {
+            "ss_network_module": "fizgig.minimax (lora_unet, transformer blocks)",
+            "ss_network_dim": str(network_dim),
+            "ss_network_alpha": str(network_alpha),
+            "ss_architecture": ARCHITECTURE_MINIMAX,
+        }
     if extra_metadata:
         metadata.update(extra_metadata)
+    if is_lokr:
+        # LyCORIS-standard keys (diffusion_model.<dotted>.lokr_*) — the format every ComfyUI
+        # LoKR in the wild uses. Unlike Krea 2 (whose internal saves stay native for resume and
+        # previews), MiniMax has neither, and every checkpoint's only consumer is ComfyUI — so
+        # every LoKR save is comfy-format. Fizgig's own loader ingests both namings via
+        # ensure_kohya_lora_state_dict.
+        from fizgig.networks.lora import _precalculate_safetensors_hashes
+        from safetensors.torch import save_file
+        dotted = getattr(network, "_dotted_names", {})
+        sd = {}
+        for k, v in network.state_dict().items():
+            mod, _, suffix = k.partition(".")
+            path_dotted = dotted.get(mod)
+            nk = f"diffusion_model.{path_dotted}.{suffix}" if path_dotted else k
+            v = v.detach().clone().to("cpu")
+            if dtype is not None:
+                v = v.to(dtype)
+            sd[nk] = v
+        model_hash, legacy_hash = _precalculate_safetensors_hashes(sd, metadata)
+        metadata["sshs_model_hash"] = model_hash
+        metadata["sshs_legacy_hash"] = legacy_hash
+        save_file(sd, path, metadata)
+        return
     network.save_weights(path, dtype, metadata)
 
 
@@ -350,6 +381,8 @@ def train_minimax(
     *,
     network_dim: int = 16,
     network_alpha: float = 16,
+    network_type: str = "lora",      # "lora" | "lokr" (Kronecker, full-matrix w2)
+    lokr_factor: int = 8,            # LoKR only: w1 is ~factor x factor; dim/alpha unused
     learning_rate: float = 1e-4,
     max_train_epochs: int = 10,
     save_every_n_epochs: int = 0,
@@ -445,12 +478,36 @@ def train_minimax(
     if use_ckpt:
         dit.enable_gradient_checkpointing()
         logger.info("[vram] gradient checkpointing ON")
-    network = create_network(None, "lora_unet", 1.0, network_dim, network_alpha, None, [], dit,
-                             include_patterns=include_patterns)
+    if network_type == "lokr":
+        # LoKR (Kronecker) — same mechanism as Krea 2's: module_class swaps the parametrization
+        # inside the identical scan/wrap machinery, so include_patterns (adaln exclusion) and the
+        # NF4/Linear4bit base compose unchanged. dim/alpha are ignored; factor is the dial.
+        from fizgig.networks.lora import LoKRModule
+        logger.info(f"network: LoKR (Kronecker), factor {lokr_factor}, full-matrix w2 — "
+                    "dim/alpha do not apply")
+        network = create_network(None, "lora_unet", 1.0, network_dim, network_alpha, None, [], dit,
+                                 include_patterns=include_patterns,
+                                 module_class=LoKRModule, module_kwargs={"factor": int(lokr_factor)})
+    else:
+        network = create_network(None, "lora_unet", 1.0, network_dim, network_alpha, None, [], dit,
+                                 include_patterns=include_patterns)
     network.apply_to(text_encoders=None, unet=dit, apply_text_encoder=False, apply_unet=True)
     network.requires_grad_(True)
     network.to(device=device, dtype=dtype)
-    logger.info(f"LoRA: {len(network.unet_loras)} modules wrapped (dim {network_dim}, alpha {network_alpha})")
+    network._network_type = network_type
+    network._lokr_factor = int(lokr_factor)
+    # Dotted module paths for the LyCORIS-standard save (diffusion_model.<path>.lokr_*) — built
+    # from the DiT itself with the same flattening create_modules used, so the reverse mapping is
+    # exact even where module names contain underscores. isinstance covers bnb Linear4bit (an
+    # nn.Linear subclass).
+    network._dotted_names = {
+        f"lora_unet_{name.replace('.', '_')}": name
+        for name, m in dit.named_modules() if isinstance(m, torch.nn.Linear)
+    }
+    if network_type == "lokr":
+        logger.info(f"LoKR: {len(network.unet_loras)} modules wrapped (factor {lokr_factor})")
+    else:
+        logger.info(f"LoRA: {len(network.unet_loras)} modules wrapped (dim {network_dim}, alpha {network_alpha})")
 
     params = list(network.get_trainable_params())
 

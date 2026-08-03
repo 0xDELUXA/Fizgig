@@ -5409,12 +5409,14 @@ class LoRATrainerGUI:
                   self._krea2_autorecap_cb, self._krea2_warmuplook_cb,
                   self._krea2_losswatch_hint,
                   # torch.compile is wired into krea2_train only.
-                  self._compile_blocks_label, self.compile_blocks_check, self._compile_blocks_hint,
-                  # Network Type (LoRA/LoKR) is a krea2_train flag; Klein trains standard only.
-                  # The row frame carries the combo + hint together.
-                  self.labels["NETWORK_TYPE"], self._network_type_rowf):
+                  self._compile_blocks_label, self.compile_blocks_check, self._compile_blocks_hint):
             self._set_widget_visible(w, is_krea2)
-        if is_krea2:
+        # Network Type (LoRA/LoKR) is wired for BOTH native families (krea2_train and
+        # minimax_train take --network_type/--lokr_factor); Klein trains standard only.
+        # The row frame carries the combo + hint together.
+        for w in (self.labels["NETWORK_TYPE"], self._network_type_rowf):
+            self._set_widget_visible(w, native)
+        if native:
             # Restore the rank/alpha <-> factor row swap for the current selection.
             self._on_network_type_changed()
         else:
@@ -21700,6 +21702,11 @@ class LoRATrainerGUI:
         # at run time — correct for queued runs too); an explicit number passes through.
         _bs = str(self.settings.get("BLOCKS_SWAP", "auto") or "auto").strip()
         cmd += ["--blocks_to_swap", "auto" if _bs.lower().startswith("auto") else _bs]
+        # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
+        # the factor is the dial. Same flags as the Krea 2 builder.
+        if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):
+            cmd += ["--network_type", "lokr",
+                    "--lokr_factor", str(self.settings.get("LOKR_FACTOR", 8))]
         # Adaptive LR — bi-directional plateau tracker (model-agnostic). Min/Max combo values can
         # carry a trailing note (e.g. "2e-4 - rank 4/8 only"); take the leading token.
         if self.settings.get("ADAPTIVE_LR"):

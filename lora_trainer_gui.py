@@ -14155,7 +14155,8 @@ class LoRATrainerGUI:
             outer, "Model Paths (MiniMax H3 — experimental)",
             "Barebones image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the bf16 "
             "DiT (quantized to NF4 at load — fits a 32 GB card). The Qwen3-VL-32B text encoder and "
-            "the video VAE are only needed for the one-time caching pass. No samples, no preview.",
+            "the video VAE are only needed for the one-time caching pass — the compact nvfp4 TE "
+            "(the same file ComfyUI uses) is recommended. No samples, no preview.",
         )
         mm_card.columnconfigure(1, weight=1)
         mr = 0
@@ -14168,10 +14169,17 @@ class LoRATrainerGUI:
         )
         mr = self._add_pref_row(
             mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
-            "Qwen3-VL-32B text encoder (bf16). NF4-quantized at load (~14 GB) — used only while "
-            "caching caption embeddings, then offloaded before training.",
-            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
-            download_note="~51.5GB bf16 — Comfy-Org/MiniMax-H3 → text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+            "Qwen3-VL-32B text encoder — nvfp4 (the compact ComfyUI file) or bf16 both work; the "
+            "loader detects which you gave it. NF4 on GPU either way (~14 GB), used only while "
+            "caching caption embeddings, then offloaded before training. (The int8_convrot TE "
+            "variant is NOT supported — its rotated weights can't be dequantized here.)",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            download_label="Download nvfp4 (recommended)",
+            download_note="~15.7GB nvfp4-awq — the same TE ComfyUI uses, so you may already have it; "
+                          "identical conditioning to bf16 (validated), just a slower one-off load",
+            download_url2="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+            download_label2="bf16",
+            download_note2="~51.5GB bf16 — the full-precision original; loads faster, 3.3x the disk",
         )
         mr = self._add_pref_row(
             mm_card, mr, "Video VAE:", "minimax_vae",

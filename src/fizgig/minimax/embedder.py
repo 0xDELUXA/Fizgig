@@ -86,8 +86,25 @@ def _nvfp4_dequant(packed, block_scale_fp8, global_scale):
 
 
 def _dequant_comfy_weight(f, file_mod, ckpt):
-    """Dequantize one comfy-quant Linear weight (nvfp4 or int8) back to bf16 [out, in]."""
-    if (file_mod + ".weight_scale_2") in ckpt:            # nvfp4
+    """Dequantize one comfy-quant Linear weight (nvfp4 or int8_tensorwise) back to bf16 [out, in].
+
+    The `.comfy_quant` blob names the scheme — checked explicitly, because e.g. the
+    int8_convrot TE variant stores ROTATED weights that would sail through a naive
+    weight*scale dequant and silently produce a garbage encoder."""
+    import json as _json
+    fmt = ""
+    try:
+        blob = bytes(f.get_tensor(file_mod + ".comfy_quant").tolist())
+        fmt = _json.loads(blob.decode("utf-8")).get("format", "")
+    except Exception:
+        pass
+    if fmt not in ("nvfp4", "int8_tensorwise"):
+        raise NotImplementedError(
+            f"Unsupported comfy-quant format '{fmt or 'unknown'}' on {file_mod} — Fizgig can load "
+            "the nvfp4-awq or bf16 Qwen3-VL-32B TE. The int8_convrot variant stores rotated "
+            "weights and is not supported; use qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors "
+            "(~15.7 GB) or the bf16 file instead.")
+    if fmt == "nvfp4":
         packed = f.get_tensor(file_mod + ".weight")
         bscale = f.get_tensor(file_mod + ".weight_scale")
         gscale = f.get_tensor(file_mod + ".weight_scale_2")

@@ -697,6 +697,11 @@ DEFAULT_PREFS = {
     # model, so samples can render on the resident training DiT instead of loading the
     # separate Turbo checkpoint (saves the park-to-CPU shuffle during previews).
     "krea2_turbo_lora": "",
+    # MiniMax H3 model paths (experimental third family — barebones image-only LoRA training).
+    # bf16 DiT is the training base (NF4-quantized at load); Qwen3-VL-32B TE + video VAE cache.
+    "minimax_dit": "",
+    "minimax_text_encoder": "",
+    "minimax_vae": "",
     # Output directories — relative to repo root, portable across clones/moves.
     # Resolved to absolute in load_prefs(); in-memory pref values are absolute.
     # All three live as top-level folders inside the repo:
@@ -14068,6 +14073,39 @@ class LoRATrainerGUI:
                                     "Default folder the Start tab's Browse opens in", is_dir=True)
 
         self._add_runpod_card(outer)
+
+        # Card (bottom): MiniMax H3 model paths — experimental third family, kept at the very
+        # bottom under everything else since it's barebones image-only LoRA training (no samples,
+        # no inference). The bf16 DiT is the training base; it's NF4-quantized at load.
+        mm_card = self._start_section_card(
+            outer, "Model Paths (MiniMax H3 — experimental)",
+            "Barebones image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the bf16 "
+            "DiT (quantized to NF4 at load — fits a 32 GB card). The Qwen3-VL-32B text encoder and "
+            "the video VAE are only needed for the one-time caching pass. No samples, no preview.",
+        )
+        mm_card.columnconfigure(1, weight=1)
+        mr = 0
+        mr = self._add_pref_row(
+            mm_card, mr, "DiT (bf16):", "minimax_dit",
+            "MiniMax H3 bf16 DiT — the training base (minimax_h3_fl2va_bf16.safetensors, ~66 GB). "
+            "Quantized to NF4 at load, so the resident base is ~17 GB.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
+            download_note="~66GB bf16 — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_bf16.safetensors (the fl2va text→AV variant is the trainable one)",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
+            "Qwen3-VL-32B text encoder (bf16). NF4-quantized at load (~14 GB) — used only while "
+            "caching caption embeddings, then offloaded before training.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+            download_note="~51.5GB bf16 — Comfy-Org/MiniMax-H3 → text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "Video VAE:", "minimax_vae",
+            "The H3 video VAE — encodes each training image to a 24-channel latent (used only "
+            "during caching).",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors",
+            download_note="~4.9GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_fp16.safetensors",
+        )
 
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)

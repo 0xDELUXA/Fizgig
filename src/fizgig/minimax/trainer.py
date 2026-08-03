@@ -14,6 +14,7 @@ So the training target for the model's output is `x0 - noise`.
 """
 
 import argparse
+import gc
 import logging
 import math
 import os
@@ -680,11 +681,22 @@ def train_minimax(
         The DiT never moves: only eval mode is toggled, and block swap's JIT .to() is already
         forward-safe, so there is no swap-mode dance like Krea 2 needs."""
         import time as _time
+        import numpy as _np
         from PIL import Image
         from fizgig.minimax import sampling
         was_training = dit.training
+        decoder = None
         try:
             dit.eval()
+            if vae_path:
+                # Loaded per preview and freed in the finally: the ViT3D decoder is ~4.85 GB and
+                # would otherwise sit on top of the resident base for the whole run.
+                from safetensors import safe_open as _safe_open
+                from fizgig.minimax.vae import MiniMaxH3VideoVAEDecoder
+                decoder = MiniMaxH3VideoVAEDecoder()
+                with _safe_open(vae_path, framework="pt", device="cpu") as _f:
+                    decoder.load_state_dict({k: _f.get_tensor(k) for k in _f.keys()}, strict=False)
+                decoder = decoder.to(device, torch.float32).eval()
             _seed = sample_seed if sample_seed != 0 else random.randint(1, 2 ** 31 - 1)
             ts = _time.strftime("%Y%m%d%H%M%S")
             for i, txt in enumerate(encoded_prompts):
@@ -695,18 +707,24 @@ def train_minimax(
                     uncond_embeds=(encoded_negative.to(device, dtype)
                                    if encoded_negative is not None else None),
                     seed=_seed + i, device=device, dtype=dtype)
-                # PROVISIONAL renderer: the 24ch->RGB linear approximation, i.e. a 1/16-scale
-                # rough look. The real ViT3D decoder is the next piece of work; when it lands,
-                # only this line changes.
-                arr = sampling.latent_to_rgb(lat)
-                img = Image.fromarray(arr).resize((sample_width, sample_height), Image.NEAREST)
+                if decoder is not None:
+                    px = decoder.decode(lat.float())[0]          # [3, H, W] in [0, 1]
+                    arr = (px.permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
+                    img = Image.fromarray(arr)
+                else:
+                    # No VAE path configured — fall back to the 24ch->RGB linear approximation
+                    # (a 1/16-scale rough look) rather than dropping previews entirely.
+                    arr = sampling.latent_to_rgb(lat)
+                    img = Image.fromarray(arr).resize((sample_width, sample_height), Image.NEAREST)
                 img.save(os.path.join(
                     sample_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}.png"))
             logger.info(f"[preview] epoch {epoch}: wrote {len(encoded_prompts)} sample(s) "
                         f"to {sample_dir}")
         finally:
+            del decoder                                  # free the ~4.85 GB decoder immediately
             if was_training:
                 dit.train()
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 

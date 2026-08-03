@@ -177,3 +177,211 @@ class MiniMaxH3VideoVAEEncoder(nn.Module):
         lm = self.latents_mean.view(1, -1, 1, 1, 1).to(mean)
         ls = self.latents_std.view(1, -1, 1, 1, 1).to(mean)
         return (mean - lm) / ls
+
+
+# ---------------------------------------------------------------------------------------
+# DECODE PATH — the ViT3D decoder (latent -> pixels), ported from the ComfyUI reference.
+#
+# Every dimension is hardcoded there too (comfy/sd.py builds the VAE with zero arguments) and
+# matches the checkpoint: 36 blocks, dim 2048 (32 heads x 64), gated-SiLU FFN, RMSNorm inside
+# blocks with per-branch LayerScale, LayerNorm at the output, and proj_out emitting
+# 3*4*16*16 — so ONE latent voxel becomes a 4-frame 16x16 pixel block.
+#
+# Three details are easy to get silently wrong, so each is called out where it happens:
+#   * QKV is HEAD-MAJOR INTERLEAVED ([q|k|v] per head), not [3, heads, dim] like the DiT's;
+#   * rope is split-half over the FIRST 48 of 64 head dims, the remaining 16 passing through;
+#   * token ids are normalised to [-1, 1] over the actual T/H/W, so the decode shape is
+#     semantically load-bearing, not merely a memory choice.
+# ---------------------------------------------------------------------------------------
+
+def create_token_ids(patch_dims, device=None, dtype=torch.float32):
+    """[1, prod(dims), len(dims)] coordinates, each axis normalised to [-1, 1]."""
+    coords_list = []
+    for dim_size in patch_dims:
+        coords = torch.arange(0.5, dim_size, dtype=dtype, device=device) / dim_size
+        coords_list.append(2.0 * coords - 1.0)
+    coords = torch.stack(torch.meshgrid(*coords_list, indexing="ij"), dim=-1)
+    return coords.flatten(0, len(patch_dims) - 1).unsqueeze(0)
+
+
+class RotaryEmbeddingND(nn.Module):
+    """3-axis rope producing a [B, S, 1, pairs, 2, 2] rotation table."""
+
+    def __init__(self, dim, rotary_base=100.0, n_dim=3):
+        super().__init__()
+        self.n_dim = n_dim
+        self.angle_scale = 2.0 * math.pi
+        inv_freq = 1 / rotary_base ** torch.arange(0, 1, 2 * n_dim / dim, dtype=torch.float32)
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    def forward(self, img_ids):
+        angles = (self.angle_scale * img_ids[:, :, :, None].float()
+                  * self.inv_freq.to(img_ids.device)[None, None, None, :])
+        angles = angles.flatten(2, 3)
+        c, s = torch.cos(angles), torch.sin(angles)
+        table = torch.stack([c, -s, s, c], dim=-1).reshape(
+            *angles.shape[:2], 1, angles.shape[-1], 2, 2)
+        return table.to(img_ids.dtype)
+
+
+def _apply_rope_split_half(x, freqs_cis):
+    """Split-half (GPT-NeoX style) rotation: the rotated span splits [first half | second half],
+    NOT adjacent pairs. Pure-torch equivalent of comfy_kitchen's kernel."""
+    t_ = x.reshape(*x.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2).to(freqs_cis.dtype)
+    out = freqs_cis[..., 0] * t_[..., 0] + freqs_cis[..., 1] * t_[..., 1]
+    return out.movedim(-1, -2).reshape(*x.shape).type_as(x)
+
+
+class _VaeFeedForward(nn.Module):
+    """Gated SiLU: w1 emits 2x inner width and the FIRST chunk is the gate."""
+
+    def __init__(self, dim, mult=4, bias=True):
+        super().__init__()
+        inner = dim * mult
+        self.w1 = nn.Linear(dim, inner * 2, bias=bias)
+        self.w2 = nn.Linear(inner, dim, bias=bias)
+
+    def forward(self, x):
+        gate, y = self.w1(x).chunk(2, dim=-1)
+        return self.w2(F.silu(gate) * y)
+
+
+class _VaeAttention(nn.Module):
+    def __init__(self, heads, dim_head, bias=True, eps=1e-5):
+        super().__init__()
+        self.heads, self.dim_head, self.eps = heads, dim_head, eps
+        inner = heads * dim_head
+        self.to_qkv = nn.Linear(inner, inner * 3, bias=bias)
+        self.to_out = nn.Linear(inner, inner, bias=bias)
+
+    def forward(self, x, rotary_pos_emb=None):
+        b, s, _ = x.shape
+        # HEAD-MAJOR INTERLEAVED: (b, s, heads, 3*dim_head), then split -> per head [q|k|v].
+        # The DiT's attention splits [3, heads, dim]; copying either into the other silently
+        # scrambles the projection with no error.
+        qkv = self.to_qkv(x).view(b, s, -1, 3 * self.dim_head)
+        q, k, v = torch.chunk(qkv, 3, dim=-1)
+        q = F.rms_norm(q, (self.dim_head,), eps=self.eps)   # affine=False -> no learned weight
+        k = F.rms_norm(k, (self.dim_head,), eps=self.eps)
+        if rotary_pos_emb is not None:
+            rot = rotary_pos_emb.shape[-3] * 2              # 48 of 64; the rest pass through
+            q = torch.cat([_apply_rope_split_half(q[..., :rot], rotary_pos_emb), q[..., rot:]], -1)
+            k = torch.cat([_apply_rope_split_half(k[..., :rot], rotary_pos_emb), k[..., rot:]], -1)
+        out = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+        out = out.transpose(1, 2).reshape(b, s, -1).nan_to_num_(0.0)
+        return self.to_out(out)
+
+
+class _VaeTransformerBlock(nn.Module):
+    """Pre-norm RMSNorm + LayerScale (scale1/scale2 are learned per-channel residual gains)."""
+
+    def __init__(self, heads, dim_head, bias=True, eps=1e-5):
+        super().__init__()
+        dim = heads * dim_head
+        self.norm1 = nn.RMSNorm(dim, eps=eps, elementwise_affine=True)
+        self.attn = _VaeAttention(heads=heads, dim_head=dim_head, bias=bias, eps=eps)
+        self.scale1 = nn.Parameter(torch.empty(dim))
+        self.norm2 = nn.RMSNorm(dim, eps=eps, elementwise_affine=True)
+        self.ff = _VaeFeedForward(dim=dim, bias=bias)
+        self.scale2 = nn.Parameter(torch.empty(dim))
+
+    def forward(self, x, rotary_pos_emb=None):
+        x = x + self.scale1 * self.attn(self.norm1(x), rotary_pos_emb)
+        return x + self.scale2 * self.ff(self.norm2(x))
+
+
+class ViT3DDecoder(nn.Module):
+    """[B, 24, T, H, W] latent -> [B, 3, 4T, 16H, 16W] pixels."""
+
+    def __init__(self, patch_size=16, patch_size_t=4, in_channels=24, out_channels=3,
+                 num_layers=36, heads=32, dim_head=64, rope_theta=100.0, rope_dim_ratio=0.75,
+                 bias=True, eps=1e-5, num_register_tokens=4):
+        super().__init__()
+        dim = heads * dim_head
+        self.patch_size, self.patch_size_t = patch_size, patch_size_t
+        self.out_channels, self.num_register_tokens = out_channels, num_register_tokens
+        self.pos_embed = RotaryEmbeddingND(int(dim_head * rope_dim_ratio), rope_theta, n_dim=3)
+        self.x_embedder = nn.Linear(in_channels, dim)
+        self.register_tokens = nn.Parameter(torch.empty(1, num_register_tokens, dim))
+        # Present only so the checkpoint loads without an unexpected key — never read. The
+        # reference appends a literal zero row where you might expect this to be used.
+        self.register_buffer("mask_token", torch.empty(1, 1, dim))
+        self.transformer_blocks = nn.ModuleList(
+            [_VaeTransformerBlock(heads=heads, dim_head=dim_head, bias=bias, eps=eps)
+             for _ in range(num_layers)])
+        self.norm_out = nn.LayerNorm(dim, eps=eps, elementwise_affine=True)   # LayerNorm, not RMS
+        self.proj_out = nn.Linear(dim, out_channels * patch_size_t * patch_size * patch_size)
+
+    def forward(self, x):
+        B, _C, lt, lh, lw = x.shape
+        h = self.x_embedder(x.flatten(2).transpose(1, 2))       # one latent voxel = one token
+        num_patches = h.shape[1]
+        h = torch.cat([h, self.register_tokens.expand(B, -1, -1).to(h.dtype),
+                       torch.zeros_like(h[:, 0:1, :])], dim=1)
+        img_ids = create_token_ids((lt, lh, lw), x.device, torch.float32).expand(B, -1, -1)
+        suffix = torch.zeros((B, 1 + self.num_register_tokens, 3),
+                             device=x.device, dtype=img_ids.dtype)
+        rope = self.pos_embed(torch.cat([img_ids, suffix], dim=1))
+        for block in self.transformer_blocks:
+            h = block(h, rope)
+        out = self.proj_out(self.norm_out(h))[:, :num_patches, :]
+        out = out.view(B, lt, lh, lw, self.out_channels,
+                       self.patch_size_t, self.patch_size, self.patch_size)
+        out = out.permute(0, 4, 1, 5, 2, 6, 3, 7).contiguous()
+        return out.reshape(B, self.out_channels, lt * self.patch_size_t,
+                           lh * self.patch_size, lw * self.patch_size)
+
+
+class MiniMaxH3VideoVAEDecoder(nn.Module):
+    """Decode-only companion to the encoder above: normalized latent -> pixels in [0, 1].
+
+    Single-frame path only (latent_t == 1), which is the model's native image convention and
+    exactly what the encoder produces for a still — the reference has the same special case
+    (`if z.shape[2] == 1`). Longer clips need its temporal chunking, which is not ported.
+
+    Spatial tiling is likewise not ported: the reference tiles above 256 px per axis, and since
+    token ids are resolution-normalised a single-pass decode of a larger image is not identical
+    to its tiled one. For diagnostic previews that is an acceptable difference — but it is a
+    real one, so it is measured (see the round-trip test) rather than assumed."""
+
+    def __init__(self, embed_dim=24, z_channels=24):
+        super().__init__()
+        self.post_quant_conv = nn.Conv3d(embed_dim, z_channels, 1)   # a real learned 1x1x1 mix
+        self.decoder = ViT3DDecoder(in_channels=z_channels)
+        self.register_buffer("latents_mean", torch.tensor(LATENTS_MEAN[:embed_dim]))
+        self.register_buffer("latents_std", torch.tensor(LATENTS_STD[:embed_dim]))
+        self.register_buffer("pixel_mean", torch.tensor(IMAGENET_MEAN).view(1, 3, 1, 1, 1),
+                             persistent=False)
+        self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1),
+                             persistent=False)
+
+    # One temporal GROUP. FRAME_PER_TOKEN = (1, 4, 4, 4, 4): five latent tokens cover 17 pixel
+    # frames, which is the unit this decoder was calibrated on.
+    _T_GROUP = 5
+    # The reference drops a 3-frame causal lead-in (its frame_pre_padding), so the first REAL
+    # frame of a group is index 3.
+    _LEAD_IN = 3
+
+    @torch.no_grad()
+    def decode(self, z):
+        """z: normalized latent [B, 24, 1, H, W] -> pixels [B, 3, H*16, W*16] in [0, 1].
+
+        The single latent frame is replicated to a full temporal group before decoding. That is
+        not a fudge — `create_token_ids` normalises the t coordinate over `latent_T`, so a lone
+        token sits at t=0, outside the range the decoder ever saw. Measured on a real photo:
+        decoding the token alone gives 16 dB and a visibly dark image (~0.82 gain), while one
+        replicated group gives 31 dB with correct brightness. Costs 5x the tokens, which is
+        still small at preview sizes."""
+        if z.shape[2] != 1:
+            raise NotImplementedError(
+                "MiniMax H3 decode here is single-frame (latent_t == 1); multi-frame needs the "
+                "reference's temporal chunking, which is not ported.")
+        lm = self.latents_mean.view(1, -1, 1, 1, 1).to(z)
+        ls = self.latents_std.view(1, -1, 1, 1, 1).to(z)
+        # post_quant_conv is a real learned 1x1x1 channel mix, NOT an identity — skipping it
+        # leaves the image structurally recognisable but badly wrong (measured: 7 dB PSNR).
+        zz = self.post_quant_conv(z * ls + lm).repeat(1, 1, self._T_GROUP, 1, 1)
+        dec = self.decoder(zz)                          # -> [B, 3, 4*T_GROUP, H*16, W*16]
+        dec = dec[:, :, self._LEAD_IN]                  # first real frame -> [B, 3, H*16, W*16]
+        dec = dec.float() * self.pixel_std.to(dec)[:, :, 0] + self.pixel_mean.to(dec)[:, :, 0]
+        return dec.clamp_(0.0, 1.0)

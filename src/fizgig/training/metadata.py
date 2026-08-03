@@ -20,12 +20,15 @@ logger = logging.getLogger(__name__)
 ARCHITECTURE_KLEIN_9B = "klein9b"
 ARCHITECTURE_KLEIN_9B_FULL = "klein_9b"
 ARCHITECTURE_KREA2 = "krea2"  # Krea 2 single-stream MMDiT (Qwen-Image VAE + Qwen3-VL-4B)
+ARCHITECTURE_MINIMAX = "minimax_h3"  # MiniMax H3 omni DiT (video VAE + Qwen3-VL-32B), image-only training
 
 # SAI model spec architecture strings
 ARCH_KLEIN_9B = "Flux.2-klein-9b"
 IMPL_KLEIN = "https://github.com/black-forest-labs/flux2"
 ARCH_KREA2 = "Krea-2"
 IMPL_KREA2 = "https://github.com/krea-ai/krea-2"
+ARCH_MINIMAX = "MiniMax-H3"
+IMPL_MINIMAX = "https://github.com/MiniMax-AI/MiniMax-H3"
 
 ADAPTER_LORA = "lora"
 MODELSPEC_TITLE = "modelspec.title"
@@ -112,6 +115,9 @@ def build_metadata(
     elif architecture == ARCHITECTURE_KREA2:
         arch = ARCH_KREA2
         impl = IMPL_KREA2
+    elif architecture == ARCHITECTURE_MINIMAX:
+        arch = ARCH_MINIMAX
+        impl = IMPL_MINIMAX
     else:
         raise ValueError(f"Unknown architecture: {architecture}")
 

@@ -26,10 +26,18 @@ from fizgig.training.metadata import ARCHITECTURE_MINIMAX
 
 logger = logging.getLogger(__name__)
 
-# LoRA targets the 50 transformer blocks + the 2-block text refiner ONLY — the NF4-quantized
-# bf16-compute Linears. The fp32 patch/head IO layers are left alone (wrapping them clashes
-# fp32-base vs bf16-adapter). This is the "Model Area to Train = full transformer" default.
-DEFAULT_INCLUDE_PATTERNS = [r"blocks\..*", r"token_refiner\.blocks\..*"]
+# LoRA targets the transformer blocks' ATTENTION + MLP Linears only (+ the 2-block text
+# refiner). The fp32 patch/head IO layers are left alone (wrapping them clashes fp32-base vs
+# bf16-adapter) — and `adaln_proj.linear` is deliberately EXCLUDED:
+#   * ComfyUI's pruned inference builds (minimax_h3_*_pruned_*) replace the full-width AdaLN
+#     with a time-embedding curve table — adaln_proj.linear there is [96768, 8], not
+#     [96768, 2688], so an adaln LoRA can never apply (one shape error per block, key dropped).
+#   * adaln up-matrices are 96768-out (6x qkv) — training them poured the largest share of LoRA
+#     capacity into weights the user's inference model then threw away (real run: ~50% likeness
+#     until excluded).
+# Power users on the full bf16 model can re-add it via --include_patterns.
+DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
+                            r"token_refiner\.blocks\..*"]
 
 
 def sample_sigmas(batch: int, device, shift: float = 12.0, generator=None) -> torch.Tensor:

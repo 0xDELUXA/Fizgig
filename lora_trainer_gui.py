@@ -578,8 +578,8 @@ SEED_TRAVEL_PRESETS = {
 # apply (rank/alpha/lr/epochs/save/seed/adaptive/optimizer/grad-accum/max-grad-norm/megapixels);
 # the H3 base is always NF4 (no swap / fp8 / quant knobs). The first entry is applied on switch.
 MINIMAX_BUILT_IN_PRESETS = {
-    "✨ MiniMax H3 Defaults (rank 16)": {
-        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
+    "✨ MiniMax H3 Defaults (rank 32)": {
+        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "NETWORK_TYPE": "LoRA (standard)",
         "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
@@ -587,8 +587,8 @@ MINIMAX_BUILT_IN_PRESETS = {
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.25",
     },
-    "✨ MiniMax H3 Adaptive LR (rank 16)": {
-        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16, "NETWORK_TYPE": "LoRA (standard)",
+    "✨ MiniMax H3 Adaptive LR (rank 32)": {
+        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "NETWORK_TYPE": "LoRA (standard)",
         "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",

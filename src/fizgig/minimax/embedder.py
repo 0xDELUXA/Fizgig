@@ -104,6 +104,16 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
             else:
                 keep = w.to(torch.float32) if w.dtype == torch.float32 else w.to(compute_dtype)
                 setattr(parent, leaf, nn.Parameter(keep.to(dev), requires_grad=False))
+
+    # Computed (non-checkpoint) buffers stayed on meta from the meta-build. The rotary
+    # embedding's inv_freq is the load-bearing one — rebuild it on the real device. A general
+    # sweep materializes any other stray meta buffers to be safe.
+    from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
+    model.rotary_emb = Qwen3RotaryEmbedding(model.config).to(dev)
+    for mod in model.modules():
+        for bname, buf in list(mod.named_buffers(recurse=False)):
+            if buf is not None and buf.is_meta:
+                mod.register_buffer(bname, torch.zeros(buf.shape, dtype=buf.dtype, device=dev))
     model.requires_grad_(False)
 
     tok = AutoTokenizer.from_pretrained(tokenizer_dir or _bundled_tokenizer_dir())

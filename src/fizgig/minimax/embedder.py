@@ -18,7 +18,13 @@ import os
 
 import torch
 import torch.nn as nn
-from safetensors import safe_open
+
+# The official safetensors safe_open(device="cpu") + get_tensor path memory-maps the file and
+# slices the torch storage per tensor — on Windows, reading a 48 GB file that way hard-crashes
+# (access violation, exit 0xC0000005) deep in torch.storage.__getitem__. The repo's own
+# MemoryEfficientSafeOpen reads each tensor with a plain np.fromfile (no torch mmap-view), which
+# is exactly why every large-model loader (krea2 / klein) uses it. Use it here too.
+from fizgig.krea2.safetensors_utils import MemoryEfficientSafeOpen
 
 # Derived from the checkpoint tensor shapes (U8 weights are 4-bit-packed: real in-dim = 2x).
 _QWEN3_32B_TRUNC50 = dict(
@@ -89,7 +95,7 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
 
     dev = torch.device(device)
     model_keys = {n for n, _ in model.named_parameters()}
-    with safe_open(path, framework="pt", device="cpu") as f:
+    with MemoryEfficientSafeOpen(path) as f:
         ckpt = set(f.keys())
         for name in model_keys:
             src = "model." + name                          # checkpoint prefixes the LM with model.

@@ -10,7 +10,12 @@ The frozen base is what LoRA/FT trains on top of; the fp32 output-head island st
 
 import torch
 import torch.nn as nn
-from safetensors import safe_open
+
+# Not the official safe_open mmap path: on Windows, streaming a 66 GB file via
+# safe_open(device="cpu").get_tensor() hard-crashes (access violation) in torch's storage
+# mmap-slicing. MemoryEfficientSafeOpen reads each tensor with a plain np.fromfile instead —
+# the same reader every other large-model loader in the repo uses. See embedder.py.
+from fizgig.krea2.safetensors_utils import MemoryEfficientSafeOpen
 
 from .model import MiniMaxH3DiT, MiniMaxH3Config
 
@@ -45,7 +50,7 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
                     setattr(module, child_name, q)
 
     dev = torch.device(device)
-    with safe_open(path, framework="pt", device="cpu") as f:
+    with MemoryEfficientSafeOpen(path) as f:
         keys = set(f.keys())
         for name, param in model.named_parameters():
             if name not in keys:

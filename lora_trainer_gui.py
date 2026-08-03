@@ -588,15 +588,6 @@ MINIMAX_BUILT_IN_PRESETS = {
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.25",
     },
-    "✨ MiniMax H3 Adaptive LR (rank 32)": {
-        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "NETWORK_TYPE": "LoRA (standard)",
-        "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
-        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "1e-4", "ADAPTIVE_LR_MAX": "4e-4",
-        "OPTIMIZER_TYPE": "adamw8bit",
-        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        "DATASET_MEGAPIXELS": "0.25",
-    },
 }
 
 # Directory for dataset configurations

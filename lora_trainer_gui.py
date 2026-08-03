@@ -4202,6 +4202,12 @@ class LoRATrainerGUI:
             self._on_timestep_sampling_changed()
             self._on_weighting_scheme_changed()
             self._update_noise_range_label()
+        # Network Type drives a ROW SWAP (rank/alpha <-> LoKR factor), and setting a combobox
+        # programmatically does NOT fire <<ComboboxSelected>> — so without this a preset that
+        # changes the type left the old rows on screen: "LoRA (standard)" selected with the
+        # LoKR Factor box still underneath it.
+        if "NETWORK_TYPE" in preset and "LOKR_FACTOR" in getattr(self, "rows", {}):
+            self._on_network_type_changed()
 
         # Update FP8/SCALED checkboxes from preset
         if "FP8" in preset:
@@ -4329,6 +4335,11 @@ class LoRATrainerGUI:
         try:
             os.makedirs(PRESETS_DIR, exist_ok=True)
             snapshot = self._collect_preset_values()
+            # Presets deliberately don't carry the family (a Krea 2 preset must not hijack your
+            # model choice), but "restore my last launch" plainly includes WHICH model it was —
+            # the same reasoning the training queue uses when it stores the architecture beside
+            # its snapshot. Namespaced so _apply_preset_values ignores it as an unknown key.
+            snapshot["__architecture__"] = self.architecture_var.get()
             with open(LAST_TRAIN_FILE, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, indent=2, default=str)
         except Exception as e:
@@ -4346,8 +4357,18 @@ class LoRATrainerGUI:
         try:
             with open(LAST_TRAIN_FILE, "r", encoding="utf-8") as f:
                 snapshot = json.load(f)
+            # Switch family FIRST if the launch was on a different one: on_architecture_changed
+            # loads that family's default preset, so doing it after would clobber everything the
+            # snapshot just restored. Older snapshots have no architecture — they simply skip this.
+            _arch = snapshot.pop("__architecture__", None)
+            _switched = ""
+            if _arch and _arch in ARCHITECTURES and _arch != self.architecture_var.get():
+                self.architecture_var.set(_arch)
+                self.on_architecture_changed()
+                _switched = f"\n\nSwitched the Base Model back to {_arch}."
             self._apply_preset_values(snapshot)
-            messagebox.showinfo("Loaded", "Restored settings from your last training launch.")
+            messagebox.showinfo("Loaded",
+                                f"Restored settings from your last training launch.{_switched}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load last train settings:\n{e}")
 

@@ -57,10 +57,20 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
         raise ValueError("MiniMax H3 image training is batch size 1")
     device = latent.device
     x0 = latent.float()
+    # The DiT patchifies with patch_size (1, ph, pw), so the latent's H and W must be divisible by
+    # the spatial patch. The dataset buckets on a 16-px step and the VAE is 16x, so a latent can be
+    # odd (e.g. a 496-px bucket -> 31-px latent, not divisible by 2). Crop to the patch multiple
+    # (drops at most one latent row/col = <=16 px of image edge) so patchify is exact and the target
+    # (x0 - noise) stays the same shape as the model's prediction.
+    _pt, _ph, _pw = getattr(model, "patch_size", (1, 2, 2))
+    _H, _W = x0.shape[-2], x0.shape[-1]
+    _Hc, _Wc = (_H // _ph) * _ph, (_W // _pw) * _pw
+    if (_Hc, _Wc) != (_H, _W):
+        x0 = x0[..., :_Hc, :_Wc].contiguous()
     if noise is None:
         noise = torch.randn(x0.shape, device=device, generator=generator, dtype=torch.float32)
     else:
-        noise = noise.to(device=device, dtype=torch.float32)
+        noise = noise.to(device=device, dtype=torch.float32)[..., :x0.shape[-2], :x0.shape[-1]]
     if sigma is None:
         sigma = sample_sigmas(1, device, shift=shift, generator=generator)
     s = sigma.reshape(1, 1, 1, 1, 1).to(torch.float32)

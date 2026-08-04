@@ -99,8 +99,7 @@ def encode_and_save_text(encoder, batch: List[ItemInfo]) -> None:
     One forward for the whole batch rather than one per caption: the nvfp4-resident encoder
     dequantizes 351 weights per FORWARD, so this is where the caching pass spends its time.
     encode_batch right-pads, which is exactly equivalent for a causal stack (verified in
-    tests/diag_batch_encode.py) and memoizes, so repeated captions across the three
-    resolution blocks cost nothing."""
+    tests/diag_batch_encode.py) and memoizes, so a repeated caption costs nothing."""
     embeds = encoder.encode_batch([item.caption for item in batch])
     for item, hidden in zip(batch, embeds):
         save_text_encoder_output_cache_minimax(item, hidden[0])

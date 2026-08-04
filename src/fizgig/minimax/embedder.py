@@ -170,11 +170,10 @@ class MiniMaxH3TextEncoder:
     def encode(self, caption: str, max_length: int = 512) -> torch.Tensor:
         """Encode one caption to [1, L, 5120]. Memoized by caption text for the caching pass.
 
-        MiniMax trains multi-resolution, so the dataset is three blocks over the SAME images and
-        therefore the same captions — without this the encoder runs three times per caption for
-        an identical result. Text conditioning does not depend on resolution. Under the
-        nvfp4-resident encoder a forward dequantizes 351 weights, so this is the difference
-        between one pass and three."""
+        Text conditioning does not depend on resolution or on anything else that varies between
+        dataset blocks, so a caption that appears more than once — repeated text, or several
+        dataset entries over the same folder — is encoded once. Under the nvfp4-resident encoder
+        a forward dequantizes 351 weights, so a repeat is far from free."""
         hit = self._cache.get(caption)
         if hit is not None:
             return hit.clone()                             # callers must not share storage

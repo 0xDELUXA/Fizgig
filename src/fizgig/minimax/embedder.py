@@ -157,16 +157,30 @@ class MiniMaxH3TextEncoder:
         self.tokenizer = tokenizer
         self.device = device
         self.compute_dtype = compute_dtype
+        self._cache = {}          # caption -> CPU embedding; see encode()
 
     @torch.no_grad()
     def encode(self, caption: str, max_length: int = 512) -> torch.Tensor:
+        """Encode one caption to [1, L, 5120]. Memoized by caption text for the caching pass.
+
+        MiniMax trains multi-resolution, so the dataset is three blocks over the SAME images and
+        therefore the same captions — without this the encoder runs three times per caption for
+        an identical result. Text conditioning does not depend on resolution. Under the
+        nvfp4-resident encoder a forward dequantizes 351 weights, so this is the difference
+        between one pass and three."""
+        hit = self._cache.get(caption)
+        if hit is not None:
+            return hit.clone()                             # callers must not share storage
         # H3: raw prompt text, NO special tokens (no chat template).
         ids = self.tokenizer(caption, add_special_tokens=False, return_tensors="pt",
                              truncation=True, max_length=max_length)["input_ids"].to(self.device)
         if ids.shape[1] == 0:                              # empty caption -> single pad token
             ids = torch.tensor([[self.tokenizer.pad_token_id or 151643]], device=self.device)
         out = self.model(input_ids=ids)                    # norm=Identity -> raw layer-50 output
-        return out.last_hidden_state.to(self.compute_dtype)   # [1, L, 5120]
+        emb = out.last_hidden_state.to(self.compute_dtype)  # [1, L, 5120]
+        # keep it on CPU: a few hundred KB per caption, and GPU memory is the scarce thing here
+        self._cache[caption] = emb.detach().to("cpu")
+        return emb
 
 
 class Nvfp4Linear(nn.Linear):

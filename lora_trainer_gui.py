@@ -436,33 +436,48 @@ QUEUE_FILE = os.path.join(PRESETS_DIR, "training_queue.json")
 
 # MiniMax H3 — training noise-level density ("Detail Focus" on the Training tab).
 #
-# H3's reference recipe draws a uniform u and maps it through sigma = 12u/(1 + 11u). The 12 is
-# the VIDEO sigma-shift, calibrated for a ~5760-token 39-frame pack; a single training image is
-# 256-1024 tokens, so we inherit a shift roughly an order of magnitude too large for stills.
-# Measured consequence: median sigma 0.923, and only 5% of steps at or below 0.387 — the last
-# non-zero sigma of Comfy's 20-step schedule, i.e. the one step that renders all fine detail.
-# For contrast, Klein and Krea 2 derive their shift from the actual token count (~1.7 at 768^2)
-# and put 44% of steps below sigma 0.6, against 11% here.
+# H3's reference recipe draws a uniform u and maps it through sigma = shift*u/(1 + (shift-1)*u),
+# with shift = 12. That 12 is the VIDEO sigma-shift, calibrated for a ~5760-token 39-frame pack.
+# One training image is 256-1024 tokens, so image-only training inherits a shift roughly an
+# order of magnitude too large. Measured consequence: median sigma 0.923, and only 5% of steps
+# at or below 0.387 — the last non-zero sigma of Comfy's 20-step schedule, i.e. the single step
+# that renders all fine detail. Klein and Krea 2 scale their own shift by the sample's token
+# count and put 44% of steps below sigma 0.6, against 11% here.
 #
-# The percentage in each label is the share of training steps at or below sigma 0.387 (the
-# "detail band"), measured over 400k draws. Lower shift = more low-noise training. Parsed with
-# .split(" ")[0], the same convention the Adaptive LR dropdowns use, so the trailing note is
-# free text. 'sigmoid' and 'resolution' are logit-normal literals the trainer also accepts;
-# both were tried at 1e-4 and visibly overdrove the adapters (twice) — kept for A/B, flagged.
-MINIMAX_SHIFT_OPTIONS = [
-    "12 - reference default, 5% detail band",
-    "8 - 7%",
-    "6 - 9%, suggested first step down",
-    "5 - 11%",
-    "4 - 14%, near the settings that overdrove",
-    "3 - 17%",
-    # sqrt-token scaling from the video calibration puts a 0.25 MP still (256 tokens) at ~2.5.
-    # Note it passes 'resolution' on detail-band share (20% vs 16%) while keeping far more of
-    # the run above sigma 0.6 (63% vs 55%) — a different shape, not simply "further".
-    "2.5 - 20%, sqrt-matched to 0.25 MP",
-    "resolution - 16%, overdrove at 1e-4",
-    "sigmoid - 32%, overdrove at 1e-4",
+# The recommendations scale 12 down by the sqrt-token rule (the SD3/Flux resolution-transfer
+# result: equal coarse SNR between resolutions needs shift ratio sqrt(m/n)). With a /16 VAE and
+# a 2x2 patch, an image carries ~977*MP tokens, so
+#
+#     shift = 12 * sqrt(977*MP / 5760)  ~=  5 * sqrt(MP)
+#
+# which is where 2.5 @ 0.25 MP and 5 @ 1.0 MP come from. NOTE the honest caveat, repeated in the
+# GUI help: the image ecosystem's own fitted rule (Flux's linear-in-tokens mu) is gentler than
+# pure sqrt and would put the same transfer nearer 6, so these numbers are the aggressive end of
+# a bracket, not a settled answer. Nobody has swept this properly — hence the "experiment" framing.
+MINIMAX_SHIFT_BY_MP = [
+    ("0.25", "2.5"), ("0.5", "3.5"), ("0.75", "4.3"), ("1.0", "5"),
+    ("1.5", "6"), ("2.0", "7"), ("2.4", "7.7"), ("3.0", "8.6"), ("4.2", "10"),
 ]
+# Parsed with .split(" ")[0] — the same convention the Adaptive LR dropdowns use — so the
+# trailing note is free text and can be reworded without invalidating saved presets or queue
+# items. The trainer also accepts the literals 'sigmoid' and 'resolution' (logit-normal
+# densities) on the CLI; both overdrove the adapters at 1e-4 in real runs, so they are not
+# offered here, but an old preset carrying one still passes straight through.
+MINIMAX_SHIFT_OPTIONS = [f"{s} - for {mp} MP" for mp, s in MINIMAX_SHIFT_BY_MP] + [
+    "12 - MiniMax's own default (tuned for video, not stills)",
+]
+
+
+def minimax_recommended_shift(megapixels):
+    """The Detail Focus value recommended for a Target Megapixels setting.
+
+    Exact match where the MP dropdown offers one, otherwise the closest listed MP (so a
+    hand-typed value still gets a sensible answer instead of nothing)."""
+    try:
+        mp = float(str(megapixels).strip())
+    except (TypeError, ValueError):
+        return None
+    return min(MINIMAX_SHIFT_BY_MP, key=lambda kv: abs(float(kv[0]) - mp))[1]
 
 # Built-in presets — always available in the Load Preset dropdown, prefixed with ✨ to distinguish
 # from user-saved presets. Defined in code so they ship with the app and can't be deleted accidentally.
@@ -612,14 +627,26 @@ SEED_TRAVEL_PRESETS = {
 # apply (rank/alpha/lr/epochs/save/seed/adaptive/optimizer/grad-accum/max-grad-norm/megapixels);
 # the H3 base is always NF4 (no swap / fp8 / quant knobs). The first entry is applied on switch.
 MINIMAX_BUILT_IN_PRESETS = {
-    "✨ MiniMax H3 Defaults (rank 32)": {
-        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32, "NETWORK_TYPE": "LoRA (standard)",
+    # LoKR factor 8 rather than standard LoRA: the same call Krea 2 landed on after measurement
+    # (highest likeness recorded here, no skin sheen). Dim/alpha still ride along for when the
+    # Network Type is flipped back to LoRA — the H3 trainer ignores them under LoKR.
+    #
+    # Static 1e-4, adaptive OFF. The adaptive watcher probes the LR UP on steady descent, and a
+    # density sweep needs the LR held still or the runs aren't comparable. Turn it on once a
+    # Detail Focus value has been settled on.
+    #
+    # Detail Focus 2.5 = the recommendation for the 0.25 MP this preset trains at. Change one and
+    # the Training tab flags the other (the readout beside the dial), so the pair stays coherent.
+    "✨ MiniMax H3 Defaults (LoKR 8, 0.25 MP)": {
+        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32,
+        "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         "OPTIMIZER_TYPE": "adamw8bit",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.25",
+        "MINIMAX_SHIFT": "2.5",
     },
 }
 
@@ -1259,7 +1286,8 @@ class LoRATrainerGUI:
             "SEED": 42,
             "BLOCKS_SWAP": "auto",  # Klein valid range 0-16; "auto" detects from GPU
             # MiniMax H3 only — training noise-level density (see MINIMAX_SHIFT_OPTIONS).
-            "MINIMAX_SHIFT": "12",
+            # Defaults to the recommendation for the default 0.25 MP, not to H3's video-tuned 12.
+            "MINIMAX_SHIFT": "2.5",
             "RESUME_TRAINING": "",
             "OPTIMIZER_TYPE": "adamw8bit",
             "OPTIMIZER_ARGS": "",
@@ -3572,22 +3600,36 @@ class LoRATrainerGUI:
         self._minimax_shift_frame = ttk.Frame(training_content)
         self._minimax_shift_frame.grid(row=26, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
         self.entries["MINIMAX_SHIFT"] = ttk.Combobox(
-            self._minimax_shift_frame, values=MINIMAX_SHIFT_OPTIONS, state="readonly", width=38)
+            self._minimax_shift_frame, values=MINIMAX_SHIFT_OPTIONS, state="readonly", width=34)
         self.entries["MINIMAX_SHIFT"].pack(side=tk.LEFT)
         self._select_combo_by_token(self.entries["MINIMAX_SHIFT"],
-                                    self.settings.get("MINIMAX_SHIFT", "12"))
+                                    self.settings.get("MINIMAX_SHIFT", "2.5"))
+        # Live "does this match your image size?" readout. The dial is deliberately NOT auto-set
+        # from the MP box: a queued A/B must keep the density the user chose for it, and silently
+        # rewriting a setting when an unrelated dropdown moves is exactly how a sweep gets muddled.
+        self._minimax_shift_match = tk.Label(self._minimax_shift_frame, text="",
+                                             font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
+        self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
         self._minimax_shift_hint = ttk.Label(
             training_content,
-            text="Where the run spends its steps on the noise scale. The reference default (12) is "
-                 "MiniMax's VIDEO setting: it puts 57% of steps above sigma 0.9 and only 5% in the "
-                 "low-noise band where fine detail is learned — good at placing a pose, hairstyle and "
-                 "silhouette, thin on skin, eyes and texture. Lower numbers move steps down into that "
-                 "band. Step down one notch at a time: more low-noise training also means a bigger "
-                 "effective step there, so if a lower setting overbakes, drop the learning rate (or "
-                 "turn on Adaptive LR) rather than jumping straight back to 12. The value used is "
-                 "recorded in the saved LoRA's metadata as ss_timestep_density.",
+            text="Which noise levels this run actually trains on. MiniMax's own default is 12 — but "
+                 "that is tuned for VIDEO, where one sample carries ~20x the data of a single photo. "
+                 "On stills it leaves only ~5% of training in the low-noise range where fine detail "
+                 "is learned, so a LoRA gets good at pose, hairstyle and silhouette while skin, eyes "
+                 "and texture stay thin. The values above scale it to your image size (roughly "
+                 "5 x the square root of your Target Megapixels) — smaller images want a lower number.\n"
+                 "These are starting points, not rules, and nobody has swept this properly yet — "
+                 "experimenting here is genuinely worth doing. Lower = more detail training, but also "
+                 "a bigger effective step down there: if a lower setting overbakes, drop the Learning "
+                 "Rate or turn on Adaptive LR before you write it off. Every run stamps its setting "
+                 "into the saved LoRA (ss_timestep_density) and the training queue shows it, so "
+                 "back-to-back comparisons are easy to keep straight.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_shift_hint.grid(row=27, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        self.dataset_megapixels_var.trace_add("write", lambda *_: self._refresh_minimax_shift_match())
+        self.entries["MINIMAX_SHIFT"].bind("<<ComboboxSelected>>",
+                                           lambda _e: self._refresh_minimax_shift_match())
+        self._refresh_minimax_shift_match()
 
         # Answers "when do changes take effect?" (issue #40) right where people wonder it.
         ttk.Label(training_content,
@@ -5380,6 +5422,29 @@ class LoRATrainerGUI:
         except tk.TclError:
             pass
         return False
+
+    def _refresh_minimax_shift_match(self):
+        """Tell the user whether Detail Focus matches their Target Megapixels.
+
+        Informational only — it never moves the dial. Someone sweeping densities has deliberately
+        picked a value the rule wouldn't, and the green/amber readout is there to confirm the
+        choice was deliberate, not to undo it."""
+        lbl = getattr(self, "_minimax_shift_match", None)
+        combo = self.entries.get("MINIMAX_SHIFT")
+        if lbl is None or combo is None or not lbl.winfo_exists():
+            return
+        want = minimax_recommended_shift(self.dataset_megapixels_var.get())
+        try:
+            have = str(combo.get()).split(" ")[0]
+        except tk.TclError:
+            return
+        if want is None:
+            lbl.config(text="")
+        elif have == want:
+            lbl.config(text="✓ matches your image size", fg="#27AE60")
+        else:
+            lbl.config(text=f"recommended for {self.dataset_megapixels_var.get()} MP: {want}",
+                       fg="#E67E22")
 
     def _is_krea2_arch(self) -> bool:
         return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)

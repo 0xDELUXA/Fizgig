@@ -363,27 +363,49 @@ class MiniMaxH3VideoVAEDecoder(nn.Module):
     _TILE_OVERLAP_MIN = 64
     vae_ratio = 16          # spatial compression, same constant the encoder uses
 
-    # One temporal GROUP. FRAME_PER_TOKEN = (1, 4, 4, 4, 4): five latent tokens cover 17 pixel
-    # frames, which is the unit this decoder was calibrated on.
+    # A lone temporal token is out of distribution for this chunk-trained decoder, so the single
+    # latent is replicated before decoding. Two schemes, selected by `single_frame_mode`:
+    #
+    #   "reference" (DEFAULT) — cat([z, z]) -> a 2-latent clip, keep pixel frame 0. What
+    #       ai-toolkit does: the first latent of a chunk covers exactly pixel frame 0 in the
+    #       (1, 4, 4, 4, 4) grouping, so that frame is the in-distribution single-frame decode.
+    #   "group" — replicate to a full 5-latent temporal group, keep frame 3 (past the causal
+    #       lead-in). Scores far better on ROUND-TRIP fidelity: 29.99 dB mean against the
+    #       reference's 16.96 dB on real photos (tests/diag_frame_choice.py) — but that test
+    #       only ever sees ENCODER-produced latents, which are in-distribution by construction.
+    #       On real previews, whose latents come from a partially-trained sampler and sit off
+    #       the encoder manifold, the reference scheme is what looks right (Peter, 4 Aug). The
+    #       PSNR win does not transfer, so it is not the default.
+    #
+    # Change with `decoder.single_frame_mode = "group"` to A/B.
     _T_GROUP = 5
-    # The reference drops a 3-frame causal lead-in (its frame_pre_padding), so the first REAL
-    # frame of a group is index 3.
-    _LEAD_IN = 3
+    _LEAD_IN = 3            # "group": the reference drops a 3-frame causal lead-in
+    _REF_T = 2              # "reference": cat([z, z])
+    _REF_FRAME = 0
+    single_frame_mode = "reference"
+
+    def _pad_and_index(self):
+        """(replication count, pixel frame to keep) for the active single-frame scheme."""
+        if self.single_frame_mode == "group":
+            return self._T_GROUP, self._LEAD_IN
+        if self.single_frame_mode == "reference":
+            return self._REF_T, self._REF_FRAME
+        raise ValueError(f"single_frame_mode must be 'reference' or 'group', "
+                         f"got {self.single_frame_mode!r}")
 
     @torch.no_grad()
     def decode(self, z):
         """z: normalized latent [B, 24, 1, H, W] -> pixels [B, 3, H*16, W*16] in [0, 1].
 
-        The single latent frame is replicated to a full temporal group before decoding. That is
-        not a fudge — `create_token_ids` normalises the t coordinate over `latent_T`, so a lone
-        token sits at t=0, outside the range the decoder ever saw. Measured on a real photo:
-        decoding the token alone gives 16 dB and a visibly dark image (~0.82 gain), while one
-        replicated group gives 31 dB with correct brightness. Costs 5x the tokens, which is
-        still small at preview sizes."""
+        The single latent frame is replicated before decoding — `create_token_ids` normalises
+        the t coordinate over `latent_T`, so a lone token sits at t=0, outside the range the
+        decoder ever saw (measured: 16 dB and visibly dark). See `single_frame_mode` above for
+        which replication scheme runs."""
         if z.shape[2] != 1:
             raise NotImplementedError(
                 "MiniMax H3 decode here is single-frame (latent_t == 1); multi-frame needs the "
                 "reference's temporal chunking, which is not ported.")
+        n_rep, _ = self._pad_and_index()
         lm = self.latents_mean.view(1, -1, 1, 1, 1).to(z)
         ls = self.latents_std.view(1, -1, 1, 1, 1).to(z)
         # Follow the module's own dtype rather than forcing fp32: this decoder is 2.4 B params,
@@ -392,14 +414,14 @@ class MiniMaxH3VideoVAEDecoder(nn.Module):
         w_dtype = self.post_quant_conv.weight.dtype
         # post_quant_conv is a real learned 1x1x1 channel mix, NOT an identity — skipping it
         # leaves the image structurally recognisable but badly wrong (measured: 7 dB PSNR).
-        zz = self.post_quant_conv((z * ls + lm).to(w_dtype)).repeat(1, 1, self._T_GROUP, 1, 1)
+        zz = self.post_quant_conv((z * ls + lm).to(w_dtype)).repeat(1, 1, n_rep, 1, 1)
         dec = self._tiled_decode(zz)                    # -> [B, 3, H*16, W*16]
         dec = dec.float() * self.pixel_std.to(dec)[:, :, 0] + self.pixel_mean.to(dec)[:, :, 0]
         return dec.clamp_(0.0, 1.0)
 
     def _decode_tile(self, zz):
-        """One tile: full temporal group in, the single real frame out."""
-        return self.decoder(zz)[:, :, self._LEAD_IN]
+        """One tile: the replicated clip in, the single kept frame out."""
+        return self.decoder(zz)[:, :, self._pad_and_index()[1]]
 
     def _split_tiles(self, input_len):
         """Tile starts/lengths/overlaps in PIXELS, matching the reference's layout."""

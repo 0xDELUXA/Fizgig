@@ -30,23 +30,23 @@ from fizgig.training.metadata import ARCHITECTURE_MINIMAX
 
 logger = logging.getLogger(__name__)
 
+VIDEO_SIGMA_SHIFT_TRAIN = 12.0     # H3's video shift — also the reference TRAINING density
+
 # LoRA targets the transformer blocks' ATTENTION + MLP Linears (+ the 2-block text refiner).
 # The fp32 patch/head IO layers are left alone (wrapping them clashes fp32-base vs bf16-adapter).
 #
-# `adaln_proj` is EXCLUDED on BOTH checkpoints — two real runs earned this:
-#   * FULL bf16 model ([96768, 2688]): the up-matrices are 96768-out (6x qkv) and soaked up the
-#     largest share of LoRA capacity for weights ComfyUI's pruned builds then throw away
-#     (~50% likeness until excluded).
-#   * PRUNED model ([96768, 8]): tried 4 Aug for reference parity (ai-toolkit wraps it). ONE
-#     epoch at 1e-4 melted anatomy; the A/B (tests/diag_epoch1_ab.py) pinned it — same LoRA
-#     with only the 51 adaln modules disabled rendered clean. Mechanism: AdaLN's modulation
-#     magnitudes are tiny (~0.007 typical), so an adapter delta that is 0.3% of the base by
-#     NORM still swings individual shift/scale/GATE coordinates by ~100% x 50 blocks — and its
-#     8-dim input concentrates gradient, so it gets there in one epoch.
-# Power users can still opt in via --include_patterns (add blocks\.\d+\.adaln_proj\..*).
+# `adaln_proj` is per-checkpoint (matching the reference trainer on the pruned build):
+#   * FULL bf16 model ([96768, 2688]): EXCLUDED — the up-matrices are 96768-out (6x qkv),
+#     soaked up the largest share of LoRA capacity, and ComfyUI's pruned inference builds
+#     drop every adaln key anyway (~50% likeness until excluded, real run).
+#   * PRUNED model ([96768, 8]): INCLUDED — deploy-consistent, cheap (rank caps at 8), and
+#     what ai-toolkit trains. An epoch-1 melt was once pinned on these adapters
+#     (tests/diag_epoch1_ab.py: adaln-off rendered clean at that seed), but the distortion
+#     predated adaln and persisted without it — the actual culprit was the TRAINING DENSITY
+#     (see sample_sigmas): low-shift densities slam the mid/low-noise zone and overdrive
+#     every adapter, adaln merely being the most visible casualty.
 DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
                             r"token_refiner\.blocks\..*"]
-# Kept only so an explicit experiment can reach for it; NOT a default anywhere.
 PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*",
                                                       r"final_layer\.adaln_proj\..*"]
 
@@ -115,23 +115,29 @@ def sample_sigmas(batch: int, device, shift=None, generator=None,
                   image_tokens: int = None) -> torch.Tensor:
     """Noise levels in (0,1) for training.
 
-    shift=None (the default): H3's own recipe — an UNSHIFTED logit-normal,
-    sigma = sigmoid(N(0,1)), median 0.5. This is what the reference trainer uses for H3
-    (ai-toolkit's `timestep_type='sigmoid'` default; its scheduler's shift=12 feeds the
-    SAMPLER only, never training).
+    shift=None (the default): sigma = 12u/(1+11u), u ~ uniform — H3's OWN training density.
+    ai-toolkit's per-model defaults override the global 'sigmoid' with timestep_type='shift'
+    through a scheduler configured shift=12 (ui options.tsx + their scheduler_config), so this
+    is what MiniMax LoRAs are actually trained with there: median sigma ~0.92, ~57% of steps
+    above 0.9, ~3% below 0.3. Training lives at the high-noise end, where each step nudges
+    broad structure gently — which is why 1e-4 is a sane LR there and scorching at low shifts.
+    (An earlier run here blamed shift-12 for poor likeness; that verdict was confounded —
+    bf16 adaln was eating half the LoRA and being dropped at inference, and the pack had no
+    audio rows yet. Withdrawn.)
 
-    shift="resolution": logit-normal with a resolution-dependent shift (shift = exp(mu), mu
-    linear in image tokens: 256 -> 0.5, 6400 -> 1.15 — Krea 2's mapping). ~1.7 at 768^2, i.e.
-    median sigma 0.62. Fizgig's previous default; kept for A/B. It biases training toward the
-    high-noise end, where a model learns global structure and colour — so an overshooting LoRA
-    overshoots there first.
+    shift="sigmoid": UNSHIFTED logit-normal, sigma = sigmoid(N(0,1)), median 0.5 — the
+    SD3/Flux-style density (ai-toolkit's GLOBAL default, but NOT its MiniMax one). Trains the
+    mid/low-noise zone hard: at 1e-4 a 46-image epoch visibly overdrove the adapters
+    (real-run finding, twice). A/B use only.
 
-    shift=<float>: legacy uniform-u + shift map (sigma = s*u/(1+(s-1)*u)). NOTE: H3's
-    sigma_shift_video=12.0 is the SAMPLER'S step-spacing schedule for full VIDEO token counts —
-    training image LoRAs with it put 57% of steps at sigma>0.9 and only ~4% below 0.3, which
-    produced structurally poor likeness at every checkpoint (real-run finding). Experiments only.
+    shift="resolution": logit-normal with a resolution-dependent shift (~1.7 @768^2, median
+    0.62 — Krea 2's mapping). Fizgig's original replacement density; same overdrive failure.
+
+    shift=<float>: the uniform-u + shift map at any other value.
     """
     if shift is None:
+        shift = VIDEO_SIGMA_SHIFT_TRAIN
+    if shift == "sigmoid":
         return torch.sigmoid(torch.randn(batch, device=device, generator=generator))
     if shift == "resolution":
         tokens = float(image_tokens or 225)                       # ~0.25 MP default
@@ -564,15 +570,17 @@ def train_minimax(
         raise RuntimeError("No training items — run minimax_cache_latents then minimax_cache_text first.")
     logger.info(f"MiniMax H3 training: {group.num_train_items} items, {max_train_epochs} epochs")
     if shift is None:
-        logger.info("[timesteps] unshifted logit-normal, sigma = sigmoid(N(0,1)) — H3's own "
-                    "training density (median sigma 0.5)")
+        logger.info("[timesteps] shift-12 uniform map (median sigma ~0.92) — H3's own training "
+                    "density, matching the reference trainer")
+    elif shift == "sigmoid":
+        logger.warning("[timesteps] UNSHIFTED logit-normal (median 0.5) — A/B mode. At 1e-4 this "
+                       "overdrives adapters within an epoch on small datasets; the default "
+                       "(omit --shift) is the reference recipe.")
     elif shift == "resolution":
-        logger.info("[timesteps] logit-normal + resolution shift (~1.7 @768^2, median sigma 0.62) "
-                    "— A/B against the default, which is unshifted")
+        logger.warning("[timesteps] logit-normal + resolution shift (median ~0.62) — A/B mode; "
+                       "same overdrive caveat as sigmoid.")
     else:
-        logger.warning(f"[timesteps] explicit shift={shift} — uniform-u legacy map. Note: 12.0 is "
-                       "the VIDEO sampler schedule and trains almost entirely at high noise; the "
-                       "default (omit --shift) is right for image LoRAs.")
+        logger.info(f"[timesteps] explicit shift={shift} — uniform-u map.")
 
     # ---- VRAM plan: block swap + gradient checkpointing (before the base loads) ----
     _mp = 0.25
@@ -645,11 +653,13 @@ def train_minimax(
     if use_ckpt:
         dit.enable_gradient_checkpointing()
         logger.info("[vram] gradient checkpointing ON")
-    include_patterns = user_include_patterns or DEFAULT_INCLUDE_PATTERNS
-    logger.info("[base] %s checkpoint; LoRA targets: attention + MLP + token refiner (AdaLN "
-                "excluded — its gate coordinates melt anatomy when adapted, see the pattern "
-                "note in trainer.py)",
-                "pruned (curve-table AdaLN)" if dit.pruned_adaln else "full bf16")
+    # AdaLN targeting is per-checkpoint — see the pattern note at the top of this file.
+    include_patterns = user_include_patterns or (
+        PRUNED_INCLUDE_PATTERNS if dit.pruned_adaln else DEFAULT_INCLUDE_PATTERNS)
+    logger.info("[base] %s checkpoint; LoRA targets: attention + MLP + token refiner%s",
+                "pruned (curve-table AdaLN)" if dit.pruned_adaln else "full bf16",
+                " + AdaLN (deploy-consistent on this build; rank caps at 8)"
+                if dit.pruned_adaln else " (AdaLN excluded - dropped by pruned inference builds)")
     if network_type == "lokr":
         # LoKR (Kronecker) — same mechanism as Krea 2's: module_class swaps the parametrization
         # inside the identical scan/wrap machinery, so include_patterns (adaln exclusion) and the

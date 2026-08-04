@@ -26,8 +26,8 @@ logging.basicConfig(level=logging.INFO)
 
 
 def _shift_arg(v):
-    """--shift takes either the literal 'resolution' or a float (see the flag's help)."""
-    return v if v == "resolution" else float(v)
+    """--shift takes the literals 'sigmoid'/'resolution' or a float (see the flag's help)."""
+    return v if v in ("sigmoid", "resolution") else float(v)
 
 
 def setup_parser() -> argparse.ArgumentParser:
@@ -71,11 +71,11 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Recompute blocks in backward to cut activation VRAM. Auto: off when "
                         "everything fits (faster), on otherwise; forced on when swap > 0.")
     p.add_argument("--shift", type=_shift_arg, default=None,
-                   help="Timestep schedule. Unset (recommended) = H3's own density: unshifted "
-                        "logit-normal, sigma = sigmoid(N(0,1)). 'resolution' = logit-normal with "
-                        "a resolution shift (~1.7 @768, Fizgig's old default) for A/B. A float = "
-                        "legacy uniform-u shift map; 12.0 is the VIDEO sampler schedule and "
-                        "ruins likeness.")
+                   help="Training timestep density. Unset (recommended) = H3's own recipe: the "
+                        "shift-12 uniform map (what the reference trainer uses). 'sigmoid' = "
+                        "unshifted logit-normal and 'resolution' = resolution-shifted "
+                        "logit-normal, both A/B modes that overdrive adapters at 1e-4. "
+                        "A float = the uniform-u shift map at that value.")
     # Adaptive LR — bi-directional plateau tracker (starts at the geometric midpoint of min/max;
     # the Learning Rate box is ignored while it's on).
     p.add_argument("--adaptive_lr", action="store_true")

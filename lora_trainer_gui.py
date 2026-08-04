@@ -434,6 +434,32 @@ LAST_TRAIN_FILE = os.path.join(PRESETS_DIR, ".last_train_settings.json")
 # never auto-starts on launch (a queue found at startup waits for the user's first Start).
 QUEUE_FILE = os.path.join(PRESETS_DIR, "training_queue.json")
 
+# MiniMax H3 — training noise-level density ("Detail Focus" on the Training tab).
+#
+# H3's reference recipe draws a uniform u and maps it through sigma = 12u/(1 + 11u). The 12 is
+# the VIDEO sigma-shift, calibrated for a ~5760-token 39-frame pack; a single training image is
+# 256-1024 tokens, so we inherit a shift roughly an order of magnitude too large for stills.
+# Measured consequence: median sigma 0.923, and only 5% of steps at or below 0.387 — the last
+# non-zero sigma of Comfy's 20-step schedule, i.e. the one step that renders all fine detail.
+# For contrast, Klein and Krea 2 derive their shift from the actual token count (~1.7 at 768^2)
+# and put 44% of steps below sigma 0.6, against 11% here.
+#
+# The percentage in each label is the share of training steps at or below sigma 0.387 (the
+# "detail band"), measured over 400k draws. Lower shift = more low-noise training. Parsed with
+# .split(" ")[0], the same convention the Adaptive LR dropdowns use, so the trailing note is
+# free text. 'sigmoid' and 'resolution' are logit-normal literals the trainer also accepts;
+# both were tried at 1e-4 and visibly overdrove the adapters (twice) — kept for A/B, flagged.
+MINIMAX_SHIFT_OPTIONS = [
+    "12 - reference default, 5% detail band",
+    "8 - 7%",
+    "6 - 9%, suggested first step down",
+    "5 - 11%",
+    "4 - 14%, near the settings that overdrove",
+    "3 - 17%",
+    "resolution - 16%, overdrove at 1e-4",
+    "sigmoid - 32%, overdrove at 1e-4",
+]
+
 # Built-in presets — always available in the Load Preset dropdown, prefixed with ✨ to distinguish
 # from user-saved presets. Defined in code so they ship with the app and can't be deleted accidentally.
 # Tune these as empirical findings accumulate.
@@ -1228,6 +1254,8 @@ class LoRATrainerGUI:
             "SAVE_EVERY_N_EPOCHS": 1,
             "SEED": 42,
             "BLOCKS_SWAP": "auto",  # Klein valid range 0-16; "auto" detects from GPU
+            # MiniMax H3 only — training noise-level density (see MINIMAX_SHIFT_OPTIONS).
+            "MINIMAX_SHIFT": "12",
             "RESUME_TRAINING": "",
             "OPTIMIZER_TYPE": "adamw8bit",
             "OPTIMIZER_ARGS": "",
@@ -3532,6 +3560,31 @@ class LoRATrainerGUI:
                        "the scores with your dataset. Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._krea2_losswatch_hint.grid(row=24, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        # --- Detail Focus (MiniMax H3 only) — which noise levels the run actually trains on.
+        # Hidden for every other family by _apply_training_arch_visibility; see
+        # MINIMAX_SHIFT_OPTIONS for why the reference default starves the low-noise band.
+        self._minimax_shift_label = ttk.Label(training_content, text="Detail Focus:")
+        self._minimax_shift_label.grid(row=26, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self._minimax_shift_frame = ttk.Frame(training_content)
+        self._minimax_shift_frame.grid(row=26, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        self.entries["MINIMAX_SHIFT"] = ttk.Combobox(
+            self._minimax_shift_frame, values=MINIMAX_SHIFT_OPTIONS, state="readonly", width=38)
+        self.entries["MINIMAX_SHIFT"].pack(side=tk.LEFT)
+        self._select_combo_by_token(self.entries["MINIMAX_SHIFT"],
+                                    self.settings.get("MINIMAX_SHIFT", "12"))
+        self._minimax_shift_hint = ttk.Label(
+            training_content,
+            text="Where the run spends its steps on the noise scale. The reference default (12) is "
+                 "MiniMax's VIDEO setting: it puts 57% of steps above sigma 0.9 and only 5% in the "
+                 "low-noise band where fine detail is learned — good at placing a pose, hairstyle and "
+                 "silhouette, thin on skin, eyes and texture. Lower numbers move steps down into that "
+                 "band. Step down one notch at a time: more low-noise training also means a bigger "
+                 "effective step there, so if a lower setting overbakes, drop the learning rate (or "
+                 "turn on Adaptive LR) rather than jumping straight back to 12. The value used is "
+                 "recorded in the saved LoRA's metadata as ss_timestep_density.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_shift_hint.grid(row=27, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # Answers "when do changes take effect?" (issue #40) right where people wonder it.
         ttk.Label(training_content,
                   text="When do changes apply? Settings are read when a run launches — changing "
@@ -3540,7 +3593,7 @@ class LoRATrainerGUI:
                        "need a fresh run (Resume skips re-caching).",
                   foreground=COLORS["text_explain"], font=(FONT_FAMILY, 8, "italic"),
                   justify=tk.LEFT, wraplength=720).grid(
-            row=25, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 6))
+            row=30, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 6))
 
         # === Optimizer Section (Collapsed by default) ===
         optimizer_section = CollapsibleFrame(outer,"Optimizer", default_expanded=False)
@@ -4751,6 +4804,12 @@ class LoRATrainerGUI:
             v = p.get(key)
             if v not in (None, ""):
                 bits.append(f"{label} {v}")
+        # Detail Focus only means anything for MiniMax, and it's the whole point of queueing a
+        # shift sweep — without it two rows of an A/B look identical in the manager.
+        if ARCHITECTURES.get(item.get("architecture", ""), {}).get("is_minimax"):
+            _sh = str(p.get("MINIMAX_SHIFT") or "").split(" ")[0]
+            if _sh:
+                bits.append(f"detail {_sh}")
         return name, "  ·  ".join(str(b) for b in bits) + f"\nqueued {item.get('queued_at', '?')}"
 
     def _render_queue_window(self):
@@ -5301,6 +5360,23 @@ class LoRATrainerGUI:
         # hide lists in _apply_training_arch_visibility once krea2_train supports it.
         self._apply_training_arch_visibility(config.get("is_krea2", False))
 
+    @staticmethod
+    def _select_combo_by_token(combo, value):
+        """Select the option whose FIRST whitespace-separated token equals `value`.
+
+        Labelled dropdowns here carry a trailing note ("12 - reference default, 5% detail band")
+        while settings/presets store only the bare token. Matching on the token means the note
+        can be reworded without invalidating anyone's saved runs or queued items."""
+        want = str(value).split(" ")[0]
+        try:
+            for opt in (combo.cget("values") or ()):
+                if str(opt).split(" ")[0] == want:
+                    combo.set(str(opt))
+                    return True
+        except tk.TclError:
+            pass
+        return False
+
     def _is_krea2_arch(self) -> bool:
         return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)
 
@@ -5475,6 +5551,11 @@ class LoRATrainerGUI:
         # The row frame carries the combo + hint together.
         for w in (self.labels["NETWORK_TYPE"], self._network_type_rowf):
             self._set_widget_visible(w, native)
+
+        # Detail Focus is the inverse: MiniMax ONLY. Klein and Krea 2 already derive their shift
+        # from the sample's token count, so there is nothing to dial there.
+        for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint):
+            self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
         # rather than show a picker the trainer silently ignores.
@@ -20833,6 +20914,9 @@ class LoRATrainerGUI:
             "SAVE_EVERY_N_EPOCHS": int(self.entries["SAVE_EVERY_N_EPOCHS"].get()),
             "SEED": int(self.entries["SEED"].get()),
             "BLOCKS_SWAP": blocks_swap,
+            # MiniMax-only; the widget exists (hidden) under every family, so read it unconditionally
+            # and let the MiniMax command builder be the one that acts on it.
+            "MINIMAX_SHIFT": str(self.entries["MINIMAX_SHIFT"].get() or "12").split(" ")[0],
             "DATASET_CONFIG": self._get_path("DATASET_CONFIG"),
             "VAE_MODEL": self._get_path("VAE_MODEL"),
             "CLIP_MODEL": self._get_path("CLIP_MODEL"),
@@ -21779,6 +21863,13 @@ class LoRATrainerGUI:
         # at run time — correct for queued runs too); an explicit number passes through.
         _bs = str(self.settings.get("BLOCKS_SWAP", "auto") or "auto").strip()
         cmd += ["--blocks_to_swap", "auto" if _bs.lower().startswith("auto") else _bs]
+        # Detail Focus -> --shift. Sent ALWAYS, including the reference 12, so the launched
+        # command (and the console line recording it) states which density a run used instead of
+        # leaving it implicit — these are meant to be A/B'd against each other, often queued
+        # back to back, and "which one was this?" has to be answerable from the record alone.
+        # The trainer stamps the same thing into the LoRA as ss_timestep_density.
+        _shift = str(self.settings.get("MINIMAX_SHIFT", "12") or "12").split(" ")[0]
+        cmd += ["--shift", _shift]
         # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
         # the factor is the dial. Same flags as the Krea 2 builder.
         if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):

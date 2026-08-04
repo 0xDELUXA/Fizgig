@@ -635,9 +635,11 @@ MINIMAX_BUILT_IN_PRESETS = {
     # density sweep needs the LR held still or the runs aren't comparable. Turn it on once a
     # Detail Focus value has been settled on.
     #
-    # Detail Focus 2.5 = the recommendation for the 0.25 MP this preset trains at. Change one and
+    # Detail Focus 3.5 = the recommendation for the 0.5 MP this preset trains at. Change one and
     # the Training tab flags the other (the readout beside the dial), so the pair stays coherent.
-    "✨ MiniMax H3 Defaults (LoKR 8, 0.25 MP)": {
+    # 0.5 MP rather than the 0.25 the other families default to: detail has to be present in the
+    # training image before any schedule can teach it, and 0.5 still fits without block swap.
+    "✨ MiniMax H3 Defaults (LoKR 8, 0.5 MP)": {
         "NETWORK_DIM": 32, "NETWORK_ALPHA": 32,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         "LEARNING_RATE": 1e-4,
@@ -645,8 +647,8 @@ MINIMAX_BUILT_IN_PRESETS = {
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         "OPTIMIZER_TYPE": "adamw8bit",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        "DATASET_MEGAPIXELS": "0.25",
-        "MINIMAX_SHIFT": "2.5",
+        "DATASET_MEGAPIXELS": "0.5",
+        "MINIMAX_SHIFT": "3.5",
     },
 }
 
@@ -1286,8 +1288,8 @@ class LoRATrainerGUI:
             "SEED": 42,
             "BLOCKS_SWAP": "auto",  # Klein valid range 0-16; "auto" detects from GPU
             # MiniMax H3 only — training noise-level density (see MINIMAX_SHIFT_OPTIONS).
-            # Defaults to the recommendation for the default 0.25 MP, not to H3's video-tuned 12.
-            "MINIMAX_SHIFT": "2.5",
+            # Matches the shipped MiniMax preset (0.5 MP), not H3's video-tuned 12.
+            "MINIMAX_SHIFT": "3.5",
             "RESUME_TRAINING": "",
             "OPTIMIZER_TYPE": "adamw8bit",
             "OPTIMIZER_ARGS": "",
@@ -3603,7 +3605,7 @@ class LoRATrainerGUI:
             self._minimax_shift_frame, values=MINIMAX_SHIFT_OPTIONS, state="readonly", width=34)
         self.entries["MINIMAX_SHIFT"].pack(side=tk.LEFT)
         self._select_combo_by_token(self.entries["MINIMAX_SHIFT"],
-                                    self.settings.get("MINIMAX_SHIFT", "2.5"))
+                                    self.settings.get("MINIMAX_SHIFT", "3.5"))
         # Live "does this match your image size?" readout. The dial is deliberately NOT auto-set
         # from the MP box: a queued A/B must keep the density the user chose for it, and silently
         # rewriting a setting when an unrelated dropdown moves is exactly how a sweep gets muddled.

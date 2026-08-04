@@ -577,6 +577,16 @@ def train_minimax(
                                                          device=device, quantize=quantize)[0]
             sample_dir = os.path.join(output_dir, "sample")
             os.makedirs(sample_dir, exist_ok=True)
+            # State the whole preview recipe once, up front — steps in particular, since too
+            # few leaves the latent off-manifold and the decode patchy.
+            logger.info(
+                f"[preview] {sample_steps} steps @ {sample_width}x{sample_height}, "
+                f"cfg {sample_cfg_scale:g}"
+                f"{'' if sample_cfg_scale > 1.0 else ' (off — H3 is guidance-distilled)'}, "
+                f"seed {sample_seed if sample_seed else 'random'}, "
+                f"every {sample_every_n_epochs} epoch(s)"
+                f"{', plus epoch 0' if sample_at_first else ''} — "
+                f"{'full VAE decode' if vae_path else 'RGB approximation (no VAE path set)'}")
         except Exception as _e:
             logger.warning(f"[preview] prompt encoding failed ({type(_e).__name__}: {_e}) — "
                            f"previews disabled; training continues normally.")
@@ -724,7 +734,7 @@ def train_minimax(
                 img.save(os.path.join(
                     sample_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}.png"))
             logger.info(f"[preview] epoch {epoch}: wrote {len(encoded_prompts)} sample(s) "
-                        f"to {sample_dir}")
+                        f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
             del decoder                                  # free the ~4.85 GB decoder immediately
             if was_training:

@@ -182,6 +182,11 @@ class Nvfp4Linear(nn.Linear):
     AWQ note: `pre_quant_scale` multiplies the INPUT (comfy ops.py does `input * s`), so it is
     applied to the activation here rather than folded into the weight columns — exact, and it
     keeps the stored block scales untouched.
+        Both scale tensors are held as their raw BYTES (uint8 views) and reinterpreted in the
+    forward. The block scales are float8_e4m3fn and the global scale fp32; a stray
+    `.to(dtype=...)` anywhere would silently cast either one — for the fp8 scales that is not
+    lossy, it is garbage, since a cast reads them as numbers rather than reinterpreting. The
+    byte view cannot be cast.
     """
 
     def __init__(self, in_features, out_features, bias=False, compute_dtype=torch.bfloat16):
@@ -190,22 +195,35 @@ class Nvfp4Linear(nn.Linear):
         self.compute_dtype = compute_dtype
         self.register_buffer("packed", torch.empty(out_features, in_features // 2,
                                                    dtype=torch.uint8), persistent=False)
+        # fp8 block scales [out, in/16], stored as bytes
         self.register_buffer("bscale", torch.empty(out_features, in_features // 16,
                                                    dtype=torch.uint8), persistent=False)
-        self.register_buffer("gscale", torch.empty((), dtype=torch.float32), persistent=False)
+        # fp32 scalar, stored as its 4 bytes
+        self.register_buffer("gscale", torch.empty(4, dtype=torch.uint8), persistent=False)
         self.register_buffer("pre_quant_scale", None, persistent=False)
+
+    def _scales(self):
+        return self.bscale.view(torch.float8_e4m3fn), self.gscale.view(torch.float32)
 
     @property
     def weight(self):
-        """Dense weight, materialized on demand (inspection only — forward dequantizes inline)."""
-        return _nvfp4_dequant(self.packed, self.bscale, self.gscale).to(self.compute_dtype)
+        """The TRUE dense weight, materialized on demand (inspection only — the forward
+        dequantizes inline). The AWQ scale is folded into the columns here so this matches the
+        weight the reference produces; the forward applies it to the activation instead, which
+        is algebraically identical and one rounding step shorter."""
+        bs, gs = self._scales()
+        w = _nvfp4_dequant(self.packed, bs, gs).to(self.compute_dtype)
+        if self.pre_quant_scale is not None:
+            w = w * self.pre_quant_scale.to(w.dtype).reshape(1, -1)
+        return w
 
     def forward(self, x):
         dt = self.compute_dtype
         if self.pre_quant_scale is not None:
             x = x * self.pre_quant_scale.to(x.dtype)      # AWQ acts on the input
-        w = _nvfp4_dequant(self.packed, self.bscale, self.gscale).to(dt)
-        return torch.nn.functional.linear(x.to(dt), w, self.bias)
+        bs, gs = self._scales()
+        return torch.nn.functional.linear(x.to(dt), _nvfp4_dequant(self.packed, bs, gs).to(dt),
+                                          self.bias)
 
 
 def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
@@ -283,8 +301,11 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
                     continue
                 fm = "model." + mod_name
                 module.packed = f.get_tensor(fm + ".weight").to(torch.uint8).to(dev)
-                module.bscale = f.get_tensor(fm + ".weight_scale").view(torch.uint8).to(dev)
-                module.gscale = f.get_tensor(fm + ".weight_scale_2").to(torch.float32).to(dev)
+                # byte views: fp8 block scales and the fp32 global scale must never be CAST
+                module.bscale = f.get_tensor(fm + ".weight_scale").contiguous().view(
+                    torch.uint8).to(dev)
+                module.gscale = f.get_tensor(fm + ".weight_scale_2").to(torch.float32).reshape(
+                    1).contiguous().view(torch.uint8).to(dev)
                 pqs = fm + ".pre_quant_scale"
                 module.pre_quant_scale = (f.get_tensor(pqs).to(compute_dtype).to(dev)
                                           if pqs in ckpt else None)

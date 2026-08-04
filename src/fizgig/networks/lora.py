@@ -850,7 +850,16 @@ class LoRANetwork(torch.nn.Module):
                         # expose in_features/out_features and LoRAModule only wraps their
                         # forward. Needed to LoRA-train on an NF4-quantized frozen base
                         # (MiniMax H3's 33B DiT), which Fizgig loads as Linear4bit.
-                        is_linear = child_module.__class__.__name__ in ("Linear", "Linear4bit", "Linear8bitLt")
+                        # Match by CLASS NAME, so every quantized Linear stand-in must be listed
+                        # here or its modules are silently skipped — a LoRA that trains a
+                        # fraction of what was asked for, with no error. ConvRotInt8Linear /
+                        # Nvfp4Linear (MiniMax H3's int8-ConvRot and nvfp4 bases) were exactly
+                        # that: 58 of 258 modules wrapped. An isinstance(nn.Linear) test would
+                        # be more robust; the name list is kept for Conv2d symmetry, so ADD TO
+                        # IT when introducing a Linear subclass.
+                        is_linear = child_module.__class__.__name__ in (
+                            "Linear", "Linear4bit", "Linear8bitLt",
+                            "ConvRotInt8Linear", "Nvfp4Linear")
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
                         is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
 

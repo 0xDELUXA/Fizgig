@@ -167,11 +167,71 @@ class MiniMaxH3TextEncoder:
         return out.last_hidden_state.to(self.compute_dtype)   # [1, L, 5120]
 
 
+class Nvfp4Linear(nn.Linear):
+    """A frozen Linear that KEEPS the checkpoint's nvfp4 weights, like the reference loader.
+
+    The previous path dequantized nvfp4 -> bf16 and then re-quantized to NF4, which adds ~9%
+    relative error to the encoder (measured per tensor on the real file) that the reference
+    never incurs — it attaches the packed nvfp4 tensors and uses them directly. NF4 is also the
+    coarser format here: one absmax per 64 elements against nvfp4's FP8 scale per 16, plus AWQ.
+
+    Cost of keeping them: nothing. Packed nvfp4 is 0.5 byte/param, the same as NF4 — ~15.7 GB
+    for this encoder either way. Dequantization moves to the matmul, which is fine because the
+    TE runs once per caption during the caching pass, not per training step.
+
+    AWQ note: `pre_quant_scale` multiplies the INPUT (comfy ops.py does `input * s`), so it is
+    applied to the activation here rather than folded into the weight columns — exact, and it
+    keeps the stored block scales untouched.
+    """
+
+    def __init__(self, in_features, out_features, bias=False, compute_dtype=torch.bfloat16):
+        super().__init__(in_features, out_features, bias=bias)
+        del self._parameters["weight"]
+        self.compute_dtype = compute_dtype
+        self.register_buffer("packed", torch.empty(out_features, in_features // 2,
+                                                   dtype=torch.uint8), persistent=False)
+        self.register_buffer("bscale", torch.empty(out_features, in_features // 16,
+                                                   dtype=torch.uint8), persistent=False)
+        self.register_buffer("gscale", torch.empty((), dtype=torch.float32), persistent=False)
+        self.register_buffer("pre_quant_scale", None, persistent=False)
+
+    @property
+    def weight(self):
+        """Dense weight, materialized on demand (inspection only — forward dequantizes inline)."""
+        return _nvfp4_dequant(self.packed, self.bscale, self.gscale).to(self.compute_dtype)
+
+    def forward(self, x):
+        dt = self.compute_dtype
+        if self.pre_quant_scale is not None:
+            x = x * self.pre_quant_scale.to(x.dtype)      # AWQ acts on the input
+        w = _nvfp4_dequant(self.packed, self.bscale, self.gscale).to(dt)
+        return torch.nn.functional.linear(x.to(dt), w, self.bias)
+
+
 def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
-                       quantize=True, tokenizer_dir=None) -> MiniMaxH3TextEncoder:
-    """Build + NF4-load the Qwen3-VL-32B language TE from the bf16 checkpoint (visual.* skipped)."""
+                       quantize=True, tokenizer_dir=None,
+                       te_quant="auto") -> MiniMaxH3TextEncoder:
+    """Build the Qwen3-VL-32B language TE (visual.* skipped).
+
+    te_quant:
+      "nvfp4" — KEEP the checkpoint's packed nvfp4 weights (what the reference does). Same
+                residency as NF4 (~0.5 byte/param) with none of the extra ~9% error.
+      "nf4"   — dequantize to bf16 then 4-bit quantize with bitsandbytes. Required for the
+                bf16 checkpoint, which has nothing to keep.
+      "auto"  — nvfp4 when the file is nvfp4-awq, else nf4.
+    """
     from bitsandbytes.nn import Linear4bit, Params4bit
     from transformers import AutoTokenizer
+
+    with MemoryEfficientSafeOpen(path) as _probe:
+        _is_cq = any(k.endswith(".comfy_quant") for k in _probe.keys())
+    mode = te_quant
+    if mode == "auto":
+        mode = "nvfp4" if _is_cq else "nf4"
+    if mode == "nvfp4" and not _is_cq:
+        raise ValueError("te_quant='nvfp4' needs the nvfp4-awq checkpoint")
+    if not quantize:
+        mode = "none"
 
     with torch.device("meta"):
         model = build_qwen3_te()
@@ -180,12 +240,21 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
         # each Linear4bit eagerly allocates a full fp32 CPU weight (nn.Linear default) — across the
         # 32B Qwen3-VL that is well over 100 GB of throwaway tensors the allocator then holds for
         # the whole caching pass. On meta the shells are 0 bytes; real weights stream in below.
-        if quantize:
+        if mode != "none":
             for mod_name, module in list(model.named_modules()):
                 for child_name, child in list(module.named_children()):
                     full = f"{mod_name}.{child_name}" if mod_name else child_name
-                    if isinstance(child, nn.Linear) and (full + ".weight").endswith(_NF4_SUFFIXES):
-                        q = Linear4bit(child.in_features, child.out_features, bias=child.bias is not None,
+                    if not (isinstance(child, nn.Linear)
+                            and (full + ".weight").endswith(_NF4_SUFFIXES)):
+                        continue
+                    if mode == "nvfp4":
+                        setattr(module, child_name,
+                                Nvfp4Linear(child.in_features, child.out_features,
+                                            bias=child.bias is not None,
+                                            compute_dtype=compute_dtype))
+                    else:
+                        q = Linear4bit(child.in_features, child.out_features,
+                                       bias=child.bias is not None,
                                        compute_dtype=compute_dtype, quant_type="nf4")
                         setattr(module, child_name, q)
 
@@ -202,8 +271,24 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
         # else (norms, embed) loads as usual; the checkpoint's norm weights already carry the
         # folded AWQ scales, so the model function matches the bf16 TE up to 4-bit noise.
         is_comfy_quant = any(k.endswith(".comfy_quant") for k in ckpt)
-        if is_comfy_quant:
+        if mode == "nvfp4":
+            print("[minimax-te] comfy-quant checkpoint (nvfp4-awq) — KEEPING the packed nvfp4 "
+                  "weights (the reference's own storage; NF4 on top would add ~9% error)")
+        elif is_comfy_quant:
             print("[minimax-te] comfy-quant checkpoint (nvfp4-awq) — dequantizing to bf16 per tensor")
+        # nvfp4 mode: the quantized linears hold BUFFERS, not parameters — fill them first.
+        if mode == "nvfp4":
+            for mod_name, module in model.named_modules():
+                if not isinstance(module, Nvfp4Linear):
+                    continue
+                fm = "model." + mod_name
+                module.packed = f.get_tensor(fm + ".weight").to(torch.uint8).to(dev)
+                module.bscale = f.get_tensor(fm + ".weight_scale").view(torch.uint8).to(dev)
+                module.gscale = f.get_tensor(fm + ".weight_scale_2").to(torch.float32).to(dev)
+                pqs = fm + ".pre_quant_scale"
+                module.pre_quant_scale = (f.get_tensor(pqs).to(compute_dtype).to(dev)
+                                          if pqs in ckpt else None)
+
         for name in model_keys:
             src = "model." + name                          # checkpoint prefixes the LM with model.
             file_mod = src.rsplit(".", 1)[0]
@@ -215,7 +300,9 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
             else:
                 continue                                   # e.g. norm (Identity) has no params
             parent = model.get_submodule(name.rsplit(".", 1)[0])
-            if quantize and (name.endswith(_NF4_SUFFIXES)):
+            if mode == "nvfp4" and name.endswith(_NF4_SUFFIXES):
+                continue                                   # placed as nvfp4 buffers above
+            if mode == "nf4" and (name.endswith(_NF4_SUFFIXES)):
                 p = Params4bit(w.to(compute_dtype), requires_grad=False, quant_type="nf4").to(dev)
                 setattr(parent, leaf, p)
             else:

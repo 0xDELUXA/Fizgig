@@ -702,6 +702,22 @@ def train_minimax(
     else:
         logger.info(f"LoRA: {len(network.unet_loras)} modules wrapped (dim {network_dim}, alpha {network_alpha})")
 
+    # How many Linears did the include_patterns actually TARGET? create_modules matches by class
+    # NAME, so a quantized Linear stand-in that is not on that list is skipped in silence — which
+    # once shipped a run training 58 of 258 modules with no error anywhere. Compare and refuse.
+    import re as _re
+    _targeted = [n for n, m in dit.named_modules()
+                 if isinstance(m, torch.nn.Linear)
+                 and any(_re.search(p, n) for p in include_patterns)]
+    if len(network.unet_loras) < len(_targeted):
+        _kinds = sorted({type(dit.get_submodule(n)).__name__ for n in _targeted})
+        raise RuntimeError(
+            f"only {len(network.unet_loras)} of {len(_targeted)} targeted Linears were wrapped — "
+            f"the network builder matches by class name and one of {_kinds} is not on its list "
+            f"(networks/lora.py, create_modules). Training now would silently learn a fraction "
+            f"of the model.")
+    logger.info(f"[network] {len(network.unet_loras)}/{len(_targeted)} targeted Linears wrapped")
+
     params = list(network.get_trainable_params())
 
     # Adaptive LR ignores the Learning Rate box: it starts at the GEOMETRIC MIDPOINT of Min/Max

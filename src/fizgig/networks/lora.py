@@ -52,6 +52,18 @@ class LoRAModule(torch.nn.Module):
             in_dim = org_module.in_features
             out_dim = org_module.out_features
 
+        # A LoRA can't have more rank than the matrix it adapts: B@A is rank <= min(in, out)
+        # however wide the bottleneck is. Above that cap the extra columns of lora_up are dead
+        # weight — on MiniMax H3's pruned AdaLN ([96768, 8]) a rank-32 adapter would be 3.1 M
+        # params per block that can never express more than rank 8. Cap the rank and scale alpha
+        # with it so alpha/dim (the applied strength) is unchanged.
+        cap = min(in_dim, out_dim)
+        if lora_dim > cap:
+            _a = alpha.detach().float().item() if type(alpha) == torch.Tensor else alpha
+            if _a:            # 0/None already means "alpha = rank", which follows the cap itself
+                alpha = _a * cap / lora_dim
+            lora_dim = cap
+
         self.lora_dim = lora_dim
         self.split_dims = split_dims
 

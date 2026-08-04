@@ -51,6 +51,12 @@ class MiniMaxH3Config:
     time_embed_hidden_size: int = 5376
     time_embed_dim: int = 2688
     rope_inv_freq_len: int = 16
+    # PRUNED checkpoints (minimax_h3_*_pruned_*, what ComfyUI ships and users run at inference)
+    # replace the timestep MLP with a lookup table sampled by linear interpolation: no
+    # `time_embedder`, an `adaln_t_table` of [size, time_embed_dim] instead, time_embed_dim 8
+    # rather than 2688, and NO silu in front of the AdaLN projections. Set this and the model
+    # builds that variant; None = the full bf16 model.
+    adaln_t_table_size: Optional[int] = None
     norm_eps: float = 1e-5
     qk_norm_eps: float = 1e-5
     final_norm_eps: float = 1e-5
@@ -383,7 +389,16 @@ class MiniMaxH3DiT(nn.Module):
         self.video_patch_proj = nn.Linear(video_patch_dim, c.hidden_size, bias=True)
         self.audio_patch_proj = nn.Linear(c.audio_latents_dim, c.hidden_size, bias=True)
         self.condition_proj = nn.Linear(c.text_dim, c.hidden_size, bias=True)
-        self.time_embedder = TimeEmbedder(c.timestep_input_dim, c.time_embed_hidden_size, c.time_embed_dim)
+        # Full model: a timestep MLP. Pruned: a sampled curve table (see the config field).
+        self.pruned_adaln = c.adaln_t_table_size is not None
+        _silu = not self.pruned_adaln              # the table already absorbs the nonlinearity
+        if self.pruned_adaln:
+            self.time_embedder = None
+            self.register_buffer("adaln_t_table",
+                                 torch.zeros(c.adaln_t_table_size, c.time_embed_dim))
+        else:
+            self.time_embedder = TimeEmbedder(c.timestep_input_dim, c.time_embed_hidden_size,
+                                              c.time_embed_dim)
         self.rope = nn.Module()
         self.rope.register_buffer("inv_freq",
                                   1.0 / (10000.0 ** (torch.arange(0, c.rope_inv_freq_len, dtype=torch.float32)
@@ -393,15 +408,31 @@ class MiniMaxH3DiT(nn.Module):
                                           c.final_norm_eps)
         self.blocks = nn.ModuleList([
             DiTBlock(c.hidden_size, c.num_attention_heads, c.attention_head_dim, c.ffn_hidden_size,
-                     c.time_embed_dim, c.norm_eps, c.qk_norm_eps)
+                     c.time_embed_dim, c.norm_eps, c.qk_norm_eps, apply_silu=_silu)
             for _ in range(c.num_layers)])
         self.final_layer = FinalLayer(c.hidden_size, c.time_embed_dim, video_patch_dim,
-                                      c.audio_latents_dim, c.final_norm_eps)
+                                      c.audio_latents_dim, c.final_norm_eps, apply_silu=_silu)
         self._gradient_checkpointing = False
         self._swap_from = len(self.blocks)          # blocks >= this index live on CPU between uses
         # Pack the reference's silence audio block (see the AUDIO_* constants above). Off is an
         # escape hatch for A/B only — the base was trained with these rows present.
         self.pack_audio_rows = True
+
+    def _time_embedding(self, t: torch.Tensor) -> torch.Tensor:
+        """[M] cleanness values in [0,1] -> [M, time_embed_dim] modulation input.
+
+        Full model: the sinusoid+MLP time embedder. Pruned: linear interpolation into the
+        curve table (t=0 is row 0, t=1 the last row)."""
+        if not self.pruned_adaln:
+            return self.time_embedder(t)
+        table = self.adaln_t_table.float()
+        pos = t.to(torch.float32).clamp(0.0, 1.0) * (table.shape[0] - 1)
+        # the table can be CPU-parked under offloading while t arrives on cuda
+        pos = pos.to(table.device)
+        lo = pos.floor().long()
+        hi = (lo + 1).clamp(max=table.shape[0] - 1)
+        frac = (pos - lo.float()).unsqueeze(1)
+        return (table[lo] * (1.0 - frac) + table[hi] * frac).to(t.device)
 
     def enable_gradient_checkpointing(self, enabled: bool = True):
         """Recompute each block in backward instead of storing activations. Required when block
@@ -481,7 +512,7 @@ class MiniMaxH3DiT(nn.Module):
         # (timestep, modality) table. Tags: video 0, text 1, audio 2.
         t_all = t_val if audio_embed is None else torch.cat([t_val, t_audio])
         uniq, inverse = torch.unique(t_all, sorted=True, return_inverse=True)
-        t_emb = self.time_embedder(uniq).to(dtype)                                # [M, t_dim]
+        t_emb = self._time_embedding(uniq).to(dtype)                              # [M, t_dim]
         tags = torch.full((seq_len,), VIDEO_TAG, dtype=torch.long, device=device)
         tags[:text_len] = TEXT_TAG
         row_t_index = torch.full((seq_len,), int(inverse[0]), dtype=torch.long, device=device)

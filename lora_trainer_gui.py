@@ -14299,22 +14299,26 @@ class LoRATrainerGUI:
 
         # Card (bottom): MiniMax H3 model paths — experimental third family, kept at the very
         # bottom under everything else since it's barebones image-only LoRA training (no samples,
-        # no inference). The bf16 DiT is the training base; it's NF4-quantized at load.
+        # no inference). The DiT is the training base; it's NF4-quantized at load either way.
         mm_card = self._start_section_card(
             outer, "Model Paths (MiniMax H3 — experimental)",
-            "Barebones image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the bf16 "
-            "DiT (quantized to NF4 at load — fits a 32 GB card). The Qwen3-VL-32B text encoder and "
-            "the video VAE are only needed for the one-time caching pass — the compact nvfp4 TE "
-            "(the same file ComfyUI uses) is recommended. No samples, no preview.",
+            "Image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the pruned int8 DiT "
+            "— the same file ComfyUI runs — quantized to NF4 at load, so the resident base is "
+            "~11 GB. The Qwen3-VL-32B text encoder and the video VAE are only needed for the "
+            "one-time caching pass; the compact nvfp4 TE is recommended. Stills only — no video, "
+            "no audio.",
         )
         mm_card.columnconfigure(1, weight=1)
         mr = 0
         mr = self._add_pref_row(
-            mm_card, mr, "DiT (bf16):", "minimax_dit",
-            "MiniMax H3 bf16 DiT — the training base (minimax_h3_fl2va_bf16.safetensors, ~66 GB). "
-            "Quantized to NF4 at load, so the resident base is ~17 GB.",
-            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_bf16.safetensors",
-            download_note="~66GB bf16 — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_bf16.safetensors (the fl2va text→AV variant is the trainable one)",
+            mm_card, mr, "DiT:", "minimax_dit",
+            "MiniMax H3 DiT — the training base. Use the PRUNED int8 file "
+            "(minimax_h3_fl2va_pruned_int8_convrot.safetensors, ~21 GB): it is the one ComfyUI "
+            "runs, so your LoRA trains against the weights it will be deployed on, and its "
+            "curve-table AdaLN is a target a LoRA can actually use. The ~66 GB bf16 file also "
+            "works. Either is quantized to NF4 at load.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            download_note="~21GB — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors (fl2va is the trainable variant; the 66GB bf16 file works too)",
         )
         mr = self._add_pref_row(
             mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
@@ -20355,9 +20359,9 @@ class LoRATrainerGUI:
 
         if config.get("is_minimax"):
             # MiniMax H3 reads its three model paths from Preferences (minimax_*). All are
-            # required: the bf16 DiT to train, the video VAE + Qwen3-VL-32B TE for caching.
+            # required: the DiT to train (pruned int8 or bf16), the video VAE + Qwen3-VL-32B TE.
             for pref_key, label in (
-                ("minimax_dit", "MiniMax H3 DiT (bf16)"),
+                ("minimax_dit", "MiniMax H3 DiT"),
                 ("minimax_vae", "MiniMax H3 Video VAE"),
                 ("minimax_text_encoder", "Qwen3-VL-32B text encoder"),
             ):

@@ -30,18 +30,23 @@ from fizgig.training.metadata import ARCHITECTURE_MINIMAX
 
 logger = logging.getLogger(__name__)
 
-# LoRA targets the transformer blocks' ATTENTION + MLP Linears only (+ the 2-block text
-# refiner). The fp32 patch/head IO layers are left alone (wrapping them clashes fp32-base vs
-# bf16-adapter) — and `adaln_proj.linear` is deliberately EXCLUDED:
-#   * ComfyUI's pruned inference builds (minimax_h3_*_pruned_*) replace the full-width AdaLN
-#     with a time-embedding curve table — adaln_proj.linear there is [96768, 8], not
-#     [96768, 2688], so an adaln LoRA can never apply (one shape error per block, key dropped).
-#   * adaln up-matrices are 96768-out (6x qkv) — training them poured the largest share of LoRA
-#     capacity into weights the user's inference model then threw away (real run: ~50% likeness
-#     until excluded).
-# Power users on the full bf16 model can re-add it via --include_patterns.
+# LoRA targets the transformer blocks' ATTENTION + MLP Linears (+ the 2-block text refiner).
+# The fp32 patch/head IO layers are left alone (wrapping them clashes fp32-base vs bf16-adapter).
+#
+# `adaln_proj.linear` is per-checkpoint, because the two releases are not the same layer:
+#   * FULL bf16 model: [96768, 2688]. EXCLUDED. Those up-matrices are 96768-out (6x qkv), so
+#     they soaked up the largest share of LoRA capacity (real run: ~50% likeness until excluded)
+#     — and ComfyUI's pruned inference builds, which is what users deploy on, replace the layer
+#     with a curve table, so every adaln key hits a shape error there and is silently dropped.
+#   * PRUNED model: [96768, **8**]. INCLUDED. Training on the pruned checkpoint means the LoRA
+#     is trained against the weights it deploys on, and an 8-input AdaLN is a cheap, genuinely
+#     useful target (the rank cap in LoRAModule keeps it at rank <= 8, ~800 K params per block).
+#     This is what the reference trainer does.
+# Either default can be overridden with --include_patterns.
 DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
                             r"token_refiner\.blocks\..*"]
+PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*",
+                                                      r"final_layer\.adaln_proj\..*"]
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +60,12 @@ DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
 #   swap 16 + ckpt   : resident 11.9 (0.34 GB/block), steady 12.8, step peak 19.3 — the swap
 #                      path carries a ~7.4 GB backward transient (checkpoint recompute segments
 #                      held by the engine), which the planner must budget on top of residency.
-_RESIDENT_GB = 17.5          # full NF4 base resident (measured 17.3-17.6)
+_RESIDENT_GB = 17.5          # full bf16 model, NF4 resident (measured 17.3-17.6)
+# The PRUNED checkpoint drops the full-width AdaLN (~40% of the model's weight mass) for a curve
+# table, so the same NF4 pass lands far smaller: ~20.1 B params quantized -> ~10.1 GB, plus the
+# unquantized remainder. Estimated from the file's own tensor census, not yet GPU-measured, so
+# it carries margin.
+_RESIDENT_PRUNED_GB = 11.0
 _PER_BLOCK_GB = 0.34         # one parked block's GPU share (measured: (17.5-11.9)/16)
 _ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 5.1)
 _ACT_GB_CKPT = 2.0           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.9; margin)
@@ -63,7 +73,7 @@ _SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active 
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
 
 
-def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1):
+def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None):
     """Pure planner: (blocks_to_swap, gradient_checkpointing) from free VRAM + token load.
 
     Token load scales the activation term linearly (tokens ∝ mp x batch). Checkpointing is
@@ -71,16 +81,32 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1):
     (without recompute, autograd would pin every swapped block's weights through backward).
     Swap additionally budgets _SWAP_TRANSIENT_GB: the backward pass transiently holds
     recompute segments beyond the parked residency (measured, see anchors above)."""
+    resident = _RESIDENT_GB if resident_gb is None else float(resident_gb)
     scale = max(0.25, float(mp)) / 0.25 * max(1, int(batch))
-    need_nockpt = _RESIDENT_GB + _ACT_GB_NOCKPT * scale + _RESERVE_GB
+    need_nockpt = resident + _ACT_GB_NOCKPT * scale + _RESERVE_GB
     if free_gb >= need_nockpt:
         return 0, False
-    need_ckpt = _RESIDENT_GB + _ACT_GB_CKPT * scale + _RESERVE_GB
+    need_ckpt = resident + _ACT_GB_CKPT * scale + _RESERVE_GB
     if free_gb >= need_ckpt:
         return 0, True
     deficit = need_ckpt + _SWAP_TRANSIENT_GB - free_gb
     blocks = min(40, int(deficit / _PER_BLOCK_GB + 0.999))
     return blocks, True
+
+
+def is_pruned_checkpoint(path: str) -> bool:
+    """Does this file carry the curve-table AdaLN? Reads only the safetensors header.
+
+    Needed before the base loads, because the pruned build's NF4 residency is ~6 GB smaller and
+    the swap planner would otherwise park blocks nobody needs parked."""
+    import json
+    import struct
+    try:
+        with open(path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            return "adaln_t_table" in json.loads(f.read(n))
+    except Exception:
+        return False
 
 
 def sample_sigmas(batch: int, device, shift=None, generator=None,
@@ -523,7 +549,7 @@ def train_minimax(
     import math
 
     torch.manual_seed(seed)
-    include_patterns = include_patterns or DEFAULT_INCLUDE_PATTERNS
+    user_include_patterns = include_patterns   # None -> resolved per checkpoint below
 
     # ---- dataset (built from the caches the two cache scripts wrote) ----
     shared_epoch = Value("i", 0)
@@ -556,8 +582,11 @@ def train_minimax(
     if str(blocks_to_swap).lower() == "auto":
         if torch.cuda.is_available() and quantize:
             _free_gb = torch.cuda.mem_get_info()[0] / 1e9
-            n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp)
-            logger.info(f"[vram] auto plan: free {_free_gb:.1f} GB, largest bucket {_mp:.2f} MP "
+            _pruned = is_pruned_checkpoint(dit_path)
+            _resident = _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB
+            n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp, resident_gb=_resident)
+            logger.info(f"[vram] auto plan: free {_free_gb:.1f} GB, largest bucket {_mp:.2f} MP, "
+                        f"base ~{_resident:.0f} GB ({'pruned' if _pruned else 'bf16'}) "
                         f"-> blocks_to_swap={n_swap}, checkpointing={'on' if _ckpt_auto else 'off'}")
         else:
             n_swap, _ckpt_auto = 0, False
@@ -614,6 +643,18 @@ def train_minimax(
     if use_ckpt:
         dit.enable_gradient_checkpointing()
         logger.info("[vram] gradient checkpointing ON")
+    # The AdaLN default depends on which checkpoint this is — see the patterns at the top.
+    include_patterns = user_include_patterns or (
+        PRUNED_INCLUDE_PATTERNS if dit.pruned_adaln else DEFAULT_INCLUDE_PATTERNS)
+    if dit.pruned_adaln:
+        logger.info("[base] pruned checkpoint (curve-table AdaLN): training the weights you "
+                    "deploy on, and AdaLN is included in the LoRA targets")
+        if user_include_patterns is None and network_type != "lokr":
+            logger.info("[network] AdaLN is [96768, 8], so its adapters cap at rank 8 whatever "
+                        "--network_dim says (a LoRA cannot exceed the rank of what it adapts)")
+    else:
+        logger.info("[base] full bf16 checkpoint: AdaLN excluded from the LoRA targets (it is "
+                    "replaced by a curve table in the pruned build people run at inference)")
     if network_type == "lokr":
         # LoKR (Kronecker) — same mechanism as Krea 2's: module_class swaps the parametrization
         # inside the identical scan/wrap machinery, so include_patterns (adaln exclusion) and the

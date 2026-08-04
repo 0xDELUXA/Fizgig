@@ -88,7 +88,9 @@ def _nvfp4_dequant(packed, block_scale_fp8, global_scale):
     layer, i.e. ~73s -> ~25s across the whole encoder)."""
     out, in2 = packed.shape
     inp = in2 * 2
-    codes = torch.empty(out, inp, dtype=torch.uint8)
+    # device follows `packed`: this began as a load-time CPU helper, but Nvfp4Linear now calls it
+    # inside a GPU forward, and an un-placed scratch tensor silently lands on CPU.
+    codes = torch.empty(out, inp, dtype=torch.uint8, device=packed.device)
     codes[:, 0::2] = packed >> 4                                  # HIGH nibble first (verified)
     codes[:, 1::2] = packed & 0x0F
     vals = _E2M1_SIGNED.to(codes.device)[codes.long()]            # one signed gather

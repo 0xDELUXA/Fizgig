@@ -63,11 +63,20 @@ def main():
 
     process_batches(args, datasets, all_files, all_paths, lambda batch: encode_and_save_text(encoder, batch))
 
-    # One UNCONDITIONAL embed per cache dir (empty prompt -> the TE's single-pad fallback).
-    # Caption dropout (ai-toolkit default 0.05) swaps it in for ~5% of steps so the model keeps
-    # a usable unconditional pathway instead of overfitting every step to the captions.
-    from safetensors.torch import save_file as _save_file
     _uncond = encoder.encode("")[0].detach().cpu().contiguous()      # (L=1, 5120)
+    del encoder
+    post_process(datasets, all_files, all_paths, args.keep_cache)
+
+    # One UNCONDITIONAL embed per cache dir (empty prompt -> the TE's single-pad fallback), so
+    # caption dropout has something to swap in for ~5% of steps.
+    #
+    # Written AFTER post_process, deliberately. Its filename ends `_minimaxh3_te.safetensors`, so
+    # it matches the glob post_process uses to find stale caches — and since no dataset ITEM
+    # claims that path, a second caching pass would delete the one the first pass wrote. The GUI
+    # re-runs caching on every launch, so the file existed only until the next run and
+    # ss_caption_dropout silently read 0.
+    from safetensors.torch import save_file as _save_file
+    _n = 0
     for ds in datasets:
         _dir = getattr(ds, "cache_directory", None)
         if _dir:
@@ -75,9 +84,9 @@ def main():
             _save_file({"hidden_states": _uncond,
                         "attention_mask": torch.ones(_uncond.shape[0], dtype=torch.bool)},
                        os.path.join(_dir, f"uncond_{ARCHITECTURE_MINIMAX}_te.safetensors"))
-    logger.info(f"[uncond] cached the empty-prompt embed for caption dropout ({_uncond.shape})")
-    del encoder
-    post_process(datasets, all_files, all_paths, args.keep_cache)
+            _n += 1
+    logger.info(f"[uncond] cached the empty-prompt embed for caption dropout "
+                f"({tuple(_uncond.shape)}) in {_n} cache dir(s)")
 
 
 if __name__ == "__main__":

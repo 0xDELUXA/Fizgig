@@ -33,18 +33,20 @@ logger = logging.getLogger(__name__)
 # LoRA targets the transformer blocks' ATTENTION + MLP Linears (+ the 2-block text refiner).
 # The fp32 patch/head IO layers are left alone (wrapping them clashes fp32-base vs bf16-adapter).
 #
-# `adaln_proj.linear` is per-checkpoint, because the two releases are not the same layer:
-#   * FULL bf16 model: [96768, 2688]. EXCLUDED. Those up-matrices are 96768-out (6x qkv), so
-#     they soaked up the largest share of LoRA capacity (real run: ~50% likeness until excluded)
-#     — and ComfyUI's pruned inference builds, which is what users deploy on, replace the layer
-#     with a curve table, so every adaln key hits a shape error there and is silently dropped.
-#   * PRUNED model: [96768, **8**]. INCLUDED. Training on the pruned checkpoint means the LoRA
-#     is trained against the weights it deploys on, and an 8-input AdaLN is a cheap, genuinely
-#     useful target (the rank cap in LoRAModule keeps it at rank <= 8, ~800 K params per block).
-#     This is what the reference trainer does.
-# Either default can be overridden with --include_patterns.
+# `adaln_proj` is EXCLUDED on BOTH checkpoints — two real runs earned this:
+#   * FULL bf16 model ([96768, 2688]): the up-matrices are 96768-out (6x qkv) and soaked up the
+#     largest share of LoRA capacity for weights ComfyUI's pruned builds then throw away
+#     (~50% likeness until excluded).
+#   * PRUNED model ([96768, 8]): tried 4 Aug for reference parity (ai-toolkit wraps it). ONE
+#     epoch at 1e-4 melted anatomy; the A/B (tests/diag_epoch1_ab.py) pinned it — same LoRA
+#     with only the 51 adaln modules disabled rendered clean. Mechanism: AdaLN's modulation
+#     magnitudes are tiny (~0.007 typical), so an adapter delta that is 0.3% of the base by
+#     NORM still swings individual shift/scale/GATE coordinates by ~100% x 50 blocks — and its
+#     8-dim input concentrates gradient, so it gets there in one epoch.
+# Power users can still opt in via --include_patterns (add blocks\.\d+\.adaln_proj\..*).
 DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
                             r"token_refiner\.blocks\..*"]
+# Kept only so an explicit experiment can reach for it; NOT a default anywhere.
 PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*",
                                                       r"final_layer\.adaln_proj\..*"]
 
@@ -643,18 +645,11 @@ def train_minimax(
     if use_ckpt:
         dit.enable_gradient_checkpointing()
         logger.info("[vram] gradient checkpointing ON")
-    # The AdaLN default depends on which checkpoint this is — see the patterns at the top.
-    include_patterns = user_include_patterns or (
-        PRUNED_INCLUDE_PATTERNS if dit.pruned_adaln else DEFAULT_INCLUDE_PATTERNS)
-    if dit.pruned_adaln:
-        logger.info("[base] pruned checkpoint (curve-table AdaLN): training the weights you "
-                    "deploy on, and AdaLN is included in the LoRA targets")
-        if user_include_patterns is None and network_type != "lokr":
-            logger.info("[network] AdaLN is [96768, 8], so its adapters cap at rank 8 whatever "
-                        "--network_dim says (a LoRA cannot exceed the rank of what it adapts)")
-    else:
-        logger.info("[base] full bf16 checkpoint: AdaLN excluded from the LoRA targets (it is "
-                    "replaced by a curve table in the pruned build people run at inference)")
+    include_patterns = user_include_patterns or DEFAULT_INCLUDE_PATTERNS
+    logger.info("[base] %s checkpoint; LoRA targets: attention + MLP + token refiner (AdaLN "
+                "excluded — its gate coordinates melt anatomy when adapted, see the pattern "
+                "note in trainer.py)",
+                "pruned (curve-table AdaLN)" if dit.pruned_adaln else "full bf16")
     if network_type == "lokr":
         # LoKR (Kronecker) — same mechanism as Krea 2's: module_class swaps the parametrization
         # inside the identical scan/wrap machinery, so include_patterns (adaln exclusion) and the

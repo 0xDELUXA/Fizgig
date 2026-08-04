@@ -53,18 +53,37 @@ LATENT_RGB_FACTORS = [
 LATENT_RGB_BIAS = [0.057426, -0.022078, -0.071449]
 
 
-def sample_schedule(steps: int, shift: float = 12.0):
+def sample_schedule(steps: int, shift: float = 12.0, mode: str = "comfy"):
     """Descending sigmas 1 -> 0 on H3's shifted grid: sigma = shift*u / (1 + (shift-1)*u).
 
-    Mirrors the reference `build_sigma_schedule` exactly: a linspace(1, 0, steps) base through
-    the exponential shift, with consecutive duplicates collapsed. The TERMINAL 0 is part of the
-    count, so `steps` yields `steps - 1` model evaluations — the same convention ai-toolkit and
-    the shipped H3 workflows use, so "28 steps" means the same thing here as there.
+    mode="comfy" (DEFAULT) reproduces ComfyUI's `simple` scheduler against
+    ModelSamplingDiscreteFlow(shift=12) — the H3 sampling_settings. Comfy builds a 1000-entry
+    sigma table from u = (i+1)/1000 and `simple` walks it backwards in even strides, then
+    appends 0. That yields `steps + 1` sigmas and `steps` model evaluations, i.e. "20 steps"
+    means twenty forwards, as it does in the UI.
 
-    shift 12.0 is the video schedule every shipped H3 workflow uses (supported_models
-    sampling_settings). Returns a list of `steps` sigmas, last exactly 0.0."""
+    mode="reference" is ai-toolkit's build_sigma_schedule: linspace(1, 0, steps) through the
+    same shift, consecutive duplicates collapsed, terminal 0 INSIDE the count — so `steps`
+    yields `steps - 1` evaluations. Kept for comparing against their previews.
+
+    Previews default to comfy because ComfyUI is where the results are judged: a preview is
+    worth more when it predicts what you will see there than when it matches another trainer.
+    The two grids are close but not equal (at 20 steps the last non-zero sigma is 0.3871 for
+    comfy against 0.4000 for the reference) and the evaluation counts differ by one.
+
+    shift 12.0 is the video schedule every shipped H3 workflow uses."""
+    if steps < 1:
+        raise ValueError("sample_schedule needs at least one step")
+    if mode == "comfy":
+        # comfy's table: sigmas[i] = shift_map((i+1)/1000), walked back in even strides
+        table = [(shift * u) / (1.0 + (shift - 1.0) * u)
+                 for u in ((i + 1) / 1000.0 for i in range(1000))]
+        stride = len(table) / steps
+        return [table[-(1 + int(x * stride))] for x in range(steps)] + [0.0]
+    if mode != "reference":
+        raise ValueError(f"sample_schedule mode must be 'comfy' or 'reference', got {mode!r}")
     if steps < 2:
-        raise ValueError("sample_schedule needs at least 2 sigmas (one model evaluation)")
+        raise ValueError("reference mode needs at least 2 sigmas (one model evaluation)")
     out = []
     for i in range(steps):
         u = 1.0 - i / (steps - 1)                       # linspace(1, 0, steps)
@@ -88,10 +107,37 @@ def latent_to_rgb(latent: torch.Tensor):
     return np.transpose(rgb, (1, 2, 0))                   # HWC
 
 
+def _res_multistep_coeffs(sig_cur, sig_next, sig_prev):
+    """(sigma_fn(h), h*b1, h*b2) for ComfyUI's res_multistep second-order step (eta = 0).
+
+    Ported from comfy/k_diffusion/sampling.py::res_multistep, which implements the multistep
+    scheme in arXiv:2308.02157. With eta = 0 the ancestral machinery collapses (sigma_down is
+    just the next sigma, sigma_up is 0, no noise is re-injected), leaving:
+
+        t = -log(sigma),  h = t_next - t,  c2 = (t_prev - t) / h
+        b1 = phi1(-h) - phi2(-h)/c2 ,  b2 = phi2(-h)/c2
+        x <- exp(-h) * x + h * (b1 * denoised + b2 * denoised_prev)
+
+    where phi1(t) = expm1(t)/t and phi2(t) = (phi1(t) - 1)/t. Done in float64: h is small at
+    the top of a shift-12 grid and phi2 divides by it twice."""
+    import math
+    t = -math.log(max(float(sig_cur), 1e-12))
+    t_next = -math.log(max(float(sig_next), 1e-12))
+    t_prev = -math.log(max(float(sig_prev), 1e-12))
+    h = t_next - t
+    c2 = (t_prev - t) / h
+    phi1 = math.expm1(-h) / -h
+    phi2 = (phi1 - 1.0) / -h
+    b1 = phi1 - phi2 / c2
+    b2 = phi2 / c2
+    return math.exp(-h), h * b1, h * b2
+
+
 @torch.no_grad()
 def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scale=1.0,
                  uncond_embeds=None, seed=0, shift=12.0, device="cuda",
-                 dtype=torch.bfloat16, latent_channels=24, spatial=16, log_steps=False):
+                 dtype=torch.bfloat16, latent_channels=24, spatial=16, log_steps=False,
+                 sampler="res_multistep", schedule_mode="comfy"):
     """Denoise one image and return its LATENT [1, 24, 1, H/16, W/16].
 
     Decoding is the caller's business (real VAE decoder, or latent_to_rgb for a rough look) so
@@ -125,8 +171,9 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
 
     from fizgig.minimax.model import remap_sigma
     use_cfg = cfg_scale > 1.0 and uncond_embeds is not None
-    sigmas = sample_schedule(steps, shift=shift)
+    sigmas = sample_schedule(steps, shift=shift, mode=schedule_mode)
     n_eval = len(sigmas) - 1                            # the terminal 0 is not an evaluation
+    prev_denoised = None                                # res_multistep's one-step memory
     for i in range(n_eval):
         s_curr, s_next = sigmas[i], sigmas[i + 1]
         if log_steps:
@@ -150,7 +197,16 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
             if use_cfg:
                 out_u = model(x.to(dtype), t, uncond_embeds).float()
                 out = out_u + cfg_scale * (out - out_u)
-        x = x + (s_curr - s_next) * out                     # see the sign note in the docstring
+        # `out` is the head's x0 - noise, so the denoised estimate is x + sigma*out (one step
+        # from sigma to 0). Euler is x + (sigma - sigma_next)*out, identical to comfy's
+        # to_d()/dt form; res_multistep reuses the PREVIOUS denoised for a 2nd-order step.
+        denoised = x + s_curr * out
+        if sampler == "res_multistep" and prev_denoised is not None and s_next > 0:
+            a_x, hb1, hb2 = _res_multistep_coeffs(s_curr, s_next, sigmas[i - 1])
+            x = a_x * x + hb1 * denoised + hb2 * prev_denoised
+        else:
+            x = x + (s_curr - s_next) * out             # Euler (first step, last step, or opt-out)
+        prev_denoised = denoised
     return x
 
 

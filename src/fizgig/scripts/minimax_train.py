@@ -96,8 +96,11 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample_width", type=int, default=768,
                    help="H3's native canvas is a 768 short edge (768*1344 pixel cap)")
     p.add_argument("--sample_height", type=int, default=768)
-    p.add_argument("--sample_steps", type=int, default=28,
-                   help="Denoise steps per preview (the reference pipeline uses 28; fewer leaves the latent off-manifold and the decode patchy)")
+    p.add_argument("--sample_steps", type=int, default=20,
+                   help="Denoise steps per preview. 20 matches ComfyUI's shipped MiniMax "
+                        "template (BasicScheduler simple/20), and previews use the same "
+                        "res_multistep sampler and sigma grid, so the count means the same "
+                        "thing in both places.")
     p.add_argument("--sample_cfg_scale", type=float, default=1.0,
                    help=">1 enables CFG (a 2nd forward per step); the shipped H3 workflows use none")
     p.add_argument("--sample_negative", default=None, help="Only used when --sample_cfg_scale > 1")

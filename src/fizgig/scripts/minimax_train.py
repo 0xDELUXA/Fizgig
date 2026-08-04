@@ -65,6 +65,11 @@ def setup_parser() -> argparse.ArgumentParser:
                         "needs the uncond embed cached by minimax_cache_text). 0 disables.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
+    p.add_argument("--train_blocks", default=None, metavar="LO-HI",
+                   help="EXPERIMENT: train only DiT blocks LO-HI (e.g. 14-37) out of 50, instead "
+                        "of all of them. The text refiner is always included. H3's 50 blocks are "
+                        "identical and nobody has mapped what each one does, so any range is a "
+                        "hypothesis — compare against a full-model run on the same dataset.")
     p.add_argument("--base_quant", default="auto", choices=["auto", "int8", "nf4"],
                    help="Frozen-base precision. 'int8' keeps the checkpoint's own ConvRot "
                         "weights (~0.17%% base error, ~21 GB) — what the reference trainer "
@@ -152,6 +157,7 @@ def main():
         caption_dropout=args.caption_dropout,
         base_quant=args.base_quant,
         include_patterns=args.include_patterns,
+        train_blocks=args.train_blocks,
         quantize=not args.no_quantize,
         shift=args.shift,
         blocks_to_swap=args.blocks_to_swap,

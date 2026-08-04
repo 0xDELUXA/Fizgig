@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import random
+import re
 import sys
 import time
 from multiprocessing import Value
@@ -53,6 +54,35 @@ DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
 # them. It also happened to carry our single highest per-element drift after a matched epoch
 # (0.0133 vs their 0.0068 max), so it was contributing noise rather than capability.
 PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*"]
+
+
+def restrict_patterns_to_blocks(patterns, block_spec: str):
+    """Narrow `blocks.N.*` patterns to a block range like "14-37". Non-block patterns pass through.
+
+    H3 is 50 IDENTICAL blocks with no published map of what each one does, so training a subset is
+    an experiment, not a recipe — this exists to make that experiment cheap to run. The token
+    refiner is deliberately never narrowed: it is text-side (where a trigger token gets shaped),
+    it is 8 of 258 modules, and holding it constant keeps two block ranges comparable to each
+    other rather than confounding the block question with a conditioning change.
+
+    Applied ON TOP of the per-checkpoint pattern list rather than replacing it, so the pruned vs
+    bf16 AdaLN decision stays in exactly one place.
+    """
+    spec = str(block_spec).strip()
+    m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", spec)
+    if not m:
+        raise ValueError(f"train_blocks must look like '14-37', got {block_spec!r}")
+    lo, hi = int(m.group(1)), int(m.group(2))
+    if lo > hi:
+        raise ValueError(f"train_blocks range is inverted: {block_spec!r}")
+    alt = "|".join(str(i) for i in range(lo, hi + 1))
+    out = []
+    for p in patterns:
+        if p.startswith(r"blocks\.\d+"):
+            out.append(p.replace(r"blocks\.\d+", rf"blocks\.(?:{alt})", 1))
+        else:
+            out.append(p)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +580,7 @@ def train_minimax(
     caption_dropout: float = 0.05,
     base_quant: str = "auto",
     include_patterns: list = None,
+    train_blocks: str = None,        # "14-37" = train only that block range (experiment)
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
     blocks_to_swap="auto",           # "auto" | int — park the last N blocks on CPU between uses
@@ -714,6 +745,13 @@ def train_minimax(
     # AdaLN targeting is per-checkpoint — see the pattern note at the top of this file.
     include_patterns = user_include_patterns or (
         PRUNED_INCLUDE_PATTERNS if dit.pruned_adaln else DEFAULT_INCLUDE_PATTERNS)
+    if train_blocks:
+        include_patterns = restrict_patterns_to_blocks(include_patterns, train_blocks)
+        _lo, _hi = (int(x) for x in str(train_blocks).split("-"))
+        logger.info("[base] EXPERIMENT: training blocks %d-%d only (%d of %d), text refiner "
+                    "included. Nobody has mapped what H3's blocks do — judge this against a "
+                    "full-model run on the same dataset, not on its own.",
+                    _lo, _hi, _hi - _lo + 1, len(dit.blocks))
     logger.info("[base] %s checkpoint; LoRA targets: attention + MLP + token refiner%s",
                 "pruned (curve-table AdaLN)" if dit.pruned_adaln else "full bf16",
                 " + AdaLN (deploy-consistent on this build; rank caps at 8)"
@@ -854,6 +892,7 @@ def train_minimax(
             "ss_learning_rate": f"{learning_rate:g}",
             "ss_optimizer": optimizer_label,
             "ss_timestep_density": _dens,
+            "ss_train_blocks": str(train_blocks) if train_blocks else "all",
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
             "ss_max_grad_norm": f"{max_grad_norm:g}",
             "ss_bucket_resolutions": ",".join(_res),

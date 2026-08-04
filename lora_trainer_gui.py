@@ -468,6 +468,27 @@ MINIMAX_SHIFT_OPTIONS = [f"{s} - for {mp} MP" for mp, s in MINIMAX_SHIFT_BY_MP] 
 ]
 
 
+# MiniMax H3 — which of the 50 DiT blocks to train ("Blocks to Train" on the Training tab).
+#
+# THIS IS A GUESS, and the labels say so. H3 is 50 identical blocks with no published map. The
+# ranges below come from the proportions of Klein's empirically-built map (composition in the
+# first ~30% of depth, identity ~30-75%, fine detail ~60-100%) scaled to 50 blocks — an analogy
+# between two different architectures, not a measurement of this one.
+#
+# What is measured: per-block ||dW|| on two finished H3 LoRAs is nearly FLAT (3x quietest to
+# loudest against a 2% flat expectation, thirds within 28/34/38), and the quietest blocks do not
+# agree between runs. So weight movement offers no map either way — which is exactly why the
+# only way to learn anything here is to train a range and compare the result. The last entry is
+# a deliberate control: if the front half trains a good likeness, the premise is wrong.
+MINIMAX_BLOCK_OPTIONS = [
+    "all - every block (50 of 50)",
+    "10-49 - skip the first 10",
+    "14-37 - identity band, Klein map scaled",
+    "25-49 - back half",
+    "0-24 - front half (control - expected worse)",
+]
+
+
 def minimax_recommended_shift(megapixels):
     """The Detail Focus value recommended for a Target Megapixels setting.
 
@@ -1290,6 +1311,7 @@ class LoRATrainerGUI:
             # MiniMax H3 only — training noise-level density (see MINIMAX_SHIFT_OPTIONS).
             # Matches the shipped MiniMax preset (0.5 MP), not H3's video-tuned 12.
             "MINIMAX_SHIFT": "3.5",
+            "MINIMAX_BLOCKS": "all",
             "RESUME_TRAINING": "",
             "OPTIMIZER_TYPE": "adamw8bit",
             "OPTIMIZER_ARGS": "",
@@ -3628,6 +3650,30 @@ class LoRATrainerGUI:
                  "back-to-back comparisons are easy to keep straight.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_shift_hint.grid(row=27, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        # --- Blocks to Train (MiniMax only, experimental) ---------------------------------
+        self._minimax_blocks_label = ttk.Label(training_content, text="Blocks to Train:")
+        self._minimax_blocks_label.grid(row=28, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self._minimax_blocks_frame = ttk.Frame(training_content)
+        self._minimax_blocks_frame.grid(row=28, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        self.entries["MINIMAX_BLOCKS"] = ttk.Combobox(
+            self._minimax_blocks_frame, values=MINIMAX_BLOCK_OPTIONS, state="readonly", width=42)
+        self.entries["MINIMAX_BLOCKS"].pack(side=tk.LEFT)
+        self._select_combo_by_token(self.entries["MINIMAX_BLOCKS"],
+                                    self.settings.get("MINIMAX_BLOCKS", "all"))
+        self._minimax_blocks_hint = ttk.Label(
+            training_content,
+            text="EXPERIMENT — no recommended answer yet. H3 is 50 identical blocks and nobody has "
+                 "published what each one does. In other models the earliest blocks handle "
+                 "composition and layout rather than who the person is, so training a middle band "
+                 "MAY give a cleaner likeness and less memorised background — or may just train "
+                 "less. The ranges here are scaled from Klein's block map, which is a different "
+                 "architecture, so treat them as hypotheses. Train one against a full-model run on "
+                 "the same dataset and judge the pair; the front-half option is there as a control. "
+                 "Fewer blocks also means faster steps and a smaller file. The range is recorded in "
+                 "the LoRA's metadata as ss_train_blocks.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         self.dataset_megapixels_var.trace_add("write", lambda *_: self._refresh_minimax_shift_match())
         self.entries["MINIMAX_SHIFT"].bind("<<ComboboxSelected>>",
                                            lambda _e: self._refresh_minimax_shift_match())
@@ -4858,6 +4904,9 @@ class LoRATrainerGUI:
             _sh = str(p.get("MINIMAX_SHIFT") or "").split(" ")[0]
             if _sh:
                 bits.append(f"detail {_sh}")
+            _bl = str(p.get("MINIMAX_BLOCKS") or "").split(" ")[0]
+            if _bl and _bl.lower() != "all":
+                bits.append(f"blocks {_bl}")
         return name, "  ·  ".join(str(b) for b in bits) + f"\nqueued {item.get('queued_at', '?')}"
 
     def _render_queue_window(self):
@@ -5625,7 +5674,8 @@ class LoRATrainerGUI:
 
         # Detail Focus is the inverse: MiniMax ONLY. Klein and Krea 2 already derive their shift
         # from the sample's token count, so there is nothing to dial there.
-        for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint):
+        for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint,
+                  self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint):
             self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
@@ -20990,6 +21040,7 @@ class LoRATrainerGUI:
             # MiniMax-only; the widget exists (hidden) under every family, so read it unconditionally
             # and let the MiniMax command builder be the one that acts on it.
             "MINIMAX_SHIFT": str(self.entries["MINIMAX_SHIFT"].get() or "12").split(" ")[0],
+            "MINIMAX_BLOCKS": str(self.entries["MINIMAX_BLOCKS"].get() or "all").split(" ")[0],
             "DATASET_CONFIG": self._get_path("DATASET_CONFIG"),
             "VAE_MODEL": self._get_path("VAE_MODEL"),
             "CLIP_MODEL": self._get_path("CLIP_MODEL"),
@@ -21943,6 +21994,11 @@ class LoRATrainerGUI:
         # The trainer stamps the same thing into the LoRA as ss_timestep_density.
         _shift = str(self.settings.get("MINIMAX_SHIFT", "12") or "12").split(" ")[0]
         cmd += ["--shift", _shift]
+        # Blocks to Train — only sent when it's a real range; "all" is the trainer's own default,
+        # and not sending it keeps the flag's presence meaning "this run was a block experiment".
+        _blocks = str(self.settings.get("MINIMAX_BLOCKS", "all") or "all").split(" ")[0]
+        if _blocks and _blocks.lower() != "all":
+            cmd += ["--train_blocks", _blocks]
         # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
         # the factor is the dial. Same flags as the Krea 2 builder.
         if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):

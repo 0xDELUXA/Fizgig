@@ -32,7 +32,12 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dataset_config", type=str, required=True, help="Path to dataset config .toml file")
     parser.add_argument("--text_encoder", type=str, required=True, help="Path to the bf16 Qwen3-VL-32B safetensors")
     parser.add_argument("--device", type=str, default=None, help="Device (default: cuda if available)")
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size for encoding")
+    parser.add_argument("--batch_size", type=int, default=16,
+                        help="Captions per text-encoder forward. The nvfp4-resident encoder "
+                             "dequantizes 351 weights per FORWARD, so this is the dial that "
+                             "matters: 1 caption/forward costs ~1.2 s, 16 costs barely more. "
+                             "Right-padding makes batching exactly equivalent to one-at-a-time "
+                             "for this causal stack (tests/diag_batch_encode.py).")
     parser.add_argument("--num_workers", type=int, default=None, help="Number of workers")
     parser.add_argument("--skip_existing", action="store_true", help="Skip existing cache files")
     parser.add_argument("--keep_cache", action="store_true", help="Keep stale cache files")

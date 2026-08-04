@@ -75,6 +75,13 @@ _RESIDENT_PRUNED_GB = 11.0
 # int8 base (base_quant=int8, the reference's own storage): the 200 block linears stay 1 byte
 # per param instead of NF4's 0.5, and the refiner/AdaLN load dense — ~19.3 + ~1.5 GB.
 _RESIDENT_INT8_GB = 21.0
+# int8 dequantizes a bf16 weight per matmul (fc1 is 28672x5376 = 308 MB). A few are live at
+# once, but they are NOT retained for backward — _Int8RotLinearFn recomputes the weight in its
+# own backward, so the cost is a handful of transients rather than one per layer. (Before that
+# custom backward, autograd saved every one and a 0.25 MP run OOM'd the moment the planner
+# turned checkpointing off: measured 0.45 GB of retained weight over 12 test linears against
+# 0.12 GB now, and the real DiT has 200.)
+_INT8_TRANSIENT_GB = 1.0
 _PER_BLOCK_GB = 0.34         # one parked block's GPU share (measured: (17.5-11.9)/16)
 _ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 5.1)
 _ACT_GB_CKPT = 2.0           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.9; margin)
@@ -82,7 +89,8 @@ _SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active 
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
 
 
-def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None):
+def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None,
+              transient_gb: float = 0.0):
     """Pure planner: (blocks_to_swap, gradient_checkpointing) from free VRAM + token load.
 
     Token load scales the activation term linearly (tokens ∝ mp x batch). Checkpointing is
@@ -91,11 +99,12 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: flo
     Swap additionally budgets _SWAP_TRANSIENT_GB: the backward pass transiently holds
     recompute segments beyond the parked residency (measured, see anchors above)."""
     resident = _RESIDENT_GB if resident_gb is None else float(resident_gb)
+    base = resident + float(transient_gb)
     scale = max(0.25, float(mp)) / 0.25 * max(1, int(batch))
-    need_nockpt = resident + _ACT_GB_NOCKPT * scale + _RESERVE_GB
+    need_nockpt = base + _ACT_GB_NOCKPT * scale + _RESERVE_GB
     if free_gb >= need_nockpt:
         return 0, False
-    need_ckpt = resident + _ACT_GB_CKPT * scale + _RESERVE_GB
+    need_ckpt = base + _ACT_GB_CKPT * scale + _RESERVE_GB
     if free_gb >= need_ckpt:
         return 0, True
     deficit = need_ckpt + _SWAP_TRANSIENT_GB - free_gb
@@ -634,10 +643,19 @@ def train_minimax(
             _base_mode = _mode
             _resident = (_RESIDENT_INT8_GB if _mode == "int8"
                          else _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB)
-            n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp, resident_gb=_resident)
+            _trans = _INT8_TRANSIENT_GB if _mode == "int8" else 0.0
+            n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp, resident_gb=_resident,
+                                           transient_gb=_trans)
             logger.info(f"[vram] auto plan: free {_free_gb:.1f} GB, largest bucket {_mp:.2f} MP, "
                         f"base ~{_resident:.0f} GB ({_mode}, {'pruned' if _pruned else 'bf16'}) "
                         f"-> blocks_to_swap={n_swap}, checkpointing={'on' if _ckpt_auto else 'off'}")
+            if n_swap > 0 and _mode == "int8":
+                logger.warning(
+                    f"[vram] {n_swap} blocks will live on CPU and cross PCIe every step, which is "
+                    f"several times slower. The int8 base is ~{_resident:.0f} GB against NF4's "
+                    f"~{_RESIDENT_PRUNED_GB:.0f}, so it only fits this bucket size with swap. "
+                    f"Faster options: lower Target Megapixels (~0.7 MP fits with no swap), or "
+                    f"--base_quant nf4 (fits, at ~9% more error in the frozen base).")
         else:
             n_swap, _ckpt_auto = 0, False
     else:

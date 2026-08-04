@@ -78,6 +78,36 @@ def dequantize_int8_convrot(qweight: torch.Tensor, scale: torch.Tensor, conf: di
     return rotate(w, group).to(out_dtype)
 
 
+class _Int8RotLinearFn(torch.autograd.Function):
+    """linear(rotate(x), dequant(q, s)) that does NOT keep the dequantized weight alive.
+
+    The naive `F.linear(xr, w)` hands autograd a bf16 `w` to save for backward — 308 MB for
+    fc1, and ~19 GB across the 200 block linears once every layer holds one. NF4 never pays
+    that (bitsandbytes re-dequantizes inside its own backward), so the int8 path OOM'd exactly
+    when gradient checkpointing was OFF, which is the case at small bucket sizes.
+
+    The base is frozen, so no weight gradient is needed and the INPUT need not be saved either:
+    grad_x = rotate(grad_y @ W_rot), recomputed from the int8 buffers that are resident anyway.
+    Net effect: this stores less than an ordinary Linear would.
+    """
+
+    @staticmethod
+    def forward(ctx, x, qdata, wscale, bias, rot, dt):
+        ctx.save_for_backward(qdata, wscale)
+        ctx.rot, ctx.dt = rot, dt
+        xr = rotate(x.to(dt), rot) if rot > 1 else x.to(dt)
+        return torch.nn.functional.linear(xr, qdata.to(dt) * wscale.to(dt), bias)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        qdata, wscale = ctx.saved_tensors
+        w = qdata.to(ctx.dt) * wscale.to(ctx.dt)          # recomputed, then freed
+        gx = grad_out.to(ctx.dt) @ w                       # [..., out] @ [out, in]
+        if ctx.rot > 1:
+            gx = rotate(gx, ctx.rot)                       # H is symmetric: R^T == R
+        return gx, None, None, None, None, None
+
+
 class ConvRotInt8Linear(torch.nn.Linear):
     """A frozen Linear that KEEPS the checkpoint's int8 ConvRot weights — the reference's storage.
 
@@ -120,7 +150,8 @@ class ConvRotInt8Linear(torch.nn.Linear):
         return rotate(self.qdata.float() * self.wscale.float(), self.rot).to(self.compute_dtype)
 
     def forward(self, x):
-        dt = self.compute_dtype
-        xr = rotate(x.to(dt), self.rot) if self.rot > 1 else x.to(dt)
-        w = self.qdata.to(dt) * self.wscale.to(dt)      # rotated-basis weight, cheap elementwise
-        return torch.nn.functional.linear(xr, w, self.bias)
+        if self.bias is not None and self.bias.requires_grad:
+            raise RuntimeError("ConvRotInt8Linear holds a FROZEN base weight; its bias must not "
+                               "require grad (the custom backward returns no bias gradient)")
+        return _Int8RotLinearFn.apply(x, self.qdata, self.wscale, self.bias,
+                                      self.rot, self.compute_dtype)

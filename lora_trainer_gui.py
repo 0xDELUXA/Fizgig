@@ -14511,15 +14511,17 @@ class LoRATrainerGUI:
             "(minimax_h3_fl2va_pruned_int8_convrot.safetensors, ~21 GB): it is the one ComfyUI "
             "runs, so your LoRA trains against the weights it will be deployed on, and its "
             "curve-table AdaLN is a target a LoRA can actually use. The ~66 GB bf16 file also "
-            "works. Either is quantized to NF4 at load.",
+            "works. The pruned file KEEPS its int8 weights (~21 GB on the GPU, what the reference "
+            "trainer does); the bf16 file is quantized to NF4 at load (~11 GB, a little lossier).",
             download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
             download_note="~21GB — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors (fl2va is the trainable variant; the 66GB bf16 file works too)",
         )
         mr = self._add_pref_row(
             mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
             "Qwen3-VL-32B text encoder — nvfp4 (the compact ComfyUI file) or bf16 both work; the "
-            "loader detects which you gave it. NF4 on GPU either way (~14 GB), used only while "
-            "caching caption embeddings, then offloaded before training. (The int8_convrot TE "
+            "loader detects which you gave it. The nvfp4 file keeps its packed weights (~15.7 GB "
+            "on the GPU); bf16 is NF4-quantized at load (~14 GB). Used only while caching caption "
+            "embeddings, then offloaded before training. (The int8_convrot TE "
             "variant is NOT supported — its rotated weights can't be dequantized here.)",
             download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
             download_label="Download nvfp4 (recommended)",

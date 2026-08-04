@@ -91,7 +91,7 @@ def latent_to_rgb(latent: torch.Tensor):
 @torch.no_grad()
 def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scale=1.0,
                  uncond_embeds=None, seed=0, shift=12.0, device="cuda",
-                 dtype=torch.bfloat16, latent_channels=24, spatial=16):
+                 dtype=torch.bfloat16, latent_channels=24, spatial=16, log_steps=False):
     """Denoise one image and return its LATENT [1, 24, 1, H/16, W/16].
 
     Decoding is the caller's business (real VAE decoder, or latent_to_rgb for a rough look) so
@@ -102,6 +102,9 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
 
     `steps` counts SIGMAS including the terminal 0, matching the reference — so it runs
     steps - 1 model evaluations.
+
+    log_steps prints one line per evaluation (step index and the sigma being denoised from),
+    so a preview is visible in the console instead of a silent pause.
     """
     lat_h, lat_w = height // spatial, width // spatial
     # The DiT patchifies 2x2, so the latent grid must be even (compute_loss crops for the same
@@ -123,8 +126,12 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     from fizgig.minimax.model import remap_sigma
     use_cfg = cfg_scale > 1.0 and uncond_embeds is not None
     sigmas = sample_schedule(steps, shift=shift)
-    for i in range(len(sigmas) - 1):                    # the terminal 0 is not an evaluation
+    n_eval = len(sigmas) - 1                            # the terminal 0 is not an evaluation
+    for i in range(n_eval):
         s_curr, s_next = sigmas[i], sigmas[i + 1]
+        if log_steps:
+            print(f"[preview] step {i + 1}/{n_eval}  sigma {s_curr:.4f} -> {s_next:.4f}",
+                  flush=True)
         t = torch.tensor([1.0 - s_curr], device=device)     # the DiT is conditioned on cleanness
         if joint_audio:
             out, a_out = model(x.to(dtype), t, text_embeds,

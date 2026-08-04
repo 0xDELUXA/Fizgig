@@ -772,13 +772,15 @@ def train_minimax(
             _seed = sample_seed if sample_seed != 0 else random.randint(1, 2 ** 31 - 1)
             ts = _time.strftime("%Y%m%d%H%M%S")
             for i, txt in enumerate(encoded_prompts):
+                print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(encoded_prompts)} "
+                      f"({sample_width}x{sample_height}, seed {_seed + i})", flush=True)
                 lat = sampling.sample_image(
                     dit, txt.to(device, dtype),
                     width=sample_width, height=sample_height, steps=sample_steps,
                     cfg_scale=sample_cfg_scale,
                     uncond_embeds=(encoded_negative.to(device, dtype)
                                    if encoded_negative is not None else None),
-                    seed=_seed + i, device=device, dtype=dtype)
+                    seed=_seed + i, device=device, dtype=dtype, log_steps=True)
                 if decoder is not None:
                     px = decoder.decode(lat.float())[0]          # [3, H, W] in [0, 1]
                     arr = (px.permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
@@ -788,6 +790,7 @@ def train_minimax(
                     # (a 1/16-scale rough look) rather than dropping previews entirely.
                     arr = sampling.latent_to_rgb(lat)
                     img = Image.fromarray(arr).resize((sample_width, sample_height), Image.NEAREST)
+                print(f"[preview] decoded {sample_width}x{sample_height}", flush=True)
                 img.save(os.path.join(
                     sample_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}.png"))
             logger.info(f"[preview] epoch {epoch}: wrote {len(encoded_prompts)} sample(s) "

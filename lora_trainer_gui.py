@@ -470,22 +470,31 @@ MINIMAX_SHIFT_OPTIONS = [f"{s} - for {mp} MP" for mp, s in MINIMAX_SHIFT_BY_MP] 
 
 # MiniMax H3 — which of the 50 DiT blocks to train ("Blocks to Train" on the Training tab).
 #
-# THIS IS A GUESS, and the labels say so. H3 is 50 identical blocks with no published map. The
-# ranges below come from the proportions of Klein's empirically-built map (composition in the
-# first ~30% of depth, identity ~30-75%, fine detail ~60-100%) scaled to 50 blocks — an analogy
-# between two different architectures, not a measurement of this one.
+# THIS IS A SEARCH, not a recommendation, and the labels say so. H3 is 50 identical blocks with
+# no published map. The ranges come from the proportions of Klein's empirically-built map
+# (composition in the first ~30% of depth, identity ~30-75%, fine detail ~60-100%) scaled to 50
+# blocks — an analogy between two architectures, not a measurement of this one.
+#
+# READ EVERY RESULT AS: "was this subset sufficient?" A range that trains a good likeness means
+# its COMPLEMENT was not needed — whichever end that turns out to be. There is no option here
+# that disproves the idea; a surprising winner just relocates the answer. (An earlier revision
+# labelled the front half a "control, expected worse". That was wrong: a good front-half result
+# would mean the back half is droppable, which is the outcome we are hunting, not a refutation.)
+#
+# Why dropping blocks may HELP rather than merely cost less: a block that carries no identity
+# still receives gradient, and what is left for it to learn is the dataset's background, framing
+# and lighting. Excluding it removes capacity that would otherwise go into memorising the set.
 #
 # What is measured: per-block ||dW|| on two finished H3 LoRAs is nearly FLAT (3x quietest to
 # loudest against a 2% flat expectation, thirds within 28/34/38), and the quietest blocks do not
-# agree between runs. So weight movement offers no map either way — which is exactly why the
-# only way to learn anything here is to train a range and compare the result. The last entry is
-# a deliberate control: if the front half trains a good likeness, the premise is wrong.
+# agree between runs. Weight movement offers no map either way — which is why the only way to
+# learn anything here is to train a range and compare.
 MINIMAX_BLOCK_OPTIONS = [
     "all - every block (50 of 50)",
     "10-49 - skip the first 10",
-    "14-37 - identity band, Klein map scaled",
+    "14-37 - middle band",
     "25-49 - back half",
-    "0-24 - front half (control - expected worse)",
+    "0-24 - front half",
 ]
 
 
@@ -3663,14 +3672,16 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint = ttk.Label(
             training_content,
             text="EXPERIMENT — no recommended answer yet. H3 is 50 identical blocks and nobody has "
-                 "published what each one does. In other models the earliest blocks handle "
-                 "composition and layout rather than who the person is, so training a middle band "
-                 "MAY give a cleaner likeness and less memorised background — or may just train "
-                 "less. The ranges here are scaled from Klein's block map, which is a different "
-                 "architecture, so treat them as hypotheses. Train one against a full-model run on "
-                 "the same dataset and judge the pair; the front-half option is there as a control. "
-                 "Fewer blocks also means faster steps and a smaller file. The range is recorded in "
-                 "the LoRA's metadata as ss_train_blocks.",
+                 "published what each one does. A block that doesn't carry identity still gets "
+                 "trained on something, and what's left for it to learn is your backgrounds, "
+                 "framing and lighting — so leaving blocks out may give a CLEANER likeness with "
+                 "less memorised set, not just a faster run. The ranges here are scaled from "
+                 "Klein's block map, a different architecture, so they're starting guesses. Train "
+                 "one against a full-model run on the same dataset and judge the pair: if a range "
+                 "holds up, the blocks you left out weren't needed — whichever end they were. "
+                 "Fewer blocks also means faster steps and a smaller file, and less capacity "
+                 "overall, so give a narrow range a few more epochs before calling it. The range "
+                 "is recorded in the LoRA's metadata as ss_train_blocks.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 

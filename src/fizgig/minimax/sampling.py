@@ -2,12 +2,13 @@
 
 Renders ONE still per prompt. H3's temporal grid is FRAME_PER_TOKEN = (1, 4, 4, 4, 4), so a
 single latent frame decodes to exactly one pixel frame — which is also what the encoder produces
-for a still, and what training uses. So a preview needs no audio rows, no multi-frame RoPE and no
-packed-layout work: it is the training forward run backwards.
+for a still, and what training uses. So a preview is the training forward run backwards: the DiT
+packs the same [text | audio | video] sequence (the audio block is 4 rows of silence — see
+model.py), and there is no multi-frame RoPE or cond-row work to do.
 
-A preview is therefore a *training-distribution* render, not a byte-faithful ComfyUI one (ComfyUI
-always packs audio rows and >= 2 latent frames). It answers "is this LoRA learning?"; final quality
-judgement belongs in ComfyUI. Same honest caveat Klein's samples carry.
+A preview is still a *training-distribution* render, not a byte-faithful ComfyUI one (ComfyUI
+generates >= 2 latent frames and denoises the audio stream for real). It answers "is this LoRA
+learning?"; final quality judgement belongs in ComfyUI. Same honest caveat Klein's samples carry.
 
 Flow / sign convention (this is the easy thing to get backwards):
   the DiT head returns `video_out = x0 - noise` (the reference NEGATES it to hand a sampler its
@@ -25,6 +26,8 @@ import gc
 import logging
 
 import torch
+
+from fizgig.minimax.model import AUDIO_CHANNELS, audio_latents_for_frames
 
 logger = logging.getLogger(__name__)
 
@@ -93,15 +96,22 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     lat_h, lat_w = (lat_h // 2) * 2, (lat_w // 2) * 2
     gen = torch.Generator(device="cpu").manual_seed(int(seed))
     x = torch.randn(1, latent_channels, 1, lat_h, lat_w, generator=gen, dtype=torch.float32).to(device)
+    # The pack's silence audio rows: one noise draw for the whole trajectory (silence is x0 = 0,
+    # so its exact path is sigma_a*eps at every step) — and it keeps a preview reproducible.
+    n_audio = audio_latents_for_frames(1) * AUDIO_CHANNELS if getattr(model, "pack_audio_rows", False) else 0
+    audio_noise = None
+    if n_audio:
+        audio_noise = torch.randn(n_audio, model.config.audio_latents_dim,
+                                  generator=gen, dtype=torch.float32).to(device)
 
     use_cfg = cfg_scale > 1.0 and uncond_embeds is not None
     sigmas = sample_schedule(steps, shift=shift)
     for i in range(steps):
         s_curr, s_next = sigmas[i], sigmas[i + 1]
         t = torch.tensor([1.0 - s_curr], device=device)     # the DiT is conditioned on cleanness
-        out = model(x.to(dtype), t, text_embeds).float()
+        out = model(x.to(dtype), t, text_embeds, audio_noise).float()
         if use_cfg:
-            out_u = model(x.to(dtype), t, uncond_embeds).float()
+            out_u = model(x.to(dtype), t, uncond_embeds, audio_noise).float()
             out = out_u + cfg_scale * (out - out_u)
         x = x + (s_curr - s_next) * out                     # see the sign note in the docstring
     return x

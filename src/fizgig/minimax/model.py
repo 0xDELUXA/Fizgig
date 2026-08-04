@@ -10,11 +10,12 @@ machinery:
   optimized_attention                 -> F.scaled_dot_product_attention
   prefetch / patcher wrappers         -> dropped
 
-Scope: IMAGE ONLY. A still image is a single video frame (T=1); the audio stream is not
-exercised, so the packed sequence collapses to [text | video] with one timestep — the whole
-audio / refs / keyframes / cond-row apparatus of the reference is omitted. The audio-side
-modules (audio_patch_proj, final_layer.audio_out) are still BUILT so the official checkpoint
-loads with no missing/unexpected keys; they just don't run in the image forward.
+Scope: IMAGE ONLY. A still image is a single video frame (T=1), so the packed sequence is
+[text | audio | video] — the refs / keyframes / cond-row apparatus of the reference is omitted
+(nothing conditions an image run), but the AUDIO ROWS ARE NOT: H3 always packs an audio block,
+and for one still that is 4 rows of silence noised on the audio schedule. They carry no loss;
+they exist so the frozen base runs in the layout it was trained in. `final_layer.audio_out` is
+built for checkpoint compatibility and never run — we only read the video head.
 
 Module + parameter names match the checkpoint exactly (blocks.N.attn.qkv_proj.weight,
 adaln_proj.linear.weight, video_patch_proj, condition_proj, time_embedder.proj_in, rope.inv_freq,
@@ -100,21 +101,72 @@ def _video_t_grid(n, origin):
     return float(origin) + torch.cat([torch.zeros(1, dtype=torch.float64), spans[:-1].cumsum(0)])
 
 
-def image_position_ids(text_len, latent_h, latent_w) -> torch.Tensor:
-    """3-axis (t, h, w) position ids for a [text | single-video-frame] packed sequence.
+# --- audio rows --------------------------------------------------------------------------
+# H3 is an audio+video model and its packed sequence ALWAYS carries an audio block — the
+# reference packs one even for a single still. A still is 1 pixel frame at 24 fps against a
+# 40 Hz audio latent clock, so that block is round(40/24) = 2 latents x 2 channels = 4 rows.
+# We train and sample images, so those rows are silence (x0 = 0) noised at the audio schedule;
+# they contribute no loss. They are packed anyway because leaving them out changes the
+# attention context the base model was trained in — the whole point is to run the frozen base
+# on-distribution, so the LoRA spends its capacity on the subject and not on compensating for
+# a layout the model has never seen.
+AUDIO_CHANNELS = 2
+AUDIO_LATENTS_PER_SECOND = 40
+FPS = 24
+VIDEO_SIGMA_SHIFT = 12.0
+AUDIO_SIGMA_SHIFT = 3.0
 
-    Text rows: t = 0..text_len-1, h=w=0. Video rows: t pinned at the origin `text_len`
-    (single frame), (h, w) from the area-normalized frame grid. Mirrors the reference's
-    PackedLayout for the no-audio / no-cond case. Returns [S, 3] float64."""
+VIDEO_TAG, TEXT_TAG, AUDIO_TAG = 0, 1, 2       # AdaLN modality rows — a checkpoint contract
+MODALITY_NUM = 3
+
+
+def audio_latents_for_frames(num_frames: int = 1) -> int:
+    """Audio latents covering `num_frames` video frames (24 fps video, 40 Hz audio)."""
+    return int(round(num_frames / FPS * AUDIO_LATENTS_PER_SECOND))
+
+
+def shift_sigma(sigma, shift: float):
+    """Exponential timeshift: shift*sigma / (1 + (shift-1)*sigma)."""
+    return shift * sigma / (1.0 + (shift - 1.0) * sigma)
+
+
+def remap_sigma(sigma, from_shift: float = VIDEO_SIGMA_SHIFT, to_shift: float = AUDIO_SIGMA_SHIFT):
+    """A sigma on the `from_shift` schedule -> the same schedule POSITION on `to_shift`.
+
+    The two streams denoise together: video runs shift 12, audio shift 3, and this closed form
+    is what keeps them at the same underlying point. Used for the audio rows' timestep."""
+    return shift_sigma(sigma / (from_shift + sigma * (1.0 - from_shift)), to_shift)
+
+
+def image_position_ids(text_len, latent_h, latent_w, num_audio_latents: int = 0) -> torch.Tensor:
+    """3-axis (t, h, w) position ids for a [text | audio | single-video-frame] packed sequence.
+
+    Text rows: t = 0..text_len-1, h=w=0 — so prompt length shifts the whole media clock.
+    Audio rows: t = text_len + 0..A-1 repeated per channel, h = 0, w pinned to the frame grid's
+    first column for channel 0 and its last for channel 1 (the reference's stereo convention).
+    Video rows: t pinned at the origin `text_len` (single frame), (h, w) from the
+    area-normalized frame grid. Returns [S, 3] float64."""
     frame = _frame_grid(latent_h, latent_w)                 # [(h//2)*(w//2), 2]
     frame_rows = frame.shape[0]
     text = torch.zeros(text_len, 3, dtype=torch.float64)
     text[:, 0] = torch.arange(text_len, dtype=torch.float64)
+
+    rows = [text]
+    if num_audio_latents:
+        w_axis = _axis_from_sqrt_area(latent_w, 2, math.sqrt(latent_h * latent_w))
+        aud = torch.zeros(num_audio_latents * AUDIO_CHANNELS, 3, dtype=torch.float64)
+        aud[:, 0] = (float(text_len) + torch.arange(num_audio_latents, dtype=torch.float64)
+                     ).repeat(AUDIO_CHANNELS)
+        aud[:, 2] = torch.cat([torch.full((num_audio_latents,), float(w_axis[0]), dtype=torch.float64),
+                               torch.full((num_audio_latents,), float(w_axis[-1]), dtype=torch.float64)])
+        rows.append(aud)
+
     t_grid = _video_t_grid(1, text_len)                     # [1], = [text_len]
     vid = torch.empty(frame_rows, 3, dtype=torch.float64)
     vid[:, 0] = t_grid[0]
     vid[:, 1:] = frame
-    return torch.cat([text, vid], dim=0)
+    rows.append(vid)
+    return torch.cat(rows, dim=0)
 
 
 # --- RoPE --------------------------------------------------------------------------------
@@ -278,10 +330,14 @@ class FinalLayer(nn.Module):
         self.video_out = nn.Linear(hidden, video_dim, bias=True)
         self.audio_out = nn.Linear(hidden, audio_dim, bias=True)
 
-    def forward(self, x_video, t_emb):
-        """x_video [n_video, hidden] — just the video segment. modalities=1 -> row 0."""
+    def forward(self, x_video, t_emb, t_index: int = 0):
+        """x_video [n_video, hidden] — just the video segment.
+
+        modalities=1, so the table is one row per distinct timestep: `t_index` selects the
+        video rows' own timestep (the audio rows sit at a different one and are dropped
+        before this point, so only their existence in the table matters here)."""
         shift, scale = self.adaln_proj(t_emb)
-        hv = self.norm(x_video) * (1.0 + scale[0]) + shift[0]
+        hv = self.norm(x_video) * (1.0 + scale[t_index]) + shift[t_index]
         return self.video_out(hv.to(self.video_out.weight.dtype))
 
 
@@ -325,7 +381,7 @@ class MiniMaxH3DiT(nn.Module):
         video_patch_dim = c.latents_dim * self.patch_size[0] * self.patch_size[1] * self.patch_size[2]
 
         self.video_patch_proj = nn.Linear(video_patch_dim, c.hidden_size, bias=True)
-        self.audio_patch_proj = nn.Linear(c.audio_latents_dim, c.hidden_size, bias=True)  # loaded, not run
+        self.audio_patch_proj = nn.Linear(c.audio_latents_dim, c.hidden_size, bias=True)
         self.condition_proj = nn.Linear(c.text_dim, c.hidden_size, bias=True)
         self.time_embedder = TimeEmbedder(c.timestep_input_dim, c.time_embed_hidden_size, c.time_embed_dim)
         self.rope = nn.Module()
@@ -343,6 +399,9 @@ class MiniMaxH3DiT(nn.Module):
                                       c.audio_latents_dim, c.final_norm_eps)
         self._gradient_checkpointing = False
         self._swap_from = len(self.blocks)          # blocks >= this index live on CPU between uses
+        # Pack the reference's silence audio block (see the AUDIO_* constants above). Off is an
+        # escape hatch for A/B only — the base was trained with these rows present.
+        self.pack_audio_rows = True
 
     def enable_gradient_checkpointing(self, enabled: bool = True):
         """Recompute each block in backward instead of storing activations. Required when block
@@ -362,12 +421,18 @@ class MiniMaxH3DiT(nn.Module):
         return n
 
     def forward(self, video_latent: torch.Tensor, t: torch.Tensor,
-                text_embeds: torch.Tensor) -> torch.Tensor:
+                text_embeds: torch.Tensor, audio_noise: torch.Tensor = None) -> torch.Tensor:
         """
         video_latent : [1, C=latents_dim, T=1, H, W]  — one image as a single video frame.
         t            : scalar or [1] flow time in [0, 1] (the value fed to the time embedder;
                        the trainer owns noising and the flow target).
         text_embeds  : [1, L, text_dim] Qwen3-VL hidden states (or already [1, L, hidden]).
+        audio_noise  : optional [A*2, audio_latents_dim] unit noise for the silence rows. None
+                       draws fresh (what training wants — the reference redraws every step).
+                       A sampler should draw ONCE from its seeded generator and pass the same
+                       tensor every step: silence is x0 = 0, so the exact flow trajectory is
+                       sigma_a * eps for one fixed eps, and a fixed eps also keeps the forward
+                       deterministic for a given seed.
         returns      : [1, C, T, H, W] video velocity prediction (same shape as video_latent).
         """
         if video_latent.shape[0] != 1:
@@ -385,20 +450,49 @@ class MiniMaxH3DiT(nn.Module):
         video_rows = patchify_video(video_latent.to(torch.float32), self.patch_size)
         video_embed = self.video_patch_proj(video_rows).to(dtype)
 
-        # pack [text | video]
-        h = torch.cat([text_states.to(dtype), video_embed], dim=0)
+        # audio: silence (x0 = 0) noised on the audio schedule at the same schedule position as
+        # the video rows. Present because the base model has never seen a pack without it.
+        t_val = t.reshape(-1)[:1].to(torch.float32) if torch.is_tensor(t) else torch.tensor([float(t)], device=device)
+        t_val = t_val.to(device)
+        n_audio_latents = audio_latents_for_frames(latent_t) if self.pack_audio_rows else 0
+        audio_embed = None
+        if n_audio_latents:
+            sigma_v = (1.0 - t_val).clamp(0.0, 1.0)
+            sigma_a = remap_sigma(sigma_v)
+            t_audio = 1.0 - sigma_a
+            eps = audio_noise
+            if eps is None:
+                eps = torch.randn(n_audio_latents * AUDIO_CHANNELS, self.config.audio_latents_dim,
+                                  device=device, dtype=torch.float32)
+            audio_rows = sigma_a * eps.to(device=device, dtype=torch.float32)
+            audio_embed = self.audio_patch_proj(audio_rows).to(dtype)
+
+        # pack [text | audio | video] — the reference's order, minus the cond rows an image
+        # run never has
+        parts = [text_states.to(dtype)] + ([audio_embed] if audio_embed is not None else []) + [video_embed]
+        h = torch.cat(parts, dim=0)
         seq_len = h.shape[0]
         n_video = video_embed.shape[0]
+        n_audio = 0 if audio_embed is None else audio_embed.shape[0]
+        video_start = text_len + n_audio
 
-        # single timestep -> one modulation row-set (M=1 -> [modalities=3, hidden]). Per-row
-        # modality index: text rows tag 1, video rows tag 0.
-        t_val = t.reshape(-1)[:1].to(torch.float32) if torch.is_tensor(t) else torch.tensor([float(t)], device=device)
-        t_emb = self.time_embedder(t_val.to(device)).to(dtype)                    # [1, t_dim]
-        mod_row = torch.zeros(seq_len, dtype=torch.long, device=device)
-        mod_row[:text_len] = 1                                                    # text -> row 1
+        # One modulation row-set per DISTINCT timestep (video/text at t, audio at t_audio),
+        # indexed per row as `timestep_index * 3 + modality_tag` — the reference's exact
+        # (timestep, modality) table. Tags: video 0, text 1, audio 2.
+        t_all = t_val if audio_embed is None else torch.cat([t_val, t_audio])
+        uniq, inverse = torch.unique(t_all, sorted=True, return_inverse=True)
+        t_emb = self.time_embedder(uniq).to(dtype)                                # [M, t_dim]
+        tags = torch.full((seq_len,), VIDEO_TAG, dtype=torch.long, device=device)
+        tags[:text_len] = TEXT_TAG
+        row_t_index = torch.full((seq_len,), int(inverse[0]), dtype=torch.long, device=device)
+        if audio_embed is not None:
+            tags[text_len:video_start] = AUDIO_TAG
+            row_t_index[text_len:video_start] = int(inverse[1])
+        mod_row = row_t_index * MODALITY_NUM + tags
+        video_t_index = int(inverse[0])
 
         # rope
-        pos = image_position_ids(text_len, lat_h, lat_w).to(device)
+        pos = image_position_ids(text_len, lat_h, lat_w, n_audio_latents).to(device)
         cos, sin = rope_cos_sin(pos, self.rope.inv_freq.to(device))
         cos, sin = cos.to(dtype), sin.to(dtype)
 
@@ -414,7 +508,7 @@ class MiniMaxH3DiT(nn.Module):
             else:
                 h = _run_block(self.blocks, i, self._swap_from, h, t_emb, mod_row, cos, sin)
 
-        v = self.final_layer(h[text_len:], t_emb)                                # [n_video, video_patch_dim]
+        v = self.final_layer(h[video_start:], t_emb, video_t_index)              # [n_video, video_patch_dim]
         out = unpatchify_video(v, latent_t, lat_h // self.patch_size[1], lat_w // self.patch_size[2],
                                self.latents_dim, self.patch_size)
         return out.to(video_latent.dtype)

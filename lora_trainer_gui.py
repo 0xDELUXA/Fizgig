@@ -3186,7 +3186,23 @@ class LoRATrainerGUI:
             )
             arch_combo.pack(side=tk.LEFT)
             arch_combo.bind("<<ComboboxSelected>>", self._on_architecture_selected)
-            ToolTip(arch_combo, "Model family to train (Klein 9B or Krea 2)")
+            ToolTip(arch_combo, "Model family to train (Klein 9B, Krea 2 or MiniMax H3)")
+
+            # MiniMax renders its previews as a SINGLE video frame, which the H3 VAE decoder was
+            # not trained to produce — every workaround is a compromise (see vae.py). Previews
+            # are honest about relative progress but understate quality, so say so where the
+            # family is chosen rather than leaving people to mistrust their own run.
+            self._minimax_sample_note = tk.Label(
+                model_card,
+                text=("Note: MiniMax H3 in-training samples are single-frame renders and are "
+                      "known to look worse than the model's real output. Use them to track "
+                      "progress, but judge your epochs in ComfyUI."),
+                font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+                wraplength=760, justify=tk.LEFT,
+            )
+            self._minimax_sample_note.pack(anchor=tk.W, pady=(10, 0))
+            if not self._is_minimax_arch():
+                self._minimax_sample_note.pack_forget()
 
         # === Presets card ===
         preset_card = self._start_section_card(
@@ -5385,6 +5401,16 @@ class LoRATrainerGUI:
         # widgets, so MiniMax (is_krea2 False) hides them too.
         is_minimax = self._is_minimax_arch()
         native = is_krea2 or is_minimax
+
+        # The single-frame preview caveat belongs to MiniMax only — show it under the Base Model
+        # selector when that family is picked, hide it otherwise.
+        _note = getattr(self, "_minimax_sample_note", None)
+        if _note is not None:
+            if is_minimax:
+                if not _note.winfo_manager():
+                    _note.pack(anchor=tk.W, pady=(10, 0))
+            elif _note.winfo_manager():
+                _note.pack_forget()
         # Per-widget groups across the Training Parameters + Memory & FP8 sections.
         widgets = [
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,

@@ -456,6 +456,10 @@ MINIMAX_SHIFT_OPTIONS = [
     "5 - 11%",
     "4 - 14%, near the settings that overdrove",
     "3 - 17%",
+    # sqrt-token scaling from the video calibration puts a 0.25 MP still (256 tokens) at ~2.5.
+    # Note it passes 'resolution' on detail-band share (20% vs 16%) while keeping far more of
+    # the run above sigma 0.6 (63% vs 55%) — a different shape, not simply "further".
+    "2.5 - 20%, sqrt-matched to 0.25 MP",
     "resolution - 16%, overdrove at 1e-4",
     "sigmoid - 32%, overdrove at 1e-4",
 ]

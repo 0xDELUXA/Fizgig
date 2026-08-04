@@ -5411,6 +5411,23 @@ class LoRATrainerGUI:
                     _note.pack(anchor=tk.W, pady=(10, 0))
             elif _note.winfo_manager():
                 _note.pack_forget()
+
+        # The live-override REFERENCE image is a Klein edit-model feature. Neither native family
+        # is an edit model, and their trainers ignore the field — so hide the picker rather than
+        # leave a control that silently does nothing.
+        for _n in ("_override_ref_browse_btn", "_override_ref_label", "_override_ref_clear_btn"):
+            _w = getattr(self, _n, None)
+            if _w is None:
+                continue
+            if native and _w.winfo_manager():
+                _w.pack_forget()
+            elif not native and not _w.winfo_manager():
+                _w.pack(side=tk.LEFT, **({"padx": (6, 2)} if _n.endswith("label") else {}))
+        if native:
+            try:
+                self.sample_override_ref_var.set("")
+            except Exception:
+                pass
         # Per-widget groups across the Training Parameters + Memory & FP8 sections.
         widgets = [
             self._modelarea_label, self._modelarea_combo, self._modelarea_desc_label,

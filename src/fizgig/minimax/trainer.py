@@ -118,6 +118,30 @@ def is_pruned_checkpoint(path: str) -> bool:
         return False
 
 
+def read_sample_override(output_dir):
+    """Live sample override written by the GUI to <output_dir>/.sample_override.json.
+
+    Returns {prompt, seed, width, height} while active, else None. Unlike Krea 2 there is no
+    ref_image: H3 is not an edit model, so a reference is meaningless here and a prompt is
+    required for the override to count."""
+    import json
+    path = os.path.join(output_dir, ".sample_override.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        prompt = str(d.get("prompt", "")).strip()
+        if not prompt:
+            return None
+        return {"prompt": prompt,
+                "seed": int(d.get("seed", 1234)),
+                "width": int(d.get("width", 768)),
+                "height": int(d.get("height", 768))}
+    except Exception:
+        return None
+
+
 def sample_sigmas(batch: int, device, shift=None, generator=None,
                   image_tokens: int = None) -> torch.Tensor:
     """Noise levels in (0,1) for training.
@@ -832,6 +856,37 @@ def train_minimax(
     def _state_extra():
         return {"adaptive_lr_state": adaptive.state_dict()} if adaptive else None
 
+    # Encoded override prompt, kept between epochs: re-encoding costs a TE load, so only redo it
+    # when the prompt text actually changes.
+    _ov_state = {"prompt": None, "enc": None}
+
+    def _encode_override(prompt):
+        """Encode one override prompt mid-run.
+
+        The TE is ~14.5 GB and the int8 base ~21 GB, so unlike Krea 2 they cannot both be
+        resident on a 32 GB card — the normal flow deliberately encodes every prompt BEFORE the
+        DiT loads. To honour a live override we park the DiT on CPU for the duration, then
+        restore it (and its block-swap split). That is a ~21 GB round trip, which is why the
+        result is cached against the prompt text and only paid when you actually change it."""
+        from fizgig.minimax.sampling import encode_sample_prompts
+        _free = (torch.cuda.mem_get_info()[0] / 1e9) if torch.cuda.is_available() else 0.0
+        _park = torch.cuda.is_available() and _free < 17.0     # TE + headroom
+        if _park:
+            logger.info(f"[sample override] parking the base on CPU to fit the text encoder "
+                        f"({_free:.1f} GB free) — one-off for this prompt")
+            dit.to("cpu")
+            gc.collect()
+            torch.cuda.empty_cache()
+        try:
+            return encode_sample_prompts(te_path, [prompt], device=device, quantize=quantize)
+        finally:
+            if _park:
+                dit.to(device)
+                if n_swap > 0:
+                    dit.enable_block_swap(n_swap)   # restores the parked-block split
+                gc.collect()
+                torch.cuda.empty_cache()
+
     def _render_previews(epoch):
         """Render one still per prompt on the RESIDENT training DiT and write them where the
         samples gallery looks. The filename format is the gallery/likeness/Visualiser contract
@@ -858,14 +913,31 @@ def train_minimax(
                 # bf16, NOT fp32: 2.4 B params is 4.8 GB vs 9.7 GB, and this sits on top of the
                 # already-resident base. decode() follows the module dtype.
                 decoder = decoder.to(device, dtype).eval()
-            _seed = sample_seed if sample_seed != 0 else random.randint(1, 2 ** 31 - 1)
+            # Live override from the GUI, re-read every epoch so it can be turned on, changed or
+            # switched off mid-run without touching the paused/resume path.
+            _prompts, _w, _h = encoded_prompts, sample_width, sample_height
+            _seed = sample_seed
+            _ov = read_sample_override(output_dir)
+            if _ov and not te_path:
+                logger.warning("[sample override] a prompt is set but no --text_encoder is "
+                               "configured, so it cannot be encoded — using the Samples tab.")
+                _ov = None
+            if _ov:
+                if _ov["prompt"] != _ov_state["prompt"]:
+                    _ov_state["enc"] = _encode_override(_ov["prompt"])
+                    _ov_state["prompt"] = _ov["prompt"]
+                _prompts, _w, _h, _seed = _ov_state["enc"], _ov["width"], _ov["height"], _ov["seed"]
+                logger.info(f"[sample override] active — '{_ov['prompt'][:60]}' "
+                            f"seed={_seed} {_w}x{_h}")
+
+            _seed = _seed if _seed != 0 else random.randint(1, 2 ** 31 - 1)
             ts = _time.strftime("%Y%m%d%H%M%S")
-            for i, txt in enumerate(encoded_prompts):
-                print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(encoded_prompts)} "
-                      f"({sample_width}x{sample_height}, seed {_seed + i})", flush=True)
+            for i, txt in enumerate(_prompts):
+                print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
+                      f"({_w}x{_h}, seed {_seed + i})", flush=True)
                 lat = sampling.sample_image(
                     dit, txt.to(device, dtype),
-                    width=sample_width, height=sample_height, steps=sample_steps,
+                    width=_w, height=_h, steps=sample_steps,
                     cfg_scale=sample_cfg_scale,
                     uncond_embeds=(encoded_negative.to(device, dtype)
                                    if encoded_negative is not None else None),
@@ -878,11 +950,11 @@ def train_minimax(
                     # No VAE path configured — fall back to the 24ch->RGB linear approximation
                     # (a 1/16-scale rough look) rather than dropping previews entirely.
                     arr = sampling.latent_to_rgb(lat)
-                    img = Image.fromarray(arr).resize((sample_width, sample_height), Image.NEAREST)
-                print(f"[preview] decoded {sample_width}x{sample_height}", flush=True)
+                    img = Image.fromarray(arr).resize((_w, _h), Image.NEAREST)
+                print(f"[preview] decoded {_w}x{_h}", flush=True)
                 img.save(os.path.join(
                     sample_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}.png"))
-            logger.info(f"[preview] epoch {epoch}: wrote {len(encoded_prompts)} sample(s) "
+            logger.info(f"[preview] epoch {epoch}: wrote {len(_prompts)} sample(s) "
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
             del decoder                                  # free the ~4.85 GB decoder immediately

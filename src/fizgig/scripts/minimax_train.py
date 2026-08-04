@@ -78,8 +78,9 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--sample_prompts", default=None, help="Prompt file, one per line")
     p.add_argument("--sample_every_n_epochs", type=int, default=0)
     p.add_argument("--sample_at_first", action="store_true", help="Render an epoch-0 preview")
-    p.add_argument("--sample_width", type=int, default=512)
-    p.add_argument("--sample_height", type=int, default=512)
+    p.add_argument("--sample_width", type=int, default=768,
+                   help="H3's native canvas is a 768 short edge (768*1344 pixel cap)")
+    p.add_argument("--sample_height", type=int, default=768)
     p.add_argument("--sample_steps", type=int, default=28,
                    help="Denoise steps per preview (the reference pipeline uses 28; fewer leaves the latent off-manifold and the decode patchy)")
     p.add_argument("--sample_cfg_scale", type=float, default=1.0,

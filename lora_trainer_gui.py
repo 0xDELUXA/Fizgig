@@ -398,8 +398,11 @@ ARCHITECTURES = {
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 28,   # the reference pipeline default
-        "sample_width_default": 1024,
-        "sample_height_default": 1024,
+        # H3's native canvas is a 768 SHORT EDGE with a 768*1344 pixel cap. 1024x1024 is
+        # both over that cap and off the canvas convention; the reference pipeline samples
+        # 768x768 and ComfyUI's node defaults to 1344x768 (also 768 short edge).
+        "sample_width_default": 768,
+        "sample_height_default": 768,
         "lora_name_suffix": "mmh3",
     },
 }

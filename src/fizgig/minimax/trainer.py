@@ -83,30 +83,37 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1):
     return blocks, True
 
 
-def sample_sigmas(batch: int, device, shift: float = None, generator=None,
+def sample_sigmas(batch: int, device, shift=None, generator=None,
                   image_tokens: int = None) -> torch.Tensor:
     """Noise levels in (0,1) for training.
 
-    shift=None (the default): the validated IMAGE recipe — logit-normal base
-    (sigmoid(randn), the SD3/Flux/Krea 2 density) with a resolution-dependent shift
-    (shift = exp(mu), mu linear in the image-token count: 256 tokens -> 0.5, 6400 -> 1.15 —
-    the same mapping Krea 2 trains with). At 0.25 MP (~225 tokens) that's shift ~1.65:
-    median sigma ~0.62 with real coverage of the low-sigma zone where identity detail lives.
+    shift=None (the default): H3's own recipe — an UNSHIFTED logit-normal,
+    sigma = sigmoid(N(0,1)), median 0.5. This is what the reference trainer uses for H3
+    (ai-toolkit's `timestep_type='sigmoid'` default; its scheduler's shift=12 feeds the
+    SAMPLER only, never training).
+
+    shift="resolution": logit-normal with a resolution-dependent shift (shift = exp(mu), mu
+    linear in image tokens: 256 -> 0.5, 6400 -> 1.15 — Krea 2's mapping). ~1.7 at 768^2, i.e.
+    median sigma 0.62. Fizgig's previous default; kept for A/B. It biases training toward the
+    high-noise end, where a model learns global structure and colour — so an overshooting LoRA
+    overshoots there first.
 
     shift=<float>: legacy uniform-u + shift map (sigma = s*u/(1+(s-1)*u)). NOTE: H3's
     sigma_shift_video=12.0 is the SAMPLER'S step-spacing schedule for full VIDEO token counts —
     training image LoRAs with it put 57% of steps at sigma>0.9 and only ~4% below 0.3, which
-    produced structurally poor likeness at every checkpoint (real-run finding). Left available
-    for experiments only.
+    produced structurally poor likeness at every checkpoint (real-run finding). Experiments only.
     """
     if shift is None:
+        return torch.sigmoid(torch.randn(batch, device=device, generator=generator))
+    if shift == "resolution":
         tokens = float(image_tokens or 225)                       # ~0.25 MP default
         mu = 0.5 + (tokens - 256.0) * (1.15 - 0.5) / (6400.0 - 256.0)
-        shift = math.exp(mu)
+        s = math.exp(mu)
         base = torch.sigmoid(torch.randn(batch, device=device, generator=generator))
     else:
+        s = float(shift)
         base = torch.rand(batch, device=device, generator=generator)
-    return (shift * base) / (1.0 + (shift - 1.0) * base)
+    return (s * base) / (1.0 + (s - 1.0) * base)
 
 
 def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
@@ -529,12 +536,15 @@ def train_minimax(
         raise RuntimeError("No training items — run minimax_cache_latents then minimax_cache_text first.")
     logger.info(f"MiniMax H3 training: {group.num_train_items} items, {max_train_epochs} epochs")
     if shift is None:
-        logger.info("[timesteps] auto image schedule: logit-normal + resolution shift "
-                    "(~1.65 @0.25MP — full coverage of the identity-detail zone)")
+        logger.info("[timesteps] unshifted logit-normal, sigma = sigmoid(N(0,1)) — H3's own "
+                    "training density (median sigma 0.5)")
+    elif shift == "resolution":
+        logger.info("[timesteps] logit-normal + resolution shift (~1.7 @768^2, median sigma 0.62) "
+                    "— A/B against the default, which is unshifted")
     else:
         logger.warning(f"[timesteps] explicit shift={shift} — uniform-u legacy map. Note: 12.0 is "
                        "the VIDEO sampler schedule and trains almost entirely at high noise; the "
-                       "auto default (omit --shift) is right for image LoRAs.")
+                       "default (omit --shift) is right for image LoRAs.")
 
     # ---- VRAM plan: block swap + gradient checkpointing (before the base loads) ----
     _mp = 0.25

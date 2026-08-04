@@ -830,6 +830,24 @@ def train_minimax(
             progress_bar.update(1)
 
         logger.info(f"epoch {epoch + 1}/{max_train_epochs} done — avr_loss {loss_recorder.moving_average:.4f}")
+        # Optimizer sanity: lora_up starts at zero and an Adam-family step is bounded by ~lr, so
+        # after N steps no element can honestly exceed ~3*N*lr. When the 8-bit second moment
+        # misbehaves (v quantized to zero -> update degrades to lr*m/eps) the drift blows through
+        # that bound by orders of magnitude — caught here per epoch instead of per melted preview.
+        try:
+            _lr_now = optimizer.param_groups[0]["lr"]
+            _drift = max((float(l.lora_up.weight.detach().abs().max())
+                          for l in network.unet_loras if hasattr(l, "lora_up")), default=0.0)
+            _bound = 3.0 * global_step * _lr_now
+            if _drift > _bound:
+                logger.warning(f"[drift] max|lora_up|={_drift:.4f} EXCEEDS the Adam bound "
+                               f"~{_bound:.4f} ({global_step} steps @ lr={_lr_now:.1e}) — the "
+                               f"optimizer is stepping far beyond the configured LR (8-bit "
+                               f"state underflow?). Expect degraded samples.")
+            else:
+                logger.info(f"[drift] max|lora_up|={_drift:.4f} (bound ~{_bound:.4f} — healthy)")
+        except Exception:
+            pass
         if adaptive is not None:
             adaptive.epoch_boundary(epoch, loss_recorder.moving_average, network, optimizer)
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:

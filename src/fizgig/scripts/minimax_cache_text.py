@@ -57,6 +57,20 @@ def main():
                                  quantize=not args.no_quantize)
 
     process_batches(args, datasets, all_files, all_paths, lambda batch: encode_and_save_text(encoder, batch))
+
+    # One UNCONDITIONAL embed per cache dir (empty prompt -> the TE's single-pad fallback).
+    # Caption dropout (ai-toolkit default 0.05) swaps it in for ~5% of steps so the model keeps
+    # a usable unconditional pathway instead of overfitting every step to the captions.
+    from safetensors.torch import save_file as _save_file
+    _uncond = encoder.encode("")[0].detach().cpu().contiguous()      # (L=1, 5120)
+    for ds in datasets:
+        _dir = getattr(ds, "cache_directory", None)
+        if _dir:
+            os.makedirs(_dir, exist_ok=True)
+            _save_file({"hidden_states": _uncond,
+                        "attention_mask": torch.ones(_uncond.shape[0], dtype=torch.bool)},
+                       os.path.join(_dir, f"uncond_{ARCHITECTURE_MINIMAX}_te.safetensors"))
+    logger.info(f"[uncond] cached the empty-prompt embed for caption dropout ({_uncond.shape})")
     del encoder
     post_process(datasets, all_files, all_paths, args.keep_cache)
 

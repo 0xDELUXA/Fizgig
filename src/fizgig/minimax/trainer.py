@@ -507,6 +507,7 @@ def train_minimax(
     seed: int = 42,
     optimizer_type: str = "adamw8bit",
     optimizer_args: str = "",
+    caption_dropout: float = 0.05,
     include_patterns: list = None,
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
@@ -701,8 +702,30 @@ def train_minimax(
         logger.info(f"[adaptive_lr] ENABLED — start_lr={learning_rate:.3e} (geometric midpoint) "
                     f"min={adaptive_lr_min:.3e} max={adaptive_lr_max:.3e}; the Learning Rate box is ignored")
 
+    # Weight-decay parity with the reference trainer: ai-toolkit's job template passes
+    # optimizer_params weight_decay=1e-4; bitsandbytes' default is 0.01 (100x). Only applied
+    # when the user hasn't set their own via Optimizer Args.
+    if "weight_decay" not in (optimizer_args or "") and "adam" in optimizer_type.lower():
+        optimizer_args = (optimizer_args + " weight_decay=1e-4").strip()
     optimizer, optimizer_label = create_optimizer(optimizer_type, params, learning_rate, optimizer_args)
     logger.info(f"optimizer: {optimizer_label} @ lr={learning_rate:.3e}")
+
+    # Caption dropout (reference default 0.05): swap in the cached empty-prompt embed for a
+    # random ~5% of steps. The uncond file is written by minimax_cache_text next to the caches.
+    uncond_text = None
+    if caption_dropout and caption_dropout > 0:
+        for _ds in group.datasets:
+            _f = os.path.join(getattr(_ds, "cache_directory", "") or "",
+                              f"uncond_{ARCHITECTURE_MINIMAX}_te.safetensors")
+            if os.path.isfile(_f):
+                from safetensors.torch import load_file as _lf
+                uncond_text = _lf(_f)["hidden_states"].unsqueeze(0)      # (1, L, 5120)
+                break
+        if uncond_text is None:
+            logger.warning("[caption_dropout] no uncond embed in the cache dirs (re-run text "
+                           "caching to enable it) — dropout disabled for this run")
+        else:
+            logger.info(f"[caption_dropout] {caption_dropout:.2f} — empty-prompt embed loaded")
 
     collator = _Collator(shared_epoch, group)
     loader = DataLoader(group, batch_size=1, shuffle=True, collate_fn=collator, num_workers=0)
@@ -821,6 +844,8 @@ def train_minimax(
             if latents.dim() == 4:
                 latents = latents.unsqueeze(2)                     # -> (1, 24, 1, H, W)
             text = batch["hidden_states"].to(device, dtype)        # (1, L, 5120)
+            if uncond_text is not None and random.random() < caption_dropout:
+                text = uncond_text.to(device, dtype)               # caption dropout step
             loss, _ = compute_loss(dit, latents, text, shift=shift)
             loss.backward()
             if max_grad_norm and max_grad_norm > 0:

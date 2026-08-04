@@ -60,6 +60,9 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--optimizer_type", default="adamw8bit", choices=available_optimizers())
     p.add_argument("--optimizer_args", default="", help='Free-form kwargs, e.g. "weight_decay=0.01"')
+    p.add_argument("--caption_dropout", type=float, default=0.05,
+                   help="Fraction of steps trained on the empty prompt (reference default 0.05; "
+                        "needs the uncond embed cached by minimax_cache_text). 0 disables.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
     p.add_argument("--no_quantize", action="store_true",
@@ -138,6 +141,7 @@ def main():
         seed=args.seed,
         optimizer_type=args.optimizer_type,
         optimizer_args=args.optimizer_args,
+        caption_dropout=args.caption_dropout,
         include_patterns=args.include_patterns,
         quantize=not args.no_quantize,
         shift=args.shift,

@@ -20162,12 +20162,32 @@ class LoRATrainerGUI:
                                   for c in os.path.basename(_cache_img_dir.rstrip("/\\"))) or "dataset"
                     cache_dir = os.path.join(cache_dir, f"{_nm}-{_h}")
 
+            # MiniMax trains MULTI-RESOLUTION, mirroring ai-toolkit's default
+            # resolution: [512, 768, 1024] — each image trains at three scales. The high-res
+            # scales are where fine detail is learned (at the same sigma a 1024px latent keeps
+            # far more structure than a 512px one), and single-scale 0.25 MP training was the
+            # biggest recipe divergence from the reference. Three [[datasets]] blocks share the
+            # image folder; each gets its OWN cache subdir (the trainer builds its item list by
+            # globbing the cache dir, so a shared dir would train every image 3x per block).
+            _mm_multires = (not is_jsonl and not is_video and self._is_minimax_arch())
+
             if is_jsonl:
                 jsonl_file = self.dataset_jsonl_file_var.get().strip().replace("\\", "/")
                 if is_video:
                     toml_lines.append(f'video_jsonl_file = "{jsonl_file}"')
                 else:
                     toml_lines.append(f'image_jsonl_file = "{jsonl_file}"')
+            elif _mm_multires:
+                image_dir = self.image_folder_var.get().strip().replace("\\", "/")
+                toml_lines.pop()                       # drop the single [[datasets]] header
+                for _side in (512, 768, 1024):
+                    toml_lines.append("[[datasets]]")
+                    toml_lines.append(f"resolution = [{_side}, {_side}]")
+                    toml_lines.append(f'image_directory = "{image_dir}"')
+                    if cache_dir:
+                        _cd = f"{cache_dir}-r{_side}".replace(chr(92), "/")
+                        toml_lines.append(f'cache_directory = "{_cd}"')
+                    toml_lines.append("")
             else:
                 if is_video:
                     video_dir = self.dataset_video_dir_var.get().strip().replace("\\", "/")
@@ -20176,7 +20196,7 @@ class LoRATrainerGUI:
                     image_dir = self.image_folder_var.get().strip().replace("\\", "/")
                     toml_lines.append(f'image_directory = "{image_dir}"')
 
-            if cache_dir:
+            if cache_dir and not _mm_multires:
                 toml_lines.append(f'cache_directory = "{cache_dir.replace(chr(92), "/")}"')
 
             if is_video:

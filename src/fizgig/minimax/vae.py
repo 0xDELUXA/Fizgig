@@ -366,23 +366,24 @@ class MiniMaxH3VideoVAEDecoder(nn.Module):
     # A lone temporal token is out of distribution for this chunk-trained decoder, so the single
     # latent is replicated before decoding. Two schemes, selected by `single_frame_mode`:
     #
-    #   "reference" (DEFAULT) — cat([z, z]) -> a 2-latent clip, keep pixel frame 0. What
-    #       ai-toolkit does: the first latent of a chunk covers exactly pixel frame 0 in the
-    #       (1, 4, 4, 4, 4) grouping, so that frame is the in-distribution single-frame decode.
-    #   "group" — replicate to a full 5-latent temporal group, keep frame 3 (past the causal
-    #       lead-in). Scores far better on ROUND-TRIP fidelity: 29.99 dB mean against the
-    #       reference's 16.96 dB on real photos (tests/diag_frame_choice.py) — but that test
-    #       only ever sees ENCODER-produced latents, which are in-distribution by construction.
-    #       On real previews, whose latents come from a partially-trained sampler and sit off
-    #       the encoder manifold, the reference scheme is what looks right (Peter, 4 Aug). The
-    #       PSNR win does not transfer, so it is not the default.
+    #   "group" (DEFAULT) — replicate to a full 5-latent temporal group, keep frame 3 (past the
+    #       causal lead-in). Wins on every measure taken: round-trip fidelity 29.99 dB mean vs
+    #       16.96 dB (tests/diag_frame_choice.py, real photos), and confirmed better on real
+    #       rendered previews too. Costs 2.5x the decode tokens, which is small at preview size.
+    #   "reference" — cat([z, z]) -> a 2-latent clip, keep pixel frame 0. What ai-toolkit does.
+    #       Tried as the default on 4 Aug and reverted: a 2-latent pad is still too short for a
+    #       decoder trained on 5-latent chunks, and it scores barely above the raw lone token
+    #       (16.96 vs 16.64 dB). Only a COMPLETE (1, 4, 4, 4, 4) group puts the ViT back in its
+    #       training regime, and then only an interior frame is clean — frames 0 and 4 sit at
+    #       the group boundary and lose ~10 dB.
     #
-    # Change with `decoder.single_frame_mode = "group"` to A/B.
+    # This is the one place Fizgig deliberately diverges from the reference. Set
+    # `decoder.single_frame_mode = "reference"` to A/B.
     _T_GROUP = 5
     _LEAD_IN = 3            # "group": the reference drops a 3-frame causal lead-in
     _REF_T = 2              # "reference": cat([z, z])
     _REF_FRAME = 0
-    single_frame_mode = "reference"
+    single_frame_mode = "group"
 
     def _pad_and_index(self):
         """(replication count, pixel frame to keep) for the active single-frame scheme."""

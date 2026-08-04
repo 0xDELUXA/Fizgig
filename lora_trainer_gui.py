@@ -489,13 +489,25 @@ MINIMAX_SHIFT_OPTIONS = [f"{s} - for {mp} MP" for mp, s in MINIMAX_SHIFT_BY_MP] 
 # loudest against a 2% flat expectation, thirds within 28/34/38), and the quietest blocks do not
 # agree between runs. Weight movement offers no map either way — which is why the only way to
 # learn anything here is to train a range and compare.
+# The box is EDITABLE: these are jumping-off points, and anything the trainer's parser accepts
+# can be typed instead — "3-12, 14-15, 22, 31-33". The label separator is "·" and not "-" or a
+# plain space, because both of those appear inside a block spec; splitting on them would turn
+# "3-12, 14" into "3-12," and train the wrong set without ever complaining.
 MINIMAX_BLOCK_OPTIONS = [
-    "all - every block (50 of 50)",
-    "10-49 - skip the first 10",
-    "14-37 - middle band",
-    "25-49 - back half",
-    "0-24 - front half",
+    "all · every block (50 of 50)",
+    "10-49 · skip the first 10",
+    "14-37 · middle band",
+    "25-49 · back half",
+    "0-24 · front half",
 ]
+
+
+MINIMAX_NUM_BLOCKS = 50          # H3's DiT block count (MiniMaxH3Config.num_layers)
+
+
+def minimax_block_spec(raw):
+    """The block selection out of a dropdown label OR a hand-typed spec. "" -> "all"."""
+    return str(raw or "").split("·")[0].strip() or "all"
 
 
 def minimax_recommended_shift(megapixels):
@@ -3664,11 +3676,22 @@ class LoRATrainerGUI:
         self._minimax_blocks_label.grid(row=28, column=0, sticky=tk.W, padx=5, pady=(8, 2))
         self._minimax_blocks_frame = ttk.Frame(training_content)
         self._minimax_blocks_frame.grid(row=28, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        # Editable, not readonly — the presets are starting points and the real control is typing
+        # a spec. Anything the trainer's parser takes is legal here.
         self.entries["MINIMAX_BLOCKS"] = ttk.Combobox(
-            self._minimax_blocks_frame, values=MINIMAX_BLOCK_OPTIONS, state="readonly", width=42)
+            self._minimax_blocks_frame, values=MINIMAX_BLOCK_OPTIONS, width=34)
         self.entries["MINIMAX_BLOCKS"].pack(side=tk.LEFT)
         self._select_combo_by_token(self.entries["MINIMAX_BLOCKS"],
                                     self.settings.get("MINIMAX_BLOCKS", "all"))
+        # Live readout: a typed spec is easy to fat-finger, and "trained 3 blocks when you meant
+        # 30" is invisible in the output. Says how many blocks the box currently means.
+        self._minimax_blocks_count = tk.Label(self._minimax_blocks_frame, text="",
+                                              font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
+        self._minimax_blocks_count.pack(side=tk.LEFT, padx=(10, 0))
+        self.entries["MINIMAX_BLOCKS"].bind(
+            "<KeyRelease>", lambda _e: self._refresh_minimax_blocks_count())
+        self.entries["MINIMAX_BLOCKS"].bind(
+            "<<ComboboxSelected>>", lambda _e: self._refresh_minimax_blocks_count())
         self._minimax_blocks_hint = ttk.Label(
             training_content,
             text="EXPERIMENT — no recommended answer yet. H3 is 50 identical blocks and nobody has "
@@ -3677,13 +3700,16 @@ class LoRATrainerGUI:
                  "framing and lighting — so leaving blocks out may give a CLEANER likeness with "
                  "less memorised set, not just a faster run. The ranges here are scaled from "
                  "Klein's block map, a different architecture, so they're starting guesses. Train "
-                 "one against a full-model run on the same dataset and judge the pair: if a range "
-                 "holds up, the blocks you left out weren't needed — whichever end they were. "
+                 "one against a full-model run on the same dataset and judge the pair: if a "
+                 "selection holds up, the blocks you left out weren't needed — whichever end they "
+                 "were. Type your own: ranges and single blocks, comma-separated, like "
+                 "3-12, 14-15, 22, 31-33. Blocks are numbered 0-49. "
                  "Fewer blocks also means faster steps and a smaller file, and less capacity "
                  "overall, so give a narrow range a few more epochs before calling it. The range "
                  "is recorded in the LoRA's metadata as ss_train_blocks.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        self._refresh_minimax_blocks_count()
 
         self.dataset_megapixels_var.trace_add("write", lambda *_: self._refresh_minimax_shift_match())
         self.entries["MINIMAX_SHIFT"].bind("<<ComboboxSelected>>",
@@ -4915,8 +4941,8 @@ class LoRATrainerGUI:
             _sh = str(p.get("MINIMAX_SHIFT") or "").split(" ")[0]
             if _sh:
                 bits.append(f"detail {_sh}")
-            _bl = str(p.get("MINIMAX_BLOCKS") or "").split(" ")[0]
-            if _bl and _bl.lower() != "all":
+            _bl = minimax_block_spec(p.get("MINIMAX_BLOCKS"))
+            if _bl.lower() != "all":
                 bits.append(f"blocks {_bl}")
         return name, "  ·  ".join(str(b) for b in bits) + f"\nqueued {item.get('queued_at', '?')}"
 
@@ -5507,6 +5533,31 @@ class LoRATrainerGUI:
         else:
             lbl.config(text=f"recommended for {self.dataset_megapixels_var.get()} MP: {want}",
                        fg="#E67E22")
+
+    def _refresh_minimax_blocks_count(self):
+        """Say how many blocks the Blocks to Train box currently means, or why it can't be read.
+
+        A typed spec fails silently in the worst way: "3-12, 4" trains 11 blocks and looks like a
+        run, and nothing downstream ever says otherwise. This turns that into a number you can
+        see before you launch."""
+        lbl = getattr(self, "_minimax_blocks_count", None)
+        combo = self.entries.get("MINIMAX_BLOCKS")
+        if lbl is None or combo is None or not lbl.winfo_exists():
+            return
+        spec = minimax_block_spec(combo.get())
+        if spec.lower() == "all":
+            lbl.config(text="all 50 blocks", fg=COLORS["text_explain"])
+            return
+        try:
+            from fizgig.minimax.trainer import parse_block_spec
+            idx = parse_block_spec(spec, MINIMAX_NUM_BLOCKS)
+        except ValueError as e:
+            lbl.config(text=f"✗ {e}", fg="#E74C3C")
+            return
+        except ImportError:
+            lbl.config(text="")
+            return
+        lbl.config(text=f"✓ {len(idx)} of {MINIMAX_NUM_BLOCKS} blocks", fg="#27AE60")
 
     def _is_krea2_arch(self) -> bool:
         return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)
@@ -20605,6 +20656,18 @@ class LoRATrainerGUI:
         _check_num("Network Alpha", self.entries["NETWORK_ALPHA"].get(), float, 0)
         if self._network_type_is_lokr():
             _check_num("LoKR Factor", self.entries["LOKR_FACTOR"].get(), int, 2)
+        # Blocks to Train is free text, so a typo is caught HERE rather than after the 21 GB base
+        # has streamed in — and a queued run must never fail an hour later on a bad spec.
+        if self._is_minimax_arch():
+            _spec = minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get())
+            if _spec.lower() != "all":
+                try:
+                    from fizgig.minimax.trainer import parse_block_spec
+                    parse_block_spec(_spec, MINIMAX_NUM_BLOCKS)
+                except ValueError as e:
+                    errors.append(f"Blocks to Train: {e}")
+                except ImportError:
+                    pass
         _check_num("Max Train Epochs", self.entries["MAX_TRAIN_EPOCHS"].get(), int, 1)
         _check_num("Save Every N Epochs", self.entries["SAVE_EVERY_N_EPOCHS"].get(), int, 1)
         _check_num("Seed", self.entries["SEED"].get(), int)
@@ -21051,7 +21114,7 @@ class LoRATrainerGUI:
             # MiniMax-only; the widget exists (hidden) under every family, so read it unconditionally
             # and let the MiniMax command builder be the one that acts on it.
             "MINIMAX_SHIFT": str(self.entries["MINIMAX_SHIFT"].get() or "12").split(" ")[0],
-            "MINIMAX_BLOCKS": str(self.entries["MINIMAX_BLOCKS"].get() or "all").split(" ")[0],
+            "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "DATASET_CONFIG": self._get_path("DATASET_CONFIG"),
             "VAE_MODEL": self._get_path("VAE_MODEL"),
             "CLIP_MODEL": self._get_path("CLIP_MODEL"),
@@ -22007,8 +22070,8 @@ class LoRATrainerGUI:
         cmd += ["--shift", _shift]
         # Blocks to Train — only sent when it's a real range; "all" is the trainer's own default,
         # and not sending it keeps the flag's presence meaning "this run was a block experiment".
-        _blocks = str(self.settings.get("MINIMAX_BLOCKS", "all") or "all").split(" ")[0]
-        if _blocks and _blocks.lower() != "all":
+        _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))
+        if _blocks.lower() != "all":
             cmd += ["--train_blocks", _blocks]
         # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
         # the factor is the dial. Same flags as the Krea 2 builder.

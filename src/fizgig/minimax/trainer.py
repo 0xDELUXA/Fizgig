@@ -56,26 +56,74 @@ DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
 PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*"]
 
 
-def restrict_patterns_to_blocks(patterns, block_spec: str):
-    """Narrow `blocks.N.*` patterns to a block range like "14-37". Non-block patterns pass through.
+def parse_block_spec(spec, num_blocks: int = None):
+    """"3-12, 14-15, 22,27,31-33" -> [3,4,...,12,14,15,22,27,31,32,33].
+
+    Ranges and singles, comma-separated, whitespace anywhere. Returns sorted unique indices.
+    Raises ValueError on anything it cannot read — a typo here must stop the run, not silently
+    train a different set of blocks than the one being tested.
+
+    num_blocks, when given, bounds-checks: an out-of-range index would otherwise just match
+    nothing and quietly shrink the experiment.
+    """
+    text = str(spec if spec is not None else "").strip()
+    if not text:
+        raise ValueError("no blocks given")
+    out = set()
+    for part in text.split(","):
+        chunk = part.strip()
+        if not chunk:
+            continue                       # tolerate a trailing or doubled comma
+        m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", chunk)
+        if m:
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo > hi:
+                raise ValueError(f"range runs backwards: {chunk!r}")
+            out.update(range(lo, hi + 1))
+        elif re.fullmatch(r"\d+", chunk):
+            out.add(int(chunk))
+        else:
+            raise ValueError(f"cannot read {chunk!r} — use numbers and ranges, "
+                             f"e.g. '3-12, 14-15, 22, 31-33'")
+    if not out:
+        raise ValueError("no blocks given")
+    if num_blocks is not None:
+        bad = sorted(i for i in out if i >= num_blocks)
+        if bad:
+            raise ValueError(f"block(s) {bad} do not exist — this model has {num_blocks} "
+                             f"(0-{num_blocks - 1})")
+    return sorted(out)
+
+
+def format_block_spec(indices):
+    """[3,4,5,7] -> "3-5,7" — the canonical form recorded in metadata and logged."""
+    if not indices:
+        return ""
+    runs, start, prev = [], indices[0], indices[0]
+    for i in indices[1:]:
+        if i == prev + 1:
+            prev = i
+            continue
+        runs.append((start, prev))
+        start = prev = i
+    runs.append((start, prev))
+    return ",".join(str(a) if a == b else f"{a}-{b}" for a, b in runs)
+
+
+def restrict_patterns_to_blocks(patterns, block_spec, num_blocks: int = None):
+    """Narrow `blocks.N.*` patterns to a block selection. Non-block patterns pass through.
 
     H3 is 50 IDENTICAL blocks with no published map of what each one does, so training a subset is
     an experiment, not a recipe — this exists to make that experiment cheap to run. The token
     refiner is deliberately never narrowed: it is text-side (where a trigger token gets shaped),
-    it is 8 of 258 modules, and holding it constant keeps two block ranges comparable to each
-    other rather than confounding the block question with a conditioning change.
+    it is 8 of 258 modules, and holding it constant keeps two selections comparable to each other
+    rather than confounding the block question with a conditioning change.
 
     Applied ON TOP of the per-checkpoint pattern list rather than replacing it, so the pruned vs
     bf16 AdaLN decision stays in exactly one place.
     """
-    spec = str(block_spec).strip()
-    m = re.fullmatch(r"(\d+)\s*-\s*(\d+)", spec)
-    if not m:
-        raise ValueError(f"train_blocks must look like '14-37', got {block_spec!r}")
-    lo, hi = int(m.group(1)), int(m.group(2))
-    if lo > hi:
-        raise ValueError(f"train_blocks range is inverted: {block_spec!r}")
-    alt = "|".join(str(i) for i in range(lo, hi + 1))
+    idx = parse_block_spec(block_spec, num_blocks)
+    alt = "|".join(str(i) for i in idx)
     out = []
     for p in patterns:
         if p.startswith(r"blocks\.\d+"):
@@ -631,6 +679,11 @@ def train_minimax(
 
     torch.manual_seed(seed)
     user_include_patterns = include_patterns   # None -> resolved per checkpoint below
+    # Parse the block selection NOW, before the 21 GB base streams in: a typo surfacing after
+    # the load costs minutes and reads like a crash rather than a correction. Bounds-checking
+    # waits until the model is up (that is when the real block count is known).
+    if train_blocks:
+        parse_block_spec(train_blocks)
 
     # ---- dataset (built from the caches the two cache scripts wrote) ----
     shared_epoch = Value("i", 0)
@@ -745,13 +798,16 @@ def train_minimax(
     # AdaLN targeting is per-checkpoint — see the pattern note at the top of this file.
     include_patterns = user_include_patterns or (
         PRUNED_INCLUDE_PATTERNS if dit.pruned_adaln else DEFAULT_INCLUDE_PATTERNS)
+    _blocks_used = "all"
     if train_blocks:
-        include_patterns = restrict_patterns_to_blocks(include_patterns, train_blocks)
-        _lo, _hi = (int(x) for x in str(train_blocks).split("-"))
-        logger.info("[base] EXPERIMENT: training blocks %d-%d only (%d of %d), text refiner "
+        _n_blocks = len(dit.blocks)
+        include_patterns = restrict_patterns_to_blocks(include_patterns, train_blocks, _n_blocks)
+        _sel = parse_block_spec(train_blocks, _n_blocks)
+        _blocks_used = format_block_spec(_sel)
+        logger.info("[base] EXPERIMENT: training blocks %s only (%d of %d), text refiner "
                     "included. Nobody has mapped what H3's blocks do — judge this against a "
                     "full-model run on the same dataset, not on its own.",
-                    _lo, _hi, _hi - _lo + 1, len(dit.blocks))
+                    _blocks_used, len(_sel), _n_blocks)
     logger.info("[base] %s checkpoint; LoRA targets: attention + MLP + token refiner%s",
                 "pruned (curve-table AdaLN)" if dit.pruned_adaln else "full bf16",
                 " + AdaLN (deploy-consistent on this build; rank caps at 8)"
@@ -892,7 +948,7 @@ def train_minimax(
             "ss_learning_rate": f"{learning_rate:g}",
             "ss_optimizer": optimizer_label,
             "ss_timestep_density": _dens,
-            "ss_train_blocks": str(train_blocks) if train_blocks else "all",
+            "ss_train_blocks": _blocks_used,
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
             "ss_max_grad_norm": f"{max_grad_norm:g}",
             "ss_bucket_resolutions": ",".join(_res),

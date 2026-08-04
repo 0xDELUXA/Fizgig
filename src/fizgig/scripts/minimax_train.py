@@ -65,11 +65,12 @@ def setup_parser() -> argparse.ArgumentParser:
                         "needs the uncond embed cached by minimax_cache_text). 0 disables.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
-    p.add_argument("--train_blocks", default=None, metavar="LO-HI",
-                   help="EXPERIMENT: train only DiT blocks LO-HI (e.g. 14-37) out of 50, instead "
-                        "of all of them. The text refiner is always included. H3's 50 blocks are "
-                        "identical and nobody has mapped what each one does, so any range is a "
-                        "hypothesis — compare against a full-model run on the same dataset.")
+    p.add_argument("--train_blocks", default=None, metavar="SPEC",
+                   help="EXPERIMENT: train only these DiT blocks (of 50) instead of all of them. "
+                        "Ranges and singles, comma-separated: '14-37' or '3-12, 14-15, 22, 31-33'. "
+                        "The text refiner is always included. H3's blocks are identical and nobody "
+                        "has mapped what each one does, so any selection is a hypothesis — compare "
+                        "against a full-model run on the same dataset.")
     p.add_argument("--base_quant", default="auto", choices=["auto", "int8", "nf4"],
                    help="Frozen-base precision. 'int8' keeps the checkpoint's own ConvRot "
                         "weights (~0.17%% base error, ~21 GB) — what the reference trainer "

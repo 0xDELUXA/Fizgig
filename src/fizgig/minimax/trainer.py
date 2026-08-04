@@ -39,16 +39,20 @@ VIDEO_SIGMA_SHIFT_TRAIN = 12.0     # H3's video shift — also the reference TRA
 #   * FULL bf16 model ([96768, 2688]): EXCLUDED — the up-matrices are 96768-out (6x qkv),
 #     soaked up the largest share of LoRA capacity, and ComfyUI's pruned inference builds
 #     drop every adaln key anyway (~50% likeness until excluded, real run).
-#   * PRUNED model ([96768, 8]): INCLUDED — deploy-consistent, cheap (rank caps at 8), and
-#     what ai-toolkit trains. An epoch-1 melt was once pinned on these adapters
-#     (tests/diag_epoch1_ab.py: adaln-off rendered clean at that seed), but the distortion
-#     predated adaln and persisted without it — the actual culprit was the TRAINING DENSITY
-#     (see sample_sigmas): low-shift densities slam the mid/low-noise zone and overdrive
-#     every adapter, adaln merely being the most visible casualty.
+#   * PRUNED model ([96768, 8]): INCLUDED — deploy-consistent, and what ai-toolkit trains.
+#     It carries ~45% of all weight movement in a matched reference epoch, and it is the
+#     timestep-conditioned modulation, so starving it reads from outside as "the mid/low-noise
+#     range never gets trained". Train it at the REQUESTED rank: capping to min(in,out)=8 cost
+#     73% of its learning (see the no-cap note in networks/lora.py). An epoch-1 melt was once
+#     pinned on these adapters (tests/diag_epoch1_ab.py) but the distortion predated adaln and
+#     persisted without it — the real culprit was the training density (see sample_sigmas).
 DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
                             r"token_refiner\.blocks\..*"]
-PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*",
-                                                      r"final_layer\.adaln_proj\..*"]
+# NOTE: the per-block AdaLNs only — NOT `final_layer.adaln_proj`. The reference trains 258
+# modules and we were training 259; the extra one was added here by symmetry, not by matching
+# them. It also happened to carry our single highest per-element drift after a matched epoch
+# (0.0133 vs their 0.0068 max), so it was contributing noise rather than capability.
+PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*"]
 
 
 # ---------------------------------------------------------------------------

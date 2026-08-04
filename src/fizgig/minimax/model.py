@@ -340,11 +340,18 @@ class FinalLayer(nn.Module):
         """x_video [n_video, hidden] — just the video segment.
 
         modalities=1, so the table is one row per distinct timestep: `t_index` selects the
-        video rows' own timestep (the audio rows sit at a different one and are dropped
-        before this point, so only their existence in the table matters here)."""
+        video rows' own timestep."""
         shift, scale = self.adaln_proj(t_emb)
         hv = self.norm(x_video) * (1.0 + scale[t_index]) + shift[t_index]
         return self.video_out(hv.to(self.video_out.weight.dtype))
+
+    def forward_audio(self, x_audio, t_emb, t_index: int = 0):
+        """Same shared norm+modulation, but at the AUDIO rows' timestep and through the audio
+        head — the reference's final layer modulates every row by its own timestep and then
+        applies the per-modality head. Used by joint audio denoising in the sampler."""
+        shift, scale = self.adaln_proj(t_emb)
+        ha = self.norm(x_audio) * (1.0 + scale[t_index]) + shift[t_index]
+        return self.audio_out(ha.to(self.audio_out.weight.dtype))
 
 
 # --- model -------------------------------------------------------------------------------
@@ -452,19 +459,24 @@ class MiniMaxH3DiT(nn.Module):
         return n
 
     def forward(self, video_latent: torch.Tensor, t: torch.Tensor,
-                text_embeds: torch.Tensor, audio_noise: torch.Tensor = None) -> torch.Tensor:
+                text_embeds: torch.Tensor, audio_noise: torch.Tensor = None, *,
+                audio_rows: torch.Tensor = None, return_audio: bool = False):
         """
         video_latent : [1, C=latents_dim, T=1, H, W]  — one image as a single video frame.
         t            : scalar or [1] flow time in [0, 1] (the value fed to the time embedder;
                        the trainer owns noising and the flow target).
         text_embeds  : [1, L, text_dim] Qwen3-VL hidden states (or already [1, L, hidden]).
-        audio_noise  : optional [A*2, audio_latents_dim] unit noise for the silence rows. None
-                       draws fresh (what training wants — the reference redraws every step).
-                       A sampler should draw ONCE from its seeded generator and pass the same
-                       tensor every step: silence is x0 = 0, so the exact flow trajectory is
-                       sigma_a * eps for one fixed eps, and a fixed eps also keeps the forward
-                       deterministic for a given seed.
-        returns      : [1, C, T, H, W] video velocity prediction (same shape as video_latent).
+        audio_noise  : optional [A*2, audio_latents_dim] unit noise for SILENCE rows, scaled by
+                       the audio sigma internally. None draws fresh — what training wants (the
+                       reference redraws every step; image datasets have no soundtrack, so
+                       silence noised at sigma_a rides along without contributing loss).
+        audio_rows   : optional [A*2, audio_latents_dim] EXPLICIT row content, used verbatim
+                       (no sigma scaling) — the sampler's joint audio denoising evolves these
+                       across steps exactly like the reference pipeline. Overrides audio_noise.
+        return_audio : also return the audio head's prediction for those rows, so a sampler
+                       can step them.
+        returns      : [1, C, T, H, W] video prediction — or (video, audio [A*2, adim]) when
+                       return_audio.
         """
         if video_latent.shape[0] != 1:
             raise ValueError("MiniMax H3 image training is batch size 1 (pack one image per step)")
@@ -491,12 +503,15 @@ class MiniMaxH3DiT(nn.Module):
             sigma_v = (1.0 - t_val).clamp(0.0, 1.0)
             sigma_a = remap_sigma(sigma_v)
             t_audio = 1.0 - sigma_a
-            eps = audio_noise
-            if eps is None:
-                eps = torch.randn(n_audio_latents * AUDIO_CHANNELS, self.config.audio_latents_dim,
-                                  device=device, dtype=torch.float32)
-            audio_rows = sigma_a * eps.to(device=device, dtype=torch.float32)
-            audio_embed = self.audio_patch_proj(audio_rows).to(dtype)
+            if audio_rows is not None:
+                _arows = audio_rows.to(device=device, dtype=torch.float32)
+            else:
+                eps = audio_noise
+                if eps is None:
+                    eps = torch.randn(n_audio_latents * AUDIO_CHANNELS, self.config.audio_latents_dim,
+                                      device=device, dtype=torch.float32)
+                _arows = sigma_a * eps.to(device=device, dtype=torch.float32)
+            audio_embed = self.audio_patch_proj(_arows).to(dtype)
 
         # pack [text | audio | video] — the reference's order, minus the cond rows an image
         # run never has
@@ -542,4 +557,12 @@ class MiniMaxH3DiT(nn.Module):
         v = self.final_layer(h[video_start:], t_emb, video_t_index)              # [n_video, video_patch_dim]
         out = unpatchify_video(v, latent_t, lat_h // self.patch_size[1], lat_w // self.patch_size[2],
                                self.latents_dim, self.patch_size)
-        return out.to(video_latent.dtype)
+        out = out.to(video_latent.dtype)
+        if return_audio:
+            if n_audio:
+                audio_t_index = int(inverse[1])
+                a = self.final_layer.forward_audio(h[text_len:video_start], t_emb, audio_t_index)
+            else:
+                a = None
+            return out, a
+        return out

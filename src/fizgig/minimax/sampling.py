@@ -3,8 +3,10 @@
 Renders ONE still per prompt. H3's temporal grid is FRAME_PER_TOKEN = (1, 4, 4, 4, 4), so a
 single latent frame decodes to exactly one pixel frame — which is also what the encoder produces
 for a still, and what training uses. So a preview is the training forward run backwards: the DiT
-packs the same [text | audio | video] sequence (the audio block is 4 rows of silence — see
-model.py), and there is no multi-frame RoPE or cond-row work to do.
+packs the same [text | audio | video] sequence, and there is no multi-frame RoPE or cond-row
+work to do. The audio rows are DENOISED jointly on their own shift-3 schedule, exactly like the
+reference pipeline (training noises silence instead — also what the reference trainer does for
+image datasets).
 
 A preview is still a *training-distribution* render, not a byte-faithful ComfyUI one (ComfyUI
 generates >= 2 latent frames and denoises the audio stream for real). It answers "is this LoRA
@@ -96,23 +98,40 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     lat_h, lat_w = (lat_h // 2) * 2, (lat_w // 2) * 2
     gen = torch.Generator(device="cpu").manual_seed(int(seed))
     x = torch.randn(1, latent_channels, 1, lat_h, lat_w, generator=gen, dtype=torch.float32).to(device)
-    # The pack's silence audio rows: one noise draw for the whole trajectory (silence is x0 = 0,
-    # so its exact path is sigma_a*eps at every step) — and it keeps a preview reproducible.
-    n_audio = audio_latents_for_frames(1) * AUDIO_CHANNELS if getattr(model, "pack_audio_rows", False) else 0
-    audio_noise = None
-    if n_audio:
-        audio_noise = torch.randn(n_audio, model.config.audio_latents_dim,
-                                  generator=gen, dtype=torch.float32).to(device)
+    # Joint audio denoising, mirroring the reference pipeline: the audio rows start as pure
+    # noise (sigma_a(1) = 1) and the model's AUDIO head steps them down their own shift-3
+    # schedule alongside the video. At low sigma the video tokens then attend to plausible
+    # audio content — the regime the base was pretrained in — rather than scaled noise.
+    joint_audio = bool(getattr(model, "pack_audio_rows", False))
+    audio_rows = None
+    if joint_audio:
+        n_audio = audio_latents_for_frames(1) * AUDIO_CHANNELS
+        audio_rows = torch.randn(n_audio, model.config.audio_latents_dim,
+                                 generator=gen, dtype=torch.float32).to(device)
 
+    from fizgig.minimax.model import remap_sigma
     use_cfg = cfg_scale > 1.0 and uncond_embeds is not None
     sigmas = sample_schedule(steps, shift=shift)
     for i in range(steps):
         s_curr, s_next = sigmas[i], sigmas[i + 1]
         t = torch.tensor([1.0 - s_curr], device=device)     # the DiT is conditioned on cleanness
-        out = model(x.to(dtype), t, text_embeds, audio_noise).float()
-        if use_cfg:
-            out_u = model(x.to(dtype), t, uncond_embeds, audio_noise).float()
-            out = out_u + cfg_scale * (out - out_u)
+        if joint_audio:
+            out, a_out = model(x.to(dtype), t, text_embeds,
+                               audio_rows=audio_rows, return_audio=True)
+            out = out.float()
+            if use_cfg:
+                out_u, _ = model(x.to(dtype), t, uncond_embeds,
+                                 audio_rows=audio_rows, return_audio=True)
+                out = out_u.float() + cfg_scale * (out - out_u.float())
+            # audio Euler step on ITS schedule (shift 3, coupled by the closed-form remap)
+            sa_curr = float(remap_sigma(torch.tensor(float(s_curr))))
+            sa_next = float(remap_sigma(torch.tensor(float(s_next))))
+            audio_rows = audio_rows + (sa_curr - sa_next) * a_out.float()
+        else:
+            out = model(x.to(dtype), t, text_embeds).float()
+            if use_cfg:
+                out_u = model(x.to(dtype), t, uncond_embeds).float()
+                out = out_u + cfg_scale * (out - out_u)
         x = x + (s_curr - s_next) * out                     # see the sign note in the docstring
     return x
 

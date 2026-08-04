@@ -598,11 +598,16 @@ def train_minimax(
     except Exception:
         pass
     _ckpt_req = str(gradient_checkpointing).lower()
+    _base_mode = (base_quant if base_quant != "auto"
+                  else ("int8" if is_pruned_checkpoint(dit_path) else "nf4"))
+    if not quantize:
+        _base_mode = "none"
     if str(blocks_to_swap).lower() == "auto":
         if torch.cuda.is_available() and quantize:
             _free_gb = torch.cuda.mem_get_info()[0] / 1e9
             _pruned = is_pruned_checkpoint(dit_path)
             _mode = base_quant if base_quant != "auto" else ("int8" if _pruned else "nf4")
+            _base_mode = _mode
             _resident = (_RESIDENT_INT8_GB if _mode == "int8"
                          else _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB)
             n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp, resident_gb=_resident)
@@ -697,6 +702,7 @@ def train_minimax(
         f"lora_unet_{name.replace('.', '_')}": name
         for name, m in dit.named_modules() if isinstance(m, torch.nn.Linear)
     }
+    _n_targeted = len(network.unet_loras)
     if network_type == "lokr":
         logger.info(f"LoKR: {len(network.unet_loras)} modules wrapped (factor {lokr_factor})")
     else:
@@ -716,7 +722,8 @@ def train_minimax(
             f"the network builder matches by class name and one of {_kinds} is not on its list "
             f"(networks/lora.py, create_modules). Training now would silently learn a fraction "
             f"of the model.")
-    logger.info(f"[network] {len(network.unet_loras)}/{len(_targeted)} targeted Linears wrapped")
+    _n_targeted = len(_targeted)
+    logger.info(f"[network] {len(network.unet_loras)}/{_n_targeted} targeted Linears wrapped")
 
     params = list(network.get_trainable_params())
 
@@ -781,13 +788,46 @@ def train_minimax(
                            f"nothing left to train. Writing the final LoRA from the restored "
                            f"state. To train further, raise Max Train Epochs and resume again.")
 
+    def _run_provenance():
+        """What actually produced this LoRA — the facts you need to compare two of them.
+
+        Added after an A/B where the file could not answer "was this the int8 base or NF4?",
+        "how many modules were really wrapped?" or "how many steps?" — all of which changed the
+        interpretation completely, and one of which (58 of 258 modules) had been a silent bug.
+        A LoRA that cannot describe its own run is a measurement you have to take on trust."""
+        try:
+            _res = sorted({f"{w}x{h}" for ds in group.datasets
+                           for (w, h) in ds.batch_manager.bucket_resos})
+        except Exception:
+            _res = []
+        _dens = ("shift12" if shift is None else
+                 shift if isinstance(shift, str) else f"shift{shift:g}")
+        return {
+            "ss_base_checkpoint": os.path.basename(dit_path),
+            "ss_base_quant": _base_mode,
+            "ss_lora_modules": str(len(network.unet_loras)),
+            "ss_targeted_modules": str(_n_targeted),
+            "ss_steps": str(global_step),
+            "ss_epochs": str(max_train_epochs),
+            "ss_learning_rate": f"{learning_rate:g}",
+            "ss_optimizer": optimizer_label,
+            "ss_timestep_density": _dens,
+            "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
+            "ss_max_grad_norm": f"{max_grad_norm:g}",
+            "ss_bucket_resolutions": ",".join(_res),
+            "ss_gradient_checkpointing": "1" if use_ckpt else "0",
+            "ss_blocks_swapped": str(n_swap),
+        }
+
     def _meta():
-        return build_metadata(
+        md = build_metadata(
             None, ARCHITECTURE_MINIMAX, time.time(),
             title=(metadata_title if metadata_title is not None
                    else resolve_title(output_name, metadata_trigger_phrase)),
             author=metadata_author, description=metadata_description,
             license=metadata_license, tags=metadata_tags, trigger_phrase=metadata_trigger_phrase)
+        md.update(_run_provenance())
+        return md
 
     def _state_extra():
         return {"adaptive_lr_state": adaptive.state_dict()} if adaptive else None

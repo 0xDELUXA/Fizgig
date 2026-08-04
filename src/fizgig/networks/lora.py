@@ -52,17 +52,14 @@ class LoRAModule(torch.nn.Module):
             in_dim = org_module.in_features
             out_dim = org_module.out_features
 
-        # A LoRA can't have more rank than the matrix it adapts: B@A is rank <= min(in, out)
-        # however wide the bottleneck is. Above that cap the extra columns of lora_up are dead
-        # weight — on MiniMax H3's pruned AdaLN ([96768, 8]) a rank-32 adapter would be 3.1 M
-        # params per block that can never express more than rank 8. Cap the rank and scale alpha
-        # with it so alpha/dim (the applied strength) is unchanged.
-        cap = min(in_dim, out_dim)
-        if lora_dim > cap:
-            _a = alpha.detach().float().item() if type(alpha) == torch.Tensor else alpha
-            if _a:            # 0/None already means "alpha = rank", which follows the cap itself
-                alpha = _a * cap / lora_dim
-            lora_dim = cap
+        # NOTE: rank is NOT capped at min(in, out), even though B@A can never exceed that rank.
+        # A cap was added and then removed (4 Aug) after measuring what it costs: on MiniMax H3's
+        # pruned AdaLN ([96768, 8]) capping rank 32 -> 8 cut that layer's learning to 27% of the
+        # reference trainer's after one matched epoch, and AdaLN carries ~45% of all weight
+        # movement there. The expressible SET is identical either way; the optimisation dynamics
+        # are not — an over-complete factorisation trains markedly faster under Adam (implicit
+        # acceleration of overparameterised linear networks). The extra columns are not dead
+        # weight, they are the gradient path. Keep whatever rank the caller asked for.
 
         self.lora_dim = lora_dim
         self.split_dims = split_dims

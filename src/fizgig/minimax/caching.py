@@ -94,7 +94,13 @@ def encode_and_save_latents(vae, batch: List[ItemInfo]) -> None:
 
 @torch.no_grad()
 def encode_and_save_text(encoder, batch: List[ItemInfo]) -> None:
-    """Encode a caption batch through the Qwen3-VL-32B TE and save each (L, 5120) state."""
-    for item in batch:
-        hidden = encoder.encode(item.caption)      # (1, L, 5120)
+    """Encode a caption batch through the Qwen3-VL-32B TE and save each (L, 5120) state.
+
+    One forward for the whole batch rather than one per caption: the nvfp4-resident encoder
+    dequantizes 351 weights per FORWARD, so this is where the caching pass spends its time.
+    encode_batch right-pads, which is exactly equivalent for a causal stack (verified in
+    tests/diag_batch_encode.py) and memoizes, so repeated captions across the three
+    resolution blocks cost nothing."""
+    embeds = encoder.encode_batch([item.caption for item in batch])
+    for item, hidden in zip(batch, embeds):
         save_text_encoder_output_cache_minimax(item, hidden[0])

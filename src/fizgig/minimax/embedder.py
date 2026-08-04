@@ -159,6 +159,13 @@ class MiniMaxH3TextEncoder:
         self.compute_dtype = compute_dtype
         self._cache = {}          # caption -> CPU embedding; see encode()
 
+    def _pad_id(self) -> int:
+        """The tokenizer's pad id, or Qwen's default. NOT `pad_token_id or <default>` — a pad id
+        of 0 is falsy and would silently be replaced by the default, which is out of range for
+        any tokenizer with a smaller vocab."""
+        pid = getattr(self.tokenizer, "pad_token_id", None)
+        return 151643 if pid is None else int(pid)
+
     @torch.no_grad()
     def encode(self, caption: str, max_length: int = 512) -> torch.Tensor:
         """Encode one caption to [1, L, 5120]. Memoized by caption text for the caching pass.
@@ -175,12 +182,51 @@ class MiniMaxH3TextEncoder:
         ids = self.tokenizer(caption, add_special_tokens=False, return_tensors="pt",
                              truncation=True, max_length=max_length)["input_ids"].to(self.device)
         if ids.shape[1] == 0:                              # empty caption -> single pad token
-            ids = torch.tensor([[self.tokenizer.pad_token_id or 151643]], device=self.device)
+            ids = torch.tensor([[self._pad_id()]], device=self.device)
         out = self.model(input_ids=ids)                    # norm=Identity -> raw layer-50 output
         emb = out.last_hidden_state.to(self.compute_dtype)  # [1, L, 5120]
         # keep it on CPU: a few hundred KB per caption, and GPU memory is the scarce thing here
         self._cache[caption] = emb.detach().to("cpu")
         return emb
+
+    @torch.no_grad()
+    def encode_batch(self, captions, max_length: int = 512, batch_size: int = 8):
+        """Encode many captions, returning [1, L_i, 5120] each — same values as encode(), fewer
+        forwards.
+
+        Under the nvfp4-resident encoder a forward dequantizes 351 weights, and that cost is per
+        FORWARD, not per token: batching amortizes it across the batch. The rest is exactness.
+
+        RIGHT padding, no attention mask needed. The stack is causal, so a real token at position
+        i attends only to 0..i and trailing pads cannot influence it; slicing each row back to its
+        true length recovers the single-caption result. Verified on a real Qwen3 stack
+        (tests/diag_batch_encode.py): max|diff| 4.5e-08 across batch sizes and pad ids, while the
+        LEFT-padding control diverges by 1.9e-01 — the equivalence is a property of right padding
+        specifically, not of batching in general."""
+        out = [None] * len(captions)
+        todo = [i for i, c in enumerate(captions) if c not in self._cache]
+        for i, c in enumerate(captions):
+            if c in self._cache:
+                out[i] = self._cache[c].clone()
+
+        pad_id = self._pad_id()
+        for start in range(0, len(todo), batch_size):
+            idxs = todo[start:start + batch_size]
+            toks = []
+            for i in idxs:
+                t = self.tokenizer(captions[i], add_special_tokens=False, return_tensors="pt",
+                                   truncation=True, max_length=max_length)["input_ids"][0]
+                toks.append(t if t.numel() else torch.tensor([pad_id]))
+            L = max(t.numel() for t in toks)
+            ids = torch.full((len(toks), L), pad_id, dtype=torch.long)
+            for r, t in enumerate(toks):
+                ids[r, : t.numel()] = t
+            hs = self.model(input_ids=ids.to(self.device)).last_hidden_state
+            for r, i in enumerate(idxs):
+                emb = hs[r, : toks[r].numel()].unsqueeze(0).to(self.compute_dtype)
+                self._cache[captions[i]] = emb.detach().to("cpu")
+                out[i] = emb
+        return out
 
 
 class Nvfp4Linear(nn.Linear):

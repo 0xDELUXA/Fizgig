@@ -56,13 +56,21 @@ LATENT_RGB_BIAS = [0.057426, -0.022078, -0.071449]
 def sample_schedule(steps: int, shift: float = 12.0):
     """Descending sigmas 1 -> 0 on H3's shifted grid: sigma = shift*u / (1 + (shift-1)*u).
 
-    shift 12.0 is the video schedule the reference sampler and every shipped H3 workflow use
-    (supported_models sampling_settings). Returns steps+1 values, last exactly 0.0."""
+    Mirrors the reference `build_sigma_schedule` exactly: a linspace(1, 0, steps) base through
+    the exponential shift, with consecutive duplicates collapsed. The TERMINAL 0 is part of the
+    count, so `steps` yields `steps - 1` model evaluations — the same convention ai-toolkit and
+    the shipped H3 workflows use, so "28 steps" means the same thing here as there.
+
+    shift 12.0 is the video schedule every shipped H3 workflow uses (supported_models
+    sampling_settings). Returns a list of `steps` sigmas, last exactly 0.0."""
+    if steps < 2:
+        raise ValueError("sample_schedule needs at least 2 sigmas (one model evaluation)")
     out = []
     for i in range(steps):
-        u = 1.0 - i / steps
-        out.append((shift * u) / (1.0 + (shift - 1.0) * u))
-    out.append(0.0)
+        u = 1.0 - i / (steps - 1)                       # linspace(1, 0, steps)
+        sig = (shift * u) / (1.0 + (shift - 1.0) * u)
+        if not out or sig != out[-1]:                   # unique_consecutive
+            out.append(sig)
     return out
 
 
@@ -91,6 +99,9 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
 
     cfg_scale <= 1.0 runs a single forward per step (what every shipped H3 workflow does); above
     that costs a second forward, because the DiT is hard-locked to batch size 1.
+
+    `steps` counts SIGMAS including the terminal 0, matching the reference — so it runs
+    steps - 1 model evaluations.
     """
     lat_h, lat_w = height // spatial, width // spatial
     # The DiT patchifies 2x2, so the latent grid must be even (compute_loss crops for the same
@@ -112,7 +123,7 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     from fizgig.minimax.model import remap_sigma
     use_cfg = cfg_scale > 1.0 and uncond_embeds is not None
     sigmas = sample_schedule(steps, shift=shift)
-    for i in range(steps):
+    for i in range(len(sigmas) - 1):                    # the terminal 0 is not an evaluation
         s_curr, s_next = sigmas[i], sigmas[i + 1]
         t = torch.tensor([1.0 - s_curr], device=device)     # the DiT is conditioned on cleanness
         if joint_audio:

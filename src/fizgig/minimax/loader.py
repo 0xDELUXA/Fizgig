@@ -42,6 +42,15 @@ def _is_nf4_target(name: str) -> bool:
     return name.startswith(("blocks.", "token_refiner.blocks.")) and name.endswith(_NF4_SUBSTRINGS)
 
 
+def _owner_and_leaf(model, name: str):
+    """(module that holds `name`, attribute name) — for a TOP-LEVEL entry the owner is the
+    model itself. The pruned checkpoint's `adaln_t_table` is exactly that case: every other
+    tensor in either file is nested, so a naive rsplit('.') works everywhere else and fails
+    only here."""
+    parent_path, _, leaf = name.rpartition(".")
+    return (model.get_submodule(parent_path) if parent_path else model), leaf
+
+
 def config_from_checkpoint(keys, table_shape=None) -> MiniMaxH3Config:
     """Build the config the file actually describes.
 
@@ -128,8 +137,7 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
             if name not in keys:
                 continue
             w = _read_weight(name)
-            parent = model.get_submodule(name.rsplit(".", 1)[0])
-            leaf = name.rsplit(".", 1)[1]
+            parent, leaf = _owner_and_leaf(model, name)
             if quantize and _is_nf4_target(name):
                 # NF4-quantize this weight onto the GPU; frozen (no grad).
                 # NF4 quantization happens on the .to(cuda) move (Params4bit.cuda()).
@@ -144,8 +152,7 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
         # buffers (rope.inv_freq, and adaln_t_table on a pruned file)
         for name, _ in model.named_buffers():
             if name in keys:
-                parent = model.get_submodule(name.rsplit(".", 1)[0]) if "." in name else model
-                leaf = name.rsplit(".", 1)[1]
+                parent, leaf = _owner_and_leaf(model, name)
                 parent.register_buffer(leaf, f.get_tensor(name).to(torch.float32).to(dev))
     model.eval()
     return model

@@ -72,6 +72,9 @@ _RESIDENT_GB = 17.5          # full bf16 model, NF4 resident (measured 17.3-17.6
 # unquantized remainder. Estimated from the file's own tensor census, not yet GPU-measured, so
 # it carries margin.
 _RESIDENT_PRUNED_GB = 11.0
+# int8 base (base_quant=int8, the reference's own storage): the 200 block linears stay 1 byte
+# per param instead of NF4's 0.5, and the refiner/AdaLN load dense — ~19.3 + ~1.5 GB.
+_RESIDENT_INT8_GB = 21.0
 _PER_BLOCK_GB = 0.34         # one parked block's GPU share (measured: (17.5-11.9)/16)
 _ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 5.1)
 _ACT_GB_CKPT = 2.0           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.9; margin)
@@ -512,6 +515,7 @@ def train_minimax(
     optimizer_type: str = "adamw8bit",
     optimizer_args: str = "",
     caption_dropout: float = 0.05,
+    base_quant: str = "auto",
     include_patterns: list = None,
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
@@ -598,10 +602,12 @@ def train_minimax(
         if torch.cuda.is_available() and quantize:
             _free_gb = torch.cuda.mem_get_info()[0] / 1e9
             _pruned = is_pruned_checkpoint(dit_path)
-            _resident = _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB
+            _mode = base_quant if base_quant != "auto" else ("int8" if _pruned else "nf4")
+            _resident = (_RESIDENT_INT8_GB if _mode == "int8"
+                         else _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB)
             n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp, resident_gb=_resident)
             logger.info(f"[vram] auto plan: free {_free_gb:.1f} GB, largest bucket {_mp:.2f} MP, "
-                        f"base ~{_resident:.0f} GB ({'pruned' if _pruned else 'bf16'}) "
+                        f"base ~{_resident:.0f} GB ({_mode}, {'pruned' if _pruned else 'bf16'}) "
                         f"-> blocks_to_swap={n_swap}, checkpointing={'on' if _ckpt_auto else 'off'}")
         else:
             n_swap, _ckpt_auto = 0, False
@@ -649,7 +655,7 @@ def train_minimax(
 
     # ---- base (NF4-frozen) + trainable LoRA over the transformer blocks ----
     dit = load_minimax_h3_dit(dit_path, device=device, compute_dtype=dtype, quantize=quantize,
-                              blocks_to_swap=n_swap)
+                              blocks_to_swap=n_swap, base_quant=base_quant)
     dit.requires_grad_(False)                                   # frozen base (QLoRA-style)
     if n_swap > 0:
         n_swap = dit.enable_block_swap(n_swap)                  # sets the JIT-move boundary

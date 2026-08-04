@@ -27,7 +27,7 @@ import torch.nn as nn
 # the same reader every other large-model loader in the repo uses. See embedder.py.
 from fizgig.krea2.safetensors_utils import MemoryEfficientSafeOpen
 
-from .convrot import dequantize_int8_convrot, parse_comfy_quant
+from .convrot import ConvRotInt8Linear, dequantize_int8_convrot, parse_comfy_quant
 from .model import MiniMaxH3DiT, MiniMaxH3Config
 
 # Which Linear weights get NF4'd: the per-block matmul bulk AND the per-block AdaLN modulation
@@ -65,9 +65,21 @@ def config_from_checkpoint(keys, table_shape=None) -> MiniMaxH3Config:
 
 
 def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
-                        quantize=True, blocks_to_swap: int = 0) -> MiniMaxH3DiT:
-    """Return a MiniMaxH3DiT with the real weights loaded; block matmul linears NF4 (frozen).
-    blocks_to_swap parks the LAST n blocks on CPU at load (see the loop below) — pair it with
+                        quantize=True, blocks_to_swap: int = 0, base_quant="auto") -> MiniMaxH3DiT:
+    """Return a MiniMaxH3DiT with the real weights loaded, the base frozen.
+
+    base_quant:
+      "int8" — KEEP the checkpoint's int8 ConvRot weights (what the reference trainer does).
+               ~0.17% error in the frozen base, ~21 GB resident. Needs a pre-quantized file.
+      "nf4"  — decode to bf16 then NF4 (bitsandbytes). ~9.5% error, ~11 GB resident. The only
+               option for the bf16 checkpoint, and the fallback for small cards.
+      "auto" — int8 when the file carries int8 ConvRot weights, else nf4. Matching the
+               reference is worth the 10 GB: a LoRA fitted against a 9.5%-perturbed base spends
+               capacity correcting quantization error that is absent at inference, and the
+               effect compounds with depth (measured: our block 40-49 adapters moved 1.5-3.9x
+               the reference's, blocks 0-19 about 0.75x).
+
+    blocks_to_swap parks the LAST n blocks on CPU at load — pair it with
     model.enable_block_swap(n) so the forward moves them just-in-time."""
     from bitsandbytes.nn import Linear4bit, Params4bit
 
@@ -81,6 +93,18 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
         quant_conf = {k[: -len(".comfy_quant")]: parse_comfy_quant(f.get_tensor(k))
                       for k in keys if k.endswith(".comfy_quant")}
 
+        mode = base_quant
+        if mode == "auto":
+            mode = "int8" if quant_conf else "nf4"
+        if mode == "int8" and not quant_conf:
+            raise ValueError("base_quant='int8' needs a pre-quantized checkpoint "
+                             "(minimax_h3_*_pruned_int8_convrot.safetensors)")
+        if not quantize:
+            mode = "none"
+        # In int8 mode ONLY the checkpoint's own quantized linears stay quantized — the refiner,
+        # AdaLN and the IO layers load dense, exactly as the reference leaves them (its
+        # get_quantization_exclude_modules covers token_refiner and *adaln_proj*).
+
         with torch.device("meta"):
             model = MiniMaxH3DiT(cfg)
 
@@ -89,18 +113,33 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
             # (nn.Linear's default), which across the 33 B of NF4-target Linears is ~118 GB of
             # throwaway tensors that the process allocator then holds for the whole run. On meta
             # the shells are 0 bytes; the real weights are streamed in below.
-            if quantize:
+            if mode != "none":
                 for mod_name, module in list(model.named_modules()):
                     for child_name, child in list(module.named_children()):
                         full = f"{mod_name}.{child_name}" if mod_name else child_name
-                        if isinstance(child, nn.Linear) and _is_nf4_target(f"{full}.weight"):
+                        if not isinstance(child, nn.Linear):
+                            continue
+                        if mode == "int8":
+                            conf = quant_conf.get(full)
+                            if conf is not None:
+                                rot = (int(conf.get("convrot_groupsize", 256))
+                                       if conf.get("convrot") else 1)
+                                setattr(module, child_name, ConvRotInt8Linear(
+                                    child.in_features, child.out_features,
+                                    bias=child.bias is not None, rot=rot,
+                                    compute_dtype=compute_dtype))
+                        elif _is_nf4_target(f"{full}.weight"):
                             q = Linear4bit(child.in_features, child.out_features,
                                            bias=child.bias is not None,
                                            compute_dtype=compute_dtype, quant_type="nf4")
                             setattr(module, child_name, q)
 
         dev = torch.device(device)
-        if quant_conf:
+        if mode == "int8":
+            print(f"[load] streaming the MiniMax H3 base, KEEPING its {len(quant_conf)} int8 "
+                  "ConvRot linears (~0.17% base error, ~21 GB resident — the reference's own "
+                  "storage; NF4 would be ~9.5% error at ~11 GB).", flush=True)
+        elif quant_conf:
             print(f"[load] streaming the pre-quantized MiniMax H3 base ({len(quant_conf)} int8 "
                   "ConvRot linears decoded to bf16, then NF4) — a quiet minute here is normal "
                   "(as is a bitsandbytes 'expandable_segments not supported' warning on Windows).",
@@ -133,12 +172,23 @@ def load_minimax_h3_dit(path: str, device="cuda", compute_dtype=torch.bfloat16,
                                            f.get_tensor(f"{module_path}.weight_scale"),
                                            conf, out_dtype=compute_dtype)
 
+        # int8 mode: the quantized linears hold BUFFERS, not parameters — fill them first.
+        if mode == "int8":
+            for mod_path in quant_conf:
+                mod = model.get_submodule(mod_path)
+                tgt = torch.device("cpu") if _parked(mod_path) else dev
+                mod.qdata = f.get_tensor(f"{mod_path}.weight").to(torch.int8).to(tgt)
+                mod.wscale = (f.get_tensor(f"{mod_path}.weight_scale")
+                              .to(torch.float32).reshape(-1, 1).to(tgt))
+
         for name, param in model.named_parameters():
             if name not in keys:
                 continue
+            if mode == "int8" and name.rsplit(".", 1)[0] in quant_conf:
+                continue                      # already placed as int8 buffers above
             w = _read_weight(name)
             parent, leaf = _owner_and_leaf(model, name)
-            if quantize and _is_nf4_target(name):
+            if mode == "nf4" and _is_nf4_target(name):
                 # NF4-quantize this weight onto the GPU; frozen (no grad).
                 # NF4 quantization happens on the .to(cuda) move (Params4bit.cuda()).
                 p = Params4bit(w.to(compute_dtype), requires_grad=False, quant_type="nf4").to(dev)

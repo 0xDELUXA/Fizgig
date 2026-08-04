@@ -65,6 +65,11 @@ def setup_parser() -> argparse.ArgumentParser:
                         "needs the uncond embed cached by minimax_cache_text). 0 disables.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
+    p.add_argument("--base_quant", default="auto", choices=["auto", "int8", "nf4"],
+                   help="Frozen-base precision. 'int8' keeps the checkpoint's own ConvRot "
+                        "weights (~0.17%% base error, ~21 GB) — what the reference trainer "
+                        "does. 'nf4' decodes then 4-bit quantizes (~9.5%% error, ~11 GB). "
+                        "'auto' picks int8 for a pre-quantized file, nf4 otherwise.")
     p.add_argument("--no_quantize", action="store_true",
                    help="Train on the bf16 base (no NF4) — needs ~66 GB VRAM.")
     p.add_argument("--blocks_to_swap", default="auto",
@@ -142,6 +147,7 @@ def main():
         optimizer_type=args.optimizer_type,
         optimizer_args=args.optimizer_args,
         caption_dropout=args.caption_dropout,
+        base_quant=args.base_quant,
         include_patterns=args.include_patterns,
         quantize=not args.no_quantize,
         shift=args.shift,

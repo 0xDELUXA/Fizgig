@@ -76,3 +76,51 @@ def dequantize_int8_convrot(qweight: torch.Tensor, scale: torch.Tensor, conf: di
     group = int(conf.get("convrot_groupsize", 256)) if conf.get("convrot") else 1
     w = qweight.to(torch.float32) * scale.to(torch.float32).reshape(-1, 1)
     return rotate(w, group).to(out_dtype)
+
+
+class ConvRotInt8Linear(torch.nn.Linear):
+    """A frozen Linear that KEEPS the checkpoint's int8 ConvRot weights — the reference's storage.
+
+    Why this exists: decoding these weights to bf16 and re-quantizing to NF4 (our previous base
+    path) perturbs the frozen model by ~9.5% relative, against ~0.17% for the int8 weights the
+    reference trains on directly — ~57x more error in the function the LoRA is fitted against.
+    Measured per-tensor on the real checkpoint. The adapter then spends capacity correcting
+    quantization error that will not exist at inference, and it compounds with depth (our
+    block 40-49 adapters moved 1.5-3.9x more than the reference's; blocks 0-19 moved ~0.75x).
+
+    Why it is affordable: dequantizing the WEIGHT needs the inverse rotation, an [out, in]
+    matmul per step — far too expensive. So rotate the ACTIVATION instead, which is
+    [tokens, in]:
+
+        (x R) (W_rot)^T = x R R^T W^T = x W^T
+
+    because the regular Hadamard is symmetric and orthogonal (its own inverse). The per-matmul
+    cost is then one small rotation plus an elementwise `q * scale`. This is the same
+    dequantized-matmul path ai-toolkit itself falls back to without Triton — which is what it
+    used on this machine, so the comparison stays like-for-like.
+
+    Storage is 1 byte/param (~19 GB for H3's 200 block linears) against NF4's ~0.5.
+    """
+
+    def __init__(self, in_features, out_features, bias=False, rot=256,
+                 compute_dtype=torch.bfloat16):
+        super().__init__(in_features, out_features, bias=bias)
+        del self._parameters["weight"]          # the int8 buffers replace it
+        self.rot = int(rot)
+        self.compute_dtype = compute_dtype
+        self.register_buffer("qdata", torch.empty(out_features, in_features, dtype=torch.int8),
+                             persistent=False)
+        self.register_buffer("wscale", torch.empty(out_features, 1, dtype=torch.float32),
+                             persistent=False)
+
+    @property
+    def weight(self):
+        """The dense weight in the TRUE basis, materialized on demand (inspection only — the
+        forward never calls this, it rotates the activation instead)."""
+        return rotate(self.qdata.float() * self.wscale.float(), self.rot).to(self.compute_dtype)
+
+    def forward(self, x):
+        dt = self.compute_dtype
+        xr = rotate(x.to(dt), self.rot) if self.rot > 1 else x.to(dt)
+        w = self.qdata.to(dt) * self.wscale.to(dt)      # rotated-basis weight, cheap elementwise
+        return torch.nn.functional.linear(xr, w, self.bias)

@@ -855,6 +855,10 @@ DEFAULT_PREFS = {
     # MiniMax H3 model paths (experimental third family — barebones image-only LoRA training).
     # bf16 DiT is the training base (NF4-quantized at load); Qwen3-VL-32B TE + video VAE cache.
     "minimax_dit": "",
+    # ref2va is a DIFFERENT fine-tune from fl2va, not another quantization of it: it is what
+    # ComfyUI's r2v workflow loads, and the only H3 build that accepts reference images.
+    # Optional — required only for reference distillation.
+    "minimax_ref_dit": "",
     "minimax_text_encoder": "",
     "minimax_vae": "",
     # Output directories — relative to repo root, portable across clones/moves.
@@ -1332,6 +1336,8 @@ class LoRATrainerGUI:
             "MINIMAX_LOWNOISE_PCT": "22",
             "MINIMAX_BLOCKS": "all",
             "MINIMAX_TRAIN_ADALN": True,   # the reference behaviour; the toggle is the experiment
+            "MINIMAX_DISTILL_REF": "",     # blank = ordinary training
+            "MINIMAX_DISTILL_WEIGHT": "0.8",
             "MINIMAX_SLOW_BLOCKS": "",     # blank = one LR everywhere
             "MINIMAX_SLOW_LR_SCALE": "0.2",
             "RESUME_TRAINING": "",
@@ -3713,6 +3719,43 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
 
+        # --- Reference distillation (MiniMax only, experimental) ---------------------------
+        self._minimax_distill_label = ttk.Label(training_content, text="Learn identity from:")
+        self._minimax_distill_label.grid(row=35, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self._minimax_distill_frame = ttk.Frame(training_content)
+        self._minimax_distill_frame.grid(row=35, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        self.minimax_distill_ref_var = tk.StringVar(
+            value=str(self.settings.get("MINIMAX_DISTILL_REF", "")))
+        ttk.Entry(self._minimax_distill_frame, textvariable=self.minimax_distill_ref_var,
+                  width=34).pack(side=tk.LEFT)
+        ttk.Button(self._minimax_distill_frame, text="Browse",
+                   command=self._browse_minimax_distill_ref).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Button(self._minimax_distill_frame, text="Clear",
+                   command=lambda: self.minimax_distill_ref_var.set("")).pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(self._minimax_distill_frame, text="  teacher ").pack(side=tk.LEFT)
+        self.entries["MINIMAX_DISTILL_WEIGHT"] = ttk.Combobox(
+            self._minimax_distill_frame, values=["0.6", "0.7", "0.8", "0.9", "1.0"], width=5)
+        self.entries["MINIMAX_DISTILL_WEIGHT"].set(
+            str(self.settings.get("MINIMAX_DISTILL_WEIGHT", "0.8")))
+        self.entries["MINIMAX_DISTILL_WEIGHT"].pack(side=tk.LEFT)
+        self._minimax_distill_hint = ttk.Label(
+            training_content,
+            text="EXPERIMENT — leave blank for normal training. Pick ONE clear photo of your "
+                 "subject (a frontal close-up on a plain background works best). H3 can already "
+                 "render a person well when it is SHOWN a reference — this teaches your LoRA to "
+                 "do the same thing from the trigger word alone, so you don't need the reference "
+                 "at generation time. "
+                 "Normally the LoRA is marked against your photographs, which is why it also "
+                 "learns your backgrounds and framing. With this on, most of the marking comes "
+                 "from what the model itself produces when shown the reference — identity without "
+                 "the scenery. Teacher 0.8 means 80% of that, 20% still the real photo, which "
+                 "keeps genuine skin and texture available; 1.0 is pure and caps the LoRA at "
+                 "exactly what reference mode can already do. Same dataset and captions as usual "
+                 "— nothing else changes. Needs the ref2va model in Preferences, and caching "
+                 "re-runs to build the reference conditioning.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_distill_hint.grid(row=36, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
         self._minimax_slow_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
@@ -4521,6 +4564,9 @@ class LoRATrainerGUI:
             except (AttributeError, tk.TclError):
                 pass
 
+        if "MINIMAX_DISTILL_REF" in preset and hasattr(self, "minimax_distill_ref_var"):
+            self.minimax_distill_ref_var.set(str(preset["MINIMAX_DISTILL_REF"] or ""))
+
         # Model Area to Train (training preset dropdown)
         if "TARGET_LAYERS" in preset and hasattr(self, 'training_preset_var'):
             legacy_map = {
@@ -4996,6 +5042,9 @@ class LoRATrainerGUI:
                 bits.append(f"blocks {_bl}")
             if p.get("MINIMAX_TRAIN_ADALN") is False:
                 bits.append("no adaln")
+            _dr = str(p.get("MINIMAX_DISTILL_REF") or "").strip()
+            if _dr:
+                bits.append(f"distill {os.path.basename(_dr)} x{p.get('MINIMAX_DISTILL_WEIGHT', '0.8')}")
             _sl = str(p.get("MINIMAX_SLOW_BLOCKS") or "").strip()
             if _sl and str(p.get("MINIMAX_SLOW_LR_SCALE", "1")).strip() not in ("", "1", "1.0"):
                 bits.append(f"slow {_sl} ×{p.get('MINIMAX_SLOW_LR_SCALE')}")
@@ -5271,6 +5320,10 @@ class LoRATrainerGUI:
         _grab("krea2_per_image_lr_var", "KREA2_PER_IMAGE_LR")
         _grab("krea2_auto_recaption_var", "KREA2_AUTO_RECAPTION")
         _grab("krea2_warmup_look_var", "KREA2_WARMUP_LOOK")
+        # MiniMax reference distillation. A plain StringVar, so the generic self.entries sweep
+        # above does NOT see it — without this a queued distillation run loses its reference
+        # and silently becomes an ordinary run (tests/test_minimax_distill_gui.py).
+        _grab("minimax_distill_ref_var", "MINIMAX_DISTILL_REF")
         _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
@@ -5583,6 +5636,18 @@ class LoRATrainerGUI:
         med = shift / (shift + 1.0)
         lbl.config(text=f"→ shift {shift:.3g}, median noise {med:.2f}", fg="#27AE60")
 
+    def _browse_minimax_distill_ref(self):
+        """Pick the reference photo. Defaults to the training image folder — the reference is
+        normally one of the dataset's own pictures."""
+        initial = (self.image_folder_var.get().strip()
+                   or os.path.dirname(self.minimax_distill_ref_var.get().strip() or ""))
+        path = filedialog.askopenfilename(
+            title="Reference photo for identity distillation",
+            initialdir=initial if os.path.isdir(initial) else None,
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")])
+        if path:
+            self.minimax_distill_ref_var.set(path)
+
     def _refresh_minimax_blocks_count(self):
         """Say how many blocks the Blocks to Train box currently means, or why it can't be read.
 
@@ -5788,7 +5853,9 @@ class LoRATrainerGUI:
         for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint,
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
                   self._minimax_adaln_cb, self._minimax_adaln_hint,
-                  self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint):
+                  self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint,
+                  self._minimax_distill_label, self._minimax_distill_frame,
+                  self._minimax_distill_hint):
             self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
@@ -14680,6 +14747,20 @@ class LoRATrainerGUI:
             download_note="~21GB — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors (fl2va is the trainable variant; the 66GB bf16 file works too)",
         )
         mr = self._add_pref_row(
+            mm_card, mr, "DiT (reference):", "minimax_ref_dit",
+            "OPTIONAL — only for reference distillation ('Learn identity from' on the Training "
+            "tab). This is the ref2va model, a DIFFERENT fine-tune from the fl2va one above and "
+            "not just another quantization of it: it is what ComfyUI's Reference-to-Video "
+            "workflow loads, and the only H3 build that accepts reference images. A LoRA "
+            "distilled this way is trained on it and runs on it. Leave blank for ordinary "
+            "training.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            download_note="~21GB — Comfy-Org/MiniMax-H3 -> diffusion_models/"
+                          "minimax_h3_ref2va_pruned_int8_convrot.safetensors (the pruned int8 "
+                          "build, same shape as the fl2va one above; you may already have it if "
+                          "you use the r2v workflow)",
+        )
+        mr = self._add_pref_row(
             mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
             "Qwen3-VL-32B text encoder — nvfp4 (the compact ComfyUI file) or bf16 both work; the "
             "loader detects which you gave it. The nvfp4 file keeps its packed weights (~15.7 GB "
@@ -20764,6 +20845,17 @@ class LoRATrainerGUI:
                     errors.append(f"{label} path is empty (set it on the Preferences tab)")
                 elif not os.path.exists(path):
                     errors.append(f"{label} file does not exist: {path}")
+            # Reference distillation needs the ref2va model and a real reference photo.
+            _dref = str(getattr(self, "minimax_distill_ref_var", None)
+                        and self.minimax_distill_ref_var.get() or "").strip()
+            if _dref:
+                if not self._krea2_pref("minimax_ref_dit"):
+                    errors.append("Reference distillation needs the ref2va DiT — set "
+                                  "'DiT (reference)' on the Preferences tab. It is a different "
+                                  "model from the one above and the only H3 build that takes "
+                                  "reference images.")
+                if not os.path.isfile(_dref):
+                    errors.append(f"The 'Learn identity from' reference does not exist: {_dref}")
         elif config.get("is_krea2"):
             # Krea 2 reads its own four model paths from Preferences (krea2_*). The
             # Turbo DiT is only required when in-training previews are enabled.
@@ -21184,6 +21276,8 @@ class LoRATrainerGUI:
             "MINIMAX_LOWNOISE_PCT": str(self.entries["MINIMAX_LOWNOISE_PCT"].get() or "").strip(),
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
+            "MINIMAX_DISTILL_REF": str(self.minimax_distill_ref_var.get() or "").strip(),
+            "MINIMAX_DISTILL_WEIGHT": str(self.entries["MINIMAX_DISTILL_WEIGHT"].get() or "0.8").strip(),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
             "MINIMAX_SLOW_LR_SCALE": str(self.entries["MINIMAX_SLOW_LR_SCALE"].get() or "1").strip(),
             "DATASET_CONFIG": self._get_path("DATASET_CONFIG"),
@@ -21725,8 +21819,19 @@ class LoRATrainerGUI:
             return self._build_krea2_cache_command("krea2_cache_text.py",
                                                    "--text_encoder", self._krea2_pref("krea2_text_encoder"))
         if config.get("is_minimax"):
-            return self._build_krea2_cache_command("minimax_cache_text.py",
-                                                   "--text_encoder", self._krea2_pref("minimax_text_encoder"))
+            cmd = self._build_krea2_cache_command("minimax_cache_text.py",
+                                                  "--text_encoder", self._krea2_pref("minimax_text_encoder"))
+            # Reference distillation: the TEACHER's conditioning (caption + the reference's
+            # vision blocks) has to be cached here, because it needs the 15.7 GB vision-capable
+            # encoder and that can never be resident beside the DiT at training time. Sized
+            # against the SAME megapixels the run trains at — a reference scaled differently at
+            # caching time than at training time is a different signal, silently.
+            _ref = str(self.settings.get("MINIMAX_DISTILL_REF", "") or "").strip()
+            if _ref:
+                _w, _h = self._minimax_reference_canvas()
+                cmd += ["--reference_image", _ref,
+                        "--reference_width", str(_w), "--reference_height", str(_h)]
+            return cmd
         arch = self.settings["ARCHITECTURE"]
         python_path = self._venv_python()
         cache_script_path = self._resolve_script(config, "cache_text_script")
@@ -21791,6 +21896,19 @@ class LoRATrainerGUI:
 
     def _krea2_script(self, name: str) -> str:
         return os.path.join(FIZGIG_DIR, "src", "fizgig", "scripts", name)
+
+    def _minimax_reference_canvas(self):
+        """The generation size the reference is scaled against — the square at Target Megapixels.
+
+        The trainer sizes the reference against the largest training bucket; matching that here
+        keeps the cached teacher conditioning and the training-time reference latent describing
+        the same picture."""
+        try:
+            mp = float(str(self.dataset_megapixels_var.get()).strip())
+        except (TypeError, ValueError, AttributeError):
+            mp = 0.5
+        side = int(round((mp * 1_000_000) ** 0.5 / 32) * 32) or 512
+        return side, side
 
     def _build_krea2_cache_command(self, script_name: str, model_flag: str, model_path: str):
         """Krea 2 caching: a plain venv-python call to krea2_cache_latents.py / krea2_cache_text.py."""
@@ -22117,7 +22235,11 @@ class LoRATrainerGUI:
         cmd = [
             self._venv_python(),
             self._krea2_script("minimax_train.py"),
-            "--dit", self._krea2_pref("minimax_dit"),
+            # Distillation trains against ref2va — the teacher only exists on that model.
+            "--dit", (self._krea2_pref("minimax_ref_dit")
+                      if (str(self.settings.get("MINIMAX_DISTILL_REF", "") or "").strip()
+                          and self._krea2_pref("minimax_ref_dit"))
+                      else self._krea2_pref("minimax_dit")),
             "--dataset_config", self.settings["DATASET_CONFIG"],
             "--output_dir", self.settings["LORA_OUTPUT_DIR"],
             "--output_name", self.settings["LORA_NAME"],
@@ -22147,6 +22269,14 @@ class LoRATrainerGUI:
         _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))
         if _blocks.lower() != "all":
             cmd += ["--train_blocks", _blocks]
+        # Reference distillation. Both flags travel together; the trainer also needs --vae to
+        # encode the reference, which the sample block may already have added.
+        _dref = str(self.settings.get("MINIMAX_DISTILL_REF", "") or "").strip()
+        if _dref:
+            cmd += ["--distill_reference", _dref,
+                    "--distill_weight", str(self.settings.get("MINIMAX_DISTILL_WEIGHT", "0.8"))]
+            if "--vae" not in cmd:
+                cmd += ["--vae", self._krea2_pref("minimax_vae")]
         # AdaLN is ON by default (the reference behaviour), so only the opt-out is ever sent.
         if not self.settings.get("MINIMAX_TRAIN_ADALN", True):
             cmd.append("--no_train_adaln")

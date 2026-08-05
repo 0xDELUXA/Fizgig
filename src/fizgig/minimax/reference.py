@@ -1,0 +1,63 @@
+"""MiniMax H3 r2v reference images: sizing and encoding.
+
+Transcribed from comfy_extras/nodes_minimax_h3.py::MiniMaxH3ReferenceToVideo.execute, which is
+what produces the reference blocks the r2v workflow feeds the DiT. The sizing is not cosmetic:
+the reference's latent grid sets how many condition rows it contributes and what its
+area-normalized rope coordinates are, so a reference resized differently is a different
+conditioning signal even though the picture looks the same.
+
+Two modes, both DOWN-ONLY (a reference is never upscaled):
+
+  match — scale the reference to the GENERATION's pixel area. Fewer tokens, faster.
+          scale = min(1, sqrt((gen_w * gen_h) / (ref_w * ref_h)))
+  max   — scale so the short edge is at most 2048. The node's note: "best identity fidelity",
+          at the cost of speed, since reference tokens ride through every sampling step.
+
+Both then round each side to a multiple of 32 (CANVAS_MULTIPLE) with a floor of one multiple.
+"""
+
+import math
+
+import torch
+
+CANVAS_MULTIPLE = 32          # every canvas dimension is a multiple of this
+REF_IMAGE_SHORT_EDGE = 2048   # the "max" mode's short-edge cap
+VAE_SPATIAL = 16              # the video VAE's spatial downscale
+
+
+def reference_canvas(ref_w: int, ref_h: int, gen_w: int, gen_h: int, mode: str = "match"):
+    """-> (target_w, target_h) for a reference image. Down-only, 32-px multiples."""
+    if mode == "match":
+        scale = min(1.0, math.sqrt((gen_w * gen_h) / float(ref_w * ref_h)))
+    elif mode == "max":
+        scale = min(1.0, REF_IMAGE_SHORT_EDGE / float(min(ref_w, ref_h)))
+    else:
+        raise ValueError(f"reference sizing mode must be 'match' or 'max', got {mode!r}")
+    tw = max(CANVAS_MULTIPLE, round(ref_w * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+    th = max(CANVAS_MULTIPLE, round(ref_h * scale / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+    return int(tw), int(th)
+
+
+def prepare_reference_image(image, gen_w: int, gen_h: int, mode: str = "match"):
+    """PIL image -> [1, 3, H, W] float tensor in [-1, 1] on the reference canvas.
+
+    [-1, 1] because that is what MiniMaxH3VideoVAE.encode expects (it rescales to [0, 1] and
+    applies the imagenet normalization itself)."""
+    from PIL import Image
+    tw, th = reference_canvas(image.width, image.height, gen_w, gen_h, mode)
+    img = image.convert("RGB").resize((tw, th), Image.LANCZOS)
+    arr = torch.from_numpy(_to_array(img)).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    return arr * 2.0 - 1.0
+
+
+def _to_array(img):
+    import numpy as np
+    return np.asarray(img, dtype="uint8")
+
+
+@torch.no_grad()
+def encode_reference(vae, image, gen_w: int, gen_h: int, mode: str = "match", device="cuda",
+                     dtype=torch.float32):
+    """PIL image -> normalized reference latent [1, 24, 1, h, w], ready to pack as condition rows."""
+    px = prepare_reference_image(image, gen_w, gen_h, mode).to(device=device, dtype=dtype)
+    return vae.encode(px)

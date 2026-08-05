@@ -427,8 +427,14 @@ class Nvfp4Linear(nn.Linear):
 
 def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
                        quantize=True, tokenizer_dir=None,
-                       te_quant="auto") -> MiniMaxH3TextEncoder:
-    """Build the Qwen3-VL-32B language TE (visual.* skipped).
+                       te_quant="auto", with_vision=False) -> MiniMaxH3TextEncoder:
+    """Build the Qwen3-VL-32B TE. Language-only by default (visual.* skipped).
+
+    with_vision=True builds the FULL stack instead — needed for r2v reference conditioning,
+    where the prompt carries `<Picture i>` vision blocks. The vision tower is left in bf16: it
+    is ~176 weights against the language stack's thousands, and none of its module names match
+    the quantization suffixes (checked — `attn.qkv` / `mlp.linear_fc1`, not `self_attn.q_proj`
+    / `mlp.gate_proj`), so it is excluded automatically rather than by a special case.
 
     te_quant:
       "nvfp4" — KEEP the checkpoint's packed nvfp4 weights (what the reference does). Same
@@ -451,7 +457,17 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
         mode = "none"
 
     with torch.device("meta"):
-        model = build_qwen3_te()
+        model = build_qwen3vl_te() if with_vision else build_qwen3_te()
+
+    # Parameter name -> checkpoint key. The file stores the language stack under `model.` and
+    # the vision tower under `visual.`; the VL module tree calls those `language_model.` and
+    # `visual.`. Getting this wrong does not raise — the parameter simply keeps its random init.
+    def _ck(name: str) -> str:
+        if not with_vision:
+            return "model." + name
+        if name.startswith("language_model."):
+            return "model." + name[len("language_model."):]
+        return name
 
         # Swap the NF4-target Linears for Linear4bit shells INSIDE the meta context. Outside it,
         # each Linear4bit eagerly allocates a full fp32 CPU weight (nn.Linear default) — across the
@@ -498,7 +514,7 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
             for mod_name, module in model.named_modules():
                 if not isinstance(module, Nvfp4Linear):
                     continue
-                fm = "model." + mod_name
+                fm = _ck(mod_name)
                 module.packed = f.get_tensor(fm + ".weight").to(torch.uint8).to(dev)
                 # byte views: fp8 block scales and the fp32 global scale must never be CAST
                 module.bscale = f.get_tensor(fm + ".weight_scale").contiguous().view(
@@ -510,7 +526,7 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
                                           if pqs in ckpt else None)
 
         for name in model_keys:
-            src = "model." + name                          # checkpoint prefixes the LM with model.
+            src = _ck(name)
             file_mod = src.rsplit(".", 1)[0]
             leaf = name.rsplit(".", 1)[1]
             if is_comfy_quant and leaf == "weight" and (file_mod + ".comfy_quant") in ckpt:
@@ -532,8 +548,18 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
     # Computed (non-checkpoint) buffers stayed on meta from the meta-build. The rotary
     # embedding's inv_freq is the load-bearing one — rebuild it on the real device. A general
     # sweep materializes any other stray meta buffers to be safe.
-    from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
-    model.rotary_emb = Qwen3RotaryEmbedding(model.config).to(dev)
+    # These carry inv_freq, which the generic sweep below would otherwise ZERO — a rope table of
+    # zeros is no positional information at all, and the model would still run.
+    if with_vision:
+        from transformers.models.qwen3_vl.modeling_qwen3_vl import (Qwen3VLTextRotaryEmbedding,
+                                                                    Qwen3VLVisionRotaryEmbedding)
+        model.language_model.rotary_emb = Qwen3VLTextRotaryEmbedding(model.config.text_config).to(dev)
+        _vcfg = model.config.vision_config
+        model.visual.rotary_pos_emb = Qwen3VLVisionRotaryEmbedding(
+            _vcfg.hidden_size // _vcfg.num_heads // 2).to(dev)
+    else:
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
+        model.rotary_emb = Qwen3RotaryEmbedding(model.config).to(dev)
     for mod in model.modules():
         for bname, buf in list(mod.named_buffers(recurse=False)):
             if buf is not None and buf.is_meta:

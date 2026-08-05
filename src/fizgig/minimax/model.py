@@ -144,30 +144,55 @@ def remap_sigma(sigma, from_shift: float = VIDEO_SIGMA_SHIFT, to_shift: float = 
     return shift_sigma(sigma / (from_shift + sigma * (1.0 - from_shift)), to_shift)
 
 
-def image_position_ids(text_len, latent_h, latent_w, num_audio_latents: int = 0) -> torch.Tensor:
-    """3-axis (t, h, w) position ids for a [text | audio | single-video-frame] packed sequence.
+def ref_row_count(refs) -> int:
+    """Total packed rows contributed by a list of (latent_h, latent_w) reference images."""
+    return sum((rh // 2) * (rw // 2) for rh, rw in (refs or ()))
+
+
+def image_position_ids(text_len, latent_h, latent_w, num_audio_latents: int = 0,
+                       refs=None) -> torch.Tensor:
+    """3-axis (t, h, w) position ids for a [text | refs | audio | single-video-frame] sequence.
 
     Text rows: t = 0..text_len-1, h=w=0 — so prompt length shifts the whole media clock.
-    Audio rows: t = text_len + 0..A-1 repeated per channel, h = 0, w pinned to the frame grid's
+    Reference rows (r2v): each reference image contributes its OWN area-normalized frame grid at
+    t = cursor, and advances the cursor by 1.0. Ordered right after the text, matching the
+    reference's segment order [text | cond | refs | target audio | target video]
+    (comfy/ldm/minimax/model.py::PackedLayout).
+    Audio rows: t = cursor + 0..A-1 repeated per channel, h = 0, w pinned to the frame grid's
     first column for channel 0 and its last for channel 1 (the reference's stereo convention).
-    Video rows: t pinned at the origin `text_len` (single frame), (h, w) from the
-    area-normalized frame grid. Returns [S, 3] float64."""
+    Video rows: t pinned at the cursor (single frame), (h, w) from the area-normalized frame grid.
+
+    NOTE the cursor: with no references it is text_len and this is exactly the old layout, but
+    every reference image SHIFTS THE TARGET'S TEMPORAL ORIGIN by +1.0. Pinning the target at
+    text_len while packing references would leave the target sitting on top of the first
+    reference, which is the kind of error that produces a plausible-looking but wrong teacher.
+
+    Returns [S, 3] float64."""
     frame = _frame_grid(latent_h, latent_w)                 # [(h//2)*(w//2), 2]
     frame_rows = frame.shape[0]
     text = torch.zeros(text_len, 3, dtype=torch.float64)
     text[:, 0] = torch.arange(text_len, dtype=torch.float64)
 
     rows = [text]
+    cursor = float(text_len)
+    for rh, rw in (refs or ()):
+        r_frame = _frame_grid(rh, rw)
+        g = torch.empty(r_frame.shape[0], 3, dtype=torch.float64)
+        g[:, 0] = cursor
+        g[:, 1:] = r_frame
+        rows.append(g)
+        cursor += 1.0
+
     if num_audio_latents:
         w_axis = _axis_from_sqrt_area(latent_w, 2, math.sqrt(latent_h * latent_w))
         aud = torch.zeros(num_audio_latents * AUDIO_CHANNELS, 3, dtype=torch.float64)
-        aud[:, 0] = (float(text_len) + torch.arange(num_audio_latents, dtype=torch.float64)
+        aud[:, 0] = (cursor + torch.arange(num_audio_latents, dtype=torch.float64)
                      ).repeat(AUDIO_CHANNELS)
         aud[:, 2] = torch.cat([torch.full((num_audio_latents,), float(w_axis[0]), dtype=torch.float64),
                                torch.full((num_audio_latents,), float(w_axis[-1]), dtype=torch.float64)])
         rows.append(aud)
 
-    t_grid = _video_t_grid(1, text_len)                     # [1], = [text_len]
+    t_grid = _video_t_grid(1, cursor)                       # [1], = [cursor]
     vid = torch.empty(frame_rows, 3, dtype=torch.float64)
     vid[:, 0] = t_grid[0]
     vid[:, 1:] = frame

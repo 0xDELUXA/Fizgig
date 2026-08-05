@@ -326,6 +326,22 @@ class MiniMaxH3TextEncoder:
         emb = out.last_hidden_state.to(self.compute_dtype)
         return emb, tags
 
+    # NO encode_with_reference_batch. Batching the reference encodes was implemented and
+    # MEASURED against the one-at-a-time path on the real encoder (tests/diag_ref_batch_encode.py)
+    # and it is NOT equivalent: max|diff| 1.3e2 to 1.7e3 on conditioning whose values top out
+    # around 2e4, i.e. up to ~8% — against a left-padding control of 1.8e4. A proper 0/1 attention
+    # mask (Qwen3-VL derives its mrope positions from it) improved matters but did not fix them.
+    #
+    # Right padding IS exact on the caption path, for the causal-attention reason documented on
+    # encode_batch. The vision path adds mrope positions computed from image_grid_thw and a
+    # scatter into the <|image_pad|> slots, and something there does not survive padding. Rather
+    # than ship conditioning that is subtly wrong in a way nothing downstream would reveal, the
+    # reference pass stays one encode at a time. The cost is ~1.5 s per encode — about 2.5 min
+    # for 46 images at 2 references, linear in (images x references), and cached afterwards.
+    #
+    # If this is ever worth revisiting, the diagnostic is the gate: it must reach the ~1e-7 the
+    # caption path achieves, not merely "look close".
+
     @torch.no_grad()
     def encode_batch(self, captions, max_length: int = 512, batch_size: int = 8):
         """Encode many captions, returning [1, L_i, 5120] each — same values as encode(), fewer

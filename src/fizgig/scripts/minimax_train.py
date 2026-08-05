@@ -26,8 +26,17 @@ logging.basicConfig(level=logging.INFO)
 
 
 def _shift_arg(v):
-    """--shift takes the literals 'sigmoid'/'resolution' or a float (see the flag's help)."""
-    return v if v in ("sigmoid", "resolution") else float(v)
+    """--shift takes 'sigmoid' / 'resolution', 'lognorm:<float>', or a plain float.
+
+    'lognorm:<s>' is the same shift map as a plain float but drawn from a logit-normal base
+    instead of a uniform one — the SHAPE axis: mid-concentrated rather than flat with fat tails.
+    """
+    if v in ("sigmoid", "resolution"):
+        return v
+    if isinstance(v, str) and v.startswith("lognorm:"):
+        float(v.split(":", 1)[1])          # validate now, not 20 minutes into a run
+        return v
+    return float(v)
 
 
 def setup_parser() -> argparse.ArgumentParser:

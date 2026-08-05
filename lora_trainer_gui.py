@@ -469,6 +469,46 @@ def minimax_lownoise_to_shift(pct):
     return (1.0 - p) / p
 
 
+def minimax_lownoise_to_lognorm_shift(pct):
+    """Share of steps below sigma 0.5 (percent) -> the shift for a LOGIT-NORMAL base.
+
+    The box means the same thing whichever shape is chosen; only the arithmetic behind it
+    changes. For a uniform base the inverse is closed-form. For a logit-normal base,
+    sigma < 0.5 happens when the base draw u < 1/(s+1), and u = sigmoid(z) with z ~ N(0,1), so
+
+        P = Phi(logit(1 / (s + 1)))
+
+    which is monotonically decreasing in s but has no tidy inverse — hence bisection. Bracketed
+    generously (1e-6 .. 1e6) so extreme box values still resolve rather than silently clamping.
+    """
+    import math as _m
+    p = None
+    try:
+        p = float(str(pct).strip().rstrip("%")) / 100.0
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 < p < 1.0):
+        return None
+
+    def _share(s):
+        u = 1.0 / (s + 1.0)                                   # the base draw that gives sigma 0.5
+        z = _m.log(u / (1.0 - u))                             # logit
+        return 0.5 * (1.0 + _m.erf(z / _m.sqrt(2.0)))         # Phi(z)
+
+    lo, hi = 1e-6, 1e6
+    if p >= _share(lo):
+        return lo
+    if p <= _share(hi):
+        return hi
+    for _ in range(200):                                      # ~1e-60 on the bracket; cheap
+        mid = _m.sqrt(lo * hi)                                # geometric: s spans many decades
+        if _share(mid) > p:
+            lo = mid
+        else:
+            hi = mid
+    return _m.sqrt(lo * hi)
+
+
 def minimax_shift_to_lownoise(shift):
     """The inverse — shows an existing shift (e.g. from an older preset) as a percentage."""
     try:
@@ -1334,6 +1374,7 @@ class LoRATrainerGUI:
             "BLOCKS_SWAP": "auto",  # Klein valid range 0-16; "auto" detects from GPU
             # MiniMax H3 only. Percent of steps trained below sigma 0.5 (H3's own default works out at ~7.7%).
             "MINIMAX_LOWNOISE_PCT": "22",
+            "MINIMAX_LOGNORM": False,      # False = flat spread; True = mid-concentrated
             "MINIMAX_BLOCKS": "all",
             "MINIMAX_TRAIN_ADALN": True,   # the reference behaviour; the toggle is the experiment
             "MINIMAX_DISTILL": False,      # off = ordinary training
@@ -3664,6 +3705,12 @@ class LoRATrainerGUI:
         self._minimax_shift_match = tk.Label(self._minimax_shift_frame, text="",
                                              font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
         self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
+        self.minimax_lognorm_var = tk.BooleanVar(
+            value=bool(self.settings.get("MINIMAX_LOGNORM", False)))
+        ttk.Checkbutton(self._minimax_shift_frame, text="mid-concentrated",
+                        variable=self.minimax_lognorm_var,
+                        command=lambda: self._refresh_minimax_shift_match()).pack(side=tk.LEFT,
+                                                                                 padx=(10, 0))
         self.entries["MINIMAX_LOWNOISE_PCT"].bind(
             "<KeyRelease>", lambda _e: self._refresh_minimax_shift_match())
         self._minimax_shift_hint = ttk.Label(
@@ -3677,7 +3724,11 @@ class LoRATrainerGUI:
                  "No cap and no right answer: type whatever you want to try. Higher means more "
                  "detail training, but each of those steps also lands harder, so if a high value "
                  "overbakes, drop the Learning Rate before you drop the number. Recorded in the "
-                 "LoRA's metadata and shown on the training queue, so runs stay comparable.",
+                 "LoRA's metadata and shown on the training queue, so runs stay comparable. "
+                 "'mid-concentrated' changes the SHAPE without changing that percentage: the "
+                 "same share of low-noise steps, but the rest bunched around the middle instead "
+                 "of spread evenly out to both extremes. Krea 2 and Klein both train that way. "
+                 "Worth an A/B — the number alone only controls how much, never where.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_shift_hint.grid(row=27, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         # --- Blocks to Train (MiniMax only, experimental) ---------------------------------
@@ -4570,6 +4621,8 @@ class LoRATrainerGUI:
 
         if "MINIMAX_DISTILL" in preset and hasattr(self, "minimax_distill_var"):
             self.minimax_distill_var.set(bool(preset["MINIMAX_DISTILL"]))
+        if "MINIMAX_LOGNORM" in preset and hasattr(self, "minimax_lognorm_var"):
+            self.minimax_lognorm_var.set(bool(preset["MINIMAX_LOGNORM"]))
 
         # Model Area to Train (training preset dropdown)
         if "TARGET_LAYERS" in preset and hasattr(self, 'training_preset_var'):
@@ -5040,7 +5093,7 @@ class LoRATrainerGUI:
         if ARCHITECTURES.get(item.get("architecture", ""), {}).get("is_minimax"):
             _sh = str(p.get("MINIMAX_LOWNOISE_PCT") or "").strip()
             if _sh:
-                bits.append(f"low-noise {_sh}%")
+                bits.append(f"low-noise {_sh}%" + (" mid" if p.get("MINIMAX_LOGNORM") else ""))
             _bl = minimax_block_spec(p.get("MINIMAX_BLOCKS"))
             if _bl.lower() != "all":
                 bits.append(f"blocks {_bl}")
@@ -5328,6 +5381,7 @@ class LoRATrainerGUI:
         # above does NOT see it — without this a queued distillation run loses its reference
         # and silently becomes an ordinary run (tests/test_minimax_distill_gui.py).
         _grab("minimax_distill_var", "MINIMAX_DISTILL")
+        _grab("minimax_lognorm_var", "MINIMAX_LOGNORM")
         _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
@@ -5632,13 +5686,18 @@ class LoRATrainerGUI:
         ent = self.entries.get("MINIMAX_LOWNOISE_PCT")
         if lbl is None or ent is None or not lbl.winfo_exists():
             return
-        shift = minimax_lownoise_to_shift(ent.get())
+        lognorm = bool(getattr(self, "minimax_lognorm_var", None)
+                       and self.minimax_lognorm_var.get())
+        shift = (minimax_lownoise_to_lognorm_shift(ent.get()) if lognorm
+                 else minimax_lownoise_to_shift(ent.get()))
         if shift is None:
             lbl.config(text="✗ enter a number above 0 and below 100", fg="#E74C3C")
             return
-        # median sigma is the shift map at u = 0.5, i.e. shift / (shift + 1)
+        # The median is the shift map at the base's median draw — 0.5 for a uniform draw and for
+        # a logit-normal one alike — so it is shift/(shift+1) either way.
         med = shift / (shift + 1.0)
-        lbl.config(text=f"→ shift {shift:.3g}, median noise {med:.2f}", fg="#27AE60")
+        lbl.config(text=f"→ {'logit-normal' if lognorm else 'uniform'} shift {shift:.3g}, "
+                        f"median noise {med:.2f}", fg="#27AE60")
 
     def _refresh_minimax_blocks_count(self):
         """Say how many blocks the Blocks to Train box currently means, or why it can't be read.
@@ -21262,6 +21321,7 @@ class LoRATrainerGUI:
             # trainer's shift. Keeping the percentage is what makes a saved preset mean the same
             # thing later, rather than a shift number nobody can interpret.
             "MINIMAX_LOWNOISE_PCT": str(self.entries["MINIMAX_LOWNOISE_PCT"].get() or "").strip(),
+            "MINIMAX_LOGNORM": bool(self.minimax_lognorm_var.get()),
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
@@ -22246,9 +22306,14 @@ class LoRATrainerGUI:
         # The trainer stamps the same thing into the LoRA as ss_timestep_density.
         # Low-noise share -> shift. Always sent, including the default, so the launched command
         # records which density ran instead of leaving it implicit.
-        _shift = minimax_lownoise_to_shift(self.settings.get("MINIMAX_LOWNOISE_PCT"))
-        if _shift is not None:
-            cmd += ["--shift", f"{_shift:g}"]
+        if self.settings.get("MINIMAX_LOGNORM"):
+            _shift = minimax_lownoise_to_lognorm_shift(self.settings.get("MINIMAX_LOWNOISE_PCT"))
+            if _shift is not None:
+                cmd += ["--shift", f"lognorm:{_shift:g}"]
+        else:
+            _shift = minimax_lownoise_to_shift(self.settings.get("MINIMAX_LOWNOISE_PCT"))
+            if _shift is not None:
+                cmd += ["--shift", f"{_shift:g}"]
         # Blocks to Train — only sent when it's a real range; "all" is the trainer's own default,
         # and not sending it keeps the flag's presence meaning "this run was a block experiment".
         _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))

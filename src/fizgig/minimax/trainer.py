@@ -263,6 +263,14 @@ def sample_sigmas(batch: int, device, shift=None, generator=None,
         mu = 0.5 + (tokens - 256.0) * (1.15 - 0.5) / (6400.0 - 256.0)
         s = math.exp(mu)
         base = torch.sigmoid(torch.randn(batch, device=device, generator=generator))
+    elif isinstance(shift, str) and shift.startswith("lognorm:"):
+        # SHAPE, not amount. Same shift map, but a logit-normal base instead of a uniform one:
+        # the mass piles up in the middle and thins at BOTH ends, where a uniform base has fat
+        # tails. Krea 2 and Klein both draw logit-normal, so this is the one axis the numeric
+        # ladder cannot reach — it only ever varies how much low-noise training there is, never
+        # where the rest of the mass sits.
+        s = float(shift.split(":", 1)[1])
+        base = torch.sigmoid(torch.randn(batch, device=device, generator=generator))
     else:
         s = float(shift)
         base = torch.rand(batch, device=device, generator=generator)
@@ -793,6 +801,9 @@ def train_minimax(
     elif shift == "resolution":
         logger.warning("[timesteps] logit-normal + resolution shift (median ~0.62) — A/B mode; "
                        "same overdrive caveat as sigmoid.")
+    elif isinstance(shift, str) and str(shift).startswith("lognorm:"):
+        logger.info(f"[timesteps] logit-normal base at shift {str(shift).split(':', 1)[1]} — "
+                    f"mid-concentrated spread at the requested low-noise share.")
     else:
         logger.info(f"[timesteps] explicit shift={shift} — uniform-u map.")
 

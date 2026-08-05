@@ -120,7 +120,15 @@ def create_optimizer(name: str, params, lr: float, args_str: str = "") -> tuple:
     # the most structured tensors (adaln worst, fc1 next), which presented as melted anatomy
     # at epoch 1. eps=1e-6 caps that amplification two orders of magnitude lower. Explicit
     # "eps=..." in Optimizer Args still wins.
-    if "8bit" in key and "lion" not in key or key in ("adamw", "adam"):
+    # NOTE the condition: 8-BIT Adam family only, NOT full-precision adam/adamw.
+    # Full precision has no quantized state, so v is whatever it really is, and a 1e-6 floor
+    # then DAMPS the tensors with genuinely small second moments — exactly the ones converging
+    # on fine detail. The step shrinks by however far sqrt(v) sits below the floor, so it would
+    # silently cap late-stage learning while looking like a stability measure. This originally
+    # applied to both (ai-toolkit passes 1e-6 to every Adam-family optimizer, and matching them
+    # seemed safer than not); that was wrong — the floor is a workaround for 8-bit state, so it
+    # belongs only where 8-bit state exists.
+    if "8bit" in key and "lion" not in key:
         kwargs.setdefault("eps", 1e-6)
 
     try:

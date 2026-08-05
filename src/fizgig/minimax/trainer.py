@@ -14,6 +14,7 @@ So the training target for the model's output is `x0 - noise`.
 """
 
 import argparse
+import contextlib
 import gc
 import logging
 import math
@@ -307,6 +308,85 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
     pred = model(noised.to(latent.dtype), t, text_embeds)
     target = (x0 - noise).to(pred.dtype)
     return F.mse_loss(pred.float(), target.float()), float(sigma.reshape(-1)[0])
+
+
+@contextlib.contextmanager
+def lora_disabled(network):
+    """Run the frozen BASE inside this block — every adapter's multiplier is temporarily 0.
+
+    Every module type (LoRA, LoKR, LoHa) reads self.multiplier live in its forward and
+    short-circuits on 0.0, so this needs no re-apply and no weight surgery. Restores whatever
+    each module had, not a blanket 1.0 — a context LoRA rides at its own strength."""
+    mods = list(getattr(network, "unet_loras", []))
+    saved = [m.multiplier for m in mods]
+    try:
+        for m in mods:
+            m.multiplier = 0.0
+        yield
+    finally:
+        for m, v in zip(mods, saved):
+            m.multiplier = v
+
+
+def compute_distill_loss(model, network, latent, text_plain, *, text_ref, ref_latents,
+                         text_token_tags=None, distill_weight=0.8, shift=None, generator=None,
+                         noise=None, seed=0):
+    """Reference distillation: teach the LoRA to behave, from text alone, as if it had been
+    shown the reference photo.
+
+    Two predictions of the SAME noised latent at the SAME timestep:
+      teacher — frozen base, LoRA off, conditioning WITH the reference (vision blocks + ref rows)
+      student — LoRA on, conditioning WITHOUT it
+    loss = w * MSE(student, teacher) + (1 - w) * MSE(student, x0 - noise)
+
+    The photo term is what keeps real photographic detail available: pure distillation caps the
+    LoRA at exactly the teacher's habits and can never exceed them. The teacher term is what
+    stops the run spending capacity on backgrounds and framing, because the target is no longer
+    a particular photograph.
+
+    Everything the two passes share is drawn ONCE — noise, timestep, and the audio silence rows.
+    The audio rows especially: model.forward redraws them per call when not given, so letting
+    each pass draw its own would put a different soundtrack under teacher and student and add
+    pure noise to the very signal being distilled.
+    """
+    if latent.shape[0] != 1:
+        raise ValueError("MiniMax H3 image training is batch size 1")
+    device = latent.device
+    x0 = latent.float()
+    _pt, _ph, _pw = getattr(model, "patch_size", (1, 2, 2))
+    _H, _W = x0.shape[-2], x0.shape[-1]
+    _Hc, _Wc = (_H // _ph) * _ph, (_W // _pw) * _pw
+    if (_Hc, _Wc) != (_H, _W):
+        x0 = x0[..., :_Hc, :_Wc].contiguous()
+    if noise is None:
+        noise = torch.randn(x0.shape, device=device, generator=generator, dtype=torch.float32)
+    else:
+        noise = noise.to(device=device, dtype=torch.float32)[..., :x0.shape[-2], :x0.shape[-1]]
+
+    _tokens = (x0.shape[-2] // _ph) * (x0.shape[-1] // _pw)
+    sigma = sample_sigmas(1, device, shift=shift, generator=generator, image_tokens=_tokens)
+    s = sigma.reshape(1, 1, 1, 1, 1).to(torch.float32)
+    noised = ((1.0 - s) * x0 + s * noise).to(latent.dtype)
+    t = (1.0 - sigma).to(device)
+
+    # one soundtrack for both passes (see the docstring)
+    audio_noise = None
+    if getattr(model, "pack_audio_rows", False):
+        from fizgig.minimax.model import AUDIO_CHANNELS, audio_latents_for_frames
+        n_a = audio_latents_for_frames(1) * AUDIO_CHANNELS
+        audio_noise = torch.randn(n_a, model.config.audio_latents_dim, device=device,
+                                  generator=generator, dtype=torch.float32)
+
+    with torch.no_grad(), lora_disabled(network):
+        teacher = model(noised, t, text_ref, audio_noise, ref_latents=ref_latents,
+                        text_token_tags=text_token_tags, seed=seed).float()
+    student = model(noised, t, text_plain, audio_noise).float()
+
+    w = float(distill_weight)
+    loss = w * F.mse_loss(student, teacher.detach())
+    if w < 1.0:
+        loss = loss + (1.0 - w) * F.mse_loss(student, (x0 - noise).float())
+    return loss, float(sigma.reshape(-1)[0])
 
 
 # ---------------------------------------------------------------------------

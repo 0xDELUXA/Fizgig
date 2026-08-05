@@ -434,38 +434,48 @@ LAST_TRAIN_FILE = os.path.join(PRESETS_DIR, ".last_train_settings.json")
 # never auto-starts on launch (a queue found at startup waits for the user's first Start).
 QUEUE_FILE = os.path.join(PRESETS_DIR, "training_queue.json")
 
-# MiniMax H3 — training noise-level density ("Detail Focus" on the Training tab).
+# MiniMax H3 — how much of training happens at LOW NOISE ("Low-noise training" on the tab).
 #
-# H3's reference recipe draws a uniform u and maps it through sigma = shift*u/(1 + (shift-1)*u),
-# with shift = 12. That 12 is the VIDEO sigma-shift, calibrated for a ~5760-token 39-frame pack.
-# One training image is 256-1024 tokens, so image-only training inherits a shift roughly an
-# order of magnitude too large. Measured consequence: median sigma 0.923, and only 5% of steps
-# at or below 0.387 — the last non-zero sigma of Comfy's 20-step schedule, i.e. the single step
-# that renders all fine detail. Klein and Krea 2 scale their own shift by the sample's token
-# count and put 44% of steps below sigma 0.6, against 11% here.
+# The dial is the SHARE, not a shift number. Same underlying knob, stated as the thing that
+# actually matters. Training draws u uniform and maps it through
 #
-# The recommendations scale 12 down by the sqrt-token rule (the SD3/Flux resolution-transfer
-# result: equal coarse SNR between resolutions needs shift ratio sqrt(m/n)). With a /16 VAE and
-# a 2x2 patch, an image carries ~977*MP tokens, so
+#     sigma = shift * u / (1 + (shift - 1) * u)
 #
-#     shift = 12 * sqrt(977*MP / 5760)  ~=  5 * sqrt(MP)
+# so the fraction of steps landing below a threshold T is P = T / (shift*(1 - T) + T). At
+# T = 0.5 that inverts to exactly
 #
-# which is where 2.5 @ 0.25 MP and 5 @ 1.0 MP come from. NOTE the honest caveat, repeated in the
-# GUI help: the image ecosystem's own fitted rule (Flux's linear-in-tokens mu) is gentler than
-# pure sqrt and would put the same transfer nearer 6, so these numbers are the aggressive end of
-# a bracket, not a settled answer. Nobody has swept this properly — hence the "experiment" framing.
-MINIMAX_SHIFT_BY_MP = [
-    ("0.25", "2.5"), ("0.5", "3.5"), ("0.75", "4.3"), ("1.0", "5"),
-    ("1.5", "6"), ("2.0", "7"), ("2.4", "7.7"), ("3.0", "8.6"), ("4.2", "10"),
-]
-# Parsed with .split(" ")[0] — the same convention the Adaptive LR dropdowns use — so the
-# trailing note is free text and can be reworded without invalidating saved presets or queue
-# items. The trainer also accepts the literals 'sigmoid' and 'resolution' (logit-normal
-# densities) on the CLI; both overdrove the adapters at 1e-4 in real runs, so they are not
-# offered here, but an old preset carrying one still passes straight through.
-MINIMAX_SHIFT_OPTIONS = [f"{s} - for {mp} MP" for mp, s in MINIMAX_SHIFT_BY_MP] + [
-    "12 - MiniMax's own default (tuned for video, not stills)",
-]
+#     shift = (1 - P) / P
+#
+# — no solver, no table, no resolution term. Reference points: 50% -> shift 1 (unshifted
+# uniform), 22% -> 3.5, 7.7% -> 12 (H3's own video default).
+#
+# DELIBERATELY UNCAPPED and deliberately independent of megapixels. The previous MP-keyed
+# version derived its numbers from a sqrt-token transfer rule that has never been validated on
+# H3, and capping the list to that rule's answers ruled out settings worth trying.
+MINIMAX_LOWNOISE_SIGMA = 0.5     # "low noise" = the cleaner half of the sigma range
+
+
+def minimax_lownoise_to_shift(pct):
+    """Share of steps below sigma 0.5 (percent) -> the shift that produces it. None if unusable.
+
+    0 and 100 are the asymptotes, not values: 0% needs an infinite shift and 100% a shift of 0,
+    and neither is a schedule. Everything strictly between them is allowed."""
+    try:
+        p = float(str(pct).strip().rstrip("%")) / 100.0
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 < p < 1.0):
+        return None
+    return (1.0 - p) / p
+
+
+def minimax_shift_to_lownoise(shift):
+    """The inverse — shows an existing shift (e.g. from an older preset) as a percentage."""
+    try:
+        s = float(shift)
+    except (TypeError, ValueError):
+        return None
+    return None if s <= 0 else 100.0 / (1.0 + s)
 
 
 # MiniMax H3 — which of the 50 DiT blocks to train ("Blocks to Train" on the Training tab).
@@ -509,17 +519,6 @@ def minimax_block_spec(raw):
     """The block selection out of a dropdown label OR a hand-typed spec. "" -> "all"."""
     return str(raw or "").split("·")[0].strip() or "all"
 
-
-def minimax_recommended_shift(megapixels):
-    """The Detail Focus value recommended for a Target Megapixels setting.
-
-    Exact match where the MP dropdown offers one, otherwise the closest listed MP (so a
-    hand-typed value still gets a sensible answer instead of nothing)."""
-    try:
-        mp = float(str(megapixels).strip())
-    except (TypeError, ValueError):
-        return None
-    return min(MINIMAX_SHIFT_BY_MP, key=lambda kv: abs(float(kv[0]) - mp))[1]
 
 # Built-in presets — always available in the Load Preset dropdown, prefixed with ✨ to distinguish
 # from user-saved presets. Defined in code so they ship with the app and can't be deleted accidentally.
@@ -690,7 +689,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "OPTIMIZER_TYPE": "adamw8bit",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.5",
-        "MINIMAX_SHIFT": "3.5",
+        "MINIMAX_LOWNOISE_PCT": "22",
     },
 }
 
@@ -1329,9 +1328,8 @@ class LoRATrainerGUI:
             "SAVE_EVERY_N_EPOCHS": 1,
             "SEED": 42,
             "BLOCKS_SWAP": "auto",  # Klein valid range 0-16; "auto" detects from GPU
-            # MiniMax H3 only — training noise-level density (see MINIMAX_SHIFT_OPTIONS).
-            # Matches the shipped MiniMax preset (0.5 MP), not H3's video-tuned 12.
-            "MINIMAX_SHIFT": "3.5",
+            # MiniMax H3 only. Percent of steps trained below sigma 0.5 (H3's own default works out at ~7.7%).
+            "MINIMAX_LOWNOISE_PCT": "22",
             "MINIMAX_BLOCKS": "all",
             "MINIMAX_TRAIN_ADALN": True,   # the reference behaviour; the toggle is the experiment
             "MINIMAX_SLOW_BLOCKS": "",     # blank = one LR everywhere
@@ -3640,38 +3638,39 @@ class LoRATrainerGUI:
                        "the scores with your dataset. Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._krea2_losswatch_hint.grid(row=24, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
-        # --- Detail Focus (MiniMax H3 only) — which noise levels the run actually trains on.
-        # Hidden for every other family by _apply_training_arch_visibility; see
-        # MINIMAX_SHIFT_OPTIONS for why the reference default starves the low-noise band.
-        self._minimax_shift_label = ttk.Label(training_content, text="Detail Focus:")
+        # --- Low-noise training share (MiniMax H3 only) -----------------------------------
+        # One number, uncapped: what fraction of steps train below sigma 0.5. Converted to the
+        # trainer's shift by minimax_lownoise_to_shift. Hidden for other families by
+        # _apply_training_arch_visibility.
+        self._minimax_shift_label = ttk.Label(training_content, text="Low-noise training:")
         self._minimax_shift_label.grid(row=26, column=0, sticky=tk.W, padx=5, pady=(8, 2))
         self._minimax_shift_frame = ttk.Frame(training_content)
         self._minimax_shift_frame.grid(row=26, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
-        self.entries["MINIMAX_SHIFT"] = ttk.Combobox(
-            self._minimax_shift_frame, values=MINIMAX_SHIFT_OPTIONS, state="readonly", width=34)
-        self.entries["MINIMAX_SHIFT"].pack(side=tk.LEFT)
-        self._select_combo_by_token(self.entries["MINIMAX_SHIFT"],
-                                    self.settings.get("MINIMAX_SHIFT", "3.5"))
-        # Live "does this match your image size?" readout. The dial is deliberately NOT auto-set
-        # from the MP box: a queued A/B must keep the density the user chose for it, and silently
-        # rewriting a setting when an unrelated dropdown moves is exactly how a sweep gets muddled.
+        self.entries["MINIMAX_LOWNOISE_PCT"] = ttk.Entry(self._minimax_shift_frame, width=8)
+        self.entries["MINIMAX_LOWNOISE_PCT"].insert(
+            0, str(self.settings.get("MINIMAX_LOWNOISE_PCT", "22")))
+        self.entries["MINIMAX_LOWNOISE_PCT"].pack(side=tk.LEFT)
+        ttk.Label(self._minimax_shift_frame, text="% of steps").pack(side=tk.LEFT, padx=(4, 0))
+        # Live readout: the number you type is the thing you care about, but the schedule it
+        # produces is worth seeing — especially at the extremes, where a couple of percent of
+        # change swings the shift enormously.
         self._minimax_shift_match = tk.Label(self._minimax_shift_frame, text="",
                                              font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
         self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
+        self.entries["MINIMAX_LOWNOISE_PCT"].bind(
+            "<KeyRelease>", lambda _e: self._refresh_minimax_shift_match())
         self._minimax_shift_hint = ttk.Label(
             training_content,
-            text="Which noise levels this run actually trains on. MiniMax's own default is 12 — but "
-                 "that is tuned for VIDEO, where one sample carries ~20x the data of a single photo. "
-                 "On stills it leaves only ~5% of training in the low-noise range where fine detail "
-                 "is learned, so a LoRA gets good at pose, hairstyle and silhouette while skin, eyes "
-                 "and texture stay thin. The values above scale it to your image size (roughly "
-                 "5 x the square root of your Target Megapixels) — smaller images want a lower number.\n"
-                 "These are starting points, not rules, and nobody has swept this properly yet — "
-                 "experimenting here is genuinely worth doing. Lower = more detail training, but also "
-                 "a bigger effective step down there: if a lower setting overbakes, drop the Learning "
-                 "Rate or turn on Adaptive LR before you write it off. Every run stamps its setting "
-                 "into the saved LoRA (ss_timestep_density) and the training queue shows it, so "
-                 "back-to-back comparisons are easy to keep straight.",
+            text="How much of the run trains on nearly-clean images (noise below the halfway "
+                 "point) instead of heavily noised ones. Low noise is where fine detail and "
+                 "likeness are learned; high noise is where pose, framing and composition are. "
+                 "MiniMax's own default works out at about 8%, because it was tuned for video "
+                 "where one sample carries far more data than a single photo — on stills that "
+                 "leaves almost nothing for detail. For reference, Krea 2 spends about 30%. "
+                 "No cap and no right answer: type whatever you want to try. Higher means more "
+                 "detail training, but each of those steps also lands harder, so if a high value "
+                 "overbakes, drop the Learning Rate before you drop the number. Recorded in the "
+                 "LoRA's metadata and shown on the training queue, so runs stay comparable.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_shift_hint.grid(row=27, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         # --- Blocks to Train (MiniMax only, experimental) ---------------------------------
@@ -3765,9 +3764,6 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_adaln_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
-        self.dataset_megapixels_var.trace_add("write", lambda *_: self._refresh_minimax_shift_match())
-        self.entries["MINIMAX_SHIFT"].bind("<<ComboboxSelected>>",
-                                           lambda _e: self._refresh_minimax_shift_match())
         self._refresh_minimax_shift_match()
 
         # Answers "when do changes take effect?" (issue #40) right where people wonder it.
@@ -4992,9 +4988,9 @@ class LoRATrainerGUI:
         # Detail Focus only means anything for MiniMax, and it's the whole point of queueing a
         # shift sweep — without it two rows of an A/B look identical in the manager.
         if ARCHITECTURES.get(item.get("architecture", ""), {}).get("is_minimax"):
-            _sh = str(p.get("MINIMAX_SHIFT") or "").split(" ")[0]
+            _sh = str(p.get("MINIMAX_LOWNOISE_PCT") or "").strip()
             if _sh:
-                bits.append(f"detail {_sh}")
+                bits.append(f"low-noise {_sh}%")
             _bl = minimax_block_spec(p.get("MINIMAX_BLOCKS"))
             if _bl.lower() != "all":
                 bits.append(f"blocks {_bl}")
@@ -5571,27 +5567,21 @@ class LoRATrainerGUI:
         return False
 
     def _refresh_minimax_shift_match(self):
-        """Tell the user whether Detail Focus matches their Target Megapixels.
+        """Show the schedule the typed percentage produces, or why it can't be read.
 
-        Informational only — it never moves the dial. Someone sweeping densities has deliberately
-        picked a value the rule wouldn't, and the green/amber readout is there to confirm the
-        choice was deliberate, not to undo it."""
+        The relationship is very non-linear at the ends — 5% is shift 19, 2% is shift 49 — so the
+        resulting shift and median noise level are worth seeing next to the number you typed."""
         lbl = getattr(self, "_minimax_shift_match", None)
-        combo = self.entries.get("MINIMAX_SHIFT")
-        if lbl is None or combo is None or not lbl.winfo_exists():
+        ent = self.entries.get("MINIMAX_LOWNOISE_PCT")
+        if lbl is None or ent is None or not lbl.winfo_exists():
             return
-        want = minimax_recommended_shift(self.dataset_megapixels_var.get())
-        try:
-            have = str(combo.get()).split(" ")[0]
-        except tk.TclError:
+        shift = minimax_lownoise_to_shift(ent.get())
+        if shift is None:
+            lbl.config(text="✗ enter a number above 0 and below 100", fg="#E74C3C")
             return
-        if want is None:
-            lbl.config(text="")
-        elif have == want:
-            lbl.config(text="✓ matches your image size", fg="#27AE60")
-        else:
-            lbl.config(text=f"recommended for {self.dataset_megapixels_var.get()} MP: {want}",
-                       fg="#E67E22")
+        # median sigma is the shift map at u = 0.5, i.e. shift / (shift + 1)
+        med = shift / (shift + 1.0)
+        lbl.config(text=f"→ shift {shift:.3g}, median noise {med:.2f}", fg="#27AE60")
 
     def _refresh_minimax_blocks_count(self):
         """Say how many blocks the Blocks to Train box currently means, or why it can't be read.
@@ -20729,6 +20719,9 @@ class LoRATrainerGUI:
                     errors.append(f"Blocks to Train: {e}")
                 except ImportError:
                     pass
+            if minimax_lownoise_to_shift(self.entries["MINIMAX_LOWNOISE_PCT"].get()) is None:
+                errors.append("Low-noise training must be a number above 0 and below 100 "
+                              f"(got {self.entries['MINIMAX_LOWNOISE_PCT'].get()!r})")
             _slow_spec = str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip()
             if _slow_spec:
                 try:
@@ -21185,7 +21178,10 @@ class LoRATrainerGUI:
             "BLOCKS_SWAP": blocks_swap,
             # MiniMax-only; the widget exists (hidden) under every family, so read it unconditionally
             # and let the MiniMax command builder be the one that acts on it.
-            "MINIMAX_SHIFT": str(self.entries["MINIMAX_SHIFT"].get() or "12").split(" ")[0],
+            # Stored as the percentage the user typed; the command builder converts it to the
+            # trainer's shift. Keeping the percentage is what makes a saved preset mean the same
+            # thing later, rather than a shift number nobody can interpret.
+            "MINIMAX_LOWNOISE_PCT": str(self.entries["MINIMAX_LOWNOISE_PCT"].get() or "").strip(),
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
@@ -22141,8 +22137,11 @@ class LoRATrainerGUI:
         # leaving it implicit — these are meant to be A/B'd against each other, often queued
         # back to back, and "which one was this?" has to be answerable from the record alone.
         # The trainer stamps the same thing into the LoRA as ss_timestep_density.
-        _shift = str(self.settings.get("MINIMAX_SHIFT", "12") or "12").split(" ")[0]
-        cmd += ["--shift", _shift]
+        # Low-noise share -> shift. Always sent, including the default, so the launched command
+        # records which density ran instead of leaving it implicit.
+        _shift = minimax_lownoise_to_shift(self.settings.get("MINIMAX_LOWNOISE_PCT"))
+        if _shift is not None:
+            cmd += ["--shift", f"{_shift:g}"]
         # Blocks to Train — only sent when it's a real range; "all" is the trainer's own default,
         # and not sending it keeps the flag's presence meaning "this run was a block experiment".
         _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))

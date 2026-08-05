@@ -456,9 +456,6 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
     if not quantize:
         mode = "none"
 
-    with torch.device("meta"):
-        model = build_qwen3vl_te() if with_vision else build_qwen3_te()
-
     # Parameter name -> checkpoint key. The file stores the language stack under `model.` and
     # the vision tower under `visual.`; the VL module tree calls those `language_model.` and
     # `visual.`. Getting this wrong does not raise — the parameter simply keeps its random init.
@@ -468,6 +465,9 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
         if name.startswith("language_model."):
             return "model." + name[len("language_model."):]
         return name
+
+    with torch.device("meta"):
+        model = build_qwen3vl_te() if with_vision else build_qwen3_te()
 
         # Swap the NF4-target Linears for Linear4bit shells INSIDE the meta context. Outside it,
         # each Linear4bit eagerly allocates a full fp32 CPU weight (nn.Linear default) — across the

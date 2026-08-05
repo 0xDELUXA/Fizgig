@@ -38,16 +38,30 @@ def reference_canvas(ref_w: int, ref_h: int, gen_w: int, gen_h: int, mode: str =
     return int(tw), int(th)
 
 
-def prepare_reference_image(image, gen_w: int, gen_h: int, mode: str = "match"):
-    """PIL image -> [1, 3, H, W] float tensor in [-1, 1] on the reference canvas.
+def resize_reference(image, gen_w: int, gen_h: int, mode: str = "match"):
+    """PIL image -> PIL image on the reference canvas.
 
-    [-1, 1] because that is what MiniMaxH3VideoVAE.encode expects (it rescales to [0, 1] and
-    applies the imagenet normalization itself)."""
+    THE SAME resized image must go to BOTH the VAE (for the condition rows) and the Qwen3-VL
+    vision blocks (for the conditioning). The node does exactly that — `resized` is passed to
+    vae.encode AND appended to ref_items — and it matters: handed the original, the image
+    processor picks its own grid from its own pixel budget, so the vision block describes a
+    different-sized picture than the condition rows do. Both still run, and the conditioning is
+    simply wrong."""
     from PIL import Image
     tw, th = reference_canvas(image.width, image.height, gen_w, gen_h, mode)
-    img = image.convert("RGB").resize((tw, th), Image.LANCZOS)
-    arr = torch.from_numpy(_to_array(img)).float().permute(2, 0, 1).unsqueeze(0) / 255.0
-    return arr * 2.0 - 1.0
+    return image.convert("RGB").resize((tw, th), Image.LANCZOS)
+
+
+def reference_to_tensor(image):
+    """PIL image -> [1, 3, H, W] float tensor in [-1, 1], the range the VAE encoder expects
+    (it rescales to [0, 1] and applies the imagenet normalization itself)."""
+    arr = torch.from_numpy(_to_array(image.convert("RGB"))).float()
+    return (arr.permute(2, 0, 1).unsqueeze(0) / 255.0) * 2.0 - 1.0
+
+
+def prepare_reference_image(image, gen_w: int, gen_h: int, mode: str = "match"):
+    """PIL image -> [1, 3, H, W] float tensor in [-1, 1] on the reference canvas."""
+    return reference_to_tensor(resize_reference(image, gen_w, gen_h, mode))
 
 
 def _to_array(img):

@@ -197,6 +197,59 @@ def build_qwen3vl_te(config_overrides=None):
     return model
 
 
+# AdaLN modality tags. The DiT selects its modulation by these, so a mis-tagged row is modulated
+# as the wrong modality — it renders, it just renders wrong.
+VIDEO_TAG, TEXT_TAG, AUDIO_TAG = 0, 1, 2
+
+
+def build_image_processor(tokenizer_dir=None):
+    """The Qwen3-VL image processor, from the config bundled in src/fizgig/assets.
+
+    Built directly from the bundled preprocessor_config.json rather than downloaded: MiniMax's
+    HF repo is gated and geo-restricted, and everything needed (patch 16, temporal patch 2,
+    merge 2, mean/std 0.5) already ships with the tokenizer assets."""
+    from transformers import AutoImageProcessor
+    return AutoImageProcessor.from_pretrained(tokenizer_dir or _bundled_tokenizer_dir())
+
+
+def build_reference_tokens(tokenizer, image_processor, caption, images, max_length: int = 512):
+    """The r2v prompt presentation: `<Picture i>: <vision block>` per image, then the caption.
+
+    Returns (input_ids [1, L], token_tags [L], pixel_values, image_grid_thw). Mirrors
+    ai-toolkit's encode_minimax_h3_prompt and comfy's MiniMaxH3Tokenizer.tokenize_with_weights:
+    raw tokens, no chat template, no special tokens.
+
+    The tags are the load-bearing part. `<Picture 1>: ` is TEXT, but the WHOLE vision run —
+    the <|vision_start|> and <|vision_end|> markers included, not just the image pads — is
+    VIDEO. Tagging the markers as text would modulate two rows per image as the wrong modality.
+    """
+    pixel_values, image_grid_thw = None, None
+    ids, tags = [], []
+    if images:
+        vision = image_processor(images=images, return_tensors="pt")
+        pixel_values, image_grid_thw = vision["pixel_values"], vision["image_grid_thw"]
+        merge = image_processor.merge_size ** 2
+        v_start = tokenizer.convert_tokens_to_ids("<|vision_start|>")
+        v_end = tokenizer.convert_tokens_to_ids("<|vision_end|>")
+        img_pad = tokenizer.convert_tokens_to_ids("<|image_pad|>")
+        for i in range(len(images)):
+            n_img = int(image_grid_thw[i].prod()) // merge
+            label = tokenizer(f"<Picture {i + 1}>: ", add_special_tokens=False)["input_ids"]
+            vision_ids = [v_start] + [img_pad] * n_img + [v_end]
+            ids += label + vision_ids
+            tags += [TEXT_TAG] * len(label) + [VIDEO_TAG] * len(vision_ids)
+
+    prompt_ids = tokenizer(caption, add_special_tokens=False,
+                           truncation=True, max_length=max_length)["input_ids"]
+    ids += prompt_ids
+    tags += [TEXT_TAG] * len(prompt_ids)
+    if not ids:                                     # empty prompt with no reference
+        pid = getattr(tokenizer, "pad_token_id", None)
+        ids, tags = [151643 if pid is None else int(pid)], [TEXT_TAG]
+    return (torch.tensor([ids], dtype=torch.long), torch.tensor(tags, dtype=torch.long),
+            pixel_values, image_grid_thw)
+
+
 def qwen3vl_key_map(key: str) -> str:
     """Checkpoint key -> Qwen3VLModel parameter name.
 
@@ -214,6 +267,7 @@ class MiniMaxH3TextEncoder:
         self.device = device
         self.compute_dtype = compute_dtype
         self._cache = {}          # caption -> CPU embedding; see encode()
+        self._image_processor = None   # built on first r2v encode; see encode_with_reference()
 
     def _pad_id(self) -> int:
         """The tokenizer's pad id, or Qwen's default. NOT `pad_token_id or <default>` — a pad id
@@ -243,6 +297,34 @@ class MiniMaxH3TextEncoder:
         # keep it on CPU: a few hundred KB per caption, and GPU memory is the scarce thing here
         self._cache[caption] = emb.detach().to("cpu")
         return emb
+
+    @torch.no_grad()
+    def encode_with_reference(self, caption: str, images, max_length: int = 512):
+        """r2v conditioning: `<Picture i>:` vision blocks + caption -> ([1, L, 5120], tags [L]).
+
+        Requires the encoder to have been built with build_qwen3vl_te() — the text-only
+        Qwen3Model has no vision tower and would silently ignore the pixels. NOT memoized: the
+        cache is keyed by caption text alone, which would collide across different reference
+        images for the same caption.
+        """
+        if not hasattr(self.model, "visual"):
+            raise RuntimeError(
+                "encode_with_reference needs the vision-capable encoder — load with "
+                "with_vision=True (build_qwen3vl_te), not the text-only Qwen3Model.")
+        if self._image_processor is None:
+            self._image_processor = build_image_processor()
+        ids, tags, pixel_values, grid = build_reference_tokens(
+            self.tokenizer, self._image_processor, caption, images, max_length)
+        kw = {}
+        if pixel_values is not None:
+            # the vision tower is bf16 in the checkpoint; feed it its own dtype
+            kw["pixel_values"] = pixel_values.to(self.device, torch.bfloat16)
+            kw["image_grid_thw"] = grid.to(self.device)
+        out = self.model(input_ids=ids.to(self.device),
+                         attention_mask=torch.ones_like(ids).to(self.device), **kw)
+        # norm is Identity on this build, so last_hidden_state IS the raw layer-50 conditioning
+        emb = out.last_hidden_state.to(self.compute_dtype)
+        return emb, tags
 
     @torch.no_grad()
     def encode_batch(self, captions, max_length: int = 512, batch_size: int = 8):

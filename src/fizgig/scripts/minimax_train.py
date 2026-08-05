@@ -65,6 +65,12 @@ def setup_parser() -> argparse.ArgumentParser:
                         "needs the uncond embed cached by minimax_cache_text). 0 disables.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
+    p.add_argument("--no_train_adaln", dest="train_adaln", action="store_false",
+                   help="EXPERIMENT: drop the per-block AdaLN adapters. AdaLN is a function of "
+                        "the TIMESTEP only, so it cannot encode identity — yet on the pruned "
+                        "checkpoint it carries ~45%% of all weight movement. Turning it off frees "
+                        "that capacity for the attention and MLP paths, which do see the image. "
+                        "No effect on the bf16 checkpoint (it never targets AdaLN).")
     p.add_argument("--train_blocks", default=None, metavar="SPEC",
                    help="EXPERIMENT: train only these DiT blocks (of 50) instead of all of them. "
                         "Ranges and singles, comma-separated: '14-37' or '3-12, 14-15, 22, 31-33'. "
@@ -159,6 +165,7 @@ def main():
         base_quant=args.base_quant,
         include_patterns=args.include_patterns,
         train_blocks=args.train_blocks,
+        train_adaln=args.train_adaln,
         quantize=not args.no_quantize,
         shift=args.shift,
         blocks_to_swap=args.blocks_to_swap,

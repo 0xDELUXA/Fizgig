@@ -1333,6 +1333,7 @@ class LoRATrainerGUI:
             # Matches the shipped MiniMax preset (0.5 MP), not H3's video-tuned 12.
             "MINIMAX_SHIFT": "3.5",
             "MINIMAX_BLOCKS": "all",
+            "MINIMAX_TRAIN_ADALN": True,   # the reference behaviour; the toggle is the experiment
             "RESUME_TRAINING": "",
             "OPTIMIZER_TYPE": "adamw8bit",
             "OPTIMIZER_ARGS": "",
@@ -3711,6 +3712,27 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
 
+        # --- Train AdaLN (MiniMax only, experimental) --------------------------------------
+        # A BooleanVar kept in self.entries so the preset/queue machinery picks it up for free.
+        self.entries["MINIMAX_TRAIN_ADALN"] = tk.BooleanVar(
+            value=bool(self.settings.get("MINIMAX_TRAIN_ADALN", True)))
+        self._minimax_adaln_cb = ttk.Checkbutton(
+            training_content, text="Train AdaLN (timestep modulation)",
+            variable=self.entries["MINIMAX_TRAIN_ADALN"])
+        self._minimax_adaln_cb.grid(row=31, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_adaln_hint = ttk.Label(
+            training_content,
+            text="EXPERIMENT — on by default, which is what the reference trainer does. AdaLN is "
+                 "the part of the model that decides how strongly each block fires at each noise "
+                 "level. It only ever sees the noise level: not your image, not your prompt. So it "
+                 "CAN'T learn who someone is — but on this base it soaks up roughly 45% of "
+                 "everything your LoRA learns. Turning it off hands that capacity to the parts "
+                 "that do see the image. It may sharpen likeness, or it may cost you the timing "
+                 "control that makes the rest work — run it both ways on the same dataset. Only "
+                 "applies to the pruned int8 base; the bf16 one never trains AdaLN anyway.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_adaln_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         self.dataset_megapixels_var.trace_add("write", lambda *_: self._refresh_minimax_shift_match())
         self.entries["MINIMAX_SHIFT"].bind("<<ComboboxSelected>>",
                                            lambda _e: self._refresh_minimax_shift_match())
@@ -4944,6 +4966,8 @@ class LoRATrainerGUI:
             _bl = minimax_block_spec(p.get("MINIMAX_BLOCKS"))
             if _bl.lower() != "all":
                 bits.append(f"blocks {_bl}")
+            if p.get("MINIMAX_TRAIN_ADALN") is False:
+                bits.append("no adaln")
         return name, "  ·  ".join(str(b) for b in bits) + f"\nqueued {item.get('queued_at', '?')}"
 
     def _render_queue_window(self):
@@ -5737,7 +5761,8 @@ class LoRATrainerGUI:
         # Detail Focus is the inverse: MiniMax ONLY. Klein and Krea 2 already derive their shift
         # from the sample's token count, so there is nothing to dial there.
         for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint,
-                  self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint):
+                  self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
+                  self._minimax_adaln_cb, self._minimax_adaln_hint):
             self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
@@ -21115,6 +21140,7 @@ class LoRATrainerGUI:
             # and let the MiniMax command builder be the one that acts on it.
             "MINIMAX_SHIFT": str(self.entries["MINIMAX_SHIFT"].get() or "12").split(" ")[0],
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
+            "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "DATASET_CONFIG": self._get_path("DATASET_CONFIG"),
             "VAE_MODEL": self._get_path("VAE_MODEL"),
             "CLIP_MODEL": self._get_path("CLIP_MODEL"),
@@ -22073,6 +22099,9 @@ class LoRATrainerGUI:
         _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))
         if _blocks.lower() != "all":
             cmd += ["--train_blocks", _blocks]
+        # AdaLN is ON by default (the reference behaviour), so only the opt-out is ever sent.
+        if not self.settings.get("MINIMAX_TRAIN_ADALN", True):
+            cmd.append("--no_train_adaln")
         # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
         # the factor is the dial. Same flags as the Krea 2 builder.
         if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):

@@ -629,6 +629,7 @@ def train_minimax(
     base_quant: str = "auto",
     include_patterns: list = None,
     train_blocks: str = None,        # "14-37" = train only that block range (experiment)
+    train_adaln: bool = True,        # False = drop adaln_proj from the targets (pruned only)
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
     blocks_to_swap="auto",           # "auto" | int — park the last N blocks on CPU between uses
@@ -798,6 +799,23 @@ def train_minimax(
     # AdaLN targeting is per-checkpoint — see the pattern note at the top of this file.
     include_patterns = user_include_patterns or (
         PRUNED_INCLUDE_PATTERNS if dit.pruned_adaln else DEFAULT_INCLUDE_PATTERNS)
+    # AdaLN is a pure function of the TIMESTEP — DiTBlock.forward calls adaln_proj(t_emb) and
+    # nothing else, so its adapters cannot tell one subject from another. They can only reshape
+    # how strongly each block fires at each noise level. On the pruned checkpoint they carry
+    # ~45% of all weight movement in a matched epoch, which is a lot of a LoRA's capacity spent
+    # somewhere structurally incapable of holding a face — hence the toggle. See
+    # docs/MINIMAX_BLOCKS.md. No-op on the bf16 checkpoint, which never targets AdaLN.
+    _adaln_on = bool(train_adaln) and dit.pruned_adaln
+    if not train_adaln:
+        _before = len(include_patterns)
+        include_patterns = [p for p in include_patterns if "adaln" not in p]
+        if len(include_patterns) < _before:
+            logger.info("[base] EXPERIMENT: AdaLN adapters OFF. AdaLN sees only the timestep, so "
+                        "it cannot encode identity — this frees the capacity it was taking. "
+                        "Compare against the same run with it on.")
+        else:
+            logger.info("[base] AdaLN was not a target on this checkpoint; the toggle changes "
+                        "nothing here.")
     _blocks_used = "all"
     if train_blocks:
         _n_blocks = len(dit.blocks)
@@ -949,6 +967,7 @@ def train_minimax(
             "ss_optimizer": optimizer_label,
             "ss_timestep_density": _dens,
             "ss_train_blocks": _blocks_used,
+            "ss_train_adaln": "1" if _adaln_on else "0",
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
             "ss_max_grad_norm": f"{max_grad_norm:g}",
             "ss_bucket_resolutions": ",".join(_res),

@@ -139,7 +139,12 @@ def _bundled_tokenizer_dir():
 
 
 def build_qwen3_te(config_overrides=None):
-    """A Qwen3Model text encoder with no final norm (returns the raw layer-50 output)."""
+    """A Qwen3Model text encoder with no final norm (returns the raw layer-50 output).
+
+    Text-only. For a caption with no reference image this is equivalent to the full Qwen3-VL
+    stack: VL applies mrope, but every text token gets the SAME index on all three axes, which
+    collapses mrope to ordinary 1-D rope. Reference images break that equality, which is why the
+    r2v path needs build_qwen3vl_te() below rather than this."""
     from transformers import Qwen3Config, Qwen3Model
     cfg = dict(_QWEN3_32B_TRUNC50)
     if config_overrides:
@@ -147,6 +152,57 @@ def build_qwen3_te(config_overrides=None):
     model = Qwen3Model(Qwen3Config(**cfg))
     model.norm = nn.Identity()          # comfy applies NO final norm to the layer-50 conditioning
     return model
+
+
+# Qwen3-VL-32B vision tower. Every value here is transformers' own default for
+# Qwen3VLVisionConfig EXCEPT out_hidden_size, and all of them were cross-checked against the
+# shipped checkpoint's tensor shapes rather than taken on trust:
+#   depth 27              <- 27 distinct visual.blocks.N
+#   hidden_size 1152      <- visual.blocks.N.attn.proj.weight [1152, 1152]
+#   intermediate_size 4304<- visual.blocks.N.mlp.linear_fc1.weight [4304, 1152]
+#   patch_size 16,        <- visual.patch_embed.proj.weight [1152, 3, 2, 16, 16]
+#   temporal_patch_size 2     (also gives in_channels 3 and the temporal patch)
+#   spatial_merge_size 2  <- visual.merger.linear_fc1.weight in-features 4608 = 1152 * 2 * 2
+#   out_hidden_size 5120  <- visual.merger.linear_fc2.weight [5120, 4608]; the DEFAULT IS 3584,
+#                            which is the one value that would have been wrong left alone
+#   num_position_embeddings 2304 <- visual.pos_embed.weight [2304, 1152]
+#   deepstack_visual_indexes [8, 16, 24] <- 3 visual.deepstack_merger_list.N entries
+# The config is hardcoded rather than fetched: ai-toolkit pulls it from the MiniMax HF repo,
+# which is gated and geo-restricted, and Fizgig already hardcodes the text half the same way.
+_QWEN3VL_VISION = dict(out_hidden_size=5120)
+
+# Qwen3-VL is an mrope model, so the text stack needs a rope_scaling section. mrope_section sums
+# to head_dim/2 (24+20+20 = 64 = 128/2).
+_QWEN3VL_ROPE_SCALING = {"rope_type": "default", "mrope_section": [24, 20, 20],
+                         "mrope_interleaved": True}
+
+
+def build_qwen3vl_te(config_overrides=None):
+    """The FULL Qwen3-VL stack — vision tower + language model — with no final norm.
+
+    Needed only for reference (r2v) conditioning, where the prompt carries `<Picture i>:` vision
+    blocks. Checked against the shipped nvfp4 checkpoint: all 902 of its base tensors map onto
+    this module tree with nothing left over (see tests/test_minimax_ref_encoder.py). The three
+    parameters with no checkpoint entry are `language_model.norm.weight` (replaced by Identity
+    here, as comfy applies no final norm) and the two computed rope inv_freq buffers."""
+    from transformers import Qwen3VLConfig, Qwen3VLModel
+    txt = dict(_QWEN3_32B_TRUNC50)
+    txt["rope_scaling"] = dict(_QWEN3VL_ROPE_SCALING)
+    vis = dict(_QWEN3VL_VISION)
+    if config_overrides:
+        txt.update(config_overrides.get("text", {}))
+        vis.update(config_overrides.get("vision", {}))
+    model = Qwen3VLModel(Qwen3VLConfig(text_config=txt, vision_config=vis))
+    model.language_model.norm = nn.Identity()
+    return model
+
+
+def qwen3vl_key_map(key: str) -> str:
+    """Checkpoint key -> Qwen3VLModel parameter name.
+
+    The single-file checkpoint stores the language stack under `model.` and the vision tower
+    under `visual.`; Qwen3VLModel wants `language_model.` and `visual.`."""
+    return "language_model." + key[len("model."):] if key.startswith("model.") else key
 
 
 class MiniMaxH3TextEncoder:

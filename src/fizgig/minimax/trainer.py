@@ -908,6 +908,7 @@ def train_minimax(
     # the samples (block swap ruled out — those runs recorded blocks_swapped=0).
     # Built AFTER the adaptive block above, so `learning_rate` is already the resolved start LR.
     _slow_used, _slow_n = "", 0
+    opt_params = params          # the optimizer may get groups; `params` stays flat for clipping
     if slow_blocks and abs(float(slow_block_lr_scale) - 1.0) > 1e-9:
         _slow_idx = set(parse_block_spec(slow_blocks, len(dit.blocks)))
         _slow_ids = set()
@@ -924,8 +925,10 @@ def train_minimax(
             _scaled = learning_rate * float(slow_block_lr_scale)
             # lr_scale rides along on the group so the adaptive watcher can move both groups
             # together without flattening them back to one rate.
-            params = [{"params": _fast, "lr": learning_rate, "lr_scale": 1.0},
-                      {"params": _slow, "lr": _scaled, "lr_scale": float(slow_block_lr_scale)}]
+            # NOTE: assign to opt_params, NOT params. `params` stays the flat tensor list because
+            # clip_grad_norm_ iterates it every step and cannot take param-group dicts.
+            opt_params = [{"params": _fast, "lr": learning_rate, "lr_scale": 1.0},
+                          {"params": _slow, "lr": _scaled, "lr_scale": float(slow_block_lr_scale)}]
             _slow_used = format_block_spec(sorted(_slow_idx))
             _slow_n = len(_slow)
             logger.info("[lr] depth-split: blocks %s train at %.3e (x%g), the rest at %.3e "
@@ -935,7 +938,8 @@ def train_minimax(
             logger.warning("[lr] slow_blocks %r matched no trained modules — is it outside "
                            "Blocks to Train? Depth-split LR is not active.", slow_blocks)
 
-    optimizer, optimizer_label = create_optimizer(optimizer_type, params, learning_rate, optimizer_args)
+    optimizer, optimizer_label = create_optimizer(optimizer_type, opt_params, learning_rate,
+                                                  optimizer_args)
     logger.info(f"optimizer: {optimizer_label} @ lr={learning_rate:.3e}")
 
     # Caption dropout (reference default 0.05): swap in the cached empty-prompt embed for a

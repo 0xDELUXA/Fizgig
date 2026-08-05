@@ -121,7 +121,20 @@ Nobody has published which H3 blocks do what.
 
 ## How to read an experiment
 
-**Blocks to Train** and **Train AdaLN** are independent axes. Vary one at a time.
+**Blocks to Train** and **Train AdaLN** are *not* independent, so vary one at a time and expect
+the second to behave differently depending on the first.
+
+The interaction: AdaLN's `gate_msa` / `gate_mlp` scale each block's residual contribution, so a
+trainable AdaLN is effectively a **soft, learned block selector** — the LoRA can turn unhelpful
+blocks down by itself. Two opposite predictions follow, and they are worth resolving because they
+point at different recipes:
+
+* AdaLN off frees capacity into the content path, so give it **all** the blocks to land in.
+* AdaLN off removes the learned suppression, so **explicit** block selection matters more.
+
+A 2x2 (AdaLN on/off × all/band) settles it and tells you more than two separate sweeps. Start
+with AdaLN off at all blocks: it is one change from the current baseline, so the result is
+attributable.
 
 A selection that trains a good likeness means **its complement was not needed** — whichever end
 that turns out to be. There is no result that disproves the idea; a surprising winner relocates

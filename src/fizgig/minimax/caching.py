@@ -65,6 +65,53 @@ def save_text_encoder_output_cache_minimax(item_info: ItemInfo, hidden_states: t
     save_file(sd, item_info.text_encoder_output_cache_path, metadata=metadata)
 
 
+def reference_cache_path(te_cache_path: str) -> str:
+    """The r2v conditioning that sits beside an item's ordinary text cache.
+
+    `..._minimaxh3_te.safetensors` -> `..._minimaxh3_teref.safetensors`. A SIBLING file, not a
+    replacement: a distillation run needs BOTH (the student is conditioned on the plain caption,
+    the teacher on caption + reference), and a run without distillation must be untouched.
+
+    Note the dataset's stale-cache glob is `*_{arch}_te.safetensors`, which does not match
+    `_teref`, so these are neither swept nor mistaken for the plain cache."""
+    stem, ext = os.path.splitext(te_cache_path)
+    return stem + "ref" + ext
+
+
+def save_reference_text_cache(te_cache_path: str, hidden_states: torch.Tensor,
+                             token_tags: torch.Tensor, caption: str = "",
+                             reference: str = "") -> str:
+    """Save r2v conditioning (L, 5120) + its per-row modality tags (L,).
+
+    The tags are cached WITH the states because they are only meaningful together: they say
+    which rows are the `<Picture i>` vision block, and the DiT modulates those as video. Cached
+    states without their tags would be silently modulated as text."""
+    hidden_states = hidden_states.detach().cpu().contiguous()
+    if torch.isnan(hidden_states).any():
+        logger.warning(f"NaN in reference hidden_states for {te_cache_path} - replaced with 0")
+        hidden_states[torch.isnan(hidden_states)] = 0
+    path = reference_cache_path(te_cache_path)
+    sd = {"hidden_states": hidden_states,
+          "token_tags": token_tags.detach().cpu().to(torch.int64).contiguous()}
+    metadata = {"architecture": ARCHITECTURE_MINIMAX, "caption1": caption,
+                "reference": os.path.basename(reference), "dtype": dtype_to_str(hidden_states.dtype),
+                "format_version": "2.0.0"}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    save_file(sd, path, metadata=metadata)
+    return path
+
+
+def load_reference_text_cache(te_cache_path: str):
+    """-> (hidden_states [L, 5120], token_tags [L]) or None when this item has no r2v cache."""
+    path = reference_cache_path(te_cache_path)
+    if not os.path.exists(path):
+        return None
+    # MemoryEfficientSafeOpen, not safetensors.safe_open — the repo uses it everywhere for the
+    # documented Windows mmap crash, and these files are read on the training hot path.
+    with MemoryEfficientSafeOpen(path) as f:
+        return f.get_tensor("hidden_states"), f.get_tensor("token_tags")
+
+
 def load_text_encoder_output_cache_minimax(path: str):
     """Return (hidden_states (L, 5120), attention_mask (L,) bool) from a cache file."""
     with MemoryEfficientSafeOpen(path) as f:
@@ -93,6 +140,19 @@ def encode_and_save_latents(vae, batch: List[ItemInfo]) -> None:
 
 
 @torch.no_grad()
+def encode_and_save_reference_text(encoder, batch: List[ItemInfo], images, reference_name="") -> None:
+    """Encode caption + `<Picture i>` vision blocks per item and save beside the plain cache.
+
+    One at a time, unlike the plain pass: encode_with_reference is not batched (the cache it
+    would use is keyed by caption text alone, which collides across different references), and
+    the vision block dominates the sequence anyway — a 800x736 reference is ~575 rows against a
+    caption's ~30, so batching would save little."""
+    for item in batch:
+        hidden, tags = encoder.encode_with_reference(item.caption, images)
+        save_reference_text_cache(item.text_encoder_output_cache_path, hidden[0], tags,
+                                  caption=item.caption, reference=reference_name)
+
+
 def encode_and_save_text(encoder, batch: List[ItemInfo]) -> None:
     """Encode a caption batch through the Qwen3-VL-32B TE and save each (L, 5120) state.
 

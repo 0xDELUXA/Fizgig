@@ -412,6 +412,19 @@ class BucketBatchManager:
             sd_latent = load_file(item_info.latent_cache_path)
             sd_te = load_file(item_info.text_encoder_output_cache_path)
             sd = {**sd_latent, **sd_te}
+            # MiniMax H3 reference distillation only: a sibling `..._teref.safetensors` holds the
+            # teacher's conditioning (caption + `<Picture i>` vision blocks) and its per-row
+            # modality tags. Gated on the file EXISTING, which it only does when a MiniMax cache
+            # pass was given --reference_image — so Klein and Krea 2 batches are byte-identical
+            # and an H3 run without distillation is too.
+            _ref_te = item_info.text_encoder_output_cache_path
+            if _ref_te:
+                _stem, _ext = os.path.splitext(_ref_te)
+                _ref_path = _stem + "ref" + _ext
+                if os.path.exists(_ref_path):
+                    _sd_ref = load_file(_ref_path)
+                    sd["ref_hidden_states"] = _sd_ref["hidden_states"]
+                    sd["ref_token_tags"] = _sd_ref["token_tags"]
 
             for key, tensor in sd.items():
                 # Map Fizgig-native keys to training batch keys
@@ -424,6 +437,8 @@ class BucketBatchManager:
                     content_key = "latents"
                 elif key == "text_embed":
                     content_key = "ctx_vec"
+                elif key in ("ref_hidden_states", "ref_token_tags"):
+                    content_key = key          # H3 distillation, passed through verbatim
                 elif key in ("hidden_states", "attention_mask"):
                     # Krea 2 text cache: multi-layer Qwen3-VL stack + validity mask
                     content_key = key

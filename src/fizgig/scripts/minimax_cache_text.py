@@ -42,6 +42,18 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--skip_existing", action="store_true", help="Skip existing cache files")
     parser.add_argument("--keep_cache", action="store_true", help="Keep stale cache files")
     parser.add_argument("--no_quantize", action="store_true", help="Load the TE in bf16 (no NF4) — needs ~66 GB VRAM")
+    parser.add_argument("--reference_image", type=str, nargs="*", default=None,
+                        help="Reference distillation: also cache r2v conditioning (caption + "
+                             "'<Picture i>' vision blocks) beside the plain cache, for the "
+                             "teacher pass. Needs the vision tower, so the TE loads ~1 GB larger. "
+                             "The plain cache is still written and is what the student uses.")
+    parser.add_argument("--reference_width", type=int, default=768,
+                        help="Generation width the reference is sized against (see "
+                             "reference.reference_canvas). Must match the training resolution, or "
+                             "the teacher sees a differently-scaled reference than it would at "
+                             "inference.")
+    parser.add_argument("--reference_height", type=int, default=768)
+    parser.add_argument("--reference_size_mode", default="match", choices=["match", "max"])
     return parser
 
 
@@ -57,11 +69,34 @@ def main():
 
     all_files, all_paths = prepare_cache_files_and_paths(datasets)
 
-    logger.info(f"Loading Qwen3-VL-32B text encoder from {args.text_encoder}")
+    _refs = [p for p in (args.reference_image or []) if p]
+    logger.info(f"Loading Qwen3-VL-32B text encoder from {args.text_encoder}"
+                + (" (with the vision tower — reference distillation)" if _refs else ""))
     encoder = load_minimax_h3_te(args.text_encoder, device=device, compute_dtype=torch.bfloat16,
-                                 quantize=not args.no_quantize)
+                                 quantize=not args.no_quantize, with_vision=bool(_refs))
 
     process_batches(args, datasets, all_files, all_paths, lambda batch: encode_and_save_text(encoder, batch))
+
+    # r2v conditioning for the teacher pass. Written AFTER the plain cache and to sibling files,
+    # so a run without --reference_image is byte-identical to before and the student's
+    # conditioning is untouched either way.
+    if _refs:
+        from PIL import Image
+        from fizgig.minimax.caching import encode_and_save_reference_text
+        from fizgig.minimax.reference import resize_reference
+        _imgs = []
+        for _p in _refs:
+            _im = Image.open(_p).convert("RGB")
+            _rz = resize_reference(_im, args.reference_width, args.reference_height,
+                                   args.reference_size_mode)
+            logger.info(f"[reference] {os.path.basename(_p)} {_im.width}x{_im.height} -> "
+                        f"{_rz.width}x{_rz.height} ({args.reference_size_mode}, against "
+                        f"{args.reference_width}x{args.reference_height})")
+            _imgs.append(_rz)
+        _name = ",".join(os.path.basename(p) for p in _refs)
+        process_batches(args, datasets, all_files, all_paths,
+                        lambda batch: encode_and_save_reference_text(encoder, batch, _imgs, _name))
+        logger.info(f"[reference] cached r2v conditioning for the teacher pass ({_name})")
 
     _uncond = encoder.encode("")[0].detach().cpu().contiguous()      # (L=1, 5120)
     del encoder

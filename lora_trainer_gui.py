@@ -1334,6 +1334,8 @@ class LoRATrainerGUI:
             "MINIMAX_SHIFT": "3.5",
             "MINIMAX_BLOCKS": "all",
             "MINIMAX_TRAIN_ADALN": True,   # the reference behaviour; the toggle is the experiment
+            "MINIMAX_SLOW_BLOCKS": "",     # blank = one LR everywhere
+            "MINIMAX_SLOW_LR_SCALE": "0.2",
             "RESUME_TRAINING": "",
             "OPTIMIZER_TYPE": "adamw8bit",
             "OPTIMIZER_ARGS": "",
@@ -3712,6 +3714,36 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
 
+        # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
+        self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
+        self._minimax_slow_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self._minimax_slow_frame = ttk.Frame(training_content)
+        self._minimax_slow_frame.grid(row=33, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        self.entries["MINIMAX_SLOW_BLOCKS"] = ttk.Entry(self._minimax_slow_frame, width=22)
+        self.entries["MINIMAX_SLOW_BLOCKS"].insert(
+            0, str(self.settings.get("MINIMAX_SLOW_BLOCKS", "") or ""))
+        self.entries["MINIMAX_SLOW_BLOCKS"].pack(side=tk.LEFT)
+        ttk.Label(self._minimax_slow_frame, text="  at ×").pack(side=tk.LEFT)
+        self.entries["MINIMAX_SLOW_LR_SCALE"] = ttk.Combobox(
+            self._minimax_slow_frame, values=["0.1", "0.2", "0.3", "0.5", "0.7"],
+            state="normal", width=6)
+        self.entries["MINIMAX_SLOW_LR_SCALE"].set(
+            str(self.settings.get("MINIMAX_SLOW_LR_SCALE", "0.2")))
+        self.entries["MINIMAX_SLOW_LR_SCALE"].pack(side=tk.LEFT, padx=(2, 0))
+        self._minimax_slow_hint = ttk.Label(
+            training_content,
+            text="EXPERIMENT — leave blank for one learning rate everywhere (normal). A change in "
+                 "a late block goes almost straight to the output, while a change early on gets "
+                 "smoothed out by the 40-odd blocks after it — so the same learning rate is "
+                 "gentle at the front of the model and violent at the back. If the later blocks "
+                 "wreck your samples at a rate the early ones handle fine, put those blocks here "
+                 "with a multiplier instead of dropping them: 21-49 at ×0.2 trains them at a "
+                 "fifth the rate. Same syntax as Blocks to Train, and only blocks you're actually "
+                 "training count. Adaptive LR still works — it moves both rates together and "
+                 "keeps the ratio.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_slow_hint.grid(row=34, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # --- Train AdaLN (MiniMax only, experimental) --------------------------------------
         # A BooleanVar kept in self.entries so the preset/queue machinery picks it up for free.
         self.entries["MINIMAX_TRAIN_ADALN"] = tk.BooleanVar(
@@ -4968,6 +5000,9 @@ class LoRATrainerGUI:
                 bits.append(f"blocks {_bl}")
             if p.get("MINIMAX_TRAIN_ADALN") is False:
                 bits.append("no adaln")
+            _sl = str(p.get("MINIMAX_SLOW_BLOCKS") or "").strip()
+            if _sl and str(p.get("MINIMAX_SLOW_LR_SCALE", "1")).strip() not in ("", "1", "1.0"):
+                bits.append(f"slow {_sl} ×{p.get('MINIMAX_SLOW_LR_SCALE')}")
         return name, "  ·  ".join(str(b) for b in bits) + f"\nqueued {item.get('queued_at', '?')}"
 
     def _render_queue_window(self):
@@ -5762,7 +5797,8 @@ class LoRATrainerGUI:
         # from the sample's token count, so there is nothing to dial there.
         for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint,
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
-                  self._minimax_adaln_cb, self._minimax_adaln_hint):
+                  self._minimax_adaln_cb, self._minimax_adaln_hint,
+                  self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint):
             self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
@@ -20693,6 +20729,17 @@ class LoRATrainerGUI:
                     errors.append(f"Blocks to Train: {e}")
                 except ImportError:
                     pass
+            _slow_spec = str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip()
+            if _slow_spec:
+                try:
+                    from fizgig.minimax.trainer import parse_block_spec
+                    parse_block_spec(_slow_spec, MINIMAX_NUM_BLOCKS)
+                except ValueError as e:
+                    errors.append(f"Slower LR for blocks: {e}")
+                except ImportError:
+                    pass
+                _check_num("Slower LR multiplier",
+                           self.entries["MINIMAX_SLOW_LR_SCALE"].get(), float, 0)
         _check_num("Max Train Epochs", self.entries["MAX_TRAIN_EPOCHS"].get(), int, 1)
         _check_num("Save Every N Epochs", self.entries["SAVE_EVERY_N_EPOCHS"].get(), int, 1)
         _check_num("Seed", self.entries["SEED"].get(), int)
@@ -21141,6 +21188,8 @@ class LoRATrainerGUI:
             "MINIMAX_SHIFT": str(self.entries["MINIMAX_SHIFT"].get() or "12").split(" ")[0],
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
+            "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
+            "MINIMAX_SLOW_LR_SCALE": str(self.entries["MINIMAX_SLOW_LR_SCALE"].get() or "1").strip(),
             "DATASET_CONFIG": self._get_path("DATASET_CONFIG"),
             "VAE_MODEL": self._get_path("VAE_MODEL"),
             "CLIP_MODEL": self._get_path("CLIP_MODEL"),
@@ -22102,6 +22151,15 @@ class LoRATrainerGUI:
         # AdaLN is ON by default (the reference behaviour), so only the opt-out is ever sent.
         if not self.settings.get("MINIMAX_TRAIN_ADALN", True):
             cmd.append("--no_train_adaln")
+        # Depth-split LR: both halves must be present and the multiplier must actually do
+        # something, or the flag pair is noise on the command line.
+        _slow = str(self.settings.get("MINIMAX_SLOW_BLOCKS", "") or "").strip()
+        try:
+            _slow_x = float(self.settings.get("MINIMAX_SLOW_LR_SCALE", 1) or 1)
+        except ValueError:
+            _slow_x = 1.0
+        if _slow and abs(_slow_x - 1.0) > 1e-9:
+            cmd += ["--slow_blocks", _slow, "--slow_block_lr_scale", str(_slow_x)]
         # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
         # the factor is the dial. Same flags as the Krea 2 builder.
         if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):

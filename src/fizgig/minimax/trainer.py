@@ -470,8 +470,11 @@ class AdaptiveLR:
                 reason = f"loss plateau, streak {self.bad_streak}/{patience_down}"
 
         if new_lr != cur_lr:
+            # Respect a depth-split LR: each group carries its own lr_scale, so the watcher moves
+            # the whole schedule up or down while KEEPING the ratio between groups. Writing new_lr
+            # flat would silently undo the split on the first adaptive move.
             for pg in optimizer.param_groups:
-                pg["lr"] = new_lr
+                pg["lr"] = new_lr * pg.get("lr_scale", 1.0)
         lr_str = f"{cur_lr:.2e}" if new_lr == cur_lr else f"{cur_lr:.2e}->{new_lr:.2e}"
         wn_str = f"{weight_growth*100:+.0f}%" if weight_growth is not None else "—"
         logger.info(f"[adaptive_lr] epoch {epoch + 1}: loss={current_loss:.4f} lr={lr_str} "
@@ -630,6 +633,8 @@ def train_minimax(
     include_patterns: list = None,
     train_blocks: str = None,        # "14-37" = train only that block range (experiment)
     train_adaln: bool = True,        # False = drop adaln_proj from the targets (pruned only)
+    slow_blocks: str = None,         # block spec trained at a reduced LR ("21-49")
+    slow_block_lr_scale: float = 1.0,  # the multiplier applied to those blocks' LR
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
     blocks_to_swap="auto",           # "auto" | int — park the last N blocks on CPU between uses
@@ -894,6 +899,42 @@ def train_minimax(
     # when the user hasn't set their own via Optimizer Args.
     if "weight_decay" not in (optimizer_args or "") and "adam" in optimizer_type.lower():
         optimizer_args = (optimizer_args + " weight_decay=1e-4").strip()
+
+    # Depth-dependent LR. A perturbation injected at block 5 passes through 45 more blocks that
+    # absorb and renormalize it; one injected at block 45 lands almost directly on the output. So
+    # the same |dW| is far more disruptive the later it sits, and ONE learning rate is wrong by
+    # construction — it is either too low for the early blocks or too high for the late ones.
+    # Observed here: at 1e-4, blocks 0-20 train cleanly but slowly while anything past 20 wrecks
+    # the samples (block swap ruled out — those runs recorded blocks_swapped=0).
+    # Built AFTER the adaptive block above, so `learning_rate` is already the resolved start LR.
+    _slow_used, _slow_n = "", 0
+    if slow_blocks and abs(float(slow_block_lr_scale) - 1.0) > 1e-9:
+        _slow_idx = set(parse_block_spec(slow_blocks, len(dit.blocks)))
+        _slow_ids = set()
+        for _lora in network.unet_loras:
+            _nm = _lora.lora_name
+            if "token_refiner" in _nm:      # text-side, never part of the depth argument
+                continue
+            _m = re.search(r"blocks_(\d+)_", _nm)
+            if _m and int(_m.group(1)) in _slow_idx:
+                _slow_ids.update(id(p) for p in _lora.parameters())
+        if _slow_ids:
+            _slow = [p for p in params if id(p) in _slow_ids]
+            _fast = [p for p in params if id(p) not in _slow_ids]
+            _scaled = learning_rate * float(slow_block_lr_scale)
+            # lr_scale rides along on the group so the adaptive watcher can move both groups
+            # together without flattening them back to one rate.
+            params = [{"params": _fast, "lr": learning_rate, "lr_scale": 1.0},
+                      {"params": _slow, "lr": _scaled, "lr_scale": float(slow_block_lr_scale)}]
+            _slow_used = format_block_spec(sorted(_slow_idx))
+            _slow_n = len(_slow)
+            logger.info("[lr] depth-split: blocks %s train at %.3e (x%g), the rest at %.3e "
+                        "(%d of %d tensors slowed)", _slow_used, _scaled, slow_block_lr_scale,
+                        learning_rate, _slow_n, len(_slow) + len(_fast))
+        else:
+            logger.warning("[lr] slow_blocks %r matched no trained modules — is it outside "
+                           "Blocks to Train? Depth-split LR is not active.", slow_blocks)
+
     optimizer, optimizer_label = create_optimizer(optimizer_type, params, learning_rate, optimizer_args)
     logger.info(f"optimizer: {optimizer_label} @ lr={learning_rate:.3e}")
 
@@ -968,6 +1009,8 @@ def train_minimax(
             "ss_timestep_density": _dens,
             "ss_train_blocks": _blocks_used,
             "ss_train_adaln": "1" if _adaln_on else "0",
+            "ss_slow_blocks": _slow_used or "none",
+            "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
             "ss_max_grad_norm": f"{max_grad_norm:g}",
             "ss_bucket_resolutions": ",".join(_res),

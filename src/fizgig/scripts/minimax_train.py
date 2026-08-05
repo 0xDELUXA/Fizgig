@@ -65,6 +65,14 @@ def setup_parser() -> argparse.ArgumentParser:
                         "needs the uncond embed cached by minimax_cache_text). 0 disables.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
+    p.add_argument("--slow_blocks", default=None, metavar="SPEC",
+                   help="EXPERIMENT: train these blocks at a reduced learning rate (same syntax "
+                        "as --train_blocks). A perturbation in a late block reaches the output "
+                        "almost undamped while an early one is absorbed by everything after it, "
+                        "so one LR is too high for the late blocks or too low for the early ones. "
+                        "Pair with --slow_block_lr_scale.")
+    p.add_argument("--slow_block_lr_scale", type=float, default=1.0, metavar="X",
+                   help="LR multiplier for --slow_blocks (e.g. 0.2 = one fifth). 1.0 disables.")
     p.add_argument("--no_train_adaln", dest="train_adaln", action="store_false",
                    help="EXPERIMENT: drop the per-block AdaLN adapters. AdaLN is a function of "
                         "the TIMESTEP only, so it cannot encode identity — yet on the pruned "
@@ -166,6 +174,8 @@ def main():
         include_patterns=args.include_patterns,
         train_blocks=args.train_blocks,
         train_adaln=args.train_adaln,
+        slow_blocks=args.slow_blocks,
+        slow_block_lr_scale=args.slow_block_lr_scale,
         quantize=not args.no_quantize,
         shift=args.shift,
         blocks_to_swap=args.blocks_to_swap,

@@ -713,7 +713,7 @@ def train_minimax(
     include_patterns: list = None,
     train_blocks: str = None,        # "14-37" = train only that block range (experiment)
     train_adaln: bool = True,        # False = drop adaln_proj from the targets (pruned only)
-    distill_reference: str = None,   # reference image -> teacher/student distillation
+    distill: bool = False,           # reference distillation (references come from the dataset)
     distill_weight: float = 0.8,     # teacher share of the loss; the rest is the real photo
     slow_blocks: str = None,         # block spec trained at a reduced LR ("21-49")
     slow_block_lr_scale: float = 1.0,  # the multiplier applied to those blocks' LR
@@ -1041,41 +1041,13 @@ def train_minimax(
         else:
             logger.info(f"[caption_dropout] {caption_dropout:.2f} — empty-prompt embed loaded")
 
-    # Reference distillation: encode the reference image ONCE. Only the VAE ENCODER is needed
-    # (~a fraction of the decoder), and the result is a single small latent held for the run, so
-    # this costs almost nothing next to the resident base. The per-caption teacher conditioning
-    # comes from the `_teref` cache files instead — it needs the 15.7 GB vision-capable TE, which
-    # must never be resident alongside the DiT.
-    _distill_z = None
-    if distill_reference:
-        if not vae_path:
-            raise ValueError("--distill_reference needs --vae to encode the reference image")
-        from PIL import Image as _PILImage
-        from safetensors import safe_open as _so
-        from fizgig.minimax.reference import reference_to_tensor, resize_reference
-        from fizgig.minimax.vae import MiniMaxH3VideoVAEEncoder
-        _venc = MiniMaxH3VideoVAEEncoder()
-        with _so(vae_path, framework="pt", device="cpu") as _f:
-            _venc.load_state_dict({k: _f.get_tensor(k) for k in _f.keys()}, strict=False)
-        _venc = _venc.to(device, torch.float32).eval()
-        _im = _PILImage.open(distill_reference).convert("RGB")
-        # Sized against the training bucket, matching how the cached teacher conditioning was
-        # built — a reference scaled differently here than at caching time is a different signal.
-        _rw, _rh = 768, 768
-        try:
-            _rw, _rh = sorted({(w, h) for ds in group.datasets
-                               for (w, h) in ds.batch_manager.bucket_resos})[-1]
-        except Exception:
-            pass
-        _rz = resize_reference(_im, _rw, _rh)
-        with torch.no_grad():
-            _distill_z = _venc.encode(reference_to_tensor(_rz).to(device, torch.float32))
-        del _venc
-        clean_memory_on_device(device)
-        logger.info(f"[distill] reference {os.path.basename(distill_reference)} "
-                    f"{_im.width}x{_im.height} -> {_rz.width}x{_rz.height} (vs {_rw}x{_rh}) "
-                    f"-> latent {tuple(_distill_z.shape)}; teacher weight {distill_weight:g}, "
-                    f"photo weight {1.0 - distill_weight:g}")
+    # Reference distillation needs nothing at run start: each item's reference conditioning AND
+    # that reference's latent both ride in from the cache, one slot picked at random per step.
+    if distill:
+        logger.info("[distill] reference distillation ON — teacher weight %.2f, photo %.2f. "
+                    "References come from the dataset itself (each image paired with others by "
+                    "the caching pass); no image is ever its own reference.",
+                    distill_weight, 1.0 - distill_weight)
 
     collator = _Collator(shared_epoch, group)
     loader = DataLoader(group, batch_size=1, shuffle=True, collate_fn=collator, num_workers=0)
@@ -1131,9 +1103,8 @@ def train_minimax(
             "ss_timestep_density": _dens,
             "ss_train_blocks": _blocks_used,
             "ss_train_adaln": "1" if _adaln_on else "0",
-            "ss_distill_reference": (os.path.basename(distill_reference) if distill_reference
-                                     else "none"),
-            "ss_distill_weight": (f"{distill_weight:g}" if distill_reference else "0"),
+            "ss_distill": "dataset" if distill else "off",
+            "ss_distill_weight": (f"{distill_weight:g}" if distill else "0"),
             "ss_slow_blocks": _slow_used or "none",
             "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
@@ -1284,11 +1255,14 @@ def train_minimax(
             text = batch["hidden_states"].to(device, dtype)        # (1, L, 5120)
             if uncond_text is not None and random.random() < caption_dropout:
                 text = uncond_text.to(device, dtype)               # caption dropout step
-            if _distill_z is not None and "ref_hidden_states" in batch:
+            if distill and "ref_hidden_states" in batch:
+                _rz = batch["ref_latent"].to(device, dtype)      # (1, 24, h, w) from the cache
+                if _rz.dim() == 4:
+                    _rz = _rz.unsqueeze(2)                       # -> (1, 24, 1, h, w)
                 loss, _ = compute_distill_loss(
                     dit, network, latents, text,
                     text_ref=batch["ref_hidden_states"].to(device, dtype),
-                    ref_latents=[_distill_z],
+                    ref_latents=[_rz],
                     text_token_tags=batch["ref_token_tags"][0],
                     distill_weight=distill_weight, shift=shift, seed=seed)
             else:

@@ -65,12 +65,12 @@ def setup_parser() -> argparse.ArgumentParser:
                         "needs the uncond embed cached by minimax_cache_text). 0 disables.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
-    p.add_argument("--distill_reference", default=None, metavar="IMAGE",
+    p.add_argument("--distill", action="store_true",
                    help="EXPERIMENT: reference distillation. Instead of only reconstructing each "
                         "photo, the LoRA is taught to behave — from text alone — as the model "
-                        "does when SHOWN this reference image. Needs r2v conditioning cached by "
-                        "minimax_cache_text --reference_image, and --vae to encode the reference. "
-                        "Train and deploy on the ref2va checkpoint.")
+                        "does when SHOWN a reference. The references are OTHER images from this "
+                        "same dataset, paired by minimax_cache_text --reference_count. Train and "
+                        "deploy on the ref2va checkpoint.")
     p.add_argument("--distill_weight", type=float, default=0.8, metavar="W",
                    help="Teacher share of the loss (default 0.8); the remaining 1-W is the "
                         "ordinary flow loss against the real photo. 1.0 is pure distillation, "
@@ -184,7 +184,7 @@ def main():
         base_quant=args.base_quant,
         include_patterns=args.include_patterns,
         train_blocks=args.train_blocks,
-        distill_reference=args.distill_reference,
+        distill=args.distill,
         distill_weight=args.distill_weight,
         train_adaln=args.train_adaln,
         slow_blocks=args.slow_blocks,

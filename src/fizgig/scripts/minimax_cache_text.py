@@ -66,10 +66,9 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
     latent's implied pixel size (h*16 x w*16) rather than to a canvas of its own."""
     import glob as _glob
 
-    from PIL import Image
-
     from fizgig.dataset.image_dataset import MemoryEfficientSafeOpen
     from fizgig.minimax.caching import encode_and_save_reference_text
+    from fizgig.minimax.reference import reference_image_for_latent
 
     k = max(0, int(args.reference_count or 0))
     for ds_i, ds in enumerate(datasets):
@@ -90,7 +89,7 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
         cache_dir = getattr(ds, "cache_directory", "") or ""
 
         def _latent_for(i):
-            """The cached latent of image i, plus the pixel size it implies."""
+            """The cached latent of image i."""
             hits = _glob.glob(os.path.join(_glob.escape(cache_dir),
                                            f"{_glob.escape(keys[i])}_*{ARCHITECTURE_MINIMAX}.safetensors"))
             if not hits:
@@ -99,8 +98,7 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
                     f"The reference latent is reused from that cache rather than encoded again.")
             with MemoryEfficientSafeOpen(hits[0]) as f:
                 key = next(kx for kx in f.keys() if kx.startswith("latent_"))
-                z = f.get_tensor(key)
-            return z, (z.shape[-1] * 16, z.shape[-2] * 16)   # (w_px, h_px)
+                return f.get_tensor(key)
 
         _img_cache, _lat_cache = {}, {}
 
@@ -115,10 +113,11 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
             for slot in range(kk):
                 j = (i + 1 + slot) % n          # never i itself
                 if j not in _lat_cache:
-                    z, (w, h) = _latent_for(j)
+                    z = _latent_for(j)
                     _lat_cache[j] = z
-                    _img_cache[j] = Image.open(paths[j]).convert("RGB").resize((w, h),
-                                                                              Image.LANCZOS)
+                    # framed exactly as the picture this latent was encoded from — same helper
+                    # the trainer uses, so a crop can never become a stretch
+                    _img_cache[j] = reference_image_for_latent(paths[j], z)
                 out.append((slot, _img_cache[j], _lat_cache[j], os.path.basename(paths[j])))
             return out
 

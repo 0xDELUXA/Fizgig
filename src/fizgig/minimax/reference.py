@@ -69,6 +69,27 @@ def _to_array(img):
     return np.asarray(img, dtype="uint8")
 
 
+def reference_image_for_latent(path_or_image, latent):
+    """The reference image, framed EXACTLY as the picture its cached latent was encoded from.
+
+    The latent came from the training pipeline, which fits an image to its bucket with
+    resize_image_to_bucket: aspect-preserving scale, then a CENTRE CROP. A plain resize to the
+    same width/height instead STRETCHES, so for any photo whose aspect differs from its bucket
+    the vision block would describe a squashed picture while the latent describes a cropped one —
+    the teacher shown one framing and conditioned on another, with nothing to reveal it.
+
+    So this goes through the same shared helper the trainer uses, sized from the latent itself
+    (latent h,w x 16), rather than re-deriving the geometry.
+    """
+    from PIL import Image
+
+    from fizgig.dataset.image_dataset import resize_image_to_bucket
+    img = (Image.open(path_or_image).convert("RGB")
+           if isinstance(path_or_image, str) else path_or_image.convert("RGB"))
+    w, h = int(latent.shape[-1]) * VAE_SPATIAL, int(latent.shape[-2]) * VAE_SPATIAL
+    return Image.fromarray(resize_image_to_bucket(img, (w, h)))
+
+
 @torch.no_grad()
 def encode_reference(vae, image, gen_w: int, gen_h: int, mode: str = "match", device="cuda",
                      dtype=torch.float32):

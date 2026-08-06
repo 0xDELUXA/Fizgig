@@ -1031,8 +1031,12 @@ def train_minimax(
             logger.warning("[lr] slow_blocks %r matched no trained modules — is it outside "
                            "Blocks to Train? Depth-split LR is not active.", slow_blocks)
 
+    # eps_floor_8bit: H3-only. The 8-bit second moment underflows on this model's most structured
+    # tensors and the update degrades to lr*m/eps — measured at ~100x the configured LR, which
+    # presented as melted anatomy at epoch 1. The floor caps that. It is passed here and nowhere
+    # else: Krea 2 has never shown the failure and keeps the library default.
     optimizer, optimizer_label = create_optimizer(optimizer_type, opt_params, learning_rate,
-                                                  optimizer_args)
+                                                  optimizer_args, eps_floor_8bit=True)
     logger.info(f"optimizer: {optimizer_label} @ lr={learning_rate:.3e}")
 
     # Caption dropout (reference default 0.05): swap in the cached empty-prompt embed for a

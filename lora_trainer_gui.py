@@ -713,18 +713,31 @@ MINIMAX_BUILT_IN_PRESETS = {
     # Network Type is flipped back to LoRA — the H3 trainer ignores them under LoKR.
     #
     # Static 1e-4, adaptive OFF. The adaptive watcher probes the LR UP on steady descent, and a
-    # density sweep needs the LR held still or the runs aren't comparable. Turn it on once a
-    # Detail Focus value has been settled on.
+    # density sweep needs the LR held still or the runs aren't comparable.
     #
-    # Detail Focus 3.5 = the recommendation for the 0.5 MP this preset trains at. Change one and
-    # the Training tab flags the other (the readout beside the dial), so the pair stays coherent.
     # 0.5 MP rather than the 0.25 the other families default to: detail has to be present in the
     # training image before any schedule can teach it, and 0.5 still fits without block swap.
-    "✨ MiniMax H3 Defaults (LoKR 8, 0.5 MP)": {
-        "NETWORK_DIM": 32, "NETWORK_ALPHA": 32,
+    #
+    # 60% low-noise WITH mid-concentrated. The two controls answer different questions: the box
+    # is how much training sits below sigma 0.5, the checkbox is where that mass actually lands.
+    # At 60% the split is 58.8% of steps in sigma 0.3-0.7, 12.9% below 0.2, 5.0% above 0.8
+    # (measured, 2M draws through sample_sigmas). The same 60% on a UNIFORM base would dump far
+    # more into the near-clean end, where the latent is almost the finished image and the step
+    # teaches little. Peter ran 70% + mid-concentrated well; 60 keeps slightly more mid-band and
+    # gives back some sigma>0.8 mass, which is the only part of the schedule that lets the LoRA
+    # touch composition at all. Both beat the 22% this shipped with.
+    #
+    # Note the mid-band fraction peaks around 50% and is nearly flat from 45-60, so it does NOT
+    # discriminate on its own — it is a description of where the steps go, not a prediction of
+    # likeness. 60 is Peter's call from real runs, with the arithmetic agreeing rather than
+    # leading. 50% is worth trying: its shift is exactly 1.00, i.e. the plain logit-normal that
+    # earlier runs recorded as overdriving adapters — on adamw8bit, before the optimizer was
+    # understood.
+    "✨ MiniMax H3 Defaults (LoKR 8, 0.25 MP)": {
+        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "MAX_TRAIN_EPOCHS": 30, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         # adamw, NOT adamw8bit — the single biggest likeness change measured on H3 (2026-08-06).
         # Every other knob had been swept with likeness stuck around 40-50%; full-precision
@@ -733,8 +746,19 @@ MINIMAX_BUILT_IN_PRESETS = {
         # fine detail. Costs ~1.2 GB of fp32 state against a 21 GB resident base.
         "OPTIMIZER_TYPE": "adamw",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        "DATASET_MEGAPIXELS": "0.5",
-        "MINIMAX_LOWNOISE_PCT": "22",
+        "DATASET_MEGAPIXELS": "0.25",
+        "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
+        # The experiment knobs all ship OFF, so the preset is the plain baseline every A/B is
+        # measured against. Each of these was built to be TRIED, not to be on by default:
+        #   blocks "all"      — no block-range restriction
+        #   AdaLN False       — Peter's call from real runs; the reference trains it, we do not
+        #   slow blocks ""    — one LR everywhere, no depth split
+        #   distill False     — ordinary photo training, no r2v teacher (which also needs the
+        #                       _teref cache built, so defaulting it on would break a fresh run)
+        "MINIMAX_BLOCKS": "all",
+        "MINIMAX_TRAIN_ADALN": False,
+        "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
+        "MINIMAX_DISTILL": False,
     },
 }
 
@@ -1378,10 +1402,19 @@ class LoRATrainerGUI:
             "SEED": 42,
             "BLOCKS_SWAP": "auto",  # Klein valid range 0-16; "auto" detects from GPU
             # MiniMax H3 only. Percent of steps trained below sigma 0.5 (H3's own default works out at ~7.7%).
-            "MINIMAX_LOWNOISE_PCT": "22",
-            "MINIMAX_LOGNORM": False,      # False = flat spread; True = mid-concentrated
+            # 60 + mid-concentrated matches the MiniMax preset, which is what a switch to that
+            # family applies anyway; these are the values the widgets are BUILT with, so they are
+            # what shows before any preset lands. Both keys are MiniMax-only — no other family
+            # reads them. (OPTIMIZER_TYPE below is deliberately NOT changed to match the preset:
+            # it is shared with Klein and Krea 2, and the MiniMax preset supplies adamw on switch.)
+            "MINIMAX_LOWNOISE_PCT": "60",
+            "MINIMAX_LOGNORM": True,       # False = flat spread; True = mid-concentrated
             "MINIMAX_BLOCKS": "all",
-            "MINIMAX_TRAIN_ADALN": True,   # the reference behaviour; the toggle is the experiment
+            # OFF by default (Peter's call from real runs). The reference trains AdaLN on the
+            # pruned checkpoint, but AdaLN is a pure function of the timestep — adaln_proj(t_emb)
+            # and nothing else — so its adapters cannot tell one subject from another, and on the
+            # pruned build they were taking ~45% of all weight movement to do it.
+            "MINIMAX_TRAIN_ADALN": False,
             "MINIMAX_DISTILL": False,      # off = ordinary training
             "MINIMAX_DISTILL_WEIGHT": "0.8",
             "MINIMAX_DISTILL_REFS": "2",
@@ -3849,7 +3882,7 @@ class LoRATrainerGUI:
         # --- Train AdaLN (MiniMax only, experimental) --------------------------------------
         # A BooleanVar kept in self.entries so the preset/queue machinery picks it up for free.
         self.entries["MINIMAX_TRAIN_ADALN"] = tk.BooleanVar(
-            value=bool(self.settings.get("MINIMAX_TRAIN_ADALN", True)))
+            value=bool(self.settings.get("MINIMAX_TRAIN_ADALN", False)))
         self._minimax_adaln_cb = ttk.Checkbutton(
             training_content, text="Train AdaLN (timestep modulation)",
             variable=self.entries["MINIMAX_TRAIN_ADALN"])

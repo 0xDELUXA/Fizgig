@@ -726,7 +726,12 @@ MINIMAX_BUILT_IN_PRESETS = {
         "LEARNING_RATE": 1e-4,
         "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
-        "OPTIMIZER_TYPE": "adamw8bit",
+        # adamw, NOT adamw8bit — the single biggest likeness change measured on H3 (2026-08-06).
+        # Every other knob had been swept with likeness stuck around 40-50%; full-precision
+        # optimizer state moved it night-and-day on the same dataset. The 8-bit optimizer stores
+        # the second moment blockwise-quantized, and on this model that is evidently costing the
+        # fine detail. Costs ~1.2 GB of fp32 state against a 21 GB resident base.
+        "OPTIMIZER_TYPE": "adamw",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.5",
         "MINIMAX_LOWNOISE_PCT": "22",

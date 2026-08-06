@@ -22420,6 +22420,12 @@ class LoRATrainerGUI:
         # Base Precision. Always sent, including "auto", so the launched command records which
         # base a run used rather than leaving it implicit — these get A/B'd against each other.
         cmd += ["--base_quant", minimax_base_quant(self.settings.get("MINIMAX_BASE_QUANT"))]
+        # Gradient Checkpointing. The checkbox used to be decorative here — the flag was never
+        # sent, so MiniMax always ran the trainer's "auto" and the box did nothing. Ticked now
+        # means ON; unticked hands the decision back to the planner rather than forcing it OFF,
+        # because forcing it off is how a run ends up spilling to system RAM and crawling.
+        cmd += ["--gradient_checkpointing",
+                "on" if self.settings.get("GRADIENT_CHECKPOINTING", True) else "auto"]
         # Detail Focus -> --shift. Sent ALWAYS, including the reference 12, so the launched
         # command (and the console line recording it) states which density a run used instead of
         # leaving it implicit — these are meant to be A/B'd against each other, often queued

@@ -190,6 +190,14 @@ _ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointin
 _ACT_GB_CKPT = 0.5           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.19)
 _SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active (measured 7.4 @ n=16)
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
+# Skipping checkpointing has to EARN it. Measured on H3, recompute costs ~0.1 s/step and saves
+# ~5 GB — so choosing "no checkpointing" on a thin margin trades five gigabytes of headroom for
+# a tenth of a second. Peter's 6 Aug run picked it with 0.37 GB of predicted margin (needed
+# 32.13 of 32.5 GB free) and then ran at 4-6 s/step instead of ~1: on Windows the driver spills
+# to system RAM rather than OOMing, so an over-tight plan does not fail, it just crawls, with
+# nothing in the log to say why. The un-checkpointed peak is also the one that scales with
+# megapixels, so a plan that barely fits at one bucket size will not fit at the next.
+_NOCKPT_MARGIN_GB = 3.0      # extra headroom demanded before skipping recompute
 
 
 def adapter_param_count(dit_path: str, include_patterns, network_type: str = "lora",
@@ -322,7 +330,9 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: flo
     # in the base, not the activation term — gradient checkpointing does not reduce it.
     base = resident + float(transient_gb) + float(adapter_gb)
     scale = max(0.25, float(mp)) / 0.25 * max(1, int(batch))
-    need_nockpt = base + _ACT_GB_NOCKPT * scale + _RESERVE_GB
+    # _NOCKPT_MARGIN_GB, not just _RESERVE_GB: see the note on the constant. Recompute is ~0.1 s
+    # a step and worth ~5 GB, so skipping it on a thin margin is a bad trade in both directions.
+    need_nockpt = base + _ACT_GB_NOCKPT * scale + _RESERVE_GB + _NOCKPT_MARGIN_GB
     if free_gb >= need_nockpt:
         return 0, False
     need_ckpt = base + _ACT_GB_CKPT * scale + _RESERVE_GB

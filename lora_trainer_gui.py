@@ -737,7 +737,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 30, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         # adamw, NOT adamw8bit — the single biggest likeness change measured on H3 (2026-08-06).
         # Every other knob had been swept with likeness stuck around 40-50%; full-precision
@@ -755,6 +755,34 @@ MINIMAX_BUILT_IN_PRESETS = {
         #   slow blocks ""    — one LR everywhere, no depth split
         #   distill False     — ordinary photo training, no r2v teacher (which also needs the
         #                       _teref cache built, so defaulting it on would break a fresh run)
+        "MINIMAX_BLOCKS": "all",
+        "MINIMAX_TRAIN_ADALN": False,
+        "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
+        "MINIMAX_DISTILL": False,
+    },
+    # Same run, fewer epochs, LR let off the leash. Adaptive LR IGNORES the Learning Rate box
+    # entirely — the run starts at the GEOMETRIC MIDPOINT of Min/Max, so 2e-4 and 4e-4 start it
+    # at 2.83e-4, nearly 3x the Defaults preset's static 1e-4, and the watcher owns it from
+    # there. That is where the time comes from: 30 epochs instead of 50, at a much higher LR.
+    # LEARNING_RATE is still carried so the box holds something sensible if adaptive is unticked.
+    #
+    # The 2e-4 floor is the same call the Klein Identity presets make, and it is a floor, not a
+    # target: the watcher halves the LR on plateau or instability but never below it, so the run
+    # cannot crawl to a stop the way a 1e-5 floor allows on a long run. Note the dropdown labels
+    # it "2e-4 - rank 4/8 only" — that warning is about LoRA RANK, and this preset trains LoKR,
+    # where dim/alpha do not apply at all. The caveat does not translate; treat this as the fast
+    # option to reach for when you want a result today, and the Defaults preset as the one to
+    # judge a dataset or an A/B on.
+    "✨ MiniMax H3 Fast (LoKR 8, adaptive LR)": {
+        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
+        "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
+        "LEARNING_RATE": 1e-4,
+        "MAX_TRAIN_EPOCHS": 30, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
+        "OPTIMIZER_TYPE": "adamw",
+        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
+        "DATASET_MEGAPIXELS": "0.25",
+        "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
         "MINIMAX_BLOCKS": "all",
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",

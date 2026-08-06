@@ -737,7 +737,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 50, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
+        "MAX_TRAIN_EPOCHS": 60, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         # adamw, NOT adamw8bit — the single biggest likeness change measured on H3 (2026-08-06).
         # Every other knob had been swept with likeness stuck around 40-50%; full-precision

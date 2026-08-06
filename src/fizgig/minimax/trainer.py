@@ -145,6 +145,17 @@ def restrict_patterns_to_blocks(patterns, block_spec, num_blocks: int = None):
 #   swap 16 + ckpt   : resident 11.9 (0.34 GB/block), steady 12.8, step peak 19.3 — the swap
 #                      path carries a ~7.4 GB backward transient (checkpoint recompute segments
 #                      held by the engine), which the planner must budget on top of residency.
+#
+# Re-measured 6 Aug on the SHIPPED default (int8 base, LoKR factor 8 + adamw, AdaLN off), because
+# those anchors were taken with a rank-16 LoRA on adamw8bit — an adapter of ~0.4 GB against the
+# ~3.1 GB the defaults now carry, so the planner was budgeting for a run nobody does:
+#   resident         : base 21.07 + LoKR weights 0.63 + fp32 Adam state 2.50 = 24.20 GB
+#   0.23 MP  no ckpt : 29.18      |  ckpt: 24.39
+#   0.50 MP  no ckpt : OOM (>31)  |  ckpt: 24.47
+#   0.98 MP  no ckpt : OOM        |  ckpt: 24.56
+# Two things fall out. Un-checkpointed really does scale hard (0.5 MP OOMs a 32 GB card, so
+# forcing ckpt on there is correct), and CHECKPOINTED IS ALMOST FLAT — 1 MP costs 0.17 GB more
+# than 0.23 MP, not four times as much. Hence _ACT_GB_CKPT below.
 _RESIDENT_GB = 17.5          # full bf16 model, NF4 resident (measured 17.3-17.6)
 # The PRUNED checkpoint drops the full-width AdaLN (~40% of the model's weight mass) for a curve
 # table, so the same NF4 pass lands far smaller: ~20.1 B params quantized -> ~10.1 GB, plus the
@@ -162,14 +173,96 @@ _RESIDENT_INT8_GB = 21.0
 # 0.12 GB now, and the real DiT has 200.)
 _INT8_TRANSIENT_GB = 1.0
 _PER_BLOCK_GB = 0.34         # one parked block's GPU share (measured: (17.5-11.9)/16)
-_ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 5.1)
-_ACT_GB_CKPT = 2.0           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.9; margin)
+_ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointing (measured 4.98)
+# Checkpointed memory is very nearly FLAT in megapixels — that is the whole point of recompute,
+# and the old 2.0 (which then got multiplied by the MP scale) modelled it as growing four times
+# faster than it does. Measured on the shipped default (int8 base, LoKR 8 + adamw, 6 Aug 2026),
+# peak above the resident 24.20 GB:
+#     0.23 MP  0.19 GB        0.50 MP  0.27 GB        0.98 MP  0.36 GB
+# i.e. ~0.15 + 0.2 x scale. 0.5 keeps a wide margin at every size and still leaves the planner
+# free to say "no swap" where the card genuinely fits — the old value invented 25 blocks of swap
+# for a 1 MP run that actually peaks at 24.6 GB, costing ~4x the step time for nothing.
+_ACT_GB_CKPT = 0.5           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.19)
 _SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active (measured 7.4 @ n=16)
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
 
 
+def adapter_param_count(dit_path: str, include_patterns, network_type: str = "lora",
+                        network_dim: int = 16, lokr_factor: int = 8,
+                        train_blocks: str = None) -> int:
+    """Trainable parameter count, read from the checkpoint HEADER — no model, no GPU.
+
+    The VRAM plan runs before the DiT is built, so the shapes come from the safetensors header
+    (which is just JSON at the front of the file). That keeps this exact rather than an
+    architecture guess: it sees the real targeted Linears for whichever checkpoint is loaded,
+    respects include_patterns and the Blocks to Train restriction, and works the same on the
+    pruned and full builds.
+    """
+    import json
+    import re as _re
+    import struct
+    try:
+        with open(dit_path, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            hdr = json.loads(f.read(n))
+    except Exception:
+        return 0
+
+    pats = list(include_patterns or [])
+    if train_blocks:
+        n_blocks = len({int(m.group(1)) for k in hdr
+                        for m in [_re.match(r"blocks\.(\d+)\.", k)] if m} or {0})
+        pats = restrict_patterns_to_blocks(pats, train_blocks, n_blocks)
+    if not pats:
+        return 0
+    rx = [_re.compile(p) for p in pats]
+
+    total = 0
+    for key, ent in hdr.items():
+        if key == "__metadata__" or not key.endswith(".weight"):
+            continue
+        shape = ent.get("shape") or []
+        if len(shape) != 2:                     # Linears only, as create_modules wraps
+            continue
+        name = key[:-len(".weight")]
+        if not any(r.search(name) for r in rx):
+            continue
+        out_dim, in_dim = int(shape[0]), int(shape[1])
+        if str(network_type).lower() == "lokr":
+            from fizgig.networks.lora import factorization   # local: avoids a circular import
+            a, _c = factorization(out_dim, int(lokr_factor))
+            b, _d = factorization(in_dim, int(lokr_factor))
+            total += a * b + _c * _d            # w1 (a,b) + w2 (c,d)
+        else:
+            total += int(network_dim) * (in_dim + out_dim)
+    return total
+
+
+def adapter_vram_gb(params: int, optimizer_type: str = "adamw8bit") -> float:
+    """GB the adapter holds for the WHOLE run: bf16 weights + optimizer state.
+
+    Not a rounding error at these sizes. LoKR factor 8 on H3 trains ~313 M parameters against a
+    rank-16 LoRA's ~77 M, and the state dtype widens the gap again: fp32 Adam keeps two 4-byte
+    moments per parameter where the 8-bit optimizers keep two 1-byte ones. LoKR + adamw is
+    ~3.1 GB against ~0.4 GB for the rank-16 + adamw8bit configuration the original anchors were
+    measured on — which is why planning without this term was planning for a run nobody does.
+
+    Gradients are deliberately NOT counted here. They are transient, and fused AdamW frees them
+    per parameter as it steps, so they never all coexist: measured, a checkpointed step peaks
+    only 0.19 GB above this figure even though the gradients would be 0.63 GB if they were all
+    live at once. They belong in the activation term's margin, not in the resident one.
+
+    Verified against a real step (6 Aug 2026): base 21.07 + weights 0.63 + fp32 state 2.50 =
+    24.20 GB resident, exactly what this returns for 313.1 M parameters on adamw.
+    """
+    key = (optimizer_type or "adamw8bit").lower()
+    n_states = 1 if "lion" in key else 2        # Lion keeps momentum only
+    state_bytes = (1 if "8bit" in key else 4) * n_states
+    return params * (2 + state_bytes) / 1e9     # bf16 weight + optimizer state
+
+
 def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None,
-              transient_gb: float = 0.0):
+              transient_gb: float = 0.0, adapter_gb: float = 0.0):
     """Pure planner: (blocks_to_swap, gradient_checkpointing) from free VRAM + token load.
 
     Token load scales the activation term linearly (tokens ∝ mp x batch). Checkpointing is
@@ -178,7 +271,9 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: flo
     Swap additionally budgets _SWAP_TRANSIENT_GB: the backward pass transiently holds
     recompute segments beyond the parked residency (measured, see anchors above)."""
     resident = _RESIDENT_GB if resident_gb is None else float(resident_gb)
-    base = resident + float(transient_gb)
+    # adapter_gb is resident for the whole run (weights + grads + optimizer state), so it belongs
+    # in the base, not the activation term — gradient checkpointing does not reduce it.
+    base = resident + float(transient_gb) + float(adapter_gb)
     scale = max(0.25, float(mp)) / 0.25 * max(1, int(batch))
     need_nockpt = base + _ACT_GB_NOCKPT * scale + _RESERVE_GB
     if free_gb >= need_nockpt:
@@ -827,11 +922,26 @@ def train_minimax(
             _resident = (_RESIDENT_INT8_GB if _mode == "int8"
                          else _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB)
             _trans = _INT8_TRANSIENT_GB if _mode == "int8" else 0.0
+            # The adapter is NOT a rounding error and it is not fixed: LoKR 8 trains ~313 M
+            # parameters against a rank-16 LoRA's ~75 M, and fp32 Adam state is 4x the 8-bit
+            # one. Planning without it was planning for a configuration nobody runs — the
+            # anchors were measured on rank-16 + adamw8bit (~0.45 GB) while the shipped default
+            # is LoKR 8 + adamw (~3.8 GB). Shapes come from the checkpoint header, so this is
+            # the real targeted module set for whichever file is loaded.
+            _pat = PRUNED_INCLUDE_PATTERNS if _pruned else DEFAULT_INCLUDE_PATTERNS
+            if not train_adaln:
+                _pat = [p for p in _pat if "adaln" not in p]
+            _ad_params = adapter_param_count(dit_path, _pat, network_type=network_type,
+                                             network_dim=network_dim, lokr_factor=lokr_factor,
+                                             train_blocks=train_blocks)
+            _adapter = adapter_vram_gb(_ad_params, optimizer_type)
             n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp, resident_gb=_resident,
-                                           transient_gb=_trans)
+                                           transient_gb=_trans, adapter_gb=_adapter)
             logger.info(f"[vram] auto plan: free {_free_gb:.1f} GB, largest bucket {_mp:.2f} MP, "
-                        f"base ~{_resident:.0f} GB ({_mode}, {'pruned' if _pruned else 'bf16'}) "
-                        f"-> blocks_to_swap={n_swap}, checkpointing={'on' if _ckpt_auto else 'off'}")
+                        f"base ~{_resident:.0f} GB ({_mode}, {'pruned' if _pruned else 'bf16'}), "
+                        f"adapter ~{_adapter:.1f} GB ({_ad_params/1e6:.0f} M params, "
+                        f"{optimizer_type}) -> blocks_to_swap={n_swap}, "
+                        f"checkpointing={'on' if _ckpt_auto else 'off'}")
             if n_swap > 0 and _mode == "int8":
                 logger.warning(
                     f"[vram] {n_swap} blocks will live on CPU and cross PCIe every step, which is "

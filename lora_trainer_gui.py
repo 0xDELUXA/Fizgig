@@ -752,7 +752,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     # leading. 50% is worth trying: its shift is exactly 1.00, i.e. the plain logit-normal that
     # earlier runs recorded as overdriving adapters — on adamw8bit, before the optimizer was
     # understood.
-    "✨ MiniMax H3 Defaults (LoKR 8, 0.25 MP)": {
+    "✨ MiniMax H3 Defaults (LoKR 8, 0.5 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         "LEARNING_RATE": 1e-4,
@@ -765,7 +765,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         # fine detail. Costs ~1.2 GB of fp32 state against a 21 GB resident base.
         "OPTIMIZER_TYPE": "adamw",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        "DATASET_MEGAPIXELS": "0.25",
+        "DATASET_MEGAPIXELS": "0.5",
         "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
         # The experiment knobs all ship OFF, so the preset is the plain baseline every A/B is
         # measured against. Each of these was built to be TRIED, not to be on by default:
@@ -800,7 +800,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
         "OPTIMIZER_TYPE": "adamw",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        "DATASET_MEGAPIXELS": "0.25",
+        "DATASET_MEGAPIXELS": "0.5",
         "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
         "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,

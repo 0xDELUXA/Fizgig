@@ -554,6 +554,25 @@ MINIMAX_BLOCK_OPTIONS = [
 
 MINIMAX_NUM_BLOCKS = 50          # H3's DiT block count (MiniMaxH3Config.num_layers)
 
+# Base Precision — the label the user sees, and the --base_quant value it sends. Auto plans the
+# quantisation and the block-swap count together (see plan_base_quant in minimax/trainer.py);
+# an explicit pick is never overridden, the swap plan is built around it instead.
+MINIMAX_BASE_QUANT_OPTIONS = [
+    "Auto (recommended)",
+    "int8 · most accurate, needs ~30 GB free",
+    "4-bit · fits smaller cards",
+]
+
+
+def minimax_base_quant(raw):
+    """Dropdown label -> the --base_quant value. Anything unrecognised falls back to auto."""
+    s = str(raw or "").split("·")[0].strip().lower()
+    if s.startswith("int8"):
+        return "int8"
+    if s.startswith("4-bit") or s.startswith("nf4"):
+        return "nf4"
+    return "auto"
+
 
 def minimax_block_spec(raw):
     """The block selection out of a dropdown label OR a hand-typed spec. "" -> "all"."""
@@ -755,7 +774,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         #   slow blocks ""    — one LR everywhere, no depth split
         #   distill False     — ordinary photo training, no r2v teacher (which also needs the
         #                       _teref cache built, so defaulting it on would break a fresh run)
-        "MINIMAX_BLOCKS": "all",
+        "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
         "MINIMAX_DISTILL": False,
@@ -783,7 +802,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
         "DATASET_MEGAPIXELS": "0.25",
         "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
-        "MINIMAX_BLOCKS": "all",
+        "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
         "MINIMAX_DISTILL": False,
@@ -1438,6 +1457,7 @@ class LoRATrainerGUI:
             "MINIMAX_LOWNOISE_PCT": "60",
             "MINIMAX_LOGNORM": True,       # False = flat spread; True = mid-concentrated
             "MINIMAX_BLOCKS": "all",
+            "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
             # OFF by default (Peter's call from real runs). The reference trains AdaLN on the
             # pruned checkpoint, but AdaLN is a pure function of the timestep — adaln_proj(t_emb)
             # and nothing else — so its adapters cannot tell one subject from another, and on the
@@ -3877,6 +3897,35 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_distill_hint.grid(row=36, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
+        # --- Base Precision (MiniMax only) -------------------------------------------------
+        # Auto picks the quantisation and the block-swap count TOGETHER. Deciding swap alone,
+        # with the precision already fixed by which file you loaded, gives mid-range cards the
+        # worst of both: the int8 base is ~21 GB, so a 24 GB card parks 38 of 50 blocks on CPU
+        # and crosses PCIe every step for ~4x the runtime, when the same file loaded 4-bit is
+        # ~11 GB and needs no swap at all.
+        self._minimax_quant_label = ttk.Label(training_content, text="Base Precision:")
+        self._minimax_quant_label.grid(row=37, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_quant_frame = ttk.Frame(training_content)
+        self._minimax_quant_frame.grid(row=37, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_BASE_QUANT"] = ttk.Combobox(
+            self._minimax_quant_frame, values=list(MINIMAX_BASE_QUANT_OPTIONS), width=30,
+            state="readonly")
+        self.entries["MINIMAX_BASE_QUANT"].set(
+            str(self.settings.get("MINIMAX_BASE_QUANT", MINIMAX_BASE_QUANT_OPTIONS[0])))
+        self.entries["MINIMAX_BASE_QUANT"].pack(side=tk.LEFT)
+        self._minimax_quant_hint = ttk.Label(
+            training_content,
+            text="Auto reads your FREE VRAM at launch and picks the base precision and block "
+                 "swap together. int8 is the checkpoint's own storage and the most accurate "
+                 "base (~0.17% error) — it needs about 30 GB free to run without block swap. "
+                 "4-bit loads the SAME file at ~11 GB instead of ~21, so it fits smaller cards "
+                 "with no swap, at ~9% error in the frozen base — the LoRA then spends some "
+                 "capacity correcting error that won't exist at inference. Auto only reaches "
+                 "for 4-bit when the alternative is most of the model crossing PCIe every step. "
+                 "Pin either one and the swap plan is built around your choice.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_quant_hint.grid(row=38, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
         self._minimax_slow_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
@@ -3917,7 +3966,7 @@ class LoRATrainerGUI:
         self._minimax_adaln_cb.grid(row=31, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
         self._minimax_adaln_hint = ttk.Label(
             training_content,
-            text="EXPERIMENT — on by default, which is what the reference trainer does. AdaLN is "
+            text="EXPERIMENT — off by default (the reference trainer leaves it on). AdaLN is "
                  "the part of the model that decides how strongly each block fires at each noise "
                  "level. It only ever sees the noise level: not your image, not your prompt. So it "
                  "CAN'T learn who someone is — but on this base it soaks up roughly 45% of "
@@ -5971,7 +6020,9 @@ class LoRATrainerGUI:
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
                   self._minimax_adaln_cb, self._minimax_adaln_hint,
                   self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint,
-                  self._minimax_distill_frame, self._minimax_distill_hint):
+                  self._minimax_distill_frame, self._minimax_distill_hint,
+                  self._minimax_quant_label, self._minimax_quant_frame,
+                  self._minimax_quant_hint):
             self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
@@ -21391,6 +21442,7 @@ class LoRATrainerGUI:
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
+            "MINIMAX_BASE_QUANT": self.entries["MINIMAX_BASE_QUANT"].get(),
             "MINIMAX_DISTILL_WEIGHT": str(self.entries["MINIMAX_DISTILL_WEIGHT"].get() or "0.8").strip(),
             "MINIMAX_DISTILL_REFS": str(self.entries["MINIMAX_DISTILL_REFS"].get() or "2").strip(),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
@@ -22365,6 +22417,9 @@ class LoRATrainerGUI:
         # at run time — correct for queued runs too); an explicit number passes through.
         _bs = str(self.settings.get("BLOCKS_SWAP", "auto") or "auto").strip()
         cmd += ["--blocks_to_swap", "auto" if _bs.lower().startswith("auto") else _bs]
+        # Base Precision. Always sent, including "auto", so the launched command records which
+        # base a run used rather than leaving it implicit — these get A/B'd against each other.
+        cmd += ["--base_quant", minimax_base_quant(self.settings.get("MINIMAX_BASE_QUANT"))]
         # Detail Focus -> --shift. Sent ALWAYS, including the reference 12, so the launched
         # command (and the console line recording it) states which density a run used instead of
         # leaving it implicit — these are meant to be A/B'd against each other, often queued

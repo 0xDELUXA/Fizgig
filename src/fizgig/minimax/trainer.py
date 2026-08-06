@@ -161,7 +161,12 @@ _RESIDENT_GB = 17.5          # full bf16 model, NF4 resident (measured 17.3-17.6
 # table, so the same NF4 pass lands far smaller: ~20.1 B params quantized -> ~10.1 GB, plus the
 # unquantized remainder. Estimated from the file's own tensor census, not yet GPU-measured, so
 # it carries margin.
-_RESIDENT_PRUNED_GB = 11.0
+# MEASURED 6 Aug (was 11.0, estimated from the file's tensor census): the pruned checkpoint
+# decoded and re-quantized to NF4 sits at 10.46 GB resident, and a checkpointed step peaks at
+# 13.46 / 13.56 / 13.63 GB at 0.23 / 0.50 / 0.98 MP — flat in megapixels, exactly like int8.
+# Un-checkpointed it is 18.27 / 23.52 / OOM. Now that Auto can CHOOSE this mode, the number it
+# chooses against had to stop being a guess.
+_RESIDENT_PRUNED_GB = 10.5
 # int8 base (base_quant=int8, the reference's own storage): the 200 block linears stay 1 byte
 # per param instead of NF4's 0.5, and the refiner/AdaLN load dense — ~19.3 + ~1.5 GB.
 _RESIDENT_INT8_GB = 21.0
@@ -259,6 +264,48 @@ def adapter_vram_gb(params: int, optimizer_type: str = "adamw8bit") -> float:
     n_states = 1 if "lion" in key else 2        # Lion keeps momentum only
     state_bytes = (1 if "8bit" in key else 4) * n_states
     return params * (2 + state_bytes) / 1e9     # bf16 weight + optimizer state
+
+
+def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: float = 0.0):
+    """Pick the base quantisation AND the swap plan together -> (mode, blocks_to_swap, ckpt, why).
+
+    Choosing a swap count from VRAM alone, with the quantisation already fixed, produces the
+    worst available outcome on mid-range cards: the int8 base is ~21 GB, so a 24 GB card cannot
+    hold it and the planner parks 38 of 50 blocks on CPU — every one of them crossing PCIe every
+    step, for roughly 4x the step time. The same file loaded 4-bit is ~11 GB and needs no swap at
+    all. Krea 2 hit this exact failure and fixed it the same way (see _auto_krea2_strategy):
+    quantisation and swap are one decision.
+
+    Order of preference:
+      1. int8, no swap  — the most accurate base (~0.17% error against the reference's own
+                          storage) with no PCIe cost. Always preferred when it fits.
+      2. 4-bit, no swap — trades base accuracy (~9.5% error) for keeping every block resident.
+      3. 4-bit + swap   — 11 GB resident always parks fewer blocks than 21 GB would.
+
+    The trade in step 2 is real and worth stating: a LoRA fitted on a 9.5%-perturbed base spends
+    capacity correcting error that will not exist at inference, and it compounds with depth. It
+    is chosen only when the alternative is most of the model crossing PCIe on every step.
+
+    Only applies to a pruned int8 checkpoint — the bf16 file has no int8 weights to keep, so
+    there is nothing to choose between.
+    """
+    if not pruned:
+        n, c = plan_vram(free_gb, mp=mp, resident_gb=_RESIDENT_GB, adapter_gb=adapter_gb)
+        return "nf4", n, c, "bf16 checkpoint — NF4 is the only option"
+
+    i_swap, i_ckpt = plan_vram(free_gb, mp=mp, resident_gb=_RESIDENT_INT8_GB,
+                               transient_gb=_INT8_TRANSIENT_GB, adapter_gb=adapter_gb)
+    if i_swap == 0:
+        return "int8", i_swap, i_ckpt, "int8 fits with no block swap — the most accurate base"
+
+    n_swap, n_ckpt = plan_vram(free_gb, mp=mp, resident_gb=_RESIDENT_PRUNED_GB,
+                               adapter_gb=adapter_gb)
+    if n_swap == 0:
+        return ("nf4", n_swap, n_ckpt,
+                f"int8 would need {i_swap} of 50 blocks on CPU (~4x slower); 4-bit fits entirely "
+                f"in VRAM, at ~9% more error in the frozen base")
+    return ("nf4", n_swap, n_ckpt,
+            f"neither fits outright — 4-bit parks {n_swap} blocks against int8's {i_swap}")
 
 
 def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None,
@@ -917,11 +964,6 @@ def train_minimax(
         if torch.cuda.is_available() and quantize:
             _free_gb = torch.cuda.mem_get_info()[0] / 1e9
             _pruned = is_pruned_checkpoint(dit_path)
-            _mode = base_quant if base_quant != "auto" else ("int8" if _pruned else "nf4")
-            _base_mode = _mode
-            _resident = (_RESIDENT_INT8_GB if _mode == "int8"
-                         else _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB)
-            _trans = _INT8_TRANSIENT_GB if _mode == "int8" else 0.0
             # The adapter is NOT a rounding error and it is not fixed: LoKR 8 trains ~313 M
             # parameters against a rank-16 LoRA's ~75 M, and fp32 Adam state is 4x the 8-bit
             # one. Planning without it was planning for a configuration nobody runs — the
@@ -935,20 +977,46 @@ def train_minimax(
                                              network_dim=network_dim, lokr_factor=lokr_factor,
                                              train_blocks=train_blocks)
             _adapter = adapter_vram_gb(_ad_params, optimizer_type)
-            n_swap, _ckpt_auto = plan_vram(_free_gb, mp=_mp, resident_gb=_resident,
-                                           transient_gb=_trans, adapter_gb=_adapter)
+
+            if base_quant == "auto":
+                _mode, n_swap, _ckpt_auto, _why = plan_base_quant(
+                    _free_gb, _pruned, mp=_mp, adapter_gb=_adapter)
+            else:
+                # An explicit choice is never overridden — the plan is built AROUND it, or the
+                # swap count would be sized for a quantisation that will not run.
+                _mode = base_quant
+                _res = (_RESIDENT_INT8_GB if _mode == "int8"
+                        else _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB)
+                n_swap, _ckpt_auto = plan_vram(
+                    _free_gb, mp=_mp, resident_gb=_res,
+                    transient_gb=_INT8_TRANSIENT_GB if _mode == "int8" else 0.0,
+                    adapter_gb=_adapter)
+                _why = f"base precision pinned to {_mode} by the user"
+            _base_mode = _mode
+            _resident = (_RESIDENT_INT8_GB if _mode == "int8"
+                         else _RESIDENT_PRUNED_GB if _pruned else _RESIDENT_GB)
+
             logger.info(f"[vram] auto plan: free {_free_gb:.1f} GB, largest bucket {_mp:.2f} MP, "
                         f"base ~{_resident:.0f} GB ({_mode}, {'pruned' if _pruned else 'bf16'}), "
                         f"adapter ~{_adapter:.1f} GB ({_ad_params/1e6:.0f} M params, "
                         f"{optimizer_type}) -> blocks_to_swap={n_swap}, "
                         f"checkpointing={'on' if _ckpt_auto else 'off'}")
-            if n_swap > 0 and _mode == "int8":
+            logger.info(f"[vram] base precision: {_mode} — {_why}")
+            if _mode == "nf4" and _pruned and base_quant == "auto":
+                # Say it plainly rather than quietly downgrading the base: this costs likeness,
+                # and the user has a real alternative (train slower on int8, or free some VRAM).
                 logger.warning(
-                    f"[vram] {n_swap} blocks will live on CPU and cross PCIe every step, which is "
-                    f"several times slower. The int8 base is ~{_resident:.0f} GB against NF4's "
-                    f"~{_RESIDENT_PRUNED_GB:.0f}, so it only fits this bucket size with swap. "
-                    f"Faster options: lower Target Megapixels (~0.7 MP fits with no swap), or "
-                    f"--base_quant nf4 (fits, at ~9% more error in the frozen base).")
+                    "[vram] this run trains on a 4-bit base (~9% error) instead of the "
+                    "checkpoint's own int8 (~0.17%). It is much faster here, but the LoRA spends "
+                    "some capacity correcting quantization error that will NOT exist at "
+                    "inference. To force the accurate base, set Base Precision to int8 — expect "
+                    "block swap and a several-times-slower run — or close other GPU apps and "
+                    "re-launch.")
+            if n_swap > 0:
+                logger.warning(
+                    f"[vram] {n_swap} of 50 blocks will live on CPU and cross PCIe every step, "
+                    f"which is several times slower. Lower Target Megapixels, or free VRAM, to "
+                    f"avoid it.")
         else:
             n_swap, _ckpt_auto = 0, False
     else:

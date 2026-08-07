@@ -22669,7 +22669,11 @@ class LoRATrainerGUI:
         try:
             for entry in os.listdir(out_dir):
                 m = pattern.match(entry)
-                if m and os.path.isdir(os.path.join(out_dir, entry)):
+                # training_state.json is the save's commit marker (written last) — a dir without
+                # it is a partial save from a crashed write, not a state. Skipping it here means
+                # Resume lands on the previous GOOD state instead of a refusal.
+                if (m and os.path.isdir(os.path.join(out_dir, entry))
+                        and os.path.isfile(os.path.join(out_dir, entry, "training_state.json"))):
                     candidates.append((int(m.group(1)), entry))
         except Exception:
             return None

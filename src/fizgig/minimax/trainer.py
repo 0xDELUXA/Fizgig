@@ -751,6 +751,21 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
     import json
     state_dir = os.path.join(output_dir, f"{output_name}-{epoch:06d}-state")
     os.makedirs(state_dir, exist_ok=True)
+    try:
+        return _write_state_files(state_dir, network, optimizer, epoch=epoch,
+                                  global_step=global_step, dtype=dtype, extra=extra)
+    except Exception:
+        # A partial state dir must not linger: it has no training_state.json (written last, the
+        # commit marker), so resume refuses it — but it would still shadow the previous good
+        # state in the GUI's latest-state scan. Remove it, then let the caller decide fatality.
+        import shutil
+        shutil.rmtree(state_dir, ignore_errors=True)
+        raise
+
+
+def _write_state_files(state_dir, network, optimizer, *, epoch, global_step,
+                       dtype, extra=None):
+    import json
     network.save_weights(os.path.join(state_dir, "lora.safetensors"), dtype,
                          {"ss_architecture": ARCHITECTURE_MINIMAX,
                           "ss_network_module": "fizgig.minimax (state dir, native keys)"})
@@ -764,6 +779,9 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
         meta.update(extra)
     with open(os.path.join(state_dir, "training_state.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f)
+    # training_state.json is written LAST on purpose: it is the commit marker. A save that
+    # dies partway leaves no json, and both the resume validator and the GUI's latest-state
+    # detection treat a json-less dir as not-a-state rather than resuming garbage.
     logger.info(f"[state] saved -> {state_dir}")
     return state_dir
 
@@ -1575,10 +1593,20 @@ def train_minimax(
             _save_lora(network, ckpt, network_dim, network_alpha, dtype, _meta())
             logger.info(f"saved {ckpt}")
             if save_state:
-                _save_training_state(output_dir, output_name, network, optimizer,
-                                     epoch=epoch + 1, global_step=global_step,
-                                     dtype=dtype, extra=_state_extra())
-                prune_state_dirs(output_dir, output_name, keep_last_n_states)
+                # Non-fatal (see the krea2 twin): a failed convenience save must never kill a
+                # run whose checkpoint already wrote. Truly-full disks fail the next epoch
+                # CHECKPOINT, and that one is rightly fatal.
+                try:
+                    _save_training_state(output_dir, output_name, network, optimizer,
+                                         epoch=epoch + 1, global_step=global_step,
+                                         dtype=dtype, extra=_state_extra())
+                    prune_state_dirs(output_dir, output_name, keep_last_n_states)
+                except Exception as _se:
+                    logger.error("[state] saving the resume state FAILED (%s: %s) — likely the "
+                                 "disk (on RunPod the volume quota is only visible in the "
+                                 "dashboard). Training continues; this epoch has no resume "
+                                 "point. The epoch checkpoint itself already saved.",
+                                 type(_se).__name__, _se)
         if do_previews and sample_every_n_epochs and (epoch + 1) % sample_every_n_epochs == 0:
             try:
                 _render_previews(epoch + 1)
@@ -1596,9 +1624,14 @@ def train_minimax(
             # Pause = graceful epoch-end exit with FULL state (regardless of the save-state
             # toggles), so Resume continues exactly here — matching Klein/Krea 2. The final
             # LoRA is deliberately NOT written; Resume (or the natural run end) writes it.
-            _save_training_state(output_dir, output_name, network, optimizer,
-                                 epoch=epoch + 1, global_step=global_step,
-                                 dtype=dtype, extra=_state_extra())
+            try:
+                _save_training_state(output_dir, output_name, network, optimizer,
+                                     epoch=epoch + 1, global_step=global_step,
+                                     dtype=dtype, extra=_state_extra())
+            except Exception as _se:
+                logger.error("[pause] state save FAILED (%s: %s) — there is NO new resume point "
+                             "for this pause. Free disk space (RunPod: dashboard quota) and "
+                             "resume from the previous saved state.", type(_se).__name__, _se)
             try:
                 os.remove(pause_flag)
             except OSError:
@@ -1612,10 +1645,16 @@ def train_minimax(
     _save_lora(network, final, network_dim, network_alpha, dtype, _meta())
     logger.info(f"saved final LoRA: {final}")
     if save_state_on_train_end and max_train_epochs > start_epoch:
-        _save_training_state(output_dir, output_name, network, optimizer,
-                             epoch=max_train_epochs, global_step=global_step,
-                             dtype=dtype, extra=_state_extra())
-        prune_state_dirs(output_dir, output_name, keep_last_n_states)
+        # Non-fatal: the final LoRA is already on disk; dying here would turn a finished run red.
+        try:
+            _save_training_state(output_dir, output_name, network, optimizer,
+                                 epoch=max_train_epochs, global_step=global_step,
+                                 dtype=dtype, extra=_state_extra())
+            prune_state_dirs(output_dir, output_name, keep_last_n_states)
+        except Exception as _se:
+            logger.error("[state] end-of-run state save FAILED (%s: %s) — the finished LoRA is "
+                         "saved and fine; only train-further-by-resume is affected.",
+                         type(_se).__name__, _se)
     try:
         os.remove(pause_flag)
     except OSError:

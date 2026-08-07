@@ -512,6 +512,21 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
     _detect_latest_state_dir finds the highest-numbered one and passes it to --resume."""
     state_dir = os.path.join(output_dir, f"{output_name}-{epoch:06d}-state")
     os.makedirs(state_dir, exist_ok=True)
+    try:
+        return _write_state_files(state_dir, network, optimizer, epoch=epoch,
+                                  global_step=global_step, network_dim=network_dim,
+                                  network_alpha=network_alpha, dtype=dtype, extra=extra)
+    except Exception:
+        # A partial state dir must not linger: it has no training_state.json (written last, the
+        # commit marker), so resume refuses it — but it would still shadow the previous good
+        # state in the GUI's latest-state scan. Remove it, then let the caller decide fatality.
+        import shutil
+        shutil.rmtree(state_dir, ignore_errors=True)
+        raise
+
+
+def _write_state_files(state_dir, network, optimizer, *, epoch, global_step,
+                       network_dim, network_alpha, dtype, extra=None):
     _save_lora(network, os.path.join(state_dir, "lora.safetensors"), network_dim, network_alpha, dtype)
     torch.save(optimizer.state_dict(), os.path.join(state_dir, "optimizer.pt"))
     rng = {"torch": torch.get_rng_state()}
@@ -523,6 +538,9 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
         meta.update(extra)
     with open(os.path.join(state_dir, "training_state.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f)
+    # training_state.json is written LAST on purpose: it is the commit marker. A save that
+    # dies partway leaves no json, and both the resume validator and the GUI's latest-state
+    # detection treat a json-less dir as not-a-state rather than resuming garbage.
     logger.info(f"[state] saved -> {state_dir}")
     return state_dir
 
@@ -1958,11 +1976,24 @@ def train_krea2(
             # was flushed above, the adaptive-LR watcher has already made its call for this epoch,
             # and any queued caption updates are applied — so the optimizer is settled.
             if save_state:
-                _save_training_state(output_dir, output_name, network, optimizer,
-                                     epoch=epoch + 1, global_step=global_step,
-                                     network_dim=network_dim, network_alpha=network_alpha, dtype=dtype,
-                                     extra={"adaptive_lr_state": adaptive.state_dict()} if adaptive else None)
-                state_saved_this_epoch = True
+                # NON-FATAL by design. A real run (7 Aug, RunPod) died at 27% of 55 hours
+                # because rng.pt hit a full network volume — for a file whose only job is to
+                # make resume nicer. The checkpoint itself had already saved. State saving must
+                # never cost a run; if the disk is truly full, the next EPOCH CHECKPOINT will
+                # fail and that one is rightly fatal.
+                try:
+                    _save_training_state(output_dir, output_name, network, optimizer,
+                                         epoch=epoch + 1, global_step=global_step,
+                                         network_dim=network_dim, network_alpha=network_alpha, dtype=dtype,
+                                         extra={"adaptive_lr_state": adaptive.state_dict()} if adaptive else None)
+                    state_saved_this_epoch = True
+                except Exception as _se:
+                    logger.error("[state] saving the resume state FAILED (%s: %s). This is "
+                                 "almost always the disk — on RunPod the volume quota is "
+                                 "invisible from inside the pod (the dashboard is the only true "
+                                 "reading), so writes fail with no warning. Training continues; "
+                                 "this epoch has no resume point. The epoch checkpoint itself "
+                                 "already saved.", type(_se).__name__, _se)
                 prune_state_dirs(output_dir, output_name, keep_last_n_states)
 
         if (do_previews and sample_every_n_epochs and (epoch + 1) % sample_every_n_epochs == 0
@@ -2097,10 +2128,16 @@ def train_krea2(
                 logger.info(f"[pause] requested — state for epoch {epoch + 1} already saved; exiting cleanly")
             else:
                 logger.info(f"[pause] requested — saving state at epoch {epoch + 1} and exiting cleanly")
-                _save_training_state(output_dir, output_name, network, optimizer,
-                                     epoch=epoch + 1, global_step=global_step,
-                                     network_dim=network_dim, network_alpha=network_alpha, dtype=dtype,
-                                     extra={"adaptive_lr_state": adaptive.state_dict()} if adaptive else None)
+                try:
+                    _save_training_state(output_dir, output_name, network, optimizer,
+                                         epoch=epoch + 1, global_step=global_step,
+                                         network_dim=network_dim, network_alpha=network_alpha, dtype=dtype,
+                                         extra={"adaptive_lr_state": adaptive.state_dict()} if adaptive else None)
+                except Exception as _se:
+                    logger.error("[pause] state save FAILED (%s: %s) — there is NO new resume "
+                                 "point for this pause. Free disk space (on RunPod: check the "
+                                 "volume quota in the dashboard) and resume from the previous "
+                                 "saved state.", type(_se).__name__, _se)
             try:
                 os.remove(pause_flag)
             except Exception:
@@ -2117,11 +2154,18 @@ def train_krea2(
     # Skipped when the run trained nothing (resumed from a state already at the final epoch) —
     # the only dir we'd write is the one we resumed FROM, and the save overwrites in place.
     if save_state_on_train_end and max_train_epochs > start_epoch:
-        _save_training_state(output_dir, output_name, network, optimizer,
-                             epoch=max_train_epochs, global_step=global_step,
-                             network_dim=network_dim, network_alpha=network_alpha, dtype=dtype,
-                             extra={"adaptive_lr_state": adaptive.state_dict()} if adaptive else None)
-        prune_state_dirs(output_dir, output_name, keep_last_n_states)
+        # Non-fatal: the final LoRA is already on disk; dying here would turn a finished run red.
+        try:
+            _save_training_state(output_dir, output_name, network, optimizer,
+                                 epoch=max_train_epochs, global_step=global_step,
+                                 network_dim=network_dim, network_alpha=network_alpha, dtype=dtype,
+                                 extra={"adaptive_lr_state": adaptive.state_dict()} if adaptive else None)
+            prune_state_dirs(output_dir, output_name, keep_last_n_states)
+        except Exception as _se:
+            logger.error("[state] end-of-run state save FAILED (%s: %s) — the finished LoRA is "
+                         "saved and fine; only train-further-by-resume is affected. Free disk "
+                         "space (RunPod: dashboard quota) and re-run the last epoch if you need "
+                         "the state.", type(_se).__name__, _se)
 
     out = os.path.join(output_dir, f"{output_name}.safetensors")
     # Record the context LoRA in metadata so users know to pair it at the same strength at

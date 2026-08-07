@@ -12189,17 +12189,48 @@ class LoRATrainerGUI:
 
         os.makedirs(output_folder, exist_ok=True)
 
+        if getattr(self, "_prep_running", False):
+            messagebox.showinfo("Already running", "An image prep job is already running.")
+            return
+
         # Clear log
         self.convert_log.configure(state="normal")
         self.convert_log.delete(1.0, tk.END)
 
-        if prep_mode == "Auto Prep (Face Crops)":
-            self._auto_prep_images(source_folder, output_folder, target_area, face_mode, face_padding, replace_originals)
-        elif prep_mode == "Resize Only":
-            self._resize_only_images(source_folder, output_folder, target_area, replace_originals)
-        elif prep_mode == "Face Crop Only":
-            self._face_crop_only_images(source_folder, output_folder, target_area, face_mode, face_padding, replace_originals)
+        # Worker thread, NOT inline: face detection is ONNX inference per image plus full-size
+        # PIL decode/encode, and running the batch on the Tk main thread froze the whole window
+        # ("Not Responding") for minutes on a big folder. Every Tk read happened above; the
+        # workers only touch the UI through _log, which already marshals via after() — it was
+        # written for this thread and waiting for it. The button is disabled for the duration
+        # so the job can't be double-started.
+        self._prep_running = True
+        try:
+            self.prepare_images_btn.config(state="disabled", text="Preparing…")
+        except Exception:
+            pass
 
+        def _prep_worker():
+            try:
+                if prep_mode == "Auto Prep (Face Crops)":
+                    self._auto_prep_images(source_folder, output_folder, target_area, face_mode, face_padding, replace_originals)
+                elif prep_mode == "Resize Only":
+                    self._resize_only_images(source_folder, output_folder, target_area, replace_originals)
+                elif prep_mode == "Face Crop Only":
+                    self._face_crop_only_images(source_folder, output_folder, target_area, face_mode, face_padding, replace_originals)
+            except Exception as e:
+                self._log(f"\nERROR: prep failed — {type(e).__name__}: {e}\n")
+            finally:
+                self.master.after(0, self._prep_finished)
+
+        threading.Thread(target=_prep_worker, daemon=True).start()
+
+    def _prep_finished(self):
+        """Main-thread epilogue for a prep run: finalize the log, re-arm the button."""
+        self._prep_running = False
+        try:
+            self.prepare_images_btn.config(state="normal", text="✨ Prepare Images Now")
+        except Exception:
+            pass
         self.convert_log.configure(state="disabled")
         self.convert_log.see(tk.END)
 

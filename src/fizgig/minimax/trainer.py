@@ -1398,8 +1398,24 @@ def train_minimax(
                 _ov = None
             if _ov:
                 if _ov["prompt"] != _ov_state["prompt"]:
-                    _ov_state["enc"] = _encode_override(_ov["prompt"])
-                    _ov_state["prompt"] = _ov["prompt"]
+                    # A failed encode must not take previews down with it. This loads the
+                    # 14.5 GB TE mid-run (parking the 21 GB base to fit), and on a tight card
+                    # that can OOM — and an exception from here used to propagate into the
+                    # epoch loop's preview catch, which LATCHES previews off for the rest of
+                    # the run. One bad encode silently ended every preview and read from the
+                    # outside as "the override just stopped working". Fall back to the Samples
+                    # tab prompts for this epoch instead; the state is left untouched, so the
+                    # next boundary retries.
+                    try:
+                        _ov_state["enc"] = _encode_override(_ov["prompt"])
+                        _ov_state["prompt"] = _ov["prompt"]
+                    except Exception as _oe:
+                        logger.warning(
+                            f"[sample override] could not encode the new prompt "
+                            f"({type(_oe).__name__}) — using the Samples tab prompts this "
+                            f"epoch; will retry at the next preview.")
+                        _ov = None
+            if _ov:
                 _prompts, _w, _h, _seed = _ov_state["enc"], _ov["width"], _ov["height"], _ov["seed"]
                 logger.info(f"[sample override] active — '{_ov['prompt'][:60]}' "
                             f"seed={_seed} {_w}x{_h}")

@@ -2460,8 +2460,13 @@ class LoRATrainerGUI:
                         "seed": seed, "width": width, "height": height,
                         "ref_image": self.sample_override_ref_var.get().strip()}
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-                with open(path, "w", encoding="utf-8") as f:
+                # Atomic: the trainer polls this file at epoch boundaries, and a plain write
+                # can be caught half-finished mid-keystroke — unparseable JSON reads as "no
+                # override" for that epoch.
+                tmp = path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(data, f)
+                os.replace(tmp, path)
             elif os.path.exists(path):
                 os.remove(path)
         except Exception:

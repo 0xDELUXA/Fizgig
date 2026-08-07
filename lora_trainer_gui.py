@@ -8417,13 +8417,33 @@ class LoRATrainerGUI:
             running = proc is not None and proc.poll() is None
         except Exception:
             running = False
-        if running:
-            messagebox.showwarning(
-                "Training is running",
-                "The Qwen3-VL captioner needs about 8 GB of VRAM, which won't fit alongside a "
-                "training run — and trying would risk the run itself.\n\n"
-                "Wait for training to finish, or switch the Model dropdown to Florence-2.")
-        return running
+        if not running:
+            return False
+        # A live training process alone is not a reason to refuse — MEASURE. mem_get_info
+        # reports device-wide free memory, so it already accounts for whatever the training
+        # subprocess holds. On a 141 GB pod card there is room for both several times over;
+        # the co-fit problem is real only on consumer cards. The 12 GB bar is the ~8 GB
+        # captioner plus margin for the run's epoch-boundary spikes (previews, state saves).
+        free_gb = None
+        try:
+            import torch as _torch
+            if _torch.cuda.is_available():
+                free_gb = _torch.cuda.mem_get_info()[0] / 1e9
+        except Exception:
+            free_gb = None
+        if free_gb is not None and free_gb >= 12.0:
+            self.update_caption_log(
+                f"Training is running, but {free_gb:.0f} GB of VRAM is free — captioning "
+                f"alongside it. Training steps may slow a little while this runs.\n")
+            return False
+        _detail = (f"about {free_gb:.0f} GB free right now" if free_gb is not None
+                   else "free VRAM can't be measured from here")
+        messagebox.showwarning(
+            "Training is running",
+            f"The Qwen3-VL captioner needs about 8 GB of VRAM on top of the training run, "
+            f"and there's {_detail}.\n\n"
+            "Wait for training to finish, or switch the Model dropdown to Florence-2.")
+        return True
 
     def save_caption_with_trigger(self, img_path, caption):
         """Save caption with trigger word prepended"""

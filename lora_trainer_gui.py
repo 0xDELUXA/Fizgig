@@ -3443,12 +3443,14 @@ class LoRATrainerGUI:
             # family is chosen rather than leaving people to mistrust their own run.
             self._minimax_sample_note = tk.Label(
                 model_card,
-                text=("Note: MiniMax H3 samples render as short CLIPS by default (Sample length "
-                      "on the Samples tab) — scrub them in the gallery. Clips sample the video "
-                      "regime the model was trained in. Single-frame stills are still available "
-                      "but look worse than the model's real output. Final judgement still "
+                text=("⏱ MiniMax samples render as short CLIPS by default — MINUTES per sample, "
+                      "not seconds, added at every sample epoch. Everything about this is tuned "
+                      "on the SAMPLES tab: render less often (Generate every N epochs), smaller "
+                      "(Width/Height), shorter (Sample length — 'Still' is the old fast mode), "
+                      "or untick sample generation entirely. Clips scrub in the gallery and "
+                      "sample the video regime the model was trained in; final judgement still "
                       "belongs in ComfyUI."),
-                font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+                font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
                 wraplength=760, justify=tk.LEFT,
             )
             self._minimax_sample_note.pack(anchor=tk.W, pady=(10, 0))

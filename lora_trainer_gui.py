@@ -14949,6 +14949,14 @@ class LoRATrainerGUI:
             download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors",
             download_note="~4.9GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_fp16.safetensors",
         )
+        self._add_fetch_models_row(
+            mm_card, mr, "minimax",
+            "Fetches the DiT, text encoder and VAE above (~42 GB) and fills in these paths for "
+            "you, plus the small helper models (Florence-2 captioner, face model for the Look "
+            "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
+            "download later. No HuggingFace account needed — none of these are gated. The "
+            "optional reference DiT is NOT included (another 21 GB most setups never use) — "
+            "grab it from its own Download link above if you want reference distillation.")
 
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)

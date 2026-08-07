@@ -6,6 +6,7 @@ writes the paths into prefs.json for you.
 
     python -m fizgig.scripts.fetch_models --family krea2      # ~45 GB, no HF account needed
     python -m fizgig.scripts.fetch_models --family klein      # ~34 GB, needs an HF token
+    python -m fizgig.scripts.fetch_models --family minimax    # ~42 GB, no HF account needed
     python -m fizgig.scripts.fetch_models --family tools      # ~1.6 GB helper models
     python -m fizgig.scripts.fetch_models --all
 
@@ -66,6 +67,23 @@ FAMILIES = {
         Weight("krea2_turbo_dit", "Comfy-Org/Krea-2",
                "diffusion_models/krea2_turbo_fp8_scaled.safetensors", 13.0,
                "Turbo DiT — Repair Studio, Explorer, Royale and classic previews"),
+    ],
+    "minimax": [
+        Weight("minimax_dit", "Comfy-Org/MiniMax-H3",
+               "diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors", 21.0,
+               "H3 DiT (pruned int8) — the training base, the file ComfyUI runs"),
+        Weight("minimax_text_encoder", "Comfy-Org/MiniMax-H3",
+               "text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", 15.7,
+               "Qwen3-VL-32B text encoder (nvfp4 — the compact ComfyUI file)"),
+        Weight("minimax_vae", "Comfy-Org/MiniMax-H3",
+               "vae/minimax_h3_video_vae_fp16.safetensors", 4.9,
+               "Video VAE — caching + preview decode"),
+        # ref2va is a DIFFERENT fine-tune, needed only for reference distillation — 21 GB most
+        # users don't want on a first setup, so it rides behind --include-optional like the
+        # Krea 2 Turbo DiT does.
+        Weight("minimax_ref_dit", "Comfy-Org/MiniMax-H3",
+               "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors", 21.0,
+               "Reference DiT (ref2va) — reference distillation only", optional=True),
     ],
     "klein": [
         Weight("base_dit", "black-forest-labs/FLUX.2-klein-base-9b-fp8",
@@ -368,11 +386,12 @@ def fetch(families, models_dir=None, repo_dir=REPO_DIR, token=None, include_opti
 def main():
     p = argparse.ArgumentParser(
         description="Download Fizgig's model files and write them into Preferences.")
-    p.add_argument("--family", action="append", choices=["krea2", "klein", "tools"],
+    p.add_argument("--family", action="append", choices=["krea2", "klein", "minimax", "tools"],
                    help="Repeatable. Krea 2 needs no HF account; Klein is gated.")
     p.add_argument("--all", action="store_true", help="Every family, including the helper models.")
     p.add_argument("--include-optional", action="store_true",
-                   help="Also fetch workbench-only files (Krea 2 Turbo DiT, ~13 GB).")
+                   help="Also fetch the optional files (Krea 2 Turbo DiT ~13 GB, "
+                        "MiniMax ref2va DiT ~21 GB).")
     p.add_argument("--models-dir", default=None, help="Default: <repo>/models")
     p.add_argument("--token", default=None, help="HuggingFace token for gated repos (or HF_TOKEN).")
     p.add_argument("--dry-run", action="store_true", help="Show what would be fetched.")
@@ -392,7 +411,7 @@ def main():
         except Exception:
             pass
 
-    families = ["krea2", "klein", "tools"] if a.all else (a.family or [])
+    families = ["krea2", "klein", "minimax", "tools"] if a.all else (a.family or [])
     if not families:
         p.error("pick --family krea2|klein|tools (repeatable), or --all")
 

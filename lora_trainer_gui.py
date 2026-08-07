@@ -14725,19 +14725,20 @@ class LoRATrainerGUI:
         # filling in paths, rather than hoping they read the card below.
         _qwen_tip = tk.Label(
             models_card,
-            text="💡 Training Klein only? The Krea 2 Qwen3-VL text encoder below (~8 GB) is still "
-                 "worth downloading — the Captions tab can caption ANY dataset with it, following "
-                 "an instruction you can edit, and it writes better training captions than "
-                 "Florence-2. Nothing else about Krea 2 is needed.",
+            text="💡 Training Klein only? The Krea 2 Qwen3-VL text encoder is still worth having — "
+                 "the Captions tab can caption ANY dataset with it, following an instruction you "
+                 "can edit, and it writes better training captions than Florence-2. The download "
+                 "button below fetches it for you; nothing else about Krea 2 is needed.",
             font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
             wraplength=760, justify=tk.LEFT)
         _qwen_tip.grid(row=next_row, column=0, columnspan=3, sticky=tk.W, pady=(12, 2))
         next_row += 1
         self._add_fetch_models_row(
             models_card, next_row, "klein",
-            "Fetches the four files above (~34 GB) and fills in these paths for you, plus the "
-            "small helper models (Florence-2 captioner, face model for the Look Filter and "
-            "likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to download later. "
+            "Fetches the four files above plus the Krea 2 Qwen3-VL captioning text encoder "
+            "(~39 GB all in) and fills in these paths for you, plus the small helper models "
+            "(Florence-2 captioner, face model for the Look Filter and likeness scoring, EN→ZH "
+            "translator — ~1.6 GB) so nothing stalls to download later. "
             "Black Forest Labs gate their downloads, so you'll need a free HuggingFace token — "
             "Fizgig asks for it and tells you which pages to accept the licence on.")
         next_row += 1
@@ -14951,8 +14952,9 @@ class LoRATrainerGUI:
         )
         self._add_fetch_models_row(
             mm_card, mr, "minimax",
-            "Fetches the DiT, text encoder and VAE above (~42 GB) and fills in these paths for "
-            "you, plus the small helper models (Florence-2 captioner, face model for the Look "
+            "Fetches the DiT, text encoder and VAE above, plus the Krea 2 Qwen3-VL captioning "
+            "text encoder (~47 GB all in), and fills in these paths for you — plus the small "
+            "helper models (Florence-2 captioner, face model for the Look "
             "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
             "download later. No HuggingFace account needed — none of these are gated. The "
             "optional reference DiT is NOT included (another 21 GB most setups never use) — "

@@ -5,8 +5,8 @@ into Preferences by hand. Run this instead and it fetches what's missing, verifi
 writes the paths into prefs.json for you.
 
     python -m fizgig.scripts.fetch_models --family krea2      # ~45 GB, no HF account needed
-    python -m fizgig.scripts.fetch_models --family klein      # ~34 GB, needs an HF token
-    python -m fizgig.scripts.fetch_models --family minimax    # ~42 GB, no HF account needed
+    python -m fizgig.scripts.fetch_models --family klein      # ~39 GB, needs an HF token
+    python -m fizgig.scripts.fetch_models --family minimax    # ~47 GB, no HF account needed
     python -m fizgig.scripts.fetch_models --family tools      # ~1.6 GB helper models
     python -m fizgig.scripts.fetch_models --all
 
@@ -50,15 +50,21 @@ class Weight:
         self.gated = gated
 
 
+# The Captions tab captions ANY dataset with the Krea 2 Qwen3-VL text encoder — it follows an
+# editable instruction and writes better training captions than Florence-2. So every family's
+# download button fetches it, not just Krea 2's: a Klein- or MiniMax-only user still captions.
+# Defined once so all three lists point at the same file and pref key.
+_CAPTION_TE = Weight("krea2_text_encoder", "Comfy-Org/Krea-2",
+                     "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", 5.2,
+                     "Qwen3-VL text encoder — powers the Captions tab (shared with Krea 2)")
+
 # Paths verified against the HuggingFace API, not the README — the two can drift.
 FAMILIES = {
     "krea2": [
         Weight("krea2_raw_dit", "Comfy-Org/Krea-2",
                "diffusion_models/krea2_raw_bf16.safetensors", 26.0,
                "RAW DiT — what training runs on"),
-        Weight("krea2_text_encoder", "Comfy-Org/Krea-2",
-               "text_encoders/qwen3vl_4b_fp8_scaled.safetensors", 5.2,
-               "Qwen3-VL text encoder (fp8 — recommended; also writes your captions)"),
+        _CAPTION_TE,
         Weight("krea2_vae", "Comfy-Org/Krea-2",
                "vae/qwen_image_vae.safetensors", 0.25, "Qwen-Image VAE"),
         Weight("krea2_turbo_lora", "Comfy-Org/Krea-2",
@@ -84,6 +90,7 @@ FAMILIES = {
         Weight("minimax_ref_dit", "Comfy-Org/MiniMax-H3",
                "diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors", 21.0,
                "Reference DiT (ref2va) — reference distillation only", optional=True),
+        _CAPTION_TE,
     ],
     "klein": [
         Weight("base_dit", "black-forest-labs/FLUX.2-klein-base-9b-fp8",
@@ -98,6 +105,7 @@ FAMILIES = {
         Weight("distilled_dit", "black-forest-labs/FLUX.2-klein-9b-fp8",
                "flux-2-klein-9b-fp8.safetensors", 9.0,
                "Distilled DiT — 4-step previews and the workbench", gated=True),
+        _CAPTION_TE,
     ],
 }
 

@@ -980,6 +980,7 @@ def train_minimax(
     # (measured seam energy 4.0 on an off-manifold latent vs 1.05 on a real one).
     sample_steps: int = 28,
     sample_cfg_scale: float = 1.0,
+    sample_frames: int = 1,      # pixel frames on the 17n+5 grid; 1 = classic still
     sample_negative: str = None,
     sample_seed: int = 42,
     # Output metadata (recorded in the saved LoRA).
@@ -1505,28 +1506,57 @@ def train_minimax(
 
             _seed = _seed if _seed != 0 else random.randint(1, 2 ** 31 - 1)
             ts = _time.strftime("%Y%m%d%H%M%S")
+            _frames = max(1, int(sample_frames or 1))
+            if _frames > 1 and decoder is None:
+                logger.warning("[preview] clip samples need the video VAE for decode — no VAE "
+                               "path is configured, so this epoch renders stills instead.")
+                _frames = 1
+            if _frames > 1 and epoch <= max(1, int(start_epoch) + 1):
+                logger.info(f"[preview] clip mode: {_frames} frames per sample — expect MINUTES "
+                            f"per sample at {_w}x{_h}, not seconds. Cadence is 'Sample every N "
+                            f"epochs' and size is Width/Height, both on the Samples tab.")
             for i, txt in enumerate(_prompts):
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
-                      f"({_w}x{_h}, seed {_seed + i})", flush=True)
+                      f"({_w}x{_h}, {_frames} frame(s), seed {_seed + i})", flush=True)
                 lat = sampling.sample_image(
                     dit, txt.to(device, dtype),
                     width=_w, height=_h, steps=sample_steps,
                     cfg_scale=sample_cfg_scale,
                     uncond_embeds=(encoded_negative.to(device, dtype)
                                    if encoded_negative is not None else None),
-                    seed=_seed + i, device=device, dtype=dtype, log_steps=True)
-                if decoder is not None:
+                    seed=_seed + i, device=device, dtype=dtype, log_steps=True,
+                    num_frames=_frames)
+                stem = f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}"
+                if lat.shape[2] > 1 and decoder is not None:
+                    # Clip: decode every frame, store EVERY 2ND frame as JPEG in a sibling
+                    # .clip dir, and save the MIDDLE frame as the contract PNG — written LAST,
+                    # so the gallery/likeness settle guard sees one finished unit. The PNG name
+                    # is the gallery/likeness/Visualiser contract; the .clip dir is additive.
+                    px = decoder.decode_clip(lat.float())[0]     # [3, F, H, W] in [0, 1]
+                    n_f = px.shape[1]
+                    clip_dir = os.path.join(sample_dir, stem + ".clip")
+                    os.makedirs(clip_dir, exist_ok=True)
+                    for k in range(0, n_f, 2):
+                        fr = (px[:, k].permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
+                        Image.fromarray(fr).save(os.path.join(clip_dir, f"f{k:03d}.jpg"),
+                                                 quality=87)
+                    mid = (px[:, n_f // 2].permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
+                    img = Image.fromarray(mid)
+                    print(f"[preview] decoded {n_f}-frame clip at {_w}x{_h} "
+                          f"({(n_f + 1) // 2} scrub frames)", flush=True)
+                    del px
+                elif decoder is not None:
                     px = decoder.decode(lat.float())[0]          # [3, H, W] in [0, 1]
                     arr = (px.permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
                     img = Image.fromarray(arr)
+                    print(f"[preview] decoded {_w}x{_h}", flush=True)
                 else:
                     # No VAE path configured — fall back to the 24ch->RGB linear approximation
                     # (a 1/16-scale rough look) rather than dropping previews entirely.
                     arr = sampling.latent_to_rgb(lat)
                     img = Image.fromarray(arr).resize((_w, _h), Image.NEAREST)
-                print(f"[preview] decoded {_w}x{_h}", flush=True)
-                img.save(os.path.join(
-                    sample_dir, f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}.png"))
+                    print(f"[preview] decoded {_w}x{_h}", flush=True)
+                img.save(os.path.join(sample_dir, stem + ".png"))
             logger.info(f"[preview] epoch {epoch}: wrote {len(_prompts)} sample(s) "
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:

@@ -143,6 +143,8 @@ def setup_parser() -> argparse.ArgumentParser:
                         "thing in both places.")
     p.add_argument("--sample_cfg_scale", type=float, default=1.0,
                    help=">1 enables CFG (a 2nd forward per step); the shipped H3 workflows use none")
+    p.add_argument("--sample_frames", type=int, default=1,
+                   help="Pixel frames per sample on the 17n+5 grid (1=still; 124=trained minimum, ~5s). Off-grid snaps down.")
     p.add_argument("--sample_negative", default=None, help="Only used when --sample_cfg_scale > 1")
     p.add_argument("--sample_seed", type=int, default=42, help="0 = random each preview")
     p.add_argument("--text_encoder", default=None,
@@ -220,6 +222,7 @@ def main():
         sample_height=args.sample_height,
         sample_steps=args.sample_steps,
         sample_cfg_scale=args.sample_cfg_scale,
+        sample_frames=args.sample_frames,
         sample_negative=args.sample_negative,
         sample_seed=args.sample_seed,
     )

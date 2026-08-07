@@ -2091,6 +2091,8 @@ class LoRATrainerGUI:
         # Save the sample reference image path
         if hasattr(self, 'sample_ref_image_var'):
             data["sample_ref_image"] = self.sample_ref_image_var.get()
+        if hasattr(self, 'sample_frames_var'):
+            data["sample_frames"] = self.sample_frames_var.get()
         # Krea 2 preview engine (Samples tab) — stored canonical, not the display label
         if hasattr(self, 'krea2_preview_engine_var'):
             data["krea2_preview_engine"] = self._krea2_preview_engine()
@@ -8918,6 +8920,34 @@ class LoRATrainerGUI:
                  wraplength=560, justify=tk.LEFT)
         self.sample_ref_note.grid(row=7, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
 
+        # --- Sample length (MiniMax only) — still vs scrubbable clip -----------------------
+        # H3 is a video model whose trained range is ~124-362 frames; a single still is out of
+        # distribution and previews look worse than the same LoRA rendered as video in ComfyUI.
+        # Shown/hidden by update_samples_ui_for_architecture.
+        self.sample_frames_label = ttk.Label(prompt_card, text="Sample length:")
+        self.sample_frames_label.grid(row=8, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_frames_var = tk.StringVar(
+            value=self.last_used.get("sample_frames", "124 frames (~5s — trained minimum)"))
+        self.sample_frames_combo = ttk.Combobox(
+            prompt_card, textvariable=self.sample_frames_var, state="readonly", width=34,
+            values=["Still (1 frame)", "22 frames (~1s)", "56 frames (~2.3s)",
+                    "124 frames (~5s — trained minimum)", "141 frames (~6s)"])
+        self.sample_frames_combo.grid(row=8, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.sample_frames_var.trace_add("write", lambda *a: self._save_last_used_paths())
+        self._sample_frames_hint = tk.Label(prompt_card,
+                 text="Clips render every sample as a short video you can SCRUB in the gallery "
+                      "(no autoplay) — the regime the model was trained in, so previews finally "
+                      "match ComfyUI. A 124-frame clip takes MINUTES per sample, not seconds: "
+                      "set how often with 'Generate every N epochs' on this tab, and how big "
+                      "with the Width/Height boxes above — both apply to clips. The gallery "
+                      "card, likeness scoring and the Visualiser use the clip's middle frame.",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                 bg=COLORS["bg_surface"], wraplength=560, justify=tk.LEFT)
+        self._sample_frames_hint.grid(row=9, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
+        # hidden until a MiniMax family is selected
+        for _w in (self.sample_frames_label, self.sample_frames_combo, self._sample_frames_hint):
+            _w.grid_remove()
+
         # Card 2: Generation Frequency
         freq_card = self._start_section_card(
             self.sample_settings_frame, "Generation Frequency",
@@ -9348,6 +9378,16 @@ class LoRATrainerGUI:
             # Grey out / relabel the Klein-only sample controls when Krea 2 is selected.
             self._apply_samples_klein_only(config.get("is_krea2", False))
 
+            # Sample length (clip) row — MiniMax only: the other families' preview stacks are
+            # image pipelines with no frames axis.
+            _mm = bool(config.get("is_minimax"))
+            for _w in (getattr(self, "sample_frames_label", None),
+                       getattr(self, "sample_frames_combo", None),
+                       getattr(self, "_sample_frames_hint", None)):
+                if _w is None:
+                    continue
+                (_w.grid if _mm else _w.grid_remove)()
+
         # Update sample output path label
         self.update_sample_output_label()
 
@@ -9637,6 +9677,11 @@ class LoRATrainerGUI:
         .gallery-item img { width: 100%; height: 280px; object-fit: cover; display: block; background-color: #1B2A38; }
         .badge { position: absolute; top: 10px; left: 10px; padding: 6px 12px; border-radius: 4px; font-weight: bold; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
         .epoch-badge { background-color: #27AE60; color: white; }
+        .clip-badge { background-color: #8E44AD; color: white; right: 8px; left: auto; }
+        #lb-scrub-wrap { display: none; width: min(80vw, 640px); margin-top: 10px; text-align: center; }
+        #lb-scrub-wrap.active { display: block; }
+        #lb-scrub { width: 100%; }
+        #lb-scrub-label { color: #95A5A6; font-size: 12px; margin-top: 2px; }
         .new-badge { position: absolute; top: 10px; right: 10px; background-color: #E74C3C; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
         .image-info { padding: 12px; }
         .lora-name { color: #9B59B6; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
@@ -9755,6 +9800,11 @@ class LoRATrainerGUI:
         <span class="nav-btn prev-btn" onclick="navigateLightbox(-1)">&#10094;</span>
         <img id="lightbox-img" src="" alt="">
         <span class="nav-btn next-btn" onclick="navigateLightbox(1)">&#10095;</span>
+        <div id="lb-scrub-wrap">
+            <input type="range" id="lb-scrub" min="0" max="0" value="0"
+                   oninput="lbScrub(parseInt(this.value))">
+            <div id="lb-scrub-label"></div>
+        </div>
         <div class="image-details">
             <div class="image-name" id="lightbox-name"></div>
             <div class="image-meta" id="lightbox-meta"></div>
@@ -9898,6 +9948,11 @@ class LoRATrainerGUI:
                             }
                         }
                     } catch (e) {}
+                    // Clip scrub data (MiniMax clip previews): filename -> frame list.
+                    try {
+                        const cj = await fetch('clips.json?t=' + Date.now());
+                        if (cj.ok) { const cm = await cj.json(); images.forEach(im => { if (cm[im.filename]) im.clip = cm[im.filename]; }); }
+                    } catch (e) {}
                     await loadLikeness();
                     renderGallery();
                     renderLikenessChart();
@@ -9953,6 +10008,7 @@ class LoRATrainerGUI:
                         <img src="${img.filename}" alt="${img.filename}" loading="lazy">
                         <span class="badge epoch-badge">Epoch ${img.epoch}</span>
                         ${likBadge(img)}
+                        ${img.clip ? `<span class="badge clip-badge">🎞 ${img.clip.length}f</span>` : ''}
                     </div>
                     <div class="image-info">
                         <div class="lora-name">${img.loraName}</div>
@@ -10313,8 +10369,33 @@ class LoRATrainerGUI:
             if (idx >= 0) { currentLightboxIndex = idx; showLightbox(images[idx]); }
         }
 
+        let lbClip = null;              // active clip frame list, or null for a plain still
+
+        function lbScrub(i) {
+            if (!lbClip) return;
+            i = Math.max(0, Math.min(lbClip.length - 1, i));
+            document.getElementById('lightbox-img').src = lbClip[i];
+            document.getElementById('lb-scrub-label').textContent =
+                `frame ${i + 1} / ${lbClip.length} — drag to scrub (clips never autoplay)`;
+        }
+
         function showLightbox(img) {
-            document.getElementById('lightbox-img').src = img.filename;
+            const wrap = document.getElementById('lb-scrub-wrap');
+            const slider = document.getElementById('lb-scrub');
+            lbClip = img.clip || null;
+            if (lbClip) {
+                // Preload on OPEN, not up front — a 60-epoch gallery would otherwise pull
+                // thousands of frames nobody asked for.
+                lbClip.forEach(f => { const im = new Image(); im.src = f; });
+                slider.max = lbClip.length - 1;
+                const mid = Math.floor(lbClip.length / 2);
+                slider.value = mid;
+                wrap.classList.add('active');
+                lbScrub(mid);
+            } else {
+                wrap.classList.remove('active');
+                document.getElementById('lightbox-img').src = img.filename;
+            }
             document.getElementById('lightbox-name').textContent = img.filename;
             document.getElementById('lightbox-meta').textContent = `${img.loraName} | Epoch ${img.epoch} | Seed: ${img.seed} | ${img.time}`;
             document.getElementById('lightbox').classList.add('active');
@@ -10392,6 +10473,22 @@ class LoRATrainerGUI:
         try:
             with open(files_json_path, 'w', encoding='utf-8') as f:
                 json.dump(images, f)
+        except Exception:
+            pass
+
+        # Clip frames for the gallery scrubber: <stem>.clip/ dirs written by MiniMax clip
+        # previews, mapped against their contract PNG. Additive — a gallery with no clips gets
+        # an empty map and behaves exactly as before.
+        try:
+            clips = {}
+            for f in os.listdir(samples_dir):
+                if f.endswith(".clip") and os.path.isdir(os.path.join(samples_dir, f)):
+                    frames = sorted(x for x in os.listdir(os.path.join(samples_dir, f))
+                                    if x.lower().endswith((".jpg", ".jpeg", ".png")))
+                    if frames:
+                        clips[f[:-len(".clip")] + ".png"] = [f + "/" + x for x in frames]
+            with open(os.path.join(samples_dir, "clips.json"), 'w', encoding='utf-8') as f:
+                json.dump(clips, f)
         except Exception:
             pass
 
@@ -22576,6 +22673,11 @@ class LoRATrainerGUI:
                     "--text_encoder", _te,
                     "--vae", self._krea2_pref("minimax_vae"),
                 ]
+                # Sample length: "124 frames (~5s — trained minimum)" -> 124. Always sent so
+                # the launched command records whether a run previewed stills or clips.
+                _sf = str(getattr(self, "sample_frames_var", None)
+                          and self.sample_frames_var.get() or "").split(" ")[0]
+                cmd += ["--sample_frames", _sf if _sf.isdigit() else "1"]
                 _st = self.sample_steps_var.get().strip()
                 if _st.isdigit() and int(_st) > 0:
                     cmd += ["--sample_steps", _st]

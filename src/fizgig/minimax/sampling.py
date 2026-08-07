@@ -138,8 +138,13 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                  uncond_embeds=None, seed=0, shift=12.0, device="cuda",
                  dtype=torch.bfloat16, latent_channels=24, spatial=16, log_steps=False,
                  sampler="res_multistep", schedule_mode="comfy",
-                 ref_latents=None, text_token_tags=None):
-    """Denoise one image and return its LATENT [1, 24, 1, H/16, W/16].
+                 ref_latents=None, text_token_tags=None, num_frames: int = 1):
+    """Denoise one image OR clip and return its LATENT [1, 24, T, H/16, W/16].
+
+    num_frames is PIXEL frames on the model's 17n+5 grid (5, 22, ..., 124, 141); off-grid
+    values snap DOWN like the reference trainer. 1 = the classic still (T=1 keyframe layout).
+    The model's trained range is ~124-362 frames — a 124-frame clip samples the regime the
+    checkpoint was actually trained in, where a lone still is out of distribution.
 
     Decoding is the caller's business (real VAE decoder, or latent_to_rgb for a rough look) so
     this stays testable without a 4.8 GB decoder resident.
@@ -162,8 +167,12 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     # The DiT patchifies 2x2, so the latent grid must be even (compute_loss crops for the same
     # reason on the training side).
     lat_h, lat_w = (lat_h // 2) * 2, (lat_w // 2) * 2
+    from fizgig.minimax.model import latent_frames_for_pixels, pixel_frames_for_latent
+    latent_t = latent_frames_for_pixels(int(num_frames))
+    pixel_frames = pixel_frames_for_latent(latent_t)        # the snapped-down truth
     gen = torch.Generator(device="cpu").manual_seed(int(seed))
-    x = torch.randn(1, latent_channels, 1, lat_h, lat_w, generator=gen, dtype=torch.float32).to(device)
+    x = torch.randn(1, latent_channels, latent_t, lat_h, lat_w,
+                    generator=gen, dtype=torch.float32).to(device)
     # Joint audio denoising, mirroring the reference pipeline: the audio rows start as pure
     # noise (sigma_a(1) = 1) and the model's AUDIO head steps them down their own shift-3
     # schedule alongside the video. At low sigma the video tokens then attend to plausible
@@ -171,7 +180,7 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     joint_audio = bool(getattr(model, "pack_audio_rows", False))
     audio_rows = None
     if joint_audio:
-        n_audio = audio_latents_for_frames(1) * AUDIO_CHANNELS
+        n_audio = audio_latents_for_frames(pixel_frames) * AUDIO_CHANNELS
         audio_rows = torch.randn(n_audio, model.config.audio_latents_dim,
                                  generator=gen, dtype=torch.float32).to(device)
 

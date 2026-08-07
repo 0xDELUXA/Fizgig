@@ -778,8 +778,22 @@ def _validate_state_dir(state_dir):
     epoch 0 while looking like a resume, and overwrites the finished LoRA on the way. Refusing
     is the only safe answer, and the message has to name the folder they actually wanted.
     """
+    if os.path.isfile(state_dir):
+        sib = ""
+        base = os.path.dirname(state_dir)
+        try:
+            states = sorted(d for d in os.listdir(base) if d.endswith("-state")
+                            and os.path.isfile(os.path.join(base, d, "training_state.json")))
+            if states:
+                sib = " Next to it: " + ", ".join(states[-3:])
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"[resume] {os.path.basename(state_dir)} is a file — resume takes the saved-state "
+            f"FOLDER (named like '<lora name>-000012-state'), not a .safetensors.{sib}")
     if not os.path.isdir(state_dir):
-        raise RuntimeError(f"[resume] {state_dir} is not a folder.")
+        raise RuntimeError(f"[resume] {state_dir} does not exist — was the state folder moved "
+                           f"or renamed?")
     missing = [f for f in ("lora.safetensors", "training_state.json")
                if not os.path.isfile(os.path.join(state_dir, f))]
     if not missing:
@@ -1303,7 +1317,9 @@ def train_minimax(
     from fizgig.training.train_utils import prune_state_dirs
     global_step = 0
     start_epoch = 0
-    if resume_state_dir and os.path.isdir(resume_state_dir):
+    # `if resume_state_dir` — NOT `and os.path.isdir(...)`: a requested resume whose path is bad
+    # used to skip this block silently and train from scratch. Resume, or refuse — never ignore.
+    if resume_state_dir:
         start_epoch, global_step, _resume_meta = _load_training_state(
             resume_state_dir, network, optimizer, device=device)
         if adaptive:

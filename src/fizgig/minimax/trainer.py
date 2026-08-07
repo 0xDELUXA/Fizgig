@@ -1445,6 +1445,13 @@ def train_minimax(
                 gc.collect()
                 torch.cuda.empty_cache()
 
+    # Clip previews carry real failure risk a still never had (a 124-frame clip is ~30x the
+    # sampling tokens plus a chunked multi-frame decode), and the epoch loop LATCHES previews
+    # off on any preview exception. A clip-specific failure must degrade to the stills that
+    # were working, not take every future preview down with it — so the frame count lives in
+    # mutable state the failure handlers can lower.
+    _clip_state = {"frames": max(1, int(sample_frames or 1)), "notice_done": False}
+
     def _render_previews(epoch):
         """Render one still per prompt on the RESIDENT training DiT and write them where the
         samples gallery looks. The filename format is the gallery/likeness/Visualiser contract
@@ -1506,12 +1513,13 @@ def train_minimax(
 
             _seed = _seed if _seed != 0 else random.randint(1, 2 ** 31 - 1)
             ts = _time.strftime("%Y%m%d%H%M%S")
-            _frames = max(1, int(sample_frames or 1))
+            _frames = max(1, int(_clip_state["frames"]))
             if _frames > 1 and decoder is None:
                 logger.warning("[preview] clip samples need the video VAE for decode — no VAE "
                                "path is configured, so this epoch renders stills instead.")
                 _frames = 1
-            if _frames > 1 and epoch <= max(1, int(start_epoch) + 1):
+            if _frames > 1 and not _clip_state["notice_done"]:
+                _clip_state["notice_done"] = True
                 logger.info(f"[preview] clip mode: {_frames} frames per sample — expect MINUTES "
                             f"per sample at {_w}x{_h}, not seconds. Cadence is 'Sample every N "
                             f"epochs' and size is Width/Height, both on the Samples tab.")
@@ -1536,7 +1544,10 @@ def train_minimax(
                     n_f = px.shape[1]
                     clip_dir = os.path.join(sample_dir, stem + ".clip")
                     os.makedirs(clip_dir, exist_ok=True)
-                    for k in range(0, n_f, 2):
+                    _keep = list(range(0, n_f, 2))
+                    if _keep[-1] != n_f - 1:
+                        _keep.append(n_f - 1)          # always include the final frame
+                    for k in _keep:
                         fr = (px[:, k].permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
                         Image.fromarray(fr).save(os.path.join(clip_dir, f"f{k:03d}.jpg"),
                                                  quality=87)
@@ -1573,8 +1584,14 @@ def train_minimax(
         try:
             _render_previews(0)
         except Exception as _e0:
-            logger.warning(f"[preview] Sample at Start failed ({type(_e0).__name__}) — training "
-                           f"continues; per-epoch previews will still be attempted.")
+            if _clip_state["frames"] > 1:
+                _clip_state["frames"] = 1
+                logger.warning(f"[preview] Sample at Start failed in CLIP mode "
+                               f"({type(_e0).__name__}) — later previews will render STILLS. "
+                               f"Training continues.")
+            else:
+                logger.warning(f"[preview] Sample at Start failed ({type(_e0).__name__}) — training "
+                               f"continues; per-epoch previews will still be attempted.")
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="minimax-h3")
     for epoch in range(start_epoch, max_train_epochs):
@@ -1656,11 +1673,22 @@ def train_minimax(
                 # Latch previews OFF for the rest of the run rather than re-failing (and
                 # re-OOMing) every epoch. Training and checkpoints are never at risk.
                 _oom = "out of memory" in str(_pe).lower()
-                logger.warning(
-                    f"[preview] epoch {epoch + 1} preview failed "
-                    f"({'CUDA OOM' if _oom else type(_pe).__name__}); disabling previews for the "
-                    f"rest of the run. Training continues and LoRAs still save normally.")
-                do_previews = False
+                if _clip_state["frames"] > 1:
+                    # The failure arrived in CLIP mode — the mode a still preview never
+                    # exercised. Fall back to the stills that were working rather than ending
+                    # every preview for the run; only a failure at stills latches off.
+                    logger.warning(
+                        f"[preview] epoch {epoch + 1} CLIP preview failed "
+                        f"({'CUDA OOM' if _oom else type(_pe).__name__}) — falling back to "
+                        f"STILL previews for the rest of the run. Training continues and "
+                        f"LoRAs still save normally.")
+                    _clip_state["frames"] = 1
+                else:
+                    logger.warning(
+                        f"[preview] epoch {epoch + 1} preview failed "
+                        f"({'CUDA OOM' if _oom else type(_pe).__name__}); disabling previews for "
+                        f"the rest of the run. Training continues and LoRAs still save normally.")
+                    do_previews = False
             network.train()
         if os.path.exists(pause_flag):
             # Pause = graceful epoch-end exit with FULL state (regardless of the save-state

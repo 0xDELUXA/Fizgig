@@ -3441,9 +3441,11 @@ class LoRATrainerGUI:
             # family is chosen rather than leaving people to mistrust their own run.
             self._minimax_sample_note = tk.Label(
                 model_card,
-                text=("Note: MiniMax H3 in-training samples are single-frame renders and are "
-                      "known to look worse than the model's real output. Use them to track "
-                      "progress, but judge your epochs in ComfyUI."),
+                text=("Note: MiniMax H3 samples render as short CLIPS by default (Sample length "
+                      "on the Samples tab) — scrub them in the gallery. Clips sample the video "
+                      "regime the model was trained in. Single-frame stills are still available "
+                      "but look worse than the model's real output. Final judgement still "
+                      "belongs in ComfyUI."),
                 font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
                 wraplength=760, justify=tk.LEFT,
             )
@@ -4912,7 +4914,7 @@ class LoRATrainerGUI:
     _QUEUE_SAMPLE_KEYS = ("SAMPLE_ENABLED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
                           "SAMPLE_SEED", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_EVERY_N_STEPS",
                           "SAMPLE_AT_FIRST", "SAMPLE_FLOW_SHIFT", "SAMPLE_NEGATIVE",
-                          "SAMPLE_CFG_SCALE")
+                          "SAMPLE_CFG_SCALE", "SAMPLE_FRAMES")
 
     def _queue_snapshot(self):
         """Capture the currently configured run as a queue item."""
@@ -9112,6 +9114,7 @@ class LoRATrainerGUI:
         self.entries["SAMPLE_FLOW_SHIFT"] = self.sample_flow_shift_entry
         self.entries["SAMPLE_NEGATIVE"] = self.sample_negative_entry
         self.entries["SAMPLE_CFG_SCALE"] = self.sample_cfg_scale_entry
+        self.entries["SAMPLE_FRAMES"] = self.sample_frames_combo
 
         # Initial UI state based on current architecture
         self.update_samples_ui_for_architecture()
@@ -10008,7 +10011,7 @@ class LoRATrainerGUI:
                         <img src="${img.filename}" alt="${img.filename}" loading="lazy">
                         <span class="badge epoch-badge">Epoch ${img.epoch}</span>
                         ${likBadge(img)}
-                        ${img.clip ? `<span class="badge clip-badge">🎞 ${img.clip.length}f</span>` : ''}
+                        ${img.clip ? `<span class="badge clip-badge">🎞 scrub</span>` : ''}
                     </div>
                     <div class="image-info">
                         <div class="lora-name">${img.loraName}</div>
@@ -10414,6 +10417,9 @@ class LoRATrainerGUI:
         }
 
         document.addEventListener('keydown', (e) => {
+            // Arrows on the clip scrub slider step the slider natively; without this guard the
+            // same keydown bubbles here and ALSO jumps to the next image — two actions per key.
+            if (e.target && e.target.id === 'lb-scrub') return;
             if (document.getElementById('runviz').classList.contains('active')) {
                 if (e.key === 'Escape') closeRunViz();
                 if (e.key === 'ArrowLeft') { rvStop(); rvShow(rvIdx - 1); }

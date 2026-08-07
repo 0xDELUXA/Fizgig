@@ -1465,6 +1465,7 @@ def train_minimax(
         from fizgig.minimax import sampling
         was_training = dit.training
         decoder = None
+        _base_parked = False        # set in phase 2; the finally MUST restore a parked base
         try:
             dit.eval()
             if vae_path:
@@ -1475,9 +1476,12 @@ def train_minimax(
                 decoder = MiniMaxH3VideoVAEDecoder()
                 with _safe_open(vae_path, framework="pt", device="cpu") as _f:
                     decoder.load_state_dict({k: _f.get_tensor(k) for k in _f.keys()}, strict=False)
-                # bf16, NOT fp32: 2.4 B params is 4.8 GB vs 9.7 GB, and this sits on top of the
-                # already-resident base. decode() follows the module dtype.
-                decoder = decoder.to(device, dtype).eval()
+                # bf16, NOT fp32: 2.4 B params is 4.8 GB vs 9.7 GB. And it stays on CPU until
+                # the DECODE phase: previews used to put it on the GPU before sampling even
+                # started, which cost the sampling forward 4.85 GB of headroom it never used —
+                # harmless for a 256-token still, an OOM for a 124-frame clip whose forward is
+                # ~30x the tokens (real 32 GB-card failure, 8 Aug).
+                decoder = decoder.to(dtype).eval()
             # Live override from the GUI, re-read every epoch so it can be turned on, changed or
             # switched off mid-run without touching the paused/resume path.
             _prompts, _w, _h = encoded_prompts, sample_width, sample_height
@@ -1523,6 +1527,14 @@ def train_minimax(
                 logger.info(f"[preview] clip mode: {_frames} frames per sample — expect MINUTES "
                             f"per sample at {_w}x{_h}, not seconds. Cadence is 'Sample every N "
                             f"epochs' and size is Width/Height, both on the Samples tab.")
+            # PHASE 1 — sample every prompt with the decoder still on CPU. The latents are a
+            # few MB each, so parking them on CPU between phases costs nothing; the clip
+            # forward gets the whole non-base headroom instead of sharing it with a decoder
+            # it is not using yet.
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()          # drop the training step's allocator slack
+            _rendered = []
             for i, txt in enumerate(_prompts):
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
                       f"({_w}x{_h}, {_frames} frame(s), seed {_seed + i})", flush=True)
@@ -1534,7 +1546,29 @@ def train_minimax(
                                    if encoded_negative is not None else None),
                     seed=_seed + i, device=device, dtype=dtype, log_steps=True,
                     num_frames=_frames)
-                stem = f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}"
+                _rendered.append((f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}",
+                                  lat.to("cpu")))
+                del lat
+
+            # PHASE 2 — decode. Clip decode wants ~6 GB (decoder weights + chunk transients);
+            # if the card cannot offer that next to the resident base, park the base on CPU
+            # for the duration, exactly as the override-encode path does. A ~21 GB round trip
+            # costs seconds once per preview epoch; an OOM used to cost the previews entirely.
+            if decoder is not None:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    _free = torch.cuda.mem_get_info()[0] / 1e9
+                    if _frames > 1 and _free < 7.5:
+                        logger.info(f"[preview] {_free:.1f} GB free is too tight for clip "
+                                    f"decode — parking the base on CPU for this decode pass.")
+                        dit.to("cpu")
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        _base_parked = True
+                decoder = decoder.to(device)
+            for stem, lat in _rendered:
+                lat = lat.to(device)
                 if lat.shape[2] > 1 and decoder is not None:
                     # Clip: decode every frame, store EVERY 2ND frame as JPEG in a sibling
                     # .clip dir, and save the MIDDLE frame as the contract PNG — written LAST,
@@ -1568,10 +1602,25 @@ def train_minimax(
                     img = Image.fromarray(arr).resize((_w, _h), Image.NEAREST)
                     print(f"[preview] decoded {_w}x{_h}", flush=True)
                 img.save(os.path.join(sample_dir, stem + ".png"))
+                del lat
+            if _base_parked:
+                dit.to(device)
+                if n_swap > 0:
+                    dit.enable_block_swap(n_swap)     # restore the parked-block split
+                gc.collect()
+                torch.cuda.empty_cache()
+                _base_parked = False
             logger.info(f"[preview] epoch {epoch}: wrote {len(_prompts)} sample(s) "
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
             del decoder                                  # free the ~4.85 GB decoder immediately
+            if _base_parked:
+                # An exception mid-decode left the 21 GB base on CPU — the next training step
+                # would die with "mat2 is on cpu". Restore residency (and the swap split)
+                # before anything else runs.
+                dit.to(device)
+                if n_swap > 0:
+                    dit.enable_block_swap(n_swap)
             if was_training:
                 dit.train()
             gc.collect()

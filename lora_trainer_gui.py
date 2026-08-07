@@ -8816,7 +8816,8 @@ class LoRATrainerGUI:
         # Card 1: Prompt & Dimensions
         prompt_card = self._start_section_card(
             self.sample_settings_frame, "Prompt & Dimensions",
-            "Multi-line prompt, output size, steps and seed for each preview render.",
+            "One prompt per line — every line renders its own sample each epoch. "
+            "Output size, steps and seed apply to all of them.",
         )
         prompt_card.grid_columnconfigure(1, weight=1)
 
@@ -8830,50 +8831,58 @@ class LoRATrainerGUI:
         self.sample_prompt_text.insert("1.0", self.last_used.get("sample_prompt", self.settings["SAMPLE_PROMPT"]))
         self.sample_prompt_text.grid(row=0, column=1, columnspan=2, sticky=tk.EW, pady=4)
         self.sample_prompt_text.bind("<KeyRelease>", lambda e: self._save_last_used_paths())
+        # Issue #49: "Multi-line prompt" read as ONE prompt that may contain line breaks — two
+        # users only discovered multiple prompts by accident. Say what a line actually does.
+        tk.Label(prompt_card,
+                 text="Each line is a SEPARATE prompt — press Enter to add another sample per "
+                      "epoch. Keep a single prompt on one line (long ones wrap by themselves).",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                 bg=COLORS["bg_surface"], wraplength=520, justify=tk.LEFT).grid(
+            row=1, column=1, columnspan=2, sticky=tk.W, pady=(0, 6))
 
-        ttk.Label(prompt_card, text="Width:").grid(row=1, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        ttk.Label(prompt_card, text="Width:").grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_width_var = tk.StringVar(value=str(self.settings["SAMPLE_WIDTH"]))
         self.sample_width_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_width_var,
             values=SAMPLE_RESOLUTIONS, state="readonly", width=10,
         )
-        self.sample_width_combo.grid(row=1, column=1, sticky=tk.W, pady=4)
+        self.sample_width_combo.grid(row=2, column=1, sticky=tk.W, pady=4)
 
-        ttk.Label(prompt_card, text="Height:").grid(row=2, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        ttk.Label(prompt_card, text="Height:").grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_height_var = tk.StringVar(value=str(self.settings["SAMPLE_HEIGHT"]))
         self.sample_height_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_height_var,
             values=SAMPLE_RESOLUTIONS, state="readonly", width=10,
         )
-        self.sample_height_combo.grid(row=2, column=1, sticky=tk.W, pady=4)
+        self.sample_height_combo.grid(row=3, column=1, sticky=tk.W, pady=4)
 
         self.sample_steps_label = ttk.Label(prompt_card, text="Steps:")
-        self.sample_steps_label.grid(row=3, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_steps_label.grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_steps_var = tk.StringVar(value=str(self.settings["SAMPLE_STEPS"]))
         _steps_frame = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
-        _steps_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W, pady=4)
+        _steps_frame.grid(row=4, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_steps_entry = ttk.Entry(_steps_frame, textvariable=self.sample_steps_var, width=10)
         self.sample_steps_entry.pack(side=tk.LEFT)
         self.sample_steps_note = tk.Label(_steps_frame, text="Base samples only — Distilled is locked at 4 steps",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"])
         self.sample_steps_note.pack(side=tk.LEFT, padx=(10, 0))
 
-        ttk.Label(prompt_card, text="Seed:").grid(row=4, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        ttk.Label(prompt_card, text="Seed:").grid(row=5, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_seed_var = tk.StringVar(value=str(self.settings["SAMPLE_SEED"]))
         self.sample_seed_entry = ttk.Entry(prompt_card, textvariable=self.sample_seed_var, width=10)
-        self.sample_seed_entry.grid(row=4, column=1, sticky=tk.W, pady=4)
+        self.sample_seed_entry.grid(row=5, column=1, sticky=tk.W, pady=4)
         tk.Label(prompt_card, text="(0 = random)",
                  font=(FONT_FAMILY, 9), fg=COLORS["text_muted"], bg=COLORS["bg_surface"]).grid(
-            row=4, column=2, sticky=tk.W, padx=(10, 0)
+            row=5, column=2, sticky=tk.W, padx=(10, 0)
         )
 
         # Reference image (Klein edit conditioning) — the persistent default for
         # samples; the status-bar override can swap it live mid-run.
         self.sample_ref_label = ttk.Label(prompt_card, text="Reference:")
-        self.sample_ref_label.grid(row=5, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self.sample_ref_label.grid(row=6, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         self.sample_ref_image_var = tk.StringVar(value=self.last_used.get("sample_ref_image", ""))
         _ref_row = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
-        _ref_row.grid(row=5, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        _ref_row.grid(row=6, column=1, columnspan=2, sticky=tk.EW, pady=4)
         self.sample_ref_entry = ttk.Entry(_ref_row, textvariable=self.sample_ref_image_var, state="readonly")
         self.sample_ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.sample_ref_browse_btn = ttk.Button(_ref_row, text="Browse…", command=self._browse_sample_ref)
@@ -8887,7 +8896,7 @@ class LoRATrainerGUI:
                       "empty for normal samples.",
                  font=(FONT_FAMILY, 10), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=560, justify=tk.LEFT)
-        self.sample_ref_note.grid(row=6, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
+        self.sample_ref_note.grid(row=7, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
 
         # Card 2: Generation Frequency
         freq_card = self._start_section_card(

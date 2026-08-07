@@ -516,13 +516,26 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
         return _write_state_files(state_dir, network, optimizer, epoch=epoch,
                                   global_step=global_step, network_dim=network_dim,
                                   network_alpha=network_alpha, dtype=dtype, extra=extra)
-    except Exception:
-        # A partial state dir must not linger: it has no training_state.json (written last, the
-        # commit marker), so resume refuses it — but it would still shadow the previous good
-        # state in the GUI's latest-state scan. Remove it, then let the caller decide fatality.
+    except Exception as _first:
+        # Clean the partial dir (no training_state.json = no commit marker, but it would shadow
+        # the previous good state in the GUI's latest-state scan), then retry ONCE after a short
+        # pause. Network filesystems (RunPod volumes) throw transient stream errors that clear
+        # in seconds — a real run lost its epoch-8 state to exactly one of those. If the retry
+        # also fails it is not transient; re-raise and let the caller decide fatality.
         import shutil
+        import time
         shutil.rmtree(state_dir, ignore_errors=True)
-        raise
+        logger.warning("[state] save failed (%s: %s) — retrying once in 5s",
+                       type(_first).__name__, _first)
+        time.sleep(5)
+        try:
+            os.makedirs(state_dir, exist_ok=True)
+            return _write_state_files(state_dir, network, optimizer, epoch=epoch,
+                                      global_step=global_step, network_dim=network_dim,
+                                      network_alpha=network_alpha, dtype=dtype, extra=extra)
+        except Exception:
+            shutil.rmtree(state_dir, ignore_errors=True)
+            raise
 
 
 def _write_state_files(state_dir, network, optimizer, *, epoch, global_step,

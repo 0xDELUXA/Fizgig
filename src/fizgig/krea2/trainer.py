@@ -527,8 +527,45 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
     return state_dir
 
 
+def _validate_state_dir(state_dir):
+    """Refuse anything that is not a saved training state, and say what to pick instead.
+
+    Issue #48: choosing the OUTPUT directory rather than a state folder failed with a bare
+    "lora.safetensors not found", and the obvious workaround — putting a LoRA there under that
+    name — then appeared to work. It cannot: without training_state.json there is no epoch or
+    step, and without optimizer.pt there is no Adam state, so the run silently starts over from
+    epoch 0 while looking like a resume, and overwrites the finished LoRA on the way. Refusing
+    is the only safe answer, and the message has to name the folder they actually wanted.
+    """
+    if not os.path.isdir(state_dir):
+        raise RuntimeError(f"[resume] {state_dir} is not a folder.")
+    missing = [f for f in ("lora.safetensors", "training_state.json")
+               if not os.path.isfile(os.path.join(state_dir, f))]
+    if not missing:
+        return
+    lines = [
+        f"[resume] {state_dir} is not a saved training state — missing {', '.join(missing)}.",
+        "[resume] Pick the folder named like '<lora name>-000012-state'. Renaming a LoRA to "
+        "lora.safetensors does not make one: there would be no optimizer state and no epoch "
+        "to resume from, so the run would quietly start again from scratch.",
+    ]
+    try:
+        # The usual mistake is picking the parent output directory, one level above the state
+        # folders — so if they are sitting right there, name them.
+        here = sorted(d for d in os.listdir(state_dir)
+                      if d.endswith("-state")
+                      and os.path.isfile(os.path.join(state_dir, d, "training_state.json")))
+        if here:
+            lines.append("[resume] That looks like your output directory. The saved states in "
+                         "it are: " + ", ".join(here[-5:]))
+    except OSError:
+        pass
+    raise RuntimeError(os.linesep.join(lines))
+
+
 def _load_training_state(state_dir, network, optimizer, *, device):
     """Restore network + optimizer + RNG from a state dir. Returns (start_epoch, global_step, meta)."""
+    _validate_state_dir(state_dir)
     from safetensors.torch import load_file
     # strict=False tolerates benign key drift, but if NOTHING matched the LoRA silently stays at
     # its zero init and the run "succeeds" while training from scratch — then overwrites the

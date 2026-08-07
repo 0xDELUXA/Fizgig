@@ -1466,6 +1466,7 @@ def train_minimax(
         was_training = dit.training
         decoder = None
         _base_parked = False        # set in phase 2; the finally MUST restore a parked base
+        _opt_parked = []            # set in phase 1; ditto for the parked optimizer state
         try:
             dit.eval()
             if vae_path:
@@ -1534,6 +1535,23 @@ def train_minimax(
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()          # drop the training step's allocator slack
+            # Clip forwards are big enough that VRAM pressure does not OOM on Windows - the
+            # driver spills to system RAM and every step silently runs 3-6x slower (the
+            # same failure signature as the checkpointing-margin bug). The fp32 Adam state
+            # is ~2.5 GB of dead weight during a no-grad preview: park it on CPU for the
+            # sampling phase. Costs about a second each way, once per preview epoch.
+            if _frames > 1 and torch.cuda.is_available():
+                for _st in optimizer.state.values():
+                    for _k, _v in list(_st.items()):
+                        if torch.is_tensor(_v) and _v.is_cuda:
+                            _st[_k] = _v.to('cpu')
+                            _opt_parked.append((_st, _k))
+                if _opt_parked:
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                _free0 = torch.cuda.mem_get_info()[0] / 1e9
+                logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
+                            f'({len(_opt_parked)} optimizer tensors parked)')
             _rendered = []
             for i, txt in enumerate(_prompts):
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
@@ -1549,6 +1567,11 @@ def train_minimax(
                 _rendered.append((f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}",
                                   lat.to("cpu")))
                 del lat
+
+            # optimizer state back before anything else - the next training step needs it
+            for _st, _k in _opt_parked:
+                _st[_k] = _st[_k].to(device)
+            _opt_parked = []
 
             # PHASE 2 — decode. Clip decode wants ~6 GB (decoder weights + chunk transients);
             # if the card cannot offer that next to the resident base, park the base on CPU
@@ -1614,6 +1637,8 @@ def train_minimax(
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
             del decoder                                  # free the ~4.85 GB decoder immediately
+            for _st, _k in _opt_parked:      # exception during phase 1: state must return
+                _st[_k] = _st[_k].to(device)
             if _base_parked:
                 # An exception mid-decode left the 21 GB base on CPU — the next training step
                 # would die with "mat2 is on cpu". Restore residency (and the swap split)

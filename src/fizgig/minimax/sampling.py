@@ -198,10 +198,15 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     sigmas = sample_schedule(steps, shift=shift, mode=schedule_mode)
     n_eval = len(sigmas) - 1                            # the terminal 0 is not an evaluation
     prev_denoised = None                                # res_multistep's one-step memory
+    _last = [None]                                      # per-step wall time for the log
     for i in range(n_eval):
         s_curr, s_next = sigmas[i], sigmas[i + 1]
         if log_steps:
-            print(f"[preview] step {i + 1}/{n_eval}  sigma {s_curr:.4f} -> {s_next:.4f}",
+            import time as _t
+            _now = _t.time()
+            _dt = f"  ({_now - _last[0]:.1f}s)" if _last[0] is not None else ""
+            _last[0] = _now
+            print(f"[preview] step {i + 1}/{n_eval}  sigma {s_curr:.4f} -> {s_next:.4f}{_dt}",
                   flush=True)
         t = torch.tensor([1.0 - s_curr], device=device)     # the DiT is conditioned on cleanness
         if joint_audio:

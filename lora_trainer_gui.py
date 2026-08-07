@@ -398,11 +398,13 @@ ARCHITECTURES = {
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 20,   # the reference pipeline default
-        # H3's native canvas is a 768 SHORT EDGE with a 768*1344 pixel cap. 1024x1024 is
-        # both over that cap and off the canvas convention; the reference pipeline samples
-        # 768x768 and ComfyUI's node defaults to 1344x768 (also 768 short edge).
-        "sample_width_default": 768,
-        "sample_height_default": 768,
+        # 512x512, NOT the 768 canvas convention: preview cost scales with tokens, and a
+        # 124-frame CLIP at 768^2 is ~2.25x the rows of 512^2 — measured on a 32 GB card,
+        # that is the difference between fitting with headroom and spilling to system RAM at
+        # 3-6x the step time (8 Aug). 768 stays one dropdown click away for final-quality
+        # checks; the real 768-canvas judgement belongs in ComfyUI anyway.
+        "sample_width_default": 512,
+        "sample_height_default": 512,
         "lora_name_suffix": "mmh3",
     },
 }

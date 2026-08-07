@@ -724,6 +724,107 @@ class AdaptiveLR:
 
 
 # ---------------------------------------------------------------------------
+# Per-block movement limiter — a compressor on the block bus.
+#
+# Empirical finding (8 Aug, three runs + a block-range A/B): whichever block sits LAST in the
+# trained range absorbs wildly disproportionate movement — 2-4x the median block from epoch 1,
+# and still diverging 40 epochs later. Cut blocks 46-49 and blocks 43-45 inherit the exact
+# same signature: the pathology is POSITIONAL, not a property of particular layers. The
+# deepest trained block gets the most coherent, least-attenuated gradient (everything after
+# it is frozen and decorrelates nothing), and Adam turns coherence into relentless movement.
+# The visible symptom is output-adjacent over-editing: distorted eyes and other
+# high-frequency damage.
+#
+# LR penalties and block cuts are positional patches for a positional problem — they just
+# relocate the hot spot. This limiter is self-targeting: after each optimizer step, any
+# block whose TOTAL RELATIVE movement (sum over its adapters of ||dW||/||W_base||, the same
+# metric the offline analysis used) exceeds `cap_factor x median block` is projected back to
+# the cap by scaling its up-factors. Blocks move freely until one hogs; then only that one
+# is pulled back, wherever the trained range ends.
+# ---------------------------------------------------------------------------
+class BlockLimiter:
+    def __init__(self, network, dit, cap_factor: float = 1.5):
+        import re as _re
+        from fizgig.networks.lora import _build_dit_linear_map
+        self.cap = float(cap_factor)
+        self.clamped_total = 0
+        self.clamp_counts = {}
+        linear_map = _build_dit_linear_map(dit, None)
+        self.groups = {}          # block id -> [(module, base_norm)]
+        for m in getattr(network, "unet_loras", []):
+            blk = _re.search(r"blocks_(\d+)_", m.lora_name)
+            if blk is None or "token_refiner" in m.lora_name:
+                continue          # text-side refiner is not part of the depth argument
+            target = linear_map.get(m.lora_name)
+            bn = self._base_norm(target) if target is not None else None
+            if bn:
+                self.groups.setdefault(int(blk.group(1)), []).append((m, bn))
+
+    @staticmethod
+    def _base_norm(mod) -> float:
+        """||W_base||_F for whichever storage the base uses. The ConvRot rotation is
+        orthogonal, so the norm of the int8 codes x scales IS the true weight norm."""
+        import torch as _t
+        with _t.no_grad():
+            if hasattr(mod, "qdata"):                        # ConvRotInt8Linear
+                return float((mod.qdata.float() * mod.wscale.float()).norm())
+            w = getattr(mod, "weight", None)
+            if w is None:
+                return 0.0
+            if w.__class__.__name__ == "Params4bit":         # bnb NF4 shell
+                try:
+                    import bitsandbytes.functional as _bf
+                    return float(_bf.dequantize_4bit(w.data, w.quant_state).float().norm())
+                except Exception:
+                    return 0.0
+            return float(w.float().norm())
+
+    @staticmethod
+    def _movement(m) -> float:
+        """||dW||_F for one adapter, exactly as the offline analysis computes it."""
+        import torch as _t
+        with _t.no_grad():
+            if hasattr(m, "lokr_w1"):
+                return float(m.lokr_w1.float().norm() * m.lokr_w2.float().norm()) * float(m.scale)
+            up, dn = m.lora_up.weight.float(), m.lora_down.weight.float()
+            g = _t.trace((up.T @ up) @ (dn @ dn.T)).clamp(min=0)
+            return float(g.sqrt()) * float(m.scale)
+
+    @torch.no_grad()
+    def step(self):
+        """Project any over-cap block back to cap_factor x median. Cheap: rank-sized matmuls."""
+        import statistics as _st
+        rel = {}
+        for blk, mods in self.groups.items():
+            rel[blk] = sum((self._movement(m) / bn) ** 2 for m, bn in mods) ** 0.5
+        if len(rel) < 3:
+            return
+        med = _st.median(rel.values())
+        if med <= 0:
+            return                                            # nothing has moved yet
+        cap = self.cap * med
+        for blk, r in rel.items():
+            if r <= cap:
+                continue
+            s = cap / r
+            for m, _bn in self.groups[blk]:
+                if hasattr(m, "lokr_w2"):
+                    m.lokr_w2.mul_(s)                         # delta scales linearly in w2
+                else:
+                    m.lora_up.weight.mul_(s)
+            self.clamped_total += 1
+            self.clamp_counts[blk] = self.clamp_counts.get(blk, 0) + 1
+
+    def epoch_report(self):
+        if not self.clamp_counts:
+            return "[limiter] no block exceeded the cap this epoch"
+        top = sorted(self.clamp_counts.items(), key=lambda kv: -kv[1])[:6]
+        msg = "[limiter] clamped " + ", ".join(f"block {b} x{n}" for b, n in top)
+        self.clamp_counts = {}
+        return msg
+
+
+# ---------------------------------------------------------------------------
 # Full image-only training loop (NF4 base + LoRA) over the H3 caches.
 # ---------------------------------------------------------------------------
 class _Collator:
@@ -957,6 +1058,7 @@ def train_minimax(
     distill: bool = False,           # reference distillation (references come from the dataset)
     distill_weight: float = 0.8,     # teacher share of the loss; the rest is the real photo
     slow_blocks: str = None,         # block spec trained at a reduced LR ("21-49")
+    block_limit: float = 0.0,   # >0 = per-block movement cap at N x the median block (the limiter)
     slow_block_lr_scale: float = 1.0,  # the multiplier applied to those blocks' LR
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
@@ -1309,6 +1411,13 @@ def train_minimax(
                                                   optimizer_args, eps_floor_8bit=True)
     logger.info(f"optimizer: {optimizer_label} @ lr={learning_rate:.3e}")
 
+    limiter = None
+    if block_limit and float(block_limit) > 0:
+        limiter = BlockLimiter(network, dit, float(block_limit))
+        logger.info(f"[limiter] per-block movement cap ON at {float(block_limit):g}x the median "
+                    f"block ({len(limiter.groups)} blocks watched) — whichever block runs hot "
+                    f"gets pulled back to the pack, wherever the trained range ends.")
+
     # Caption dropout (reference default 0.05): swap in the cached empty-prompt embed for a
     # random ~5% of steps. The uncond file is written by minimax_cache_text next to the caches.
     uncond_text = None
@@ -1393,6 +1502,7 @@ def train_minimax(
             "ss_distill": "dataset" if distill else "off",
             "ss_distill_weight": (f"{distill_weight:g}" if distill else "0"),
             "ss_slow_blocks": _slow_used or "none",
+            "ss_block_limit": str(block_limit or 0),
             "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
             "ss_max_grad_norm": f"{max_grad_norm:g}",
@@ -1695,6 +1805,8 @@ def train_minimax(
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if limiter is not None:
+                limiter.step()
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)
@@ -1719,6 +1831,8 @@ def train_minimax(
                 logger.info(f"[drift] max|lora_up|={_drift:.4f} (bound ~{_bound:.4f} — healthy)")
         except Exception:
             pass
+        if limiter is not None:
+            logger.info(limiter.epoch_report())
         if adaptive is not None:
             adaptive.epoch_boundary(epoch, loss_recorder.moving_average, network, optimizer)
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:

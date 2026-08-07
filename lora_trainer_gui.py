@@ -779,6 +779,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
+        "MINIMAX_BLOCK_LIMIT": "Off",
         "MINIMAX_DISTILL": False,
     },
     # Same run, fewer epochs, LR let off the leash. Adaptive LR IGNORES the Learning Rate box
@@ -807,6 +808,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
+        "MINIMAX_BLOCK_LIMIT": "Off",
         "MINIMAX_DISTILL": False,
     },
 }
@@ -3870,6 +3872,35 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
 
+        # --- Per-block limiter (MiniMax only) ----------------------------------------------
+        # Whichever block sits LAST in the trained range absorbs 2-4x the median block's
+        # movement from epoch 1 (measured across four runs; cutting blocks just moves the hot
+        # spot to the new last block). The limiter caps any block's total movement at N x the
+        # median block, projected back after every step — self-targeting, so it needs no range.
+        self._minimax_limiter_label = ttk.Label(training_content, text="Per-block limiter:")
+        self._minimax_limiter_label.grid(row=37, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_limiter_frame = ttk.Frame(training_content)
+        self._minimax_limiter_frame.grid(row=37, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_BLOCK_LIMIT"] = ttk.Combobox(
+            self._minimax_limiter_frame, values=["Off", "1.25 x median (tight)",
+                                                 "1.5 x median (recommended)",
+                                                 "2.0 x median (loose)"],
+            width=26, state="readonly")
+        self.entries["MINIMAX_BLOCK_LIMIT"].set(
+            str(self.settings.get("MINIMAX_BLOCK_LIMIT", "Off")))
+        self.entries["MINIMAX_BLOCK_LIMIT"].pack(side=tk.LEFT)
+        self._minimax_limiter_hint = ttk.Label(
+            training_content,
+            text="EXPERIMENT — a compressor for the blocks. The last trained block always "
+                 "hogs learning (it sits closest to the output, so its gradient is the most "
+                 "coherent) and over-edits fine detail — distorted eyes are the classic "
+                 "symptom. The limiter pulls any block that exceeds N x the median block's "
+                 "movement back to the cap after every step. Unlike turning blocks off or "
+                 "slowing a range, it targets whoever actually runs hot, so it keeps working "
+                 "whatever Blocks to Train is set to.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_limiter_hint.grid(row=38, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # --- Reference distillation (MiniMax only, experimental) ---------------------------
         # No picker: the dataset IS the reference pool, so there is nothing to choose.
         self.minimax_distill_var = tk.BooleanVar(
@@ -3917,9 +3948,9 @@ class LoRATrainerGUI:
         # and crosses PCIe every step for ~4x the runtime, when the same file loaded 4-bit is
         # ~11 GB and needs no swap at all.
         self._minimax_quant_label = ttk.Label(training_content, text="Base Precision:")
-        self._minimax_quant_label.grid(row=37, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_quant_label.grid(row=39, column=0, sticky=tk.W, padx=5, pady=(8, 0))
         self._minimax_quant_frame = ttk.Frame(training_content)
-        self._minimax_quant_frame.grid(row=37, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_quant_frame.grid(row=39, column=1, sticky=tk.W, padx=5, pady=(8, 0))
         self.entries["MINIMAX_BASE_QUANT"] = ttk.Combobox(
             self._minimax_quant_frame, values=list(MINIMAX_BASE_QUANT_OPTIONS), width=30,
             state="readonly")
@@ -3937,7 +3968,7 @@ class LoRATrainerGUI:
                  "for 4-bit when the alternative is most of the model crossing PCIe every step. "
                  "Pin either one and the swap plan is built around your choice.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_quant_hint.grid(row=38, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        self._minimax_quant_hint.grid(row=40, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
@@ -6035,7 +6066,9 @@ class LoRATrainerGUI:
                   self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint,
                   self._minimax_distill_frame, self._minimax_distill_hint,
                   self._minimax_quant_label, self._minimax_quant_frame,
-                  self._minimax_quant_hint):
+                  self._minimax_quant_hint,
+                  self._minimax_limiter_label, self._minimax_limiter_frame,
+                  self._minimax_limiter_hint):
             self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
@@ -22602,6 +22635,9 @@ class LoRATrainerGUI:
         # Base Precision. Always sent, including "auto", so the launched command records which
         # base a run used rather than leaving it implicit — these get A/B'd against each other.
         cmd += ["--base_quant", minimax_base_quant(self.settings.get("MINIMAX_BASE_QUANT"))]
+        _bl = str(self.settings.get("MINIMAX_BLOCK_LIMIT", "Off") or "Off").split(" ")[0]
+        if _bl.replace(".", "", 1).isdigit():
+            cmd += ["--block_limit", _bl]
         # Gradient Checkpointing. The flag used to not be sent at all here, so the checkbox was
         # decorative on this family. Ticked (the default) means AUTO — the planner decides from
         # free VRAM, exactly like Blocks Swap and Base Precision, and in practice that is "on"

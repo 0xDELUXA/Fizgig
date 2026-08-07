@@ -93,6 +93,8 @@ def setup_parser() -> argparse.ArgumentParser:
                         "Pair with --slow_block_lr_scale.")
     p.add_argument("--slow_block_lr_scale", type=float, default=1.0, metavar="X",
                    help="LR multiplier for --slow_blocks (e.g. 0.2 = one fifth). 1.0 disables.")
+    p.add_argument("--block_limit", type=float, default=0.0,
+                   help="Per-block movement limiter: cap any block's total relative movement at N x the median block (1.5 recommended). 0 = off.")
     p.add_argument("--no_train_adaln", dest="train_adaln", action="store_false",
                    help="EXPERIMENT: drop the per-block AdaLN adapters. AdaLN is a function of "
                         "the TIMESTEP only, so it cannot encode identity — yet on the pruned "
@@ -200,6 +202,7 @@ def main():
         train_adaln=args.train_adaln,
         slow_blocks=args.slow_blocks,
         slow_block_lr_scale=args.slow_block_lr_scale,
+        block_limit=args.block_limit,
         quantize=not args.no_quantize,
         shift=args.shift,
         blocks_to_swap=args.blocks_to_swap,

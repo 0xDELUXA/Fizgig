@@ -1662,6 +1662,13 @@ def train_minimax(
                 ema.shadow = [p.detach().clone().float() for p in ema.params]
                 logger.info("[ema] no EMA state in the resume dir — restarting the average "
                             "from the restored weights.")
+        _gov_state = _resume_meta.get("movement_governor")
+        if governor is not None and _gov_state:
+            governor.mult = float(_gov_state.get("mult", 1.0))
+            _sm = _gov_state.get("smooth")
+            governor._smooth = float(_sm) if _sm is not None else None
+            logger.info(f"[governor] restored throttle — effective LR resumes at "
+                        f"{100 * governor.mult:.0f}% of the configured value")
         logger.info(f"[resume] from {resume_state_dir}: continuing at epoch "
                     f"{start_epoch + 1}/{max_train_epochs} (global_step {global_step})")
         if start_epoch >= max_train_epochs:
@@ -1731,7 +1738,14 @@ def train_minimax(
         return md
 
     def _state_extra():
-        return {"adaptive_lr_state": adaptive.state_dict()} if adaptive else None
+        extra = {}
+        if adaptive:
+            extra["adaptive_lr_state"] = adaptive.state_dict()
+        if governor is not None:
+            # Two scalars, JSON-safe. Without them a resume restarts the throttle at 100% and
+            # takes ~5-10 steps to re-clamp — a small over-dose burp on every resume.
+            extra["movement_governor"] = {"mult": governor.mult, "smooth": governor._smooth}
+        return extra or None
 
     # Encoded override prompt, kept between epochs: re-encoding costs a TE load, so only redo it
     # when the prompt text actually changes.

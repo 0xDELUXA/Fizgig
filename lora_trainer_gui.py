@@ -21658,6 +21658,7 @@ class LoRATrainerGUI:
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
             "MINIMAX_BASE_QUANT": self.entries["MINIMAX_BASE_QUANT"].get(),
+            "MINIMAX_BLOCK_LIMIT": self.entries["MINIMAX_BLOCK_LIMIT"].get(),
             "MINIMAX_DISTILL_WEIGHT": str(self.entries["MINIMAX_DISTILL_WEIGHT"].get() or "0.8").strip(),
             "MINIMAX_DISTILL_REFS": str(self.entries["MINIMAX_DISTILL_REFS"].get() or "2").strip(),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),

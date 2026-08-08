@@ -3444,13 +3444,13 @@ class LoRATrainerGUI:
             # family is chosen rather than leaving people to mistrust their own run.
             self._minimax_sample_note = tk.Label(
                 model_card,
-                text=("⏱ MiniMax samples render as short CLIPS by default — MINUTES per sample, "
-                      "not seconds, added at every sample epoch. Everything about this is tuned "
-                      "on the SAMPLES tab: render less often (Generate every N epochs), smaller "
-                      "(Width/Height), shorter (Sample length — 'Still' is the old fast mode), "
-                      "or untick sample generation entirely. Clips scrub in the gallery and "
-                      "sample the video regime the model was trained in; final judgement still "
-                      "belongs in ComfyUI."),
+                text=("⏱ MiniMax samples render as short CLIPS by default — they take longer "
+                      "than stills, and longer clips take longer still. Everything about this "
+                      "is tuned on the SAMPLES tab: render less often (Generate every N "
+                      "epochs), smaller (Width/Height), shorter (Sample length — 'Still' is "
+                      "the old fast mode), or untick sample generation entirely. Clips scrub "
+                      "in the gallery and sample the video regime the model was trained in; "
+                      "final judgement still belongs in ComfyUI."),
                 font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
                 wraplength=760, justify=tk.LEFT,
             )
@@ -9070,10 +9070,11 @@ class LoRATrainerGUI:
         self._sample_frames_hint = tk.Label(prompt_card,
                  text="Clips render every sample as a short video you can SCRUB in the gallery "
                       "(no autoplay) — the regime the model was trained in, so previews finally "
-                      "match ComfyUI. A 124-frame clip takes MINUTES per sample, not seconds: "
-                      "set how often with 'Generate every N epochs' on this tab, and how big "
-                      "with the Width/Height boxes above — both apply to clips. The gallery "
-                      "card, likeness scoring and the Visualiser use the clip's middle frame.",
+                      "match ComfyUI. Clips take longer to render than stills, and longer clips "
+                      "take longer still: set how often with 'Generate every N epochs' on this "
+                      "tab, and how big with the Width/Height boxes above — both apply to "
+                      "clips. The gallery card, likeness scoring and the Visualiser use the "
+                      "clip's middle frame.",
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=560, justify=tk.LEFT)
         self._sample_frames_hint.grid(row=9, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))

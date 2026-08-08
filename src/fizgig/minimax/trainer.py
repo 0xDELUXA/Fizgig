@@ -1859,9 +1859,10 @@ def train_minimax(
                 _frames = 1
             if _frames > 1 and not _clip_state["notice_done"]:
                 _clip_state["notice_done"] = True
-                logger.info(f"[preview] clip mode: {_frames} frames per sample — expect MINUTES "
-                            f"per sample at {_w}x{_h}, not seconds. Cadence is 'Sample every N "
-                            f"epochs' and size is Width/Height, both on the Samples tab.")
+                logger.info(f"[preview] clip mode: {_frames} frames per sample at {_w}x{_h} — "
+                            f"clips take longer than stills, and longer clips take longer "
+                            f"still. Cadence is 'Sample every N epochs' and size is "
+                            f"Width/Height, both on the Samples tab.")
             # PHASE 1 — sample every prompt with the decoder still on CPU. The latents are a
             # few MB each, so parking them on CPU between phases costs nothing; the clip
             # forward gets the whole non-base headroom instead of sharing it with a decoder

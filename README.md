@@ -141,14 +141,13 @@ int8 is the checkpoint's own storage and the most accurate base (~0.17% error); 
 
 **Quality:** H3 LoRAs used to get pose, hair and framing right while staying soft on the face. That's fixed — the fix was the optimizer, and MiniMax now trains with `adamw` rather than `adamw8bit` by default. If you're loading an older preset or your own saved settings, set **Optimizer Type** to `adamw` on the Training tab; it costs about 1.9 GB more VRAM and nothing else.
 
-Two built-in presets ship, the first applied the moment you pick the family:
+One built-in preset ships, applied the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoKR factor 8, dim/alpha 16, 60 epochs, lr 1e-4 with Adaptive LR off, 0.5 MP, 60% low noise + mid-concentrated, `adamw` |
-| **✨ MiniMax H3 Fast** | The same run with Adaptive LR on (2e-4 floor) and 30 epochs — starts around 2.8e-4, so you get a result in roughly half the time |
+| **✨ MiniMax H3 Defaults** | LoKR factor 8, dim/alpha 16, 60 epochs, 0.5 MP, 60% low noise + mid-concentrated, `adamw` — plus the full training-stability stack: **movement governor** (0.22/epoch), **per-block limiter** (1.25× median), **LR warmup** (2 epochs) and **EMA weights** (0.99), with LR 2e-4 as the ceiling the governor spends from |
 
-Use **Defaults** when you're judging a dataset or comparing settings; **Fast** when you want something today. Everything experimental ships off, so Defaults is a clean baseline to compare against.
+The stability stack is what makes MiniMax training clean end-to-end: the governor holds how far the weights actually move each epoch at a measured safe rate (so the Learning Rate box is a ceiling, not a dose — excess becomes headroom), the limiter stops any single block from hogging the learning, warmup eases the first epochs in, and EMA saves a smoothed version of the weights so checkpoints come out crisp. Each has its own dropdown on the Training tab if you want to experiment — turning the governor or limiter off is only recommended for deliberate A/B tests.
 
 **What it needs** — three files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card at the bottom):
 

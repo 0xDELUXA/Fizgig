@@ -757,7 +757,11 @@ MINIMAX_BUILT_IN_PRESETS = {
     "✨ MiniMax H3 Defaults (LoKR 8, 0.5 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
-        "LEARNING_RATE": 1e-4,
+        # 2e-4 is HEADROOM, not a dose: the governor throttles the effective LR to hold the
+        # movement budget, and late in a run (gradients cooling) a 1e-4 ceiling runs out of
+        # authority to keep the rate at target. The bigger ceiling costs nothing early (the
+        # governor spends what the budget allows) and sustains the clean rate longer.
+        "LEARNING_RATE": 2e-4,
         "MAX_TRAIN_EPOCHS": 60, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         # adamw, NOT adamw8bit — the single biggest likeness change measured on H3 (2026-08-06).
@@ -786,49 +790,23 @@ MINIMAX_BUILT_IN_PRESETS = {
         # 1.5) — one extra safety notch for the wide release; the pack median is untouched
         # either way, so tighter costs nothing but clamps the caboose sooner.
         "MINIMAX_BLOCK_LIMIT": "1.25 x median (default)",
-        # High-LR smoothing: the pair that makes the static 1e-4 in this preset trainable.
-        # Warmup keeps full-size Adam strides off the zero-init adapter (the epoch-1 damage);
-        # EMA saves the smoothed center of the stride zigzag instead of a raw corner of it.
+        # High-LR smoothing: warmup keeps full-size Adam strides off the zero-init adapter
+        # (the epoch-1 damage); EMA saves the smoothed center of the stride zigzag instead
+        # of a raw corner of it.
         "MINIMAX_LR_WARMUP": "2 epochs", "MINIMAX_EMA": "0.99 (recommended)",
         # The governor makes the LR box a ceiling: distortion tracks MOVEMENT per epoch
         # (~0.15 clean, ~0.23 visible — measured 8 Aug across LoRA and LoKR runs), and the
         # governor throttles the effective LR to hold that rate whatever the network type.
-        "MINIMAX_GOVERNOR": "0.15 / epoch (standard)",
+        # 0.22 is Peter's speed/quality call after real runs at 0.15 ("worked well but takes
+        # a lot of steps") — just under the visible-damage line, with the raw-metric limiter
+        # holding the tail at <= 1.25x that. Drop to 0.15 for extra margin on a hard dataset.
+        "MINIMAX_GOVERNOR": "0.22 / epoch (default)",
         "MINIMAX_DISTILL": False,
     },
-    # Same run, fewer epochs, LR let off the leash. Adaptive LR IGNORES the Learning Rate box
-    # entirely — the run starts at the GEOMETRIC MIDPOINT of Min/Max, so 2e-4 and 4e-4 start it
-    # at 2.83e-4, nearly 3x the Defaults preset's static 1e-4, and the watcher owns it from
-    # there. That is where the time comes from: 30 epochs instead of 50, at a much higher LR.
-    # LEARNING_RATE is still carried so the box holds something sensible if adaptive is unticked.
-    #
-    # The 2e-4 floor is the same call the Klein Identity presets make, and it is a floor, not a
-    # target: the watcher halves the LR on plateau or instability but never below it, so the run
-    # cannot crawl to a stop the way a 1e-5 floor allows on a long run. Note the dropdown labels
-    # it "2e-4 - rank 4/8 only" — that warning is about LoRA RANK, and this preset trains LoKR,
-    # where dim/alpha do not apply at all. The caveat does not translate; treat this as the fast
-    # option to reach for when you want a result today, and the Defaults preset as the one to
-    # judge a dataset or an A/B on.
-    "✨ MiniMax H3 Fast (LoKR 8, adaptive LR)": {
-        "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
-        "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
-        "LEARNING_RATE": 1e-4,
-        "MAX_TRAIN_EPOCHS": 30, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
-        "ADAPTIVE_LR": True, "ADAPTIVE_LR_MIN": "2e-4", "ADAPTIVE_LR_MAX": "4e-4",
-        "OPTIMIZER_TYPE": "adamw",
-        "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        "DATASET_MEGAPIXELS": "0.5",
-        "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
-        "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
-        "MINIMAX_TRAIN_ADALN": False,
-        "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
-        "MINIMAX_BLOCK_LIMIT": "1.25 x median (default)",
-        # Warmup and the governor are ignored under adaptive (it owns its schedule); EMA still
-        # applies and smooths the higher-LR strides this preset runs at.
-        "MINIMAX_LR_WARMUP": "Off", "MINIMAX_EMA": "0.99 (recommended)",
-        "MINIMAX_GOVERNOR": "Off",
-        "MINIMAX_DISTILL": False,
-    },
+    # The separate "Fast (adaptive LR)" preset was retired 9 Aug: the governor made it
+    # redundant — speed now comes from the movement budget (0.22 vs 0.15), not from letting
+    # adaptive LR off the leash, and one preset with the full protection stack (limiter +
+    # warmup + EMA + governor) is the recipe every real run validated.
 }
 
 # Directory for dataset configurations
@@ -4038,11 +4016,11 @@ class LoRATrainerGUI:
         self._minimax_governor_frame.grid(row=43, column=1, sticky=tk.W, padx=5, pady=(8, 0))
         self.entries["MINIMAX_GOVERNOR"] = ttk.Combobox(
             self._minimax_governor_frame, values=["Off", "0.10 / epoch (gentle)",
-                                                  "0.15 / epoch (standard)",
-                                                  "0.22 / epoch (fast)"],
+                                                  "0.15 / epoch (extra safe)",
+                                                  "0.22 / epoch (default)"],
             width=24, state="readonly")
         self.entries["MINIMAX_GOVERNOR"].set(
-            str(self.settings.get("MINIMAX_GOVERNOR", "0.15 / epoch (standard)")))
+            str(self.settings.get("MINIMAX_GOVERNOR", "0.22 / epoch (default)")))
         self.entries["MINIMAX_GOVERNOR"].pack(side=tk.LEFT)
         self._minimax_governor_hint = ttk.Label(
             training_content,

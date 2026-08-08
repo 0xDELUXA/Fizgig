@@ -3450,7 +3450,9 @@ class LoRATrainerGUI:
                       "epochs), smaller (Width/Height), shorter (Sample length — 'Still' is "
                       "the old fast mode), or untick sample generation entirely. Clips scrub "
                       "in the gallery and sample the video regime the model was trained in; "
-                      "final judgement still belongs in ComfyUI."),
+                      "final judgement still belongs in ComfyUI. 📖 Every MiniMax control on "
+                      "this tab has a full write-up in the README — worth a read before your "
+                      "first run."),
                 font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
                 wraplength=760, justify=tk.LEFT,
             )

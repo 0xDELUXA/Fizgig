@@ -6073,9 +6073,14 @@ class LoRATrainerGUI:
             self._set_widget_visible(w, is_krea2)
         # Network Type (LoRA/LoKR) is wired for BOTH native families (krea2_train and
         # minimax_train take --network_type/--lokr_factor); Klein trains standard only.
-        # The row frame carries the combo + hint together.
+        # The row frame carries the combo + hint together. The speed note is Krea 2-only:
+        # on MiniMax the governor holds both types at the same movement rate, so the ~20%
+        # LoRA speed edge measured on Krea 2 doesn't translate.
         for w in (self.labels["NETWORK_TYPE"], self._network_type_rowf):
             self._set_widget_visible(w, native)
+        self._network_type_hint.config(
+            text="LoKR: higher quality" if is_minimax
+            else "LoKR: higher quality · LoRA: ~20% faster training")
 
         # Detail Focus is the inverse: MiniMax ONLY. Klein and Krea 2 already derive their shift
         # from the sample's token count, so there is nothing to dial there.

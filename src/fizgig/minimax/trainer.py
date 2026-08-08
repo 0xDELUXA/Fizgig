@@ -796,11 +796,19 @@ class BlockLimiter:
 
     @torch.no_grad()
     def step(self):
-        """Project any over-cap block back to cap_factor x median. Cheap: rank-sized matmuls."""
+        """Project any over-cap block back to cap_factor x median. Cheap: rank-sized matmuls.
+
+        The metric is RAW ||dW|| per block — NOT movement relative to the block's base norm.
+        It used to be relative, and a real run showed why that leaks: damage correlates with
+        raw delta (the whole dose-response table is in raw units), late blocks have LARGER
+        base weights, so the relative metric granted the tail extra raw allowance — while
+        the limiter held every block to 1.25x in ITS units, the tail crept to 2.34x median
+        in raw units, over the damage threshold the governor was holding the pack under.
+        All H3 blocks are identical shapes, so raw norms are directly comparable."""
         import statistics as _st
         rel = {}
         for blk, mods in self.groups.items():
-            rel[blk] = sum((self._movement(m) / bn) ** 2 for m, bn in mods) ** 0.5
+            rel[blk] = sum(self._movement(m) for m, _bn in mods)
         if len(rel) < 3:
             return
         med = _st.median(rel.values())
@@ -889,8 +897,20 @@ class MovementGovernor:
 
     def epoch_report(self, steps: int) -> str:
         rate = (self._smooth or 0.0) * steps
+        # Tail visibility: the governor holds the MEDIAN, so a block escaping above it is
+        # the limiter's job — surface the peak/median ratio here so an escaping tail shows
+        # up in the log instead of only in offline checkpoint analysis.
+        try:
+            per_block = {blk: sum(BlockLimiter._movement(m) for m in mods)
+                         for blk, mods in self.groups.items()}
+            import statistics as _st
+            _med = _st.median(per_block.values())
+            _pk_blk, _pk = max(per_block.items(), key=lambda kv: kv[1])
+            tail = f"; hottest block {_pk_blk} at {_pk / _med:.2f}x median" if _med > 0 else ""
+        except Exception:
+            tail = ""
         return (f"[governor] movement rate ~{rate:.3f}/epoch (target {self.budget:g}) — "
-                f"effective LR at {100 * self.mult:.0f}% of the configured value")
+                f"effective LR at {100 * self.mult:.0f}% of the configured value{tail}")
 
 
 class EMAWeights:

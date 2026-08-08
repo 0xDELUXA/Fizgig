@@ -3817,20 +3817,9 @@ class LoRATrainerGUI:
             "<KeyRelease>", lambda _e: self._refresh_minimax_shift_match())
         self._minimax_shift_hint = ttk.Label(
             training_content,
-            text="How much of the run trains on nearly-clean images (noise below the halfway "
-                 "point) instead of heavily noised ones. Low noise is where fine detail and "
-                 "likeness are learned; high noise is where pose, framing and composition are. "
-                 "MiniMax's own default works out at about 8%, because it was tuned for video "
-                 "where one sample carries far more data than a single photo — on stills that "
-                 "leaves almost nothing for detail. For reference, Krea 2 spends about 30%. "
-                 "No cap and no right answer: type whatever you want to try. Higher means more "
-                 "detail training, but each of those steps also lands harder, so if a high value "
-                 "overbakes, drop the Learning Rate before you drop the number. Recorded in the "
-                 "LoRA's metadata and shown on the training queue, so runs stay comparable. "
-                 "'mid-concentrated' changes the SHAPE without changing that percentage: the "
-                 "same share of low-noise steps, but the rest bunched around the middle instead "
-                 "of spread evenly out to both extremes. Krea 2 and Klein both train that way. "
-                 "Worth an A/B — the number alone only controls how much, never where.",
+            text="How much of the run trains on nearly-clean images — where fine detail and "
+                 "likeness are learned. 60% with mid-concentrated ticked is the tuned default. "
+                 "Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_shift_hint.grid(row=27, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         # --- Blocks to Train (MiniMax only, experimental) ---------------------------------
@@ -3856,19 +3845,9 @@ class LoRATrainerGUI:
             "<<ComboboxSelected>>", lambda _e: self._refresh_minimax_blocks_count())
         self._minimax_blocks_hint = ttk.Label(
             training_content,
-            text="EXPERIMENT — no recommended answer yet. H3 is 50 identical blocks and nobody has "
-                 "published what each one does. A block that doesn't carry identity still gets "
-                 "trained on something, and what's left for it to learn is your backgrounds, "
-                 "framing and lighting — so leaving blocks out may give a CLEANER likeness with "
-                 "less memorised set, not just a faster run. The ranges here are scaled from "
-                 "Klein's block map, a different architecture, so they're starting guesses. Train "
-                 "one against a full-model run on the same dataset and judge the pair: if a "
-                 "selection holds up, the blocks you left out weren't needed — whichever end they "
-                 "were. Type your own: ranges and single blocks, comma-separated, like "
-                 "3-12, 14-15, 22, 31-33. Blocks are numbered 0-49. "
-                 "Fewer blocks also means faster steps and a smaller file, and less capacity "
-                 "overall, so give a narrow range a few more epochs before calling it. The range "
-                 "is recorded in the LoRA's metadata as ss_train_blocks.",
+            text="EXPERIMENT — train only a subset of the 50 blocks. Type ranges and single "
+                 "blocks, comma-separated, like 3-12, 22, 31-33 (blocks 0-49). No recommended "
+                 "answer yet. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
@@ -3893,14 +3872,9 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_BLOCK_LIMIT"].pack(side=tk.LEFT)
         self._minimax_limiter_hint = ttk.Label(
             training_content,
-            text="STRONGLY RECOMMENDED ON — a compressor for the blocks. The last trained "
-                 "block always hogs learning (it sits closest to the output, so its gradient "
-                 "is the most coherent) and over-edits fine detail — distorted eyes are the "
-                 "classic symptom. The limiter pulls any block that exceeds N x the median "
-                 "block's movement back to the cap after every step. Unlike turning blocks "
-                 "off or slowing a range, it targets whoever actually runs hot, so it keeps "
-                 "working whatever Blocks to Train is set to. Turn it off only for a "
-                 "deliberate A/B — every quality problem it prevents compounds from epoch 1.",
+            text="STRONGLY RECOMMENDED ON — stops any single block hogging the learning, the "
+                 "classic source of distortion. Turn off only for a deliberate A/B. Full "
+                 "write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_limiter_hint.grid(row=38, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3928,19 +3902,10 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_DISTILL_REFS"].pack(side=tk.LEFT)
         self._minimax_distill_hint = ttk.Label(
             training_content,
-            text="EXPERIMENT — off by default. H3 can already render a person well when it is "
-                 "SHOWN a photo of them; this teaches your LoRA to do the same from the trigger "
-                 "word alone, so you do not need a reference at generation time. Your dataset is "
-                 "used exactly as normal — same folder, same captions, every image still trained "
-                 "on. The difference is what each answer is marked against: normally it is the "
-                 "photograph itself, which is why a LoRA also learns your backgrounds and "
-                 "framing. With this on, most of the marking comes from what the model produces "
-                 "when shown OTHER photos of her from the same folder — identity without the "
-                 "scenery. Every image takes a turn as a reference, and no image is ever its own "
-                 "(the model would just copy the answer). Teacher 0.8 means 80% of that and 20% "
-                 "still the real photo, which keeps genuine skin and texture; 1.0 is pure and "
-                 "caps the LoRA at what reference mode can already do. Needs the ref2va model in "
-                 "Preferences. Caching takes longer and uses more disk.",
+            text="EXPERIMENT — teaches your LoRA to reproduce identity from the trigger word "
+                 "the way H3 does when shown a photo, using your own dataset as the "
+                 "references. Needs the ref2va model in Preferences. Full write-up in the "
+                 "README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_distill_hint.grid(row=36, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3963,13 +3928,8 @@ class LoRATrainerGUI:
         self._minimax_quant_hint = ttk.Label(
             training_content,
             text="Auto reads your FREE VRAM at launch and picks the base precision and block "
-                 "swap together. int8 is the checkpoint's own storage and the most accurate "
-                 "base (~0.17% error) — it needs about 30 GB free to run without block swap. "
-                 "4-bit loads the SAME file at ~11 GB instead of ~21, so it fits smaller cards "
-                 "with no swap, at ~9% error in the frozen base — the LoRA then spends some "
-                 "capacity correcting error that won't exist at inference. Auto only reaches "
-                 "for 4-bit when the alternative is most of the model crossing PCIe every step. "
-                 "Pin either one and the swap plan is built around your choice.",
+                 "swap together — int8 is the most accurate, 4-bit fits smaller cards. Full "
+                 "write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_quant_hint.grid(row=40, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3999,14 +3959,8 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_EMA"].pack(side=tk.LEFT)
         self._minimax_smooth_hint = ttk.Label(
             training_content,
-            text="What makes a high static LR (like 1e-4) trainable. Warmup ramps the LR up "
-                 "over the first epochs, so full-size steps never land on the untrained adapter "
-                 "— that is where the worst distortion comes from. EMA saves (and previews) a "
-                 "smoothed running average of the weights instead of the raw values: big steps "
-                 "zigzag around the good solution, and the average is the center of the zigzag. "
-                 "Training itself always runs on the raw weights, so neither costs speed. "
-                 "Warmup is ignored when Adaptive LR is on (adaptive owns its own schedule); "
-                 "EMA works with both.",
+            text="Warmup eases the first epochs in; EMA saves a smoothed average of the "
+                 "weights. Neither costs speed — leave both on. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_smooth_hint.grid(row=42, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -4029,13 +3983,9 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_GOVERNOR"].pack(side=tk.LEFT)
         self._minimax_governor_hint = ttk.Label(
             training_content,
-            text="The speed limit that makes the Learning Rate box safe. Distortion tracks how "
-                 "far the weights MOVE per epoch, not the LR number — and the same LR moves "
-                 "LoKR ~10x further than LoRA. The governor measures the movement every step "
-                 "and throttles the effective LR to hold the clean rate, so the LR you set is "
-                 "a ceiling, not a dose: set it high and the governor spends the excess as "
-                 "headroom. Works with warmup and EMA; ignored when Adaptive LR is on (that "
-                 "watcher owns the LR).",
+            text="The speed limit that makes the Learning Rate box safe: it holds how far the "
+                 "weights actually move each epoch at the clean rate, so the LR you set is a "
+                 "ceiling, not a dose. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_governor_hint.grid(row=44, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 

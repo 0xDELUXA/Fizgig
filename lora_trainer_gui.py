@@ -754,7 +754,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     # leading. 50% is worth trying: its shift is exactly 1.00, i.e. the plain logit-normal that
     # earlier runs recorded as overdriving adapters — on adamw8bit, before the optimizer was
     # understood.
-    "✨ MiniMax H3 Defaults (LoKR 8, 0.5 MP)": {
+    "✨ MiniMax H3 Defaults (LoKR 8, 0.25 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         # 2e-4 is HEADROOM, not a dose: the governor throttles the effective LR to hold the
@@ -771,7 +771,10 @@ MINIMAX_BUILT_IN_PRESETS = {
         # fine detail. Costs ~1.2 GB of fp32 state against a 21 GB resident base.
         "OPTIMIZER_TYPE": "adamw",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        "DATASET_MEGAPIXELS": "0.5",
+        # 0.25 MP (Peter, 9 Aug): paired with Image Prep's face-crop mode this is the quality
+        # AND speed recipe — the crop puts the identity pixels where 0.25 MP can see them, and
+        # the smaller latents cut step time hugely.
+        "DATASET_MEGAPIXELS": "0.25",
         "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
         # The experiment knobs all ship OFF, so the preset is the plain baseline every A/B is
         # measured against. Each of these was built to be TRIED, not to be on by default:

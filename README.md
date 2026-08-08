@@ -145,7 +145,9 @@ One built-in preset ships, applied the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoKR factor 8, dim/alpha 16, 60 epochs, 0.5 MP, 60% low noise + mid-concentrated, `adamw` — plus the full training-stability stack: **movement governor** (0.22/epoch), **per-block limiter** (1.25× median), **LR warmup** (2 epochs) and **EMA weights** (0.99), with LR 2e-4 as the ceiling the governor spends from |
+| **✨ MiniMax H3 Defaults** | LoKR factor 8, dim/alpha 16, 60 epochs, 0.25 MP, 60% low noise + mid-concentrated, `adamw` — plus the full training-stability stack: **movement governor** (0.22/epoch), **per-block limiter** (1.25× median), **LR warmup** (2 epochs) and **EMA weights** (0.99), with LR 2e-4 as the ceiling the governor spends from |
+
+The 0.25 MP default pairs with **face cropping in Image Prep**: crop your dataset to faces there and the identity pixels land where 0.25 MP can see them — you keep the likeness quality and the smaller latents make every training step much faster. On a ~50-image face-cropped set, expect likeness to arrive around **3,000 steps**.
 
 The stability stack is what makes MiniMax training clean end-to-end: the governor holds how far the weights actually move each epoch at a measured safe rate (so the Learning Rate box is a ceiling, not a dose — excess becomes headroom), the limiter stops any single block from hogging the learning, warmup eases the first epochs in, and EMA saves a smoothed version of the weights so checkpoints come out crisp. Each has its own dropdown on the Training tab if you want to experiment — turning the governor or limiter off is only recommended for deliberate A/B tests.
 

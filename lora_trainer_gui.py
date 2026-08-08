@@ -779,7 +779,11 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
-        "MINIMAX_BLOCK_LIMIT": "Off",
+        # The one experiment that graduated: the limiter ships ON. Validated on a real A/B
+        # (8 Aug) — the last trained block always hogs 2-4x the median block's movement and
+        # over-edits fine detail (distorted eyes); capping it at 1.5x median fixed epoch-1
+        # quality outright with zero cost to the healthy blocks. Leave it on.
+        "MINIMAX_BLOCK_LIMIT": "1.5 x median (recommended)",
         "MINIMAX_DISTILL": False,
     },
     # Same run, fewer epochs, LR let off the leash. Adaptive LR IGNORES the Learning Rate box
@@ -808,7 +812,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
-        "MINIMAX_BLOCK_LIMIT": "Off",
+        "MINIMAX_BLOCK_LIMIT": "1.5 x median (recommended)",
         "MINIMAX_DISTILL": False,
     },
 }
@@ -3887,17 +3891,18 @@ class LoRATrainerGUI:
                                                  "2.0 x median (loose)"],
             width=26, state="readonly")
         self.entries["MINIMAX_BLOCK_LIMIT"].set(
-            str(self.settings.get("MINIMAX_BLOCK_LIMIT", "Off")))
+            str(self.settings.get("MINIMAX_BLOCK_LIMIT", "1.5 x median (recommended)")))
         self.entries["MINIMAX_BLOCK_LIMIT"].pack(side=tk.LEFT)
         self._minimax_limiter_hint = ttk.Label(
             training_content,
-            text="EXPERIMENT — a compressor for the blocks. The last trained block always "
-                 "hogs learning (it sits closest to the output, so its gradient is the most "
-                 "coherent) and over-edits fine detail — distorted eyes are the classic "
-                 "symptom. The limiter pulls any block that exceeds N x the median block's "
-                 "movement back to the cap after every step. Unlike turning blocks off or "
-                 "slowing a range, it targets whoever actually runs hot, so it keeps working "
-                 "whatever Blocks to Train is set to.",
+            text="STRONGLY RECOMMENDED ON — a compressor for the blocks. The last trained "
+                 "block always hogs learning (it sits closest to the output, so its gradient "
+                 "is the most coherent) and over-edits fine detail — distorted eyes are the "
+                 "classic symptom. The limiter pulls any block that exceeds N x the median "
+                 "block's movement back to the cap after every step. Unlike turning blocks "
+                 "off or slowing a range, it targets whoever actually runs hot, so it keeps "
+                 "working whatever Blocks to Train is set to. Turn it off only for a "
+                 "deliberate A/B — every quality problem it prevents compounds from epoch 1.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_limiter_hint.grid(row=38, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 

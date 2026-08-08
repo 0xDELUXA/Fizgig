@@ -858,16 +858,20 @@ class EMAWeights:
 
     @torch.no_grad()
     def swap_in(self):
-        """Put the averaged weights into the live network (for a save or a preview)."""
-        self._backup = [p.detach().clone() for p in self.params]
+        """Put the averaged weights into the live network (for a save or a preview).
+
+        The raw-weight backup lives on CPU: swap_in brackets previews, and a clip preview
+        is exactly when GPU headroom is scarcest — a GPU-resident backup (~0.6 GB at LoKR
+        factor 8) was part of what tipped 32 GB cards back into the Windows VRAM spill."""
+        self._backup = [p.detach().to("cpu", copy=True) for p in self.params]
         for s, p in zip(self.shadow, self.params):
-            p.data.copy_(s.to(p.dtype))
+            p.data.copy_(s.to(p.device, p.dtype))
 
     @torch.no_grad()
     def swap_out(self):
         """Restore the raw training weights. Must always pair with swap_in."""
         for b, p in zip(self._backup, self.params):
-            p.data.copy_(b)
+            p.data.copy_(b.to(p.device, p.dtype))
         self._backup = None
 
     def state_dict(self):
@@ -1683,6 +1687,7 @@ def train_minimax(
         decoder = None
         _base_parked = False        # set in phase 2; the finally MUST restore a parked base
         _opt_parked = []            # set in phase 1; ditto for the parked optimizer state
+        _ema_parked = False         # set in phase 1; ditto for the parked fp32 EMA shadow
         try:
             dit.eval()
             if vae_path:
@@ -1762,12 +1767,20 @@ def train_minimax(
                         if torch.is_tensor(_v) and _v.is_cuda:
                             _st[_k] = _v.to('cpu')
                             _opt_parked.append((_st, _k))
-                if _opt_parked:
+                if ema is not None:
+                    # The fp32 shadow (~1.25 GB at LoKR factor 8) is dead weight during a
+                    # no-grad preview — the EMA weights are already swapped INTO the live
+                    # network. Park it with the optimizer state; next ema.update() is a
+                    # training step away, after the finally restores it.
+                    ema.shadow = [s.to('cpu') for s in ema.shadow]
+                    _ema_parked = True
+                if _opt_parked or _ema_parked:
                     gc.collect()
                     torch.cuda.empty_cache()
                 _free0 = torch.cuda.mem_get_info()[0] / 1e9
                 logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
-                            f'({len(_opt_parked)} optimizer tensors parked)')
+                            f'({len(_opt_parked)} optimizer tensors parked'
+                            f'{", EMA shadow parked" if _ema_parked else ""})')
             _rendered = []
             for i, txt in enumerate(_prompts):
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
@@ -1855,6 +1868,8 @@ def train_minimax(
             del decoder                                  # free the ~4.85 GB decoder immediately
             for _st, _k in _opt_parked:      # exception during phase 1: state must return
                 _st[_k] = _st[_k].to(device)
+            if _ema_parked:                  # next ema.update() needs the shadow on-device
+                ema.shadow = [s.to(device) for s in ema.shadow]
             if _base_parked:
                 # An exception mid-decode left the 21 GB base on CPU — the next training step
                 # would die with "mat2 is on cpu". Restore residency (and the swap split)

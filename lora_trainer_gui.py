@@ -3793,7 +3793,7 @@ class LoRATrainerGUI:
         self._minimax_shift_frame.grid(row=26, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
         self.entries["MINIMAX_LOWNOISE_PCT"] = ttk.Entry(self._minimax_shift_frame, width=8)
         self.entries["MINIMAX_LOWNOISE_PCT"].insert(
-            0, str(self.settings.get("MINIMAX_LOWNOISE_PCT", "22")))
+            0, str(self.settings.get("MINIMAX_LOWNOISE_PCT", "60")))
         self.entries["MINIMAX_LOWNOISE_PCT"].pack(side=tk.LEFT)
         ttk.Label(self._minimax_shift_frame, text="% of steps").pack(side=tk.LEFT, padx=(4, 0))
         # Live readout: the number you type is the thing you care about, but the schedule it
@@ -3803,7 +3803,7 @@ class LoRATrainerGUI:
                                              font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
         self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
         self.minimax_lognorm_var = tk.BooleanVar(
-            value=bool(self.settings.get("MINIMAX_LOGNORM", False)))
+            value=bool(self.settings.get("MINIMAX_LOGNORM", True)))
         ttk.Checkbutton(self._minimax_shift_frame, text="mid-concentrated",
                         variable=self.minimax_lognorm_var,
                         command=lambda: self._refresh_minimax_shift_match()).pack(side=tk.LEFT,
@@ -6126,8 +6126,6 @@ class LoRATrainerGUI:
         # from the sample's token count, so there is nothing to dial there.
         for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint,
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
-                  self._minimax_adaln_cb, self._minimax_adaln_hint,
-                  self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint,
                   self._minimax_distill_frame, self._minimax_distill_hint,
                   self._minimax_quant_label, self._minimax_quant_frame,
                   self._minimax_quant_hint,
@@ -6138,6 +6136,28 @@ class LoRATrainerGUI:
                   self._minimax_governor_label, self._minimax_governor_frame,
                   self._minimax_governor_hint):
             self._set_widget_visible(w, is_minimax)
+        # Retired MiniMax controls (Peter, 9 Aug) — never shown under any family. AdaLN can't
+        # deploy on the pruned builds; depth-split LR was superseded by the limiter + governor.
+        # The command builder locks both regardless of saved settings.
+        for w in (self._minimax_adaln_cb, self._minimax_adaln_hint,
+                  self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint):
+            self._set_widget_visible(w, False)
+        # Adaptive LR is hidden under MiniMax: ticking it silently disabled the governor +
+        # warmup (they defer to it). The var is forced off so the greyed-LR-box state and the
+        # curated launch dict can't carry a stale True into a run.
+        for w in (self._adaptive_cb, self._adaptive_frame, self._adaptive_desc_label):
+            self._set_widget_visible(w, not is_minimax)
+        if is_minimax:
+            if self.adaptive_lr_var.get():
+                self.adaptive_lr_var.set(False)
+                try:
+                    self._on_adaptive_lr_toggle()      # un-grey the Learning Rate box
+                except Exception:
+                    pass
+            # Optimizer locked to adamw (the likeness finding) — hide the dropdown row.
+            self.hide_row("OPTIMIZER_TYPE")
+        else:
+            self.show_row("OPTIMIZER_TYPE")
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
         # rather than show a picker the trainer silently ignores.
@@ -22753,18 +22773,12 @@ class LoRATrainerGUI:
         if self.settings.get("MINIMAX_DISTILL"):
             cmd += ["--distill",
                     "--distill_weight", str(self.settings.get("MINIMAX_DISTILL_WEIGHT", "0.8"))]
-        # AdaLN is ON by default (the reference behaviour), so only the opt-out is ever sent.
-        if not self.settings.get("MINIMAX_TRAIN_ADALN", True):
-            cmd.append("--no_train_adaln")
-        # Depth-split LR: both halves must be present and the multiplier must actually do
-        # something, or the flag pair is noise on the command line.
-        _slow = str(self.settings.get("MINIMAX_SLOW_BLOCKS", "") or "").strip()
-        try:
-            _slow_x = float(self.settings.get("MINIMAX_SLOW_LR_SCALE", 1) or 1)
-        except ValueError:
-            _slow_x = 1.0
-        if _slow and abs(_slow_x - 1.0) > 1e-9:
-            cmd += ["--slow_blocks", _slow, "--slow_block_lr_scale", str(_slow_x)]
+        # AdaLN LOCKED off (Peter, 9 Aug): the pruned builds everyone deploys on cannot load
+        # AdaLN LoRA keys, so training it only wastes capacity. Checkbox hidden; always opt out.
+        cmd.append("--no_train_adaln")
+        # Depth-split LR is RETIRED (Peter, 9 Aug): it was the manual precursor of the limiter
+        # + governor, which target whoever actually runs hot instead of a guessed range. The
+        # controls are hidden and a stale saved range is deliberately not sent.
         # LoKR (Kronecker) — dim/alpha still ride along above but the trainer ignores them;
         # the factor is the dial. Same flags as the Krea 2 builder.
         if str(self.settings.get("NETWORK_TYPE", "")).startswith("LoKR"):
@@ -22829,14 +22843,12 @@ class LoRATrainerGUI:
         resume_path = (self.settings.get("RESUME_TRAINING") or "").strip()
         if resume_path:
             cmd += ["--resume", resume_path]
-        # Adaptive LR — bi-directional plateau tracker (model-agnostic). Min/Max combo values can
-        # carry a trailing note (e.g. "2e-4 - rank 4/8 only"); take the leading token.
-        if self.settings.get("ADAPTIVE_LR"):
-            min_lr = str(self.settings.get("ADAPTIVE_LR_MIN", "1e-5")).split(" ")[0]
-            max_lr = str(self.settings.get("ADAPTIVE_LR_MAX", "4e-4")).split(" ")[0]
-            cmd += ["--adaptive_lr", "--adaptive_lr_min", min_lr, "--adaptive_lr_max", max_lr]
-        # Grad clipping + optimizer (Optimizer section). 1.0 is the trainer default — send only
-        # when the user changed it, keeping the launched command a faithful record otherwise.
+        # Adaptive LR is RETIRED for MiniMax (Peter, 9 Aug): ticking it silently disabled the
+        # governor and warmup (both defer to it), quietly dismantling the stability stack. The
+        # control is hidden under this family and a stale saved ADAPTIVE_LR=True is deliberately
+        # ignored here — the governor owns the schedule.
+        # Grad clipping (Optimizer section). 1.0 is the trainer default — send only when the
+        # user changed it, keeping the launched command a faithful record otherwise.
         _mgn = str(self.settings.get("MAX_GRAD_NORM", "") or "").strip()
         if _mgn:
             try:
@@ -22844,9 +22856,10 @@ class LoRATrainerGUI:
                     cmd += ["--max_grad_norm", str(float(_mgn))]
             except ValueError:
                 pass
-        _opt = str(self.settings.get("OPTIMIZER_TYPE", "") or "").strip()
-        if _opt:
-            cmd += ["--optimizer_type", _opt]
+        # Optimizer LOCKED to adamw (Peter, 9 Aug): full-precision state was the single biggest
+        # likeness change measured on H3 — 8-bit state costs fine detail for 1.9 GB. The dropdown
+        # is hidden under this family; whatever the shared setting holds is overridden here.
+        cmd += ["--optimizer_type", "adamw"]
         _opt_args = str(self.settings.get("OPTIMIZER_ARGS", "") or "").strip()
         if _opt_args:
             cmd += ["--optimizer_args", _opt_args]

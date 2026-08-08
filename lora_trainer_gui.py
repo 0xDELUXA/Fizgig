@@ -781,9 +781,11 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
         # The one experiment that graduated: the limiter ships ON. Validated on a real A/B
         # (8 Aug) — the last trained block always hogs 2-4x the median block's movement and
-        # over-edits fine detail (distorted eyes); capping it at 1.5x median fixed epoch-1
-        # quality outright with zero cost to the healthy blocks. Leave it on.
-        "MINIMAX_BLOCK_LIMIT": "1.5 x median (recommended)",
+        # over-edits fine detail (distorted eyes); capping it fixed epoch-1 quality outright
+        # with zero cost to the healthy blocks. Default is the TIGHT 1.25 notch (validated at
+        # 1.5) — one extra safety notch for the wide release; the pack median is untouched
+        # either way, so tighter costs nothing but clamps the caboose sooner.
+        "MINIMAX_BLOCK_LIMIT": "1.25 x median (default)",
         "MINIMAX_DISTILL": False,
     },
     # Same run, fewer epochs, LR let off the leash. Adaptive LR IGNORES the Learning Rate box
@@ -812,7 +814,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
-        "MINIMAX_BLOCK_LIMIT": "1.5 x median (recommended)",
+        "MINIMAX_BLOCK_LIMIT": "1.25 x median (default)",
         "MINIMAX_DISTILL": False,
     },
 }
@@ -3886,12 +3888,12 @@ class LoRATrainerGUI:
         self._minimax_limiter_frame = ttk.Frame(training_content)
         self._minimax_limiter_frame.grid(row=37, column=1, sticky=tk.W, padx=5, pady=(8, 0))
         self.entries["MINIMAX_BLOCK_LIMIT"] = ttk.Combobox(
-            self._minimax_limiter_frame, values=["Off", "1.25 x median (tight)",
-                                                 "1.5 x median (recommended)",
+            self._minimax_limiter_frame, values=["Off", "1.25 x median (default)",
+                                                 "1.5 x median",
                                                  "2.0 x median (loose)"],
             width=26, state="readonly")
         self.entries["MINIMAX_BLOCK_LIMIT"].set(
-            str(self.settings.get("MINIMAX_BLOCK_LIMIT", "1.5 x median (recommended)")))
+            str(self.settings.get("MINIMAX_BLOCK_LIMIT", "1.25 x median (default)")))
         self.entries["MINIMAX_BLOCK_LIMIT"].pack(side=tk.LEFT)
         self._minimax_limiter_hint = ttk.Label(
             training_content,

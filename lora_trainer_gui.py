@@ -3888,7 +3888,8 @@ class LoRATrainerGUI:
         self._minimax_limiter_frame = ttk.Frame(training_content)
         self._minimax_limiter_frame.grid(row=37, column=1, sticky=tk.W, padx=5, pady=(8, 0))
         self.entries["MINIMAX_BLOCK_LIMIT"] = ttk.Combobox(
-            self._minimax_limiter_frame, values=["Off", "1.25 x median (default)",
+            self._minimax_limiter_frame, values=["Off", "1.1 x median (tightest)",
+                                                 "1.25 x median (default)",
                                                  "1.5 x median",
                                                  "2.0 x median (loose)"],
             width=26, state="readonly")

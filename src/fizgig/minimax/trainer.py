@@ -745,11 +745,15 @@ class AdaptiveLR:
 class BlockLimiter:
     def __init__(self, network, dit, cap_factor: float = 1.5):
         import re as _re
-        from fizgig.networks.lora import _build_dit_linear_map
         self.cap = float(cap_factor)
         self.clamped_total = 0
         self.clamp_counts = {}
-        linear_map = _build_dit_linear_map(dit, None)
+        # Own the module map, by ISINSTANCE — the shared _build_dit_linear_map filters on the
+        # exact class NAME "Linear", which made the int8 base's ConvRotInt8Linear (and bnb's
+        # Linear4bit) invisible: on a real base the limiter watched ZERO blocks and reported
+        # "no block exceeded the cap" while the caboose ran hot. Both are nn.Linear subclasses.
+        linear_map = {"lora_unet_" + n.replace(".", "_"): m
+                      for n, m in dit.named_modules() if isinstance(m, torch.nn.Linear)}
         self.groups = {}          # block id -> [(module, base_norm)]
         for m in getattr(network, "unet_loras", []):
             blk = _re.search(r"blocks_(\d+)_", m.lora_name)

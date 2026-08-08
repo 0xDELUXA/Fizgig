@@ -103,6 +103,11 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Keep an exponential moving average of the adapter and save/preview THAT "
                         "instead of the raw weights (0.99 recommended). Training still runs on "
                         "the raw weights. 0 = off.")
+    p.add_argument("--movement_budget", type=float, default=0.0, metavar="B",
+                   help="Movement governor: throttle the LR so the median block moves ~B per "
+                        "epoch (0.15 = the measured clean rate). Makes the configured LR a "
+                        "ceiling instead of a dose — safe for any network type. 0 = off. "
+                        "Ignored under adaptive LR.")
     p.add_argument("--no_train_adaln", dest="train_adaln", action="store_false",
                    help="EXPERIMENT: drop the per-block AdaLN adapters. AdaLN is a function of "
                         "the TIMESTEP only, so it cannot encode identity — yet on the pruned "
@@ -213,6 +218,7 @@ def main():
         block_limit=args.block_limit,
         lr_warmup_epochs=args.lr_warmup_epochs,
         ema_decay=args.ema_decay,
+        movement_budget=args.movement_budget,
         quantize=not args.no_quantize,
         shift=args.shift,
         blocks_to_swap=args.blocks_to_swap,

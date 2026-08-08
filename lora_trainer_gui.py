@@ -9053,8 +9053,11 @@ class LoRATrainerGUI:
         # Shown/hidden by update_samples_ui_for_architecture.
         self.sample_frames_label = ttk.Label(prompt_card, text="Sample length:")
         self.sample_frames_label.grid(row=8, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        # Default 22 frames (Peter, 9 Aug): a run saves a checkpoint every epoch, so previews
+        # are a heartbeat, not the verdict — ~1s of clip shows likeness arriving at a fraction
+        # of the render cost. 124 (the trained minimum) stays one click away for a full read.
         self.sample_frames_var = tk.StringVar(
-            value=self.last_used.get("sample_frames", "124 frames (~5s — trained minimum)"))
+            value=self.last_used.get("sample_frames", "22 frames (~1s)"))
         self.sample_frames_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_frames_var, state="readonly", width=34,
             values=["Still (1 frame)", "22 frames (~1s)", "56 frames (~2.3s)",

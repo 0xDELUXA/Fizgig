@@ -94,7 +94,15 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--slow_block_lr_scale", type=float, default=1.0, metavar="X",
                    help="LR multiplier for --slow_blocks (e.g. 0.2 = one fifth). 1.0 disables.")
     p.add_argument("--block_limit", type=float, default=0.0,
-                   help="Per-block movement limiter: cap any block's total relative movement at N x the median block (1.5 recommended). 0 = off.")
+                   help="Per-block movement limiter: cap any block's total relative movement at N x the median block (1.25 recommended). 0 = off.")
+    p.add_argument("--lr_warmup_epochs", type=float, default=0.0, metavar="N",
+                   help="Ramp the LR linearly from 0 to the configured rate over the first N "
+                        "epochs (fractions allowed). Static LR only — ignored under adaptive. "
+                        "0 = off.")
+    p.add_argument("--ema_decay", type=float, default=0.0, metavar="D",
+                   help="Keep an exponential moving average of the adapter and save/preview THAT "
+                        "instead of the raw weights (0.99 recommended). Training still runs on "
+                        "the raw weights. 0 = off.")
     p.add_argument("--no_train_adaln", dest="train_adaln", action="store_false",
                    help="EXPERIMENT: drop the per-block AdaLN adapters. AdaLN is a function of "
                         "the TIMESTEP only, so it cannot encode identity — yet on the pruned "
@@ -203,6 +211,8 @@ def main():
         slow_blocks=args.slow_blocks,
         slow_block_lr_scale=args.slow_block_lr_scale,
         block_limit=args.block_limit,
+        lr_warmup_epochs=args.lr_warmup_epochs,
+        ema_decay=args.ema_decay,
         quantize=not args.no_quantize,
         shift=args.shift,
         blocks_to_swap=args.blocks_to_swap,

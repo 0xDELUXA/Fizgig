@@ -786,6 +786,10 @@ MINIMAX_BUILT_IN_PRESETS = {
         # 1.5) — one extra safety notch for the wide release; the pack median is untouched
         # either way, so tighter costs nothing but clamps the caboose sooner.
         "MINIMAX_BLOCK_LIMIT": "1.25 x median (default)",
+        # High-LR smoothing: the pair that makes the static 1e-4 in this preset trainable.
+        # Warmup keeps full-size Adam strides off the zero-init adapter (the epoch-1 damage);
+        # EMA saves the smoothed center of the stride zigzag instead of a raw corner of it.
+        "MINIMAX_LR_WARMUP": "2 epochs", "MINIMAX_EMA": "0.99 (recommended)",
         "MINIMAX_DISTILL": False,
     },
     # Same run, fewer epochs, LR let off the leash. Adaptive LR IGNORES the Learning Rate box
@@ -815,6 +819,9 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_TRAIN_ADALN": False,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
         "MINIMAX_BLOCK_LIMIT": "1.25 x median (default)",
+        # Warmup is ignored under adaptive (it owns its schedule); EMA still applies and smooths
+        # the higher-LR strides this preset runs at.
+        "MINIMAX_LR_WARMUP": "Off", "MINIMAX_EMA": "0.99 (recommended)",
         "MINIMAX_DISTILL": False,
     },
 }
@@ -3978,6 +3985,43 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_quant_hint.grid(row=40, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
+        # --- High-LR smoothing (MiniMax only): warmup + EMA --------------------------------
+        # The two machines that make a high STATIC LR trainable. Damage at e.g. 1e-4 comes from
+        # oversized Adam strides: worst at epoch 1 (zero-init adapters, steepest surface) and
+        # rough thereafter (the weights zigzag around the good solution). Warmup fixes the first,
+        # EMA the second — together they keep the speed of the high LR without its roughness.
+        self._minimax_smooth_label = ttk.Label(training_content, text="High-LR smoothing:")
+        self._minimax_smooth_label.grid(row=41, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_smooth_frame = ttk.Frame(training_content)
+        self._minimax_smooth_frame.grid(row=41, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        ttk.Label(self._minimax_smooth_frame, text="Warmup ").pack(side=tk.LEFT)
+        self.entries["MINIMAX_LR_WARMUP"] = ttk.Combobox(
+            self._minimax_smooth_frame, values=["Off", "1 epoch", "2 epochs", "3 epochs"],
+            width=10, state="readonly")
+        self.entries["MINIMAX_LR_WARMUP"].set(
+            str(self.settings.get("MINIMAX_LR_WARMUP", "2 epochs")))
+        self.entries["MINIMAX_LR_WARMUP"].pack(side=tk.LEFT)
+        ttk.Label(self._minimax_smooth_frame, text="   EMA ").pack(side=tk.LEFT)
+        self.entries["MINIMAX_EMA"] = ttk.Combobox(
+            self._minimax_smooth_frame, values=["Off", "0.98 (light)", "0.99 (recommended)",
+                                                "0.995 (strong)"],
+            width=18, state="readonly")
+        self.entries["MINIMAX_EMA"].set(
+            str(self.settings.get("MINIMAX_EMA", "0.99 (recommended)")))
+        self.entries["MINIMAX_EMA"].pack(side=tk.LEFT)
+        self._minimax_smooth_hint = ttk.Label(
+            training_content,
+            text="What makes a high static LR (like 1e-4) trainable. Warmup ramps the LR up "
+                 "over the first epochs, so full-size steps never land on the untrained adapter "
+                 "— that is where the worst distortion comes from. EMA saves (and previews) a "
+                 "smoothed running average of the weights instead of the raw values: big steps "
+                 "zigzag around the good solution, and the average is the center of the zigzag. "
+                 "Training itself always runs on the raw weights, so neither costs speed. "
+                 "Warmup is ignored when Adaptive LR is on (adaptive owns its own schedule); "
+                 "EMA works with both.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_smooth_hint.grid(row=42, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
         self._minimax_slow_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
@@ -6076,7 +6120,9 @@ class LoRATrainerGUI:
                   self._minimax_quant_label, self._minimax_quant_frame,
                   self._minimax_quant_hint,
                   self._minimax_limiter_label, self._minimax_limiter_frame,
-                  self._minimax_limiter_hint):
+                  self._minimax_limiter_hint,
+                  self._minimax_smooth_label, self._minimax_smooth_frame,
+                  self._minimax_smooth_hint):
             self._set_widget_visible(w, is_minimax)
 
         # Context LoRA is wired for Klein and Krea 2 but NOT MiniMax — hide the whole row there
@@ -21667,6 +21713,8 @@ class LoRATrainerGUI:
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
             "MINIMAX_BASE_QUANT": self.entries["MINIMAX_BASE_QUANT"].get(),
             "MINIMAX_BLOCK_LIMIT": self.entries["MINIMAX_BLOCK_LIMIT"].get(),
+            "MINIMAX_LR_WARMUP": self.entries["MINIMAX_LR_WARMUP"].get(),
+            "MINIMAX_EMA": self.entries["MINIMAX_EMA"].get(),
             "MINIMAX_DISTILL_WEIGHT": str(self.entries["MINIMAX_DISTILL_WEIGHT"].get() or "0.8").strip(),
             "MINIMAX_DISTILL_REFS": str(self.entries["MINIMAX_DISTILL_REFS"].get() or "2").strip(),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
@@ -22647,6 +22695,13 @@ class LoRATrainerGUI:
         _bl = str(self.settings.get("MINIMAX_BLOCK_LIMIT", "Off") or "Off").split(" ")[0]
         if _bl.replace(".", "", 1).isdigit():
             cmd += ["--block_limit", _bl]
+        # High-LR smoothing: warmup ("2 epochs" -> 2) and EMA ("0.99 (recommended)" -> 0.99).
+        _wu = str(self.settings.get("MINIMAX_LR_WARMUP", "Off") or "Off").split(" ")[0]
+        if _wu.replace(".", "", 1).isdigit():
+            cmd += ["--lr_warmup_epochs", _wu]
+        _em = str(self.settings.get("MINIMAX_EMA", "Off") or "Off").split(" ")[0]
+        if _em.replace(".", "", 1).isdigit():
+            cmd += ["--ema_decay", _em]
         # Gradient Checkpointing. The flag used to not be sent at all here, so the checkbox was
         # decorative on this family. Ticked (the default) means AUTO — the planner decides from
         # free VRAM, exactly like Blocks Swap and Base Precision, and in practice that is "on"

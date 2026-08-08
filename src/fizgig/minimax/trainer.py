@@ -828,6 +828,60 @@ class BlockLimiter:
         return msg
 
 
+class EMAWeights:
+    """Exponential moving average of the trainable adapter — the smooth center of a rough
+    trajectory.
+
+    High static LRs take big Adam strides that zigzag around the good solution; the raw
+    weights at any single step are one corner of the zigzag, and that roughness reads as
+    distortion in samples. The EMA is the running average of the path, so what gets SAVED
+    (and previewed) is the center the strides orbit — the standard diffusion-training cure
+    for exactly this. Training itself always runs on the raw weights: swap_in/swap_out
+    bracket saves and previews only.
+
+    Decay ramps in as min(decay, (1+n)/(10+n)) so the first steps track the weights closely
+    instead of anchoring to the zero init. Shadow is fp32 (the adapter is small)."""
+
+    def __init__(self, network, decay: float):
+        self.decay = float(decay)
+        self.n = 0
+        self.params = [p for p in network.parameters() if p.requires_grad]
+        self.shadow = [p.detach().clone().float() for p in self.params]
+        self._backup = None
+
+    @torch.no_grad()
+    def update(self):
+        self.n += 1
+        d = min(self.decay, (1 + self.n) / (10 + self.n))
+        for s, p in zip(self.shadow, self.params):
+            s.mul_(d).add_(p.detach().float(), alpha=1.0 - d)
+
+    @torch.no_grad()
+    def swap_in(self):
+        """Put the averaged weights into the live network (for a save or a preview)."""
+        self._backup = [p.detach().clone() for p in self.params]
+        for s, p in zip(self.shadow, self.params):
+            p.data.copy_(s.to(p.dtype))
+
+    @torch.no_grad()
+    def swap_out(self):
+        """Restore the raw training weights. Must always pair with swap_in."""
+        for b, p in zip(self._backup, self.params):
+            p.data.copy_(b)
+        self._backup = None
+
+    def state_dict(self):
+        return {"n": self.n, "decay": self.decay,
+                "shadow": [s.detach().cpu() for s in self.shadow]}
+
+    def load_state_dict(self, sd):
+        self.n = int(sd["n"])
+        if len(sd["shadow"]) != len(self.shadow):
+            raise ValueError(f"EMA state has {len(sd['shadow'])} tensors, network has "
+                             f"{len(self.shadow)} — different run configuration?")
+        self.shadow = [t.to(s.device, torch.float32) for t, s in zip(sd["shadow"], self.shadow)]
+
+
 # ---------------------------------------------------------------------------
 # Full image-only training loop (NF4 base + LoRA) over the H3 caches.
 # ---------------------------------------------------------------------------
@@ -846,7 +900,7 @@ class _Collator:
 
 
 def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, global_step,
-                         dtype, extra=None):
+                         dtype, extra=None, ema=None):
     """Save a resumable training-state dir matching Klein/Krea 2 naming: <name>-<NNNNNN>-state/.
 
     NNNNNN is the number of COMPLETED epochs (= the next 0-indexed epoch to run). Holds the
@@ -858,7 +912,7 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
     os.makedirs(state_dir, exist_ok=True)
     try:
         return _write_state_files(state_dir, network, optimizer, epoch=epoch,
-                                  global_step=global_step, dtype=dtype, extra=extra)
+                                  global_step=global_step, dtype=dtype, extra=extra, ema=ema)
     except Exception as _first:
         # Clean the partial dir (no training_state.json = no commit marker, but it would shadow
         # the previous good state in the GUI's latest-state scan), then retry ONCE after a short
@@ -874,19 +928,23 @@ def _save_training_state(output_dir, output_name, network, optimizer, *, epoch, 
         try:
             os.makedirs(state_dir, exist_ok=True)
             return _write_state_files(state_dir, network, optimizer, epoch=epoch,
-                                      global_step=global_step, dtype=dtype, extra=extra)
+                                      global_step=global_step, dtype=dtype, extra=extra, ema=ema)
         except Exception:
             shutil.rmtree(state_dir, ignore_errors=True)
             raise
 
 
 def _write_state_files(state_dir, network, optimizer, *, epoch, global_step,
-                       dtype, extra=None):
+                       dtype, extra=None, ema=None):
     import json
     network.save_weights(os.path.join(state_dir, "lora.safetensors"), dtype,
                          {"ss_architecture": ARCHITECTURE_MINIMAX,
                           "ss_network_module": "fizgig.minimax (state dir, native keys)"})
     torch.save(optimizer.state_dict(), os.path.join(state_dir, "optimizer.pt"))
+    if ema is not None:
+        # The RAW weights are what lora.safetensors holds (training resumes from them); the
+        # EMA shadow rides alongside so the average survives pause/resume too.
+        torch.save(ema.state_dict(), os.path.join(state_dir, "ema.pt"))
     rng = {"torch": torch.get_rng_state()}
     if torch.cuda.is_available():
         rng["cuda"] = torch.cuda.get_rng_state_all()
@@ -1063,6 +1121,8 @@ def train_minimax(
     distill_weight: float = 0.8,     # teacher share of the loss; the rest is the real photo
     slow_blocks: str = None,         # block spec trained at a reduced LR ("21-49")
     block_limit: float = 0.0,   # >0 = per-block movement cap at N x the median block (the limiter)
+    lr_warmup_epochs: float = 0.0,  # >0 = linear LR ramp over the first N epochs (static LR only)
+    ema_decay: float = 0.0,     # >0 = save/preview the EMA of the adapter instead of raw weights
     slow_block_lr_scale: float = 1.0,  # the multiplier applied to those blocks' LR
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
@@ -1422,6 +1482,22 @@ def train_minimax(
                     f"block ({len(limiter.groups)} blocks watched) — whichever block runs hot "
                     f"gets pulled back to the pack, wherever the trained range ends.")
 
+    ema = None
+    if ema_decay and float(ema_decay) > 0:
+        ema = EMAWeights(network, float(ema_decay))
+        logger.info(f"[ema] ON at decay {float(ema_decay):g} — checkpoints and previews use the "
+                    f"smoothed average of the training path; training itself runs on the raw "
+                    f"weights. Big-LR strides zigzag; the EMA is the center of the zigzag.")
+
+    # LR warmup: the epoch-1 damage from a high static LR comes from oversized strides landing
+    # on zero-init adapters at the steepest part of the loss surface. A linear ramp over the
+    # first N epochs eases in, then runs at full speed — the cost is a fraction of one epoch's
+    # worth of movement. Adaptive LR owns its own schedule, so warmup only applies without it.
+    if adaptive is not None and lr_warmup_epochs and lr_warmup_epochs > 0:
+        logger.info("[warmup] ignored — Adaptive LR owns the schedule (it already starts at "
+                    "the midpoint and probes from there).")
+        lr_warmup_epochs = 0.0
+
     # Caption dropout (reference default 0.05): swap in the cached empty-prompt embed for a
     # random ~5% of steps. The uncond file is written by minimax_cache_text next to the caches.
     uncond_text = None
@@ -1454,6 +1530,11 @@ def train_minimax(
     except TypeError:
         steps_per_epoch = group.num_train_items
 
+    warmup_steps = int(round(float(lr_warmup_epochs or 0.0) * steps_per_epoch))
+    if warmup_steps > 0:
+        logger.info(f"[warmup] LR ramps linearly over the first {lr_warmup_epochs:g} epoch(s) "
+                    f"= {warmup_steps} steps, then holds at the configured LR.")
+
     os.makedirs(output_dir, exist_ok=True)
     pause_flag = os.path.join(output_dir, ".pause_requested")
 
@@ -1468,6 +1549,17 @@ def train_minimax(
             resume_state_dir, network, optimizer, device=device)
         if adaptive:
             adaptive.load_state_dict(_resume_meta.get("adaptive_lr_state"))
+        if ema is not None:
+            _ema_path = os.path.join(resume_state_dir, "ema.pt")
+            if os.path.isfile(_ema_path):
+                ema.load_state_dict(torch.load(_ema_path, map_location="cpu"))
+                logger.info(f"[ema] restored the running average ({ema.n} updates)")
+            else:
+                # The state predates EMA (or it was off then). Restart the average from the
+                # RESTORED weights — the shadow currently holds the zero init from construction.
+                ema.shadow = [p.detach().clone().float() for p in ema.params]
+                logger.info("[ema] no EMA state in the resume dir — restarting the average "
+                            "from the restored weights.")
         logger.info(f"[resume] from {resume_state_dir}: continuing at epoch "
                     f"{start_epoch + 1}/{max_train_epochs} (global_step {global_step})")
         if start_epoch >= max_train_epochs:
@@ -1476,6 +1568,14 @@ def train_minimax(
             logger.warning(f"[resume] state is at epoch {start_epoch} of {max_train_epochs} — "
                            f"nothing left to train. Writing the final LoRA from the restored "
                            f"state. To train further, raise Max Train Epochs and resume again.")
+
+    if warmup_steps > 0:
+        # Stashed AFTER the resume block: optimizer.load_state_dict replaces the param-group
+        # dicts, so a stash made earlier would not survive a resume. Derived from the CONFIGURED
+        # rate (x the group's depth-split scale), not the group's current lr, which a resumed
+        # mid-ramp state would have left partway up.
+        for _g in optimizer.param_groups:
+            _g["_warmup_base_lr"] = learning_rate * float(_g.get("lr_scale", 1.0))
 
     def _run_provenance():
         """What actually produced this LoRA — the facts you need to compare two of them.
@@ -1507,6 +1607,8 @@ def train_minimax(
             "ss_distill_weight": (f"{distill_weight:g}" if distill else "0"),
             "ss_slow_blocks": _slow_used or "none",
             "ss_block_limit": str(block_limit or 0),
+            "ss_lr_warmup_epochs": f"{lr_warmup_epochs:g}",
+            "ss_ema_decay": f"{ema_decay:g}" if ema is not None else "0",
             "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
             "ss_max_grad_norm": f"{max_grad_norm:g}",
@@ -1807,10 +1909,16 @@ def train_minimax(
             loss.backward()
             if max_grad_norm and max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+            if warmup_steps and global_step < warmup_steps:
+                _wf = (global_step + 1) / warmup_steps      # hits exactly 1.0 on the last step
+                for _g in optimizer.param_groups:
+                    _g["lr"] = _g["_warmup_base_lr"] * _wf
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             if limiter is not None:
                 limiter.step()
+            if ema is not None:
+                ema.update()          # after the limiter, so the shadow tracks clamped weights
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)
@@ -1841,7 +1949,13 @@ def train_minimax(
             adaptive.epoch_boundary(epoch, loss_recorder.moving_average, network, optimizer)
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:
             ckpt = os.path.join(output_dir, f"{output_name}-{epoch + 1:06d}.safetensors")
-            _save_lora(network, ckpt, network_dim, network_alpha, dtype, _meta())
+            if ema is not None:
+                ema.swap_in()
+            try:
+                _save_lora(network, ckpt, network_dim, network_alpha, dtype, _meta())
+            finally:
+                if ema is not None:
+                    ema.swap_out()
             logger.info(f"saved {ckpt}")
             if save_state:
                 # Non-fatal (see the krea2 twin): a failed convenience save must never kill a
@@ -1850,7 +1964,7 @@ def train_minimax(
                 try:
                     _save_training_state(output_dir, output_name, network, optimizer,
                                          epoch=epoch + 1, global_step=global_step,
-                                         dtype=dtype, extra=_state_extra())
+                                         dtype=dtype, extra=_state_extra(), ema=ema)
                     prune_state_dirs(output_dir, output_name, keep_last_n_states)
                 except Exception as _se:
                     logger.error("[state] saving the resume state FAILED (%s: %s) — likely the "
@@ -1860,7 +1974,15 @@ def train_minimax(
                                  type(_se).__name__, _se)
         if do_previews and sample_every_n_epochs and (epoch + 1) % sample_every_n_epochs == 0:
             try:
-                _render_previews(epoch + 1)
+                # Previews render on the EMA weights when EMA is on — a preview must show what
+                # the saved checkpoint will look like, not the raw zigzag the EMA exists to hide.
+                if ema is not None:
+                    ema.swap_in()
+                try:
+                    _render_previews(epoch + 1)
+                finally:
+                    if ema is not None:
+                        ema.swap_out()
             except Exception as _pe:
                 # Latch previews OFF for the rest of the run rather than re-failing (and
                 # re-OOMing) every epoch. Training and checkpoints are never at risk.
@@ -1889,7 +2011,7 @@ def train_minimax(
             try:
                 _save_training_state(output_dir, output_name, network, optimizer,
                                      epoch=epoch + 1, global_step=global_step,
-                                     dtype=dtype, extra=_state_extra())
+                                     dtype=dtype, extra=_state_extra(), ema=ema)
             except Exception as _se:
                 logger.error("[pause] state save FAILED (%s: %s) — there is NO new resume point "
                              "for this pause. Free disk space (RunPod: dashboard quota) and "
@@ -1904,14 +2026,20 @@ def train_minimax(
 
     progress_bar.close()
     final = os.path.join(output_dir, f"{output_name}.safetensors")
-    _save_lora(network, final, network_dim, network_alpha, dtype, _meta())
+    if ema is not None:
+        ema.swap_in()
+    try:
+        _save_lora(network, final, network_dim, network_alpha, dtype, _meta())
+    finally:
+        if ema is not None:
+            ema.swap_out()
     logger.info(f"saved final LoRA: {final}")
     if save_state_on_train_end and max_train_epochs > start_epoch:
         # Non-fatal: the final LoRA is already on disk; dying here would turn a finished run red.
         try:
             _save_training_state(output_dir, output_name, network, optimizer,
                                  epoch=max_train_epochs, global_step=global_step,
-                                 dtype=dtype, extra=_state_extra())
+                                 dtype=dtype, extra=_state_extra(), ema=ema)
             prune_state_dirs(output_dir, output_name, keep_last_n_states)
         except Exception as _se:
             logger.error("[state] end-of-run state save FAILED (%s: %s) — the finished LoRA is "

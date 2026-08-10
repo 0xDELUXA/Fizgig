@@ -793,6 +793,7 @@ class StepClipper:
         self._rate = {}               # block id -> EMA of its per-step movement
         self._clipped_steps = 0
         self._total_steps = 0
+        self._tail = 0.0              # last measured peak/median ACCUMULATED movement
 
     @staticmethod
     def _factors(m):
@@ -800,6 +801,17 @@ class StepClipper:
         if hasattr(m, "lokr_w1"):
             return m.lokr_w1, m.lokr_w2, 1.0        # Fizgig LoKR: alpha 1.0, scale 1.0
         return m.lora_up.weight, m.lora_down.weight, float(m.scale)
+
+    @classmethod
+    def _cum_sq(cls, m) -> float:
+        """||D||_F^2 for one module — its ACCUMULATED delta, not this step's."""
+        a, b, sc = cls._factors(m)
+        a, b = a.float(), b.float()
+        if hasattr(m, "lokr_w1"):
+            n = (a.norm() * b.norm()) ** 2
+        else:
+            n = torch.trace((a.T @ a) @ (b @ b.T)).clamp(min=0)
+        return float(n) * sc * sc
 
     @classmethod
     def _step_delta_sq(cls, m, prev) -> float:
@@ -844,20 +856,36 @@ class StepClipper:
         if med <= 0:
             return                                  # nothing has moved yet
         cap = self.cap * med
+        # ACCUMULATION AWARENESS. Capping strides bounds how fast a block moves but not how far
+        # it has GOT — and a coherent run (which is what gradient accumulation produces) lets
+        # the caboose accumulate imbalance even while every stride is legal: measured at 2.02x
+        # the median block by epoch 2 with strides capped at 1.25x. The old limiter fixed that
+        # by scaling the block's accumulated delta down, which also destroyed what it had
+        # legitimately learned. Instead, a block that is ALREADY ahead simply gets a tighter
+        # step allowance until the pack catches up: no history is ever touched, the block just
+        # stops pulling further away. Squeeze is proportional and floored so it never freezes.
+        cums = {blk: sum(self._cum_sq(m) for m in mods) ** 0.5
+                for blk, mods in self.groups.items()}
+        med_cum = _st.median(cums.values())
+        self._tail = (max(cums.values()) / med_cum) if med_cum > 0 else 0.0
         _fired = False
         for blk, d in moved.items():
+            blk_cap = cap
+            if med_cum > 0 and cums[blk] > self.cap * med_cum:
+                blk_cap = cap * max(0.1, (self.cap * med_cum) / cums[blk])
             # TREND decides whether to act — that is what makes a persistently hot block (the
             # caboose) the target and lets a one-off noisy step from a healthy block through.
             # The TRIM is then applied to this actual step, not to the lagging average: scaling
             # by cap/rate under-corrects badly (a 10x hog only came back to ~5.9x).
-            if self._rate[blk] <= cap or d <= cap:
+            if self._rate[blk] <= blk_cap or d <= blk_cap:
                 continue
-            s = cap / d
+            cap_ = blk_cap
+            s = cap_ / d
             for p, prev in zip(self._params[blk], self._prev[blk]):
                 p.data.lerp_(prev, 1.0 - s)
             # The trend must reflect what actually happened, not the pre-trim step, or it stays
             # inflated and keeps re-triggering on a block that is now behaving.
-            self._rate[blk] -= 0.1 * (d - cap)
+            self._rate[blk] -= 0.1 * (d - cap_)
             self.clamped_total += 1
             self.clamp_counts[blk] = self.clamp_counts.get(blk, 0) + 1
             _fired = True
@@ -871,12 +899,13 @@ class StepClipper:
         # few persistent blocks; if this says most steps, the cap is too tight for the dataset.
         pct = (100.0 * self._clipped_steps / self._total_steps) if self._total_steps else 0.0
         self._clipped_steps = self._total_steps = 0
+        tail = f" · tail {self._tail:.2f}x median" if self._tail else ""
         if not self.clamp_counts:
-            return "[clip] no block ran above the cap this epoch"
+            return f"[clip] no block ran above the cap this epoch{tail}"
         top = sorted(self.clamp_counts.items(), key=lambda kv: -kv[1])[:6]
         n_blocks = len(self.clamp_counts)
         self.clamp_counts = {}
-        return (f"[clip] fired on {pct:.0f}% of steps across {n_blocks} block(s) — "
+        return (f"[clip] fired on {pct:.0f}% of steps across {n_blocks} block(s){tail} — "
                 + ", ".join(f"block {b} x{n}" for b, n in top))
 
 

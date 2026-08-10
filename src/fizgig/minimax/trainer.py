@@ -57,6 +57,24 @@ DEFAULT_INCLUDE_PATTERNS = [r"blocks\.\d+\.attn\..*", r"blocks\.\d+\.mlp\..*",
 PRUNED_INCLUDE_PATTERNS = DEFAULT_INCLUDE_PATTERNS + [r"blocks\.\d+\.adaln_proj\..*"]
 
 
+def clip_fallback_frames(frames: int) -> int:
+    """Next shorter clip length to retry with after a clip preview fails (in practice, OOM).
+
+    Halves the request and snaps down onto the model's 17n+5 grid, so a 141-frame OOM retries
+    at 56, then 22, and only then gives up on clips: 141 -> 56 -> 22 -> 1.
+
+    Stepping down rather than collapsing straight to a still matters because a still is the
+    MOST out-of-distribution render H3 has — ComfyUI cannot even construct one (its video
+    latent floor is 2 frames) and the trained band is ~124-362. Dropping a clip run to stills
+    on one OOM quietly replaces the previews being judged with the least trustworthy kind,
+    for the rest of the run. A shorter clip is still a clip.
+    """
+    half = int(frames) // 2
+    if half < 22:                      # below the first real grid point above a keyframe pair
+        return 1
+    return half - (half - 5) % 17      # largest 17n+5 value <= half
+
+
 def parse_block_spec(spec, num_blocks: int = None):
     """"3-12, 14-15, 22,27,31-33" -> [3,4,...,12,14,15,22,27,31,32,33].
 
@@ -2006,9 +2024,9 @@ def train_minimax(
 
     # Clip previews carry real failure risk a still never had (a 124-frame clip is ~30x the
     # sampling tokens plus a chunked multi-frame decode), and the epoch loop LATCHES previews
-    # off on any preview exception. A clip-specific failure must degrade to the stills that
-    # were working, not take every future preview down with it — so the frame count lives in
-    # mutable state the failure handlers can lower.
+    # off on any preview exception. A clip-specific failure must degrade to a SHORTER clip that
+    # fits, not take every future preview down with it — so the frame count lives in mutable
+    # state the failure handlers can lower.
     _clip_state = {"frames": max(1, int(sample_frames or 1)), "notice_done": False}
 
     def _render_previews(epoch):
@@ -2230,10 +2248,12 @@ def train_minimax(
             _render_previews(0)
         except Exception as _e0:
             if _clip_state["frames"] > 1:
-                _clip_state["frames"] = 1
-                logger.warning(f"[preview] Sample at Start failed in CLIP mode "
-                               f"({type(_e0).__name__}) — later previews will render STILLS. "
-                               f"Training continues.")
+                _was = _clip_state["frames"]
+                _clip_state["frames"] = clip_fallback_frames(_was)
+                logger.warning(
+                    f"[preview] Sample at Start failed in CLIP mode ({type(_e0).__name__}) at "
+                    f"{_was} frames — later previews retry at "
+                    f"{_clip_state['frames']} frame(s). Training continues.")
             else:
                 logger.warning(f"[preview] Sample at Start failed ({type(_e0).__name__}) — training "
                                f"continues; per-epoch previews will still be attempted.")
@@ -2359,14 +2379,15 @@ def train_minimax(
                 _oom = "out of memory" in str(_pe).lower()
                 if _clip_state["frames"] > 1:
                     # The failure arrived in CLIP mode — the mode a still preview never
-                    # exercised. Fall back to the stills that were working rather than ending
+                    # exercised. Step DOWN the frame grid and keep clips rather than ending
                     # every preview for the run; only a failure at stills latches off.
+                    _was = _clip_state["frames"]
+                    _clip_state["frames"] = clip_fallback_frames(_was)
                     logger.warning(
-                        f"[preview] epoch {epoch + 1} CLIP preview failed "
-                        f"({'CUDA OOM' if _oom else type(_pe).__name__}) — falling back to "
-                        f"STILL previews for the rest of the run. Training continues and "
-                        f"LoRAs still save normally.")
-                    _clip_state["frames"] = 1
+                        f"[preview] epoch {epoch + 1} CLIP preview failed at {_was} frames "
+                        f"({'CUDA OOM' if _oom else type(_pe).__name__}) — retrying at "
+                        f"{_clip_state['frames']} frame(s) from the next preview on. Training "
+                        f"continues and LoRAs still save normally.")
                 else:
                     logger.warning(
                         f"[preview] epoch {epoch + 1} preview failed "

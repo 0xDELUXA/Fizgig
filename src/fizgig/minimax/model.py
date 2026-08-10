@@ -470,6 +470,9 @@ class MiniMaxH3DiT(nn.Module):
         self.condition_proj = nn.Linear(c.text_dim, c.hidden_size, bias=True)
         # Full model: a timestep MLP. Pruned: a sampled curve table (see the config field).
         self.pruned_adaln = c.adaln_t_table_size is not None
+        # Set by the loader when it keeps the AdaLN projections fp32 (pruned checkpoints, as
+        # ComfyUI does). The forward then hands them an fp32 t_emb instead of demoting it.
+        self.adaln_fp32 = False
         _silu = not self.pruned_adaln              # the table already absorbs the nonlinearity
         if self.pruned_adaln:
             self.time_embedder = None
@@ -642,7 +645,12 @@ class MiniMaxH3DiT(nn.Module):
                                                              device=device, dtype=torch.float32)))
         t_all = torch.cat(t_parts) if len(t_parts) > 1 else t_val
         uniq, inverse = torch.unique(t_all, sorted=True, return_inverse=True)
-        t_emb = self._time_embedding(uniq).to(dtype)                              # [M, t_dim]
+        # Kept fp32 when the loader kept the AdaLN projections fp32 (ComfyUI's curve-checkpoint
+        # dtype). _mod_scale_shift / _mod_gate cast back to the activation dtype at the point of
+        # use, exactly as the reference does, so only the modulation gains the precision.
+        t_emb = self._time_embedding(uniq)                                        # [M, t_dim]
+        if not self.adaln_fp32:
+            t_emb = t_emb.to(dtype)
         tags = torch.full((seq_len,), VIDEO_TAG, dtype=torch.long, device=device)
         tags[:text_len] = TEXT_TAG
         if text_token_tags is not None:

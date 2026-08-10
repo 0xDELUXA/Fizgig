@@ -1625,8 +1625,11 @@ def train_minimax(
             do_previews = False
 
     # ---- base (NF4-frozen) + trainable LoRA over the transformer blocks ----
+    # adaln_fp32 matches ComfyUI's curve-checkpoint dtype, but only when AdaLN is NOT a LoRA
+    # target — a bf16 adapter cannot take an fp32 activation from the Linear it wraps.
     dit = load_minimax_h3_dit(dit_path, device=device, compute_dtype=dtype, quantize=quantize,
-                              blocks_to_swap=n_swap, base_quant=base_quant)
+                              blocks_to_swap=n_swap, base_quant=base_quant,
+                              adaln_fp32=not train_adaln)
     dit.requires_grad_(False)                                   # frozen base (QLoRA-style)
     if n_swap > 0:
         n_swap = dit.enable_block_swap(n_swap)                  # sets the JIT-move boundary

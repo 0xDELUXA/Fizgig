@@ -398,16 +398,17 @@ ARCHITECTURES = {
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 20,   # the reference pipeline default
-        # 512x512, paired with the 56-frame clip default. The softness that once argued for
+        # 768x768, paired with the 56-frame clip default. The softness that once argued for
         # 1024 was measured on STILLS (10 Aug): a 1 MP-trained adapter looked soft at 512 and
         # 768, sharp at 1024. But a still is the most out-of-distribution render H3 has —
         # ComfyUI cannot even build one (its video latent floor is 2 frames) — so that reading
         # was dominated by the missing temporal axis, not by the pixel size. Once the preview
-        # is a clip the model recognises, 512 holds up (Peter, 10 Aug), and it costs a quarter
-        # of the video rows of 1024, which is what makes a per-epoch clip affordable at all.
+        # is a clip the model recognises the size stops carrying that burden, and 768 is also
+        # H3's own base canvas short edge (ComfyUI's BASE_SHORT_EDGE). At 56 frames it is 9792
+        # video rows against 17408 at 1024, which is what makes a per-epoch clip affordable.
         # Raise both if a preview needs to be judged rather than glanced at.
-        "sample_width_default": 512,
-        "sample_height_default": 512,
+        "sample_width_default": 768,
+        "sample_height_default": 768,
         "lora_name_suffix": "mmh3",
     },
 }
@@ -9021,9 +9022,9 @@ class LoRATrainerGUI:
         self.sample_frames_label.grid(row=8, column=0, sticky=tk.W, padx=(0, 10), pady=4)
         # Default 56 frames (Peter, 10 Aug): the shortest length that reliably renders like
         # ComfyUI does. 22 was too close to the still end to shake off the out-of-distribution
-        # look, and 141 at 1024 OOMs a 32 GB card next to the resident base. 56 at the 512
-        # default is 17408 video rows — a quarter of 141's, and previews are a heartbeat
-        # between per-epoch checkpoints, not the verdict.
+        # look, and 141 at 1024 OOMs a 32 GB card next to the resident base (43008 video rows
+        # against 9792 for 56 at the 768 default). Previews are a heartbeat between per-epoch
+        # checkpoints, not the verdict.
         self.sample_frames_var = tk.StringVar(
             value=self.last_used.get("sample_frames", "56 frames (~2.3s)"))
         self.sample_frames_combo = ttk.Combobox(

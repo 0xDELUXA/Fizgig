@@ -398,17 +398,16 @@ ARCHITECTURES = {
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 20,   # the reference pipeline default
-        # 768x768, paired with the 56-frame clip default. The softness that once argued for
-        # 1024 was measured on STILLS (10 Aug): a 1 MP-trained adapter looked soft at 512 and
-        # 768, sharp at 1024. But a still is the most out-of-distribution render H3 has —
-        # ComfyUI cannot even build one (its video latent floor is 2 frames) — so that reading
-        # was dominated by the missing temporal axis, not by the pixel size. Once the preview
-        # is a clip the model recognises the size stops carrying that burden, and 768 is also
-        # H3's own base canvas short edge (ComfyUI's BASE_SHORT_EDGE). At 56 frames it is 9792
-        # video rows against 17408 at 1024, which is what makes a per-epoch clip affordable.
-        # Raise both if a preview needs to be judged rather than glanced at.
-        "sample_width_default": 768,
-        "sample_height_default": 768,
+        # 640x640, paired with the 56-frame clip default (Peter, 10 Aug). The softness that
+        # once argued for 1024 turned out not to be about pixel size at all: previews were
+        # diverging from ComfyUI on four 16-bit dtype/integration decisions (VAE decode dtype,
+        # audio integration order, the int8 per-row scale, and AdaLN precision — see the
+        # matching commits). With those matched, previews track ComfyUI and the resolution is
+        # free to be chosen for COST rather than for legibility. At 56 frames 640 is 6800 video
+        # rows, against 9792 at 768 and 17408 at 1024 — the cheapest size that still reads
+        # clearly per epoch. Raise it when a preview needs to be judged rather than glanced at.
+        "sample_width_default": 640,
+        "sample_height_default": 640,
         "lora_name_suffix": "mmh3",
     },
 }

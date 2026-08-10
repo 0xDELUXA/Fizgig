@@ -173,6 +173,20 @@ def remap_sigma(sigma, from_shift: float = VIDEO_SIGMA_SHIFT, to_shift: float = 
     return shift_sigma(sigma / (from_shift + sigma * (1.0 - from_shift)), to_shift)
 
 
+def sigma_remap_slope(sigma, from_shift: float = VIDEO_SIGMA_SHIFT,
+                      to_shift: float = AUDIO_SIGMA_SHIFT):
+    """d(sigma_to)/d(sigma_from) at the same base-grid point — comfy's `time_shift_slope`.
+
+    Scaling the audio head's velocity by this puts the audio stream onto the VIDEO sigma grid,
+    which is how the reference lets one sampler drive both streams: comfy packs audio and video
+    into a single latent (NestedTensor) and returns `(-slope)*audio_out`, so res_multistep's
+    second-order update applies to the audio rows too. Integrating the audio separately on its
+    own grid is a first-order scheme for a stream the video attends to at every step."""
+    base = sigma / (from_shift + sigma * (1.0 - from_shift))
+    return ((to_shift * (1.0 + (from_shift - 1.0) * base) ** 2)
+            / (from_shift * (1.0 + (to_shift - 1.0) * base) ** 2))
+
+
 def ref_row_count(refs) -> int:
     """Total packed rows contributed by a list of (latent_h, latent_w) reference images."""
     return sum((rh // 2) * (rw // 2) for rh, rw in (refs or ()))

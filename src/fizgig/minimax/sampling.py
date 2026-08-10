@@ -184,7 +184,7 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
         audio_rows = torch.randn(n_audio, model.config.audio_latents_dim,
                                  generator=gen, dtype=torch.float32).to(device)
 
-    from fizgig.minimax.model import remap_sigma
+    from fizgig.minimax.model import AUDIO_SIGMA_SHIFT, sigma_remap_slope
     # Built once: identical for every step, so it never lands in the hot loop.
     _ref_kw = {}
     if ref_latents:
@@ -198,6 +198,7 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     sigmas = sample_schedule(steps, shift=shift, mode=schedule_mode)
     n_eval = len(sigmas) - 1                            # the terminal 0 is not an evaluation
     prev_denoised = None                                # res_multistep's one-step memory
+    prev_denoised_a = None                              # ...and the audio stream's own
     _last = [None]                                      # per-step wall time for the log
     for i in range(n_eval):
         s_curr, s_next = sigmas[i], sigmas[i + 1]
@@ -219,11 +220,10 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                 out_u, _ = model(x.to(dtype), t, uncond_embeds,
                                  audio_rows=audio_rows, return_audio=True, **_ref_uncond_kw)
                 out = out_u.float() + cfg_scale * (out - out_u.float())
-            # audio Euler step on ITS schedule (shift 3, coupled by the closed-form remap)
-            sa_curr = float(remap_sigma(torch.tensor(float(s_curr))))
-            sa_next = float(remap_sigma(torch.tensor(float(s_next))))
-            audio_rows = audio_rows + (sa_curr - sa_next) * a_out.float()
+            # stepped BELOW, on the video grid, with the same update the video gets
+            a_out = a_out.float()
         else:
+            a_out = None
             out = model(x.to(dtype), t, text_embeds, **_ref_kw).float()
             if use_cfg:
                 out_u = model(x.to(dtype), t, uncond_embeds, **_ref_uncond_kw).float()
@@ -232,11 +232,29 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
         # from sigma to 0). Euler is x + (sigma - sigma_next)*out, identical to comfy's
         # to_d()/dt form; res_multistep reuses the PREVIOUS denoised for a 2nd-order step.
         denoised = x + s_curr * out
-        if sampler == "res_multistep" and prev_denoised is not None and s_next > 0:
+        # The audio stream rides the VIDEO sigma grid via the slope conversion, so the SAME
+        # update drives both — which is what the reference does: comfy packs audio and video
+        # into one latent and returns (-slope)*audio_out, so res_multistep's second-order step
+        # applies to the audio rows as well. Stepping audio separately with plain Euler on its
+        # own grid made it FIRST-order while the video it is coupled to was second-order, and
+        # the two step sizes diverge from 1.3% at the top of the schedule to 24% by step 19.
+        # The video tokens attend to these rows at every step, so their trajectory is part of
+        # the video's conditioning, not a side channel.
+        if a_out is not None:
+            a_scaled = sigma_remap_slope(s_curr, shift, AUDIO_SIGMA_SHIFT) * a_out
+            denoised_a = audio_rows + s_curr * a_scaled
+        _second_order = (sampler == "res_multistep" and prev_denoised is not None and s_next > 0)
+        if _second_order:
             a_x, hb1, hb2 = _res_multistep_coeffs(s_curr, s_next, sigmas[i - 1])
             x = a_x * x + hb1 * denoised + hb2 * prev_denoised
         else:
             x = x + (s_curr - s_next) * out             # Euler (first step, last step, or opt-out)
+        if a_out is not None:
+            if _second_order and prev_denoised_a is not None:
+                audio_rows = a_x * audio_rows + hb1 * denoised_a + hb2 * prev_denoised_a
+            else:
+                audio_rows = audio_rows + (s_curr - s_next) * a_scaled
+            prev_denoised_a = denoised_a
         prev_denoised = denoised
     return x
 

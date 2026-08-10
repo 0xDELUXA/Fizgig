@@ -784,6 +784,15 @@ class StepClipper:
                         for blk, mods in self.groups.items()}
         self._prev = {blk: [p.detach().clone() for p in ps] for blk, ps in self._params.items()}
         self._prev_f = {}             # per-module factor snapshot for the delta measurement
+        # Clip on each block's SMOOTHED step rate, not its instantaneous step. The caboose is a
+        # PERSISTENTLY hot block; a single step landing above the median is just noise, and
+        # per-step movement is far noisier than the cumulative quantity the retired limiter
+        # measured. Reusing 1.25x on the raw per-step value therefore braked whichever blocks
+        # were learning fastest on any given step — measured as a real quality loss that no LR
+        # change touched (halving the LR moved the dose by 8%).
+        self._rate = {}               # block id -> EMA of its per-step movement
+        self._clipped_steps = 0
+        self._total_steps = 0
 
     @staticmethod
     def _factors(m):
@@ -821,33 +830,54 @@ class StepClipper:
 
     @torch.no_grad()
     def step(self):
-        """Clip any block whose STEP exceeded cap x the median block's step."""
+        """Clip blocks whose SMOOTHED movement rate is running above cap x the pack's."""
         import statistics as _st
         if len(self.groups) < 3 or not self._prev_f:
             return
         moved = {blk: sum(self._step_delta_sq(m, self._prev_f[id(m)]) for m in mods) ** 0.5
                  for blk, mods in self.groups.items()}
-        med = _st.median(moved.values())
-        if med <= 0:
-            return                                  # nothing moved this step
-        cap = self.cap * med
         for blk, d in moved.items():
-            if d <= cap:
+            r = self._rate.get(blk)
+            self._rate[blk] = d if r is None else 0.9 * r + 0.1 * d
+        med = _st.median(self._rate.values())
+        self._total_steps += 1
+        if med <= 0:
+            return                                  # nothing has moved yet
+        cap = self.cap * med
+        _fired = False
+        for blk, d in moved.items():
+            # TREND decides whether to act — that is what makes a persistently hot block (the
+            # caboose) the target and lets a one-off noisy step from a healthy block through.
+            # The TRIM is then applied to this actual step, not to the lagging average: scaling
+            # by cap/rate under-corrects badly (a 10x hog only came back to ~5.9x).
+            if self._rate[blk] <= cap or d <= cap:
                 continue
             s = cap / d
-            # Lerp back toward the pre-step weights: p <- s*p + (1-s)*prev.
             for p, prev in zip(self._params[blk], self._prev[blk]):
                 p.data.lerp_(prev, 1.0 - s)
+            # The trend must reflect what actually happened, not the pre-trim step, or it stays
+            # inflated and keeps re-triggering on a block that is now behaving.
+            self._rate[blk] -= 0.1 * (d - cap)
             self.clamped_total += 1
             self.clamp_counts[blk] = self.clamp_counts.get(blk, 0) + 1
+            _fired = True
+        if _fired:
+            self._clipped_steps += 1
 
     def epoch_report(self):
+        # The clip-rate is the number that matters as much as WHICH blocks: a cap that fires on
+        # most steps is braking the whole pack, not trimming a caboose, and that reads from the
+        # outside as "quality is worse" with no distortion to point at. A healthy run trims a
+        # few persistent blocks; if this says most steps, the cap is too tight for the dataset.
+        pct = (100.0 * self._clipped_steps / self._total_steps) if self._total_steps else 0.0
+        self._clipped_steps = self._total_steps = 0
         if not self.clamp_counts:
-            return "[clip] no block exceeded the per-step cap this epoch"
+            return "[clip] no block ran above the cap this epoch"
         top = sorted(self.clamp_counts.items(), key=lambda kv: -kv[1])[:6]
-        msg = "[clip] clipped " + ", ".join(f"block {b} x{n}" for b, n in top)
+        n_blocks = len(self.clamp_counts)
         self.clamp_counts = {}
-        return msg
+        return (f"[clip] fired on {pct:.0f}% of steps across {n_blocks} block(s) — "
+                + ", ".join(f"block {b} x{n}" for b, n in top))
 
 
 class BlockLimiter:

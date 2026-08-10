@@ -3968,6 +3968,34 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_smooth_hint.grid(row=42, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
+        # --- Adapter-relative LR ramp (MiniMax only, EXPERIMENT, default Off) ---------------
+        # From a real run: an adapter at ||dW||~53 took a full 2e-4 for ten epochs with no
+        # distortion and gave the best likeness of the project, while a fresh adapter is
+        # visibly damaged by half that. Same step, 9% perturbation vs 150% — a LoRA starts at
+        # zero, so step/size is worst at step 1 and improves from there. This holds that RATIO
+        # steady, which ramps the LR up toward the box value as the adapter grows.
+        self._minimax_ramp_label = ttk.Label(training_content, text="Adapter-relative LR:")
+        self._minimax_ramp_label.grid(row=45, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_ramp_frame = ttk.Frame(training_content)
+        self._minimax_ramp_frame.grid(row=45, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_ADAPTER_RAMP"] = ttk.Combobox(
+            self._minimax_ramp_frame, values=["Off", "0.003 (slow build)",
+                                              "0.005 (recommended)", "0.01 (fast build)"],
+            width=24, state="readonly")
+        self.entries["MINIMAX_ADAPTER_RAMP"].set(
+            str(self.settings.get("MINIMAX_ADAPTER_RAMP", "Off")))
+        self.entries["MINIMAX_ADAPTER_RAMP"].pack(side=tk.LEFT)
+        self._minimax_ramp_hint = ttk.Label(
+            training_content,
+            text="EXPERIMENT — off by default. Makes the Learning Rate box a CEILING the run "
+                 "climbs toward instead of a rate it starts at. Every step is a huge change to "
+                 "a brand-new adapter and a tiny one to a mature adapter, so a rate that ruins "
+                 "epoch 1 can be perfectly safe by epoch 50 — this keeps the step size a "
+                 "constant fraction of what the adapter already is. Set the LR to where you "
+                 "want to END UP. Full write-up in the README.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_ramp_hint.grid(row=46, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
         self._minimax_slow_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
@@ -6072,6 +6100,7 @@ class LoRATrainerGUI:
                   self._minimax_limiter_hint,
                   self._minimax_smooth_label, self._minimax_smooth_frame,
                   self._minimax_smooth_hint,
+                  self._minimax_ramp_label, self._minimax_ramp_frame, self._minimax_ramp_hint,
                   ):
             self._set_widget_visible(w, is_minimax)
         # Retired MiniMax controls (Peter, 9 Aug) — never shown under any family. AdaLN can't
@@ -21691,6 +21720,7 @@ class LoRATrainerGUI:
             "MINIMAX_BLOCK_LIMIT": self.entries["MINIMAX_BLOCK_LIMIT"].get(),
             "MINIMAX_LR_WARMUP": self.entries["MINIMAX_LR_WARMUP"].get(),
             "MINIMAX_EMA": self.entries["MINIMAX_EMA"].get(),
+            "MINIMAX_ADAPTER_RAMP": self.entries["MINIMAX_ADAPTER_RAMP"].get(),
             "MINIMAX_DISTILL_WEIGHT": str(self.entries["MINIMAX_DISTILL_WEIGHT"].get() or "0.8").strip(),
             "MINIMAX_DISTILL_REFS": str(self.entries["MINIMAX_DISTILL_REFS"].get() or "2").strip(),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
@@ -22686,6 +22716,9 @@ class LoRATrainerGUI:
         _em = str(self.settings.get("MINIMAX_EMA", "Off") or "Off").split(" ")[0]
         if _em.replace(".", "", 1).isdigit():
             cmd += ["--ema_decay", _em]
+        _ar = str(self.settings.get("MINIMAX_ADAPTER_RAMP", "Off") or "Off").split(" ")[0]
+        if _ar.replace(".", "", 1).isdigit():
+            cmd += ["--adapter_ramp", _ar]
         # Gradient Checkpointing. The flag used to not be sent at all here, so the checkbox was
         # decorative on this family. Ticked (the default) means AUTO — the planner decides from
         # free VRAM, exactly like Blocks Swap and Base Precision, and in practice that is "on"

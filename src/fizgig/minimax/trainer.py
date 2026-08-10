@@ -1015,7 +1015,67 @@ class BlockLimiter:
         return msg
 
 
-def should_reassert_lr(*, resuming, adaptive, warmup_steps, global_step) -> bool:
+class AdapterRamp:
+    """Hold each step at a constant FRACTION of the adapter's current size, ramping the LR up
+    toward the configured ceiling as the adapter grows.
+
+    The observation this comes from: an adapter at ||dW|| ~53, trained slowly for 92 epochs,
+    took a full 2e-4 for ten epochs with no distortion at all and produced the best likeness of
+    the project. A fresh adapter at ||dW|| ~3 is visibly damaged by half that. The rate was
+    never the problem — the SAME step is a 9% perturbation of a mature adapter and a 150%
+    perturbation of a new one. A LoRA starts at exactly zero, so the ratio of step size to
+    adapter size is at its worst on step one and improves monotonically from there.
+
+    Which means the conventional schedule is backwards for adapters. Warmup-then-decay is built
+    for models that start from a sensible initialisation; here it is too hot when the adapter is
+    tiny and too cold once the adapter could take it. This ramps the other way.
+
+    Why it needs no calibration, unlike the retired movement governor: the governor servoed on
+    an ABSOLUTE movement rate, which depends on dataset size, network type and model width — it
+    was wrong by 7x on a 272-step epoch. `step / ||dW||` is dimensionless, so one target
+    transfers across datasets, LoRA vs LoKR, and any model size.
+
+    At equilibrium the adapter grows exponentially (d||dW||/dt = rho*||dW||) until the LR hits
+    the ceiling, after which growth returns to linear. rho is therefore best read as a growth
+    rate: 0.005/step doubles the adapter roughly every 140 steps."""
+
+    def __init__(self, network, target_rel: float = 0.005, start_mult: float = 0.1):
+        self.target = float(target_rel)
+        self.mult = float(start_mult)
+        self._smooth = None
+        self._prev = None
+        self.params = [p for p in network.parameters() if p.requires_grad]
+        self._mods = [m for m in getattr(network, "unet_loras", [])]
+
+    @torch.no_grad()
+    def _size(self) -> float:
+        """||dW|| across the whole adapter — model-space, not parameter-space."""
+        return sum(StepClipper._cum_sq(m) for m in self._mods) ** 0.5
+
+    @torch.no_grad()
+    def step(self) -> float:
+        cur = self._size()
+        if self._prev is None or cur <= 1e-9:
+            self._prev = cur
+            return self.mult
+        rel = max(0.0, cur - self._prev) / cur      # this step as a fraction of what exists
+        self._prev = cur
+        self._smooth = rel if self._smooth is None else 0.9 * self._smooth + 0.1 * rel
+        if self._smooth > 1e-12:
+            err = self._smooth / self.target
+            # Same gentle servo shape as the retired governor, but capped at 1.0 so the
+            # configured LR is a genuine ceiling the ramp climbs toward and never exceeds.
+            self.mult = min(1.0, max(0.02, self.mult * min(1.03, max(0.7, err ** -0.3))))
+        return self.mult
+
+    def epoch_report(self) -> str:
+        rel = (self._smooth or 0.0)
+        return (f"[ramp] adapter ||dW||={self._prev or 0:.2f}, growing {100 * rel:.3f}%/step "
+                f"(target {100 * self.target:.3f}%) — LR at {100 * self.mult:.0f}% of the "
+                f"configured ceiling")
+
+
+def should_reassert_lr(*, resuming, adaptive, ramp, warmup_steps, global_step) -> bool:
     """Does anything write param_group['lr'] from here on? If not, a resume must reassert the
     CONFIGURED rate.
 
@@ -1031,8 +1091,10 @@ def should_reassert_lr(*, resuming, adaptive, warmup_steps, global_step) -> bool
         return False
     if adaptive is not None:
         return False        # adaptive owns the LR; its restored mid-flight value is correct
+    if ramp is not None:
+        return False        # the adapter ramp rewrites lr every step
     if warmup_steps and global_step < warmup_steps:
-        return False        # the ramp rewrites lr every step until it ends
+        return False        # the warmup ramp rewrites lr every step until it ends
     return True
 
 
@@ -1333,6 +1395,7 @@ def train_minimax(
     distill_weight: float = 0.8,     # teacher share of the loss; the rest is the real photo
     slow_blocks: str = None,         # block spec trained at a reduced LR ("21-49")
     block_limit: float = 0.0,   # >0 = per-block movement cap at N x the median block (the limiter)
+    adapter_ramp: float = 0.0,  # >0 = hold each step at this FRACTION of the adapter's size
     gradient_accumulation_steps: int = 1,  # batches summed per optimizer step (effective batch)
     lr_warmup_epochs: float = 0.0,  # >0 = linear LR ramp over the first N epochs (static LR only)
     ema_decay: float = 0.0,     # >0 = save/preview the EMA of the adapter instead of raw weights
@@ -1697,6 +1760,18 @@ def train_minimax(
                     f"ends. Only the offending STEP is shortened; nothing already learned is "
                     f"scaled down.")
 
+    ramp = None
+    if adapter_ramp and float(adapter_ramp) > 0:
+        if adaptive is not None:
+            logger.info("[ramp] ignored — Adaptive LR owns the schedule.")
+        else:
+            ramp = AdapterRamp(network, float(adapter_ramp))
+            logger.info(f"[ramp] adapter-relative LR ON — each step held at "
+                        f"{100 * float(adapter_ramp):.3f}% of the adapter's current size, so the "
+                        f"LR starts low and climbs toward your configured ceiling as the adapter "
+                        f"grows. A step is a huge perturbation of a new adapter and a small one "
+                        f"of a mature adapter; this keeps the RATIO steady instead of the rate.")
+
     ema = None
     if ema_decay and float(ema_decay) > 0:
         ema = EMAWeights(network, float(ema_decay))
@@ -1796,7 +1871,7 @@ def train_minimax(
                            f"nothing left to train. Writing the final LoRA from the restored "
                            f"state. To train further, raise Max Train Epochs and resume again.")
 
-    if warmup_steps > 0:
+    if warmup_steps > 0 or ramp is not None:
         # Stashed AFTER the resume block: optimizer.load_state_dict replaces the param-group
         # dicts, so a stash made earlier would not survive a resume. Derived from the CONFIGURED
         # rate (x the group's depth-split scale), not the group's current lr, which a resumed
@@ -1806,7 +1881,7 @@ def train_minimax(
     # WHOEVER OWNS THE LR SETS IT — and when nobody does, the configured value must win.
     # NOT an elif on the block above: warmup CONFIGURED but already FINISHED lands here too,
     # and that was exactly the case the first version of this fix missed.
-    if should_reassert_lr(resuming=bool(resume_state_dir), adaptive=adaptive,
+    if should_reassert_lr(resuming=bool(resume_state_dir), adaptive=adaptive, ramp=ramp,
                           warmup_steps=warmup_steps, global_step=global_step):
         _stale = float(optimizer.param_groups[0].get("lr", learning_rate))
         for _g in optimizer.param_groups:
@@ -1847,6 +1922,7 @@ def train_minimax(
             "ss_slow_blocks": _slow_used or "none",
             "ss_block_limit": str(block_limit or 0),
             "ss_gradient_accumulation": str(_accum_n),
+            "ss_adapter_ramp": f"{adapter_ramp:g}" if ramp is not None else "0",
             "ss_lr_warmup_epochs": f"{lr_warmup_epochs:g}",
             "ss_ema_decay": f"{ema_decay:g}" if ema is not None else "0",
             "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
@@ -2166,16 +2242,22 @@ def train_minimax(
             if (i + 1) % _accum_n == 0 or (i + 1) >= steps_per_epoch:
                 if max_grad_norm and max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
-                if warmup_steps and global_step < warmup_steps:
-                    _wf = (global_step + 1) / warmup_steps
+                if warmup_steps or ramp is not None:
+                    # Warmup and the ramp COMPOSE: warmup covers the first steps (where the
+                    # adapter is near zero and the ramp's ratio is undefined), the ramp takes
+                    # over from there. Either alone is fine; the product is the LR.
+                    _wf = (min(1.0, (global_step + 1) / warmup_steps) if warmup_steps else 1.0)
+                    _rm = ramp.mult if ramp is not None else 1.0
                     for _g in optimizer.param_groups:
-                        _g["lr"] = _g["_warmup_base_lr"] * _wf
+                        _g["lr"] = _g["_warmup_base_lr"] * _wf * _rm
                 if limiter is not None:
                     limiter.pre_step()   # snapshot BEFORE the optimizer moves anything
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 if limiter is not None:
                     limiter.step()
+                if ramp is not None:
+                    ramp.step()          # post-clip weights; sets the multiplier for NEXT step
                 if ema is not None:
                     ema.update()         # after the clip, so the shadow tracks clipped weights
             global_step += 1
@@ -2204,6 +2286,8 @@ def train_minimax(
             pass
         if limiter is not None:
             logger.info(limiter.epoch_report())
+        if ramp is not None:
+            logger.info(ramp.epoch_report())
         if adaptive is not None:
             adaptive.epoch_boundary(epoch, loss_recorder.moving_average, network, optimizer)
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:

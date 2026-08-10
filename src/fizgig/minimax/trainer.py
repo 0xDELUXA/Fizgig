@@ -1862,6 +1862,13 @@ def train_minimax(
                 ema.shadow = [p.detach().clone().float() for p in ema.params]
                 logger.info("[ema] no EMA state in the resume dir — restarting the average "
                             "from the restored weights.")
+        _rs = _resume_meta.get("adapter_ramp")
+        if ramp is not None and _rs:
+            ramp.mult = float(_rs.get("mult", ramp.mult))
+            ramp._smooth = (float(_rs["smooth"]) if _rs.get("smooth") is not None else None)
+            ramp._prev = (float(_rs["prev"]) if _rs.get("prev") is not None else None)
+            logger.info(f"[ramp] restored — LR resumes at {100 * ramp.mult:.0f}% of the "
+                        f"configured ceiling rather than re-climbing from the floor")
         logger.info(f"[resume] from {resume_state_dir}: continuing at epoch "
                     f"{start_epoch + 1}/{max_train_epochs} (global_step {global_step})")
         if start_epoch >= max_train_epochs:
@@ -1944,7 +1951,16 @@ def train_minimax(
         return md
 
     def _state_extra():
-        return {"adaptive_lr_state": adaptive.state_dict()} if adaptive else None
+        extra = {}
+        if adaptive:
+            extra["adaptive_lr_state"] = adaptive.state_dict()
+        if ramp is not None:
+            # Three JSON-safe scalars. Without them a resume restarts the climb at the floor
+            # and spends ~78 steps re-earning a multiplier it had already established — the
+            # same defect the retired governor shipped with, so it does not ship again.
+            extra["adapter_ramp"] = {"mult": ramp.mult, "smooth": ramp._smooth,
+                                     "prev": ramp._prev}
+        return extra or None
 
     # Encoded override prompt, kept between epochs: re-encoding costs a TE load, so only redo it
     # when the prompt text actually changes.

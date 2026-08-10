@@ -872,7 +872,14 @@ class StepClipper:
         for blk, d in moved.items():
             blk_cap = cap
             if med_cum > 0 and cums[blk] > self.cap * med_cum:
-                blk_cap = cap * max(0.1, (self.cap * med_cum) / cums[blk])
+                # SQRT, not the raw ratio, and floored at 0.5. An already-ahead block is
+                # otherwise penalised twice over — once by the per-step cap for being above the
+                # median, again by this squeeze for being ahead — and those are the same late
+                # blocks every time, so the stacked penalty reads as a treble cut. At a 2.41x
+                # tail under a 2.0 cap the raw ratio pulled the effective cap down to 1.66;
+                # softened it is 1.82, so raising the cap actually raises it. Genuine runaways
+                # still get squeezed, just proportionally less hard.
+                blk_cap = cap * max(0.5, ((self.cap * med_cum) / cums[blk]) ** 0.5)
             # TREND decides whether to act — that is what makes a persistently hot block (the
             # caboose) the target and lets a one-off noisy step from a healthy block through.
             # The TRIM is then applied to this actual step, not to the lagging average: scaling

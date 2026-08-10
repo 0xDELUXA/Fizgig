@@ -3861,7 +3861,9 @@ class LoRATrainerGUI:
             self._minimax_limiter_frame, values=["Off", "1.1 x median (tightest)",
                                                  "1.25 x median (default)",
                                                  "1.5 x median",
-                                                 "2.0 x median (loose)"],
+                                                 "2.0 x median (loose)",
+                                                 "2.5 x median",
+                                                 "3.0 x median (safety net only)"],
             width=26, state="readonly")
         self.entries["MINIMAX_BLOCK_LIMIT"].set(
             str(self.settings.get("MINIMAX_BLOCK_LIMIT", "1.25 x median (default)")))

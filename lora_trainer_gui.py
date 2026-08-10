@@ -797,13 +797,6 @@ MINIMAX_BUILT_IN_PRESETS = {
         # (the epoch-1 damage); EMA saves the smoothed center of the stride zigzag instead
         # of a raw corner of it.
         "MINIMAX_LR_WARMUP": "2 epochs", "MINIMAX_EMA": "0.99 (recommended)",
-        # The governor makes the LR box a ceiling: distortion tracks MOVEMENT (~0.15 clean,
-        # ~0.23 visible on the 38-image set the thresholds were measured on), and the governor
-        # throttles the effective LR to hold that rate whatever the network type. The budget is
-        # PER STEP against that reference size, so bigger datasets scale up automatically —
-        # read as literally per-epoch it starved a 272-step run for 84 epochs. 0.22 is Peter's
-        # speed/quality call; drop to 0.15 for extra margin on a hard dataset.
-        "MINIMAX_GOVERNOR": "0.22 (default)",
         "MINIMAX_DISTILL": False,
     },
     # The separate "Fast (adaptive LR)" preset was retired 9 Aug: the governor made it
@@ -3852,12 +3845,15 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
 
-        # --- Per-block limiter (MiniMax only) ----------------------------------------------
+        # --- Per-step movement clip (MiniMax only) -----------------------------------------
         # Whichever block sits LAST in the trained range absorbs 2-4x the median block's
         # movement from epoch 1 (measured across four runs; cutting blocks just moves the hot
-        # spot to the new last block). The limiter caps any block's total movement at N x the
-        # median block, projected back after every step — self-targeting, so it needs no range.
-        self._minimax_limiter_label = ttk.Label(training_content, text="Per-block limiter:")
+        # spot to the new last block). This caps any block's movement WITHIN A SINGLE STEP at
+        # N x the median block's step. The 3.5.0 version capped CUMULATIVE movement instead,
+        # which also scaled down everything the block had legitimately learned — measured as a
+        # real likeness ceiling (on was visibly worse than off, off corrupted). Clipping the
+        # step prevents the overshoot instead of undoing history, so there is nothing to trade.
+        self._minimax_limiter_label = ttk.Label(training_content, text="Per-step movement clip:")
         self._minimax_limiter_label.grid(row=37, column=0, sticky=tk.W, padx=5, pady=(8, 0))
         self._minimax_limiter_frame = ttk.Frame(training_content)
         self._minimax_limiter_frame.grid(row=37, column=1, sticky=tk.W, padx=5, pady=(8, 0))
@@ -3872,9 +3868,9 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_BLOCK_LIMIT"].pack(side=tk.LEFT)
         self._minimax_limiter_hint = ttk.Label(
             training_content,
-            text="STRONGLY RECOMMENDED ON — stops any single block hogging the learning, the "
-                 "classic source of distortion. Turn off only for a deliberate A/B. Full "
-                 "write-up in the README.",
+            text="STRONGLY RECOMMENDED ON — stops any single block overshooting in a step, the "
+                 "classic source of distortion. Only the offending step is shortened, so it "
+                 "costs nothing that was already learned. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_limiter_hint.grid(row=38, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -3963,32 +3959,6 @@ class LoRATrainerGUI:
                  "weights. Neither costs speed — leave both on. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_smooth_hint.grid(row=42, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
-
-        # --- Movement governor (MiniMax only) ----------------------------------------------
-        # The dose-response finding (8 Aug): visible distortion tracks the median block's
-        # MOVEMENT per epoch, not the LR number — ~0.15/epoch clean, ~0.23 visibly distorted,
-        # and the same LR produces 10x the movement on LoKR vs LoRA. The governor measures the
-        # movement live and throttles the effective LR to hold the clean rate.
-        self._minimax_governor_label = ttk.Label(training_content, text="Movement governor:")
-        self._minimax_governor_label.grid(row=43, column=0, sticky=tk.W, padx=5, pady=(8, 0))
-        self._minimax_governor_frame = ttk.Frame(training_content)
-        self._minimax_governor_frame.grid(row=43, column=1, sticky=tk.W, padx=5, pady=(8, 0))
-        self.entries["MINIMAX_GOVERNOR"] = ttk.Combobox(
-            self._minimax_governor_frame, values=["Off", "0.10 (gentle)",
-                                                  "0.15 (extra safe)",
-                                                  "0.22 (default)"],
-            width=24, state="readonly")
-        self.entries["MINIMAX_GOVERNOR"].set(
-            str(self.settings.get("MINIMAX_GOVERNOR", "0.22 (default)")))
-        self.entries["MINIMAX_GOVERNOR"].pack(side=tk.LEFT)
-        self._minimax_governor_hint = ttk.Label(
-            training_content,
-            text="The speed limit that makes the Learning Rate box safe: it holds how far the "
-                 "weights actually move at the clean rate, so the LR you set is a ceiling, not "
-                 "a dose. The budget is per training step, so it scales with your dataset "
-                 "size automatically. Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_governor_hint.grid(row=44, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
@@ -6094,8 +6064,7 @@ class LoRATrainerGUI:
                   self._minimax_limiter_hint,
                   self._minimax_smooth_label, self._minimax_smooth_frame,
                   self._minimax_smooth_hint,
-                  self._minimax_governor_label, self._minimax_governor_frame,
-                  self._minimax_governor_hint):
+                  ):
             self._set_widget_visible(w, is_minimax)
         # Retired MiniMax controls (Peter, 9 Aug) — never shown under any family. AdaLN can't
         # deploy on the pruned builds; depth-split LR was superseded by the limiter + governor.
@@ -21714,7 +21683,6 @@ class LoRATrainerGUI:
             "MINIMAX_BLOCK_LIMIT": self.entries["MINIMAX_BLOCK_LIMIT"].get(),
             "MINIMAX_LR_WARMUP": self.entries["MINIMAX_LR_WARMUP"].get(),
             "MINIMAX_EMA": self.entries["MINIMAX_EMA"].get(),
-            "MINIMAX_GOVERNOR": self.entries["MINIMAX_GOVERNOR"].get(),
             "MINIMAX_DISTILL_WEIGHT": str(self.entries["MINIMAX_DISTILL_WEIGHT"].get() or "0.8").strip(),
             "MINIMAX_DISTILL_REFS": str(self.entries["MINIMAX_DISTILL_REFS"].get() or "2").strip(),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
@@ -22702,9 +22670,6 @@ class LoRATrainerGUI:
         _em = str(self.settings.get("MINIMAX_EMA", "Off") or "Off").split(" ")[0]
         if _em.replace(".", "", 1).isdigit():
             cmd += ["--ema_decay", _em]
-        _gv = str(self.settings.get("MINIMAX_GOVERNOR", "Off") or "Off").split(" ")[0]
-        if _gv.replace(".", "", 1).isdigit():
-            cmd += ["--movement_budget", _gv]
         # Gradient Checkpointing. The flag used to not be sent at all here, so the checkbox was
         # decorative on this family. Ticked (the default) means AUTO — the planner decides from
         # free VRAM, exactly like Blocks Swap and Base Precision, and in practice that is "on"

@@ -742,7 +742,120 @@ class AdaptiveLR:
 # the cap by scaling its up-factors. Blocks move freely until one hogs; then only that one
 # is pulled back, wherever the trained range ends.
 # ---------------------------------------------------------------------------
+class StepClipper:
+    """Cap how far any block may move in a SINGLE optimizer step.
+
+    Replaces the cumulative BlockLimiter that shipped in 3.5.0. That one clamped a block's
+    TOTAL accumulated movement back to cap x median, which necessarily scaled down everything
+    the block had legitimately learned in earlier epochs along with the overshoot — measured on
+    real runs as a genuine likeness ceiling: limiter ON was visibly worse than OFF, while OFF
+    corrupted. Clipping the STEP prevents the overshoot instead of undoing the history, so
+    there is no quality to trade for the safety.
+
+    Being per-step also removes the calibration problem that sank the movement governor: a
+    per-epoch budget has to be scaled by dataset size, and got it wrong by 7x on a 272-step
+    epoch, starving a run for 84 epochs. A step is a step on any dataset.
+
+    Measured in MODEL space — the change this step in each block's effective delta, summed in
+    quadrature across the block's modules — and cheap, because every term is a rank-sized
+    product via <kron(a,b), kron(c,d)> = <a,c><b,d> and <UV, XY> = tr(U^T X Y V^T). A full
+    weight matrix is never materialised. Over-cap blocks are lerped back toward their pre-step
+    weights, which is exact to first order in the step size (the delta is bilinear in the
+    factors, so the second-order term is negligible at real step sizes).
+
+    Self-calibrating: the cap is a multiple of the MEDIAN block's step, so it needs no absolute
+    threshold and targets whichever block is actually running hot — the caboose, wherever the
+    trained range happens to end.
+    """
+
+    def __init__(self, network, cap_factor: float = 1.25):
+        import re as _re
+        self.cap = float(cap_factor)
+        self.clamped_total = 0
+        self.clamp_counts = {}
+        self.groups = {}              # block id -> [module]
+        for m in getattr(network, "unet_loras", []):
+            blk = _re.search(r"blocks_(\d+)_", m.lora_name)
+            if blk is None or "token_refiner" in m.lora_name:
+                continue              # text-side refiner is not part of the depth argument
+            self.groups.setdefault(int(blk.group(1)), []).append(m)
+        # Pre-step parameter snapshot, allocated ONCE and copied into each step.
+        self._params = {blk: [p for m in mods for p in m.parameters() if p.requires_grad]
+                        for blk, mods in self.groups.items()}
+        self._prev = {blk: [p.detach().clone() for p in ps] for blk, ps in self._params.items()}
+        self._prev_f = {}             # per-module factor snapshot for the delta measurement
+
+    @staticmethod
+    def _factors(m):
+        """(a, b, scale) such that the module's delta is scale * a (x) b, for whichever form."""
+        if hasattr(m, "lokr_w1"):
+            return m.lokr_w1, m.lokr_w2, 1.0        # Fizgig LoKR: alpha 1.0, scale 1.0
+        return m.lora_up.weight, m.lora_down.weight, float(m.scale)
+
+    @classmethod
+    def _step_delta_sq(cls, m, prev) -> float:
+        """||D_post - D_pre||_F^2 for one module, without materialising D."""
+        a1, b1, sc = cls._factors(m)
+        a0, b0 = prev
+        a1, b1, a0, b0 = a1.float(), b1.float(), a0.float(), b0.float()
+        if hasattr(m, "lokr_w1"):
+            # <kron(a,b), kron(c,d)> = <a,c><b,d>
+            n1 = (a1.norm() * b1.norm()) ** 2
+            n0 = (a0.norm() * b0.norm()) ** 2
+            cross = (a1 * a0).sum() * (b1 * b0).sum()
+        else:
+            # <U1 V1, U0 V0> = tr(U1^T U0 V0 V1^T); ||UV||^2 = tr((U^T U)(V V^T))
+            n1 = torch.trace((a1.T @ a1) @ (b1 @ b1.T))
+            n0 = torch.trace((a0.T @ a0) @ (b0 @ b0.T))
+            cross = torch.trace((a1.T @ a0) @ (b0 @ b1.T))
+        return float((n1 + n0 - 2 * cross).clamp(min=0)) * sc * sc
+
+    @torch.no_grad()
+    def pre_step(self):
+        """Snapshot the weights the optimizer is about to move. Call BEFORE optimizer.step()."""
+        for blk, ps in self._params.items():
+            for dst, p in zip(self._prev[blk], ps):
+                dst.copy_(p.detach())
+        self._prev_f = {id(m): tuple(t.detach().clone() for t in self._factors(m)[:2])
+                        for mods in self.groups.values() for m in mods}
+
+    @torch.no_grad()
+    def step(self):
+        """Clip any block whose STEP exceeded cap x the median block's step."""
+        import statistics as _st
+        if len(self.groups) < 3 or not self._prev_f:
+            return
+        moved = {blk: sum(self._step_delta_sq(m, self._prev_f[id(m)]) for m in mods) ** 0.5
+                 for blk, mods in self.groups.items()}
+        med = _st.median(moved.values())
+        if med <= 0:
+            return                                  # nothing moved this step
+        cap = self.cap * med
+        for blk, d in moved.items():
+            if d <= cap:
+                continue
+            s = cap / d
+            # Lerp back toward the pre-step weights: p <- s*p + (1-s)*prev.
+            for p, prev in zip(self._params[blk], self._prev[blk]):
+                p.data.lerp_(prev, 1.0 - s)
+            self.clamped_total += 1
+            self.clamp_counts[blk] = self.clamp_counts.get(blk, 0) + 1
+
+    def epoch_report(self):
+        if not self.clamp_counts:
+            return "[clip] no block exceeded the per-step cap this epoch"
+        top = sorted(self.clamp_counts.items(), key=lambda kv: -kv[1])[:6]
+        msg = "[clip] clipped " + ", ".join(f"block {b} x{n}" for b, n in top)
+        self.clamp_counts = {}
+        return msg
+
+
 class BlockLimiter:
+    """RETIRED (10 Aug) — kept only because the offline analysis scripts import _movement.
+
+    Superseded by StepClipper: clamping CUMULATIVE movement also scaled down legitimately
+    learned history, which measurably capped likeness. Do not wire this into the loop."""
+
     def __init__(self, network, dit, cap_factor: float = 1.5):
         import re as _re
         self.cap = float(cap_factor)
@@ -836,108 +949,15 @@ class BlockLimiter:
         return msg
 
 
-class MovementGovernor:
-    """Hold the adapter's MOVEMENT RATE at a clean target by throttling the effective LR.
-
-    The finding behind this (8 Aug, measured across six real runs, LoRA and LoKR): visible
-    distortion tracks the median block's ||dW|| ADDED PER STEP, not the LR number. On the
-    38-image dataset every threshold was measured on, ~0.0045/step was clean and ~0.006/step
-    visibly distorted; the same 1e-4 was 0.015/step on LoRA and ~4x that on LoKR (7x the
-    zero-init params -> bigger delta per Adam stride). LR is a request; movement is the dose.
-    The governor measures the dose every step and scales the LR so the run cruises at the
-    target — put any LR in the box and excess becomes headroom, for every network type,
-    optimizer and dataset size, with no calibration.
-
-    Mechanics: per step, median across blocks of cumulative raw ||dW|| (all H3 blocks are
-    identical shapes, so raw norms are comparable — no base-norm division needed); the
-    EMA-smoothed per-step increment is servo'd onto budget/_REFERENCE_STEPS_PER_EPOCH through
-    a gentle exponent so the multiplier converges without oscillating. Note the REFERENCE, not
-    this run's steps_per_epoch: that is what makes the same budget mean the same dose on any
-    dataset size (see below). Returns the multiplier; the trainer composes it with the warmup
-    factor. Runs on the post-limiter weights."""
-
-    # The budget is calibrated PER STEP, not per epoch. Distortion comes from individual
-    # oversized strides, so the step is the unit the damage mechanism lives in; "per epoch" only
-    # looked equivalent because the thresholds were all measured on ONE dataset — 38 images, so
-    # 38 steps per epoch. Read literally as per-epoch, the same number delivers 7x less movement
-    # per step on a 272-step dataset: measured on a real run, 0.22/epoch there was 0.0008/step
-    # against the 0.0045/step that was clean on the 38-image set, and it crawled for 84 epochs
-    # while the governor behaved exactly as designed. Normalising against the reference size
-    # keeps every label meaning what it measured, and scales bigger datasets up automatically.
-    _REFERENCE_STEPS_PER_EPOCH = 38
-
-    def __init__(self, network, budget_per_epoch: float, steps_per_epoch: int):
-        import re as _re
-        self.budget = float(budget_per_epoch)
-        self.steps_per_epoch = max(1, int(steps_per_epoch))
-        self.per_step_target = self.budget / self._REFERENCE_STEPS_PER_EPOCH
-        # What this works out to over one pass of THIS dataset — the number to compare against
-        # the per-epoch rates in the logs.
-        self.effective_budget = self.per_step_target * self.steps_per_epoch
-        self.mult = 1.0
-        self._smooth = None          # EMA of the per-step movement increment
-        self.groups = {}
-        for m in getattr(network, "unet_loras", []):
-            blk = _re.search(r"blocks_(\d+)_", m.lora_name)
-            if blk is None or "token_refiner" in m.lora_name:
-                continue
-            self.groups.setdefault(int(blk.group(1)), []).append(m)
-        # Baseline primes LAZILY on the first step() — construction happens before a resume
-        # restores weights, and priming at 0 there would make the first step read the whole
-        # restored cumulative movement as one increment and crash the multiplier to the floor.
-        self._last_med = None
-
-    @torch.no_grad()
-    def _median(self) -> float:
-        import statistics as _st
-        return _st.median(sum(BlockLimiter._movement(m) for m in mods)
-                          for mods in self.groups.values())
-
-    @torch.no_grad()
-    def step(self) -> float:
-        if len(self.groups) < 3:
-            return 1.0
-        med = self._median()
-        if self._last_med is None:
-            self._last_med = med
-            return self.mult
-        inc = max(0.0, med - self._last_med)
-        self._last_med = med
-        self._smooth = inc if self._smooth is None else 0.9 * self._smooth + 0.1 * inc
-        if self._smooth > 1e-12:
-            # err > 1 = moving too fast. The 0.3 exponent makes the servo gentle; the step
-            # clamp keeps any single correction small; the floor keeps training alive even
-            # when the box LR is wildly hot (2% of a huge LR still trains).
-            err = self._smooth / self.per_step_target
-            self.mult = min(1.0, max(0.02, self.mult * min(1.03, max(0.7, err ** -0.3))))
-        return self.mult
-
-    def epoch_report(self, steps: int) -> str:
-        rate = (self._smooth or 0.0) * steps
-        # Tail visibility: the governor holds the MEDIAN, so a block escaping above it is
-        # the limiter's job — surface the peak/median ratio here so an escaping tail shows
-        # up in the log instead of only in offline checkpoint analysis.
-        try:
-            per_block = {blk: sum(BlockLimiter._movement(m) for m in mods)
-                         for blk, mods in self.groups.items()}
-            import statistics as _st
-            _med = _st.median(per_block.values())
-            _pk_blk, _pk = max(per_block.items(), key=lambda kv: kv[1])
-            tail = f"; hottest block {_pk_blk} at {_pk / _med:.2f}x median" if _med > 0 else ""
-        except Exception:
-            tail = ""
-        return (f"[governor] movement rate ~{rate:.3f}/epoch (target {self.effective_budget:.2f}) "
-                f"— effective LR at {100 * self.mult:.0f}% of the configured value{tail}")
-
-
-def should_reassert_lr(*, resuming, adaptive, governor, warmup_steps, global_step) -> bool:
+def should_reassert_lr(*, resuming, adaptive, warmup_steps, global_step) -> bool:
     """Does anything write param_group['lr'] from here on? If not, a resume must reassert the
     CONFIGURED rate.
 
     torch's optimizer.load_state_dict restores the saved param_groups INCLUDING lr, and the
-    step loop only writes lr while warmup is still ramping or the governor is live. Resuming a
-    governed run with the governor off therefore inherited that state's last throttled rate and
-    kept it for the whole run (measured on a real run: 3.28e-5 against a configured 2e-4).
+    step loop only writes lr while warmup is still ramping. A state written while something
+    WAS modulating the LR (the retired movement governor throttled it) therefore handed its
+    last throttled rate to a run that no longer modulates anything, and kept it for the whole
+    run — measured on a real run as 3.28e-5 against a configured 2e-4.
 
     The subtle case, and the one the first version of this fix got wrong: warmup CONFIGURED but
     already FINISHED. warmup_steps > 0 is not the question — `global_step < warmup_steps` is."""
@@ -945,8 +965,6 @@ def should_reassert_lr(*, resuming, adaptive, governor, warmup_steps, global_ste
         return False
     if adaptive is not None:
         return False        # adaptive owns the LR; its restored mid-flight value is correct
-    if governor is not None:
-        return False        # the governor rewrites lr every step
     if warmup_steps and global_step < warmup_steps:
         return False        # the ramp rewrites lr every step until it ends
     return True
@@ -1251,7 +1269,6 @@ def train_minimax(
     block_limit: float = 0.0,   # >0 = per-block movement cap at N x the median block (the limiter)
     lr_warmup_epochs: float = 0.0,  # >0 = linear LR ramp over the first N epochs (static LR only)
     ema_decay: float = 0.0,     # >0 = save/preview the EMA of the adapter instead of raw weights
-    movement_budget: float = 0.0,  # >0 = hold median-block movement at N/epoch by throttling LR
     slow_block_lr_scale: float = 1.0,  # the multiplier applied to those blocks' LR
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
@@ -1606,10 +1623,12 @@ def train_minimax(
 
     limiter = None
     if block_limit and float(block_limit) > 0:
-        limiter = BlockLimiter(network, dit, float(block_limit))
-        logger.info(f"[limiter] per-block movement cap ON at {float(block_limit):g}x the median "
-                    f"block ({len(limiter.groups)} blocks watched) — whichever block runs hot "
-                    f"gets pulled back to the pack, wherever the trained range ends.")
+        limiter = StepClipper(network, float(block_limit))
+        logger.info(f"[clip] per-step movement cap ON at {float(block_limit):g}x the median "
+                    f"block ({len(limiter.groups)} blocks watched) — whichever block overshoots "
+                    f"in a single step gets pulled back to the pack, wherever the trained range "
+                    f"ends. Only the offending STEP is shortened; nothing already learned is "
+                    f"scaled down.")
 
     ema = None
     if ema_decay and float(ema_decay) > 0:
@@ -1626,10 +1645,6 @@ def train_minimax(
         logger.info("[warmup] ignored — Adaptive LR owns the schedule (it already starts at "
                     "the midpoint and probes from there).")
         lr_warmup_epochs = 0.0
-    if adaptive is not None and movement_budget and movement_budget > 0:
-        logger.info("[governor] ignored — Adaptive LR owns the schedule; the two throttles "
-                    "would fight over the same dial.")
-        movement_budget = 0.0
 
     # Caption dropout (reference default 0.05): swap in the cached empty-prompt embed for a
     # random ~5% of steps. The uncond file is written by minimax_cache_text next to the caches.
@@ -1668,16 +1683,6 @@ def train_minimax(
         logger.info(f"[warmup] LR ramps linearly over the first {lr_warmup_epochs:g} epoch(s) "
                     f"= {warmup_steps} steps, then holds at the configured LR.")
 
-    governor = None
-    if movement_budget and float(movement_budget) > 0:
-        governor = MovementGovernor(network, float(movement_budget), steps_per_epoch)
-        logger.info(f"[governor] ON at {float(movement_budget):g} — the budget is per STEP "
-                    f"(calibrated on a {MovementGovernor._REFERENCE_STEPS_PER_EPOCH}-step "
-                    f"epoch), so on your {steps_per_epoch}-step epoch it works out at "
-                    f"~{governor.effective_budget:.2f} movement per epoch "
-                    f"({len(governor.groups)} blocks measured). The configured LR is a ceiling; "
-                    f"the governor throttles it to hold that rate, whatever the network type.")
-
     os.makedirs(output_dir, exist_ok=True)
     pause_flag = os.path.join(output_dir, ".pause_requested")
 
@@ -1703,13 +1708,6 @@ def train_minimax(
                 ema.shadow = [p.detach().clone().float() for p in ema.params]
                 logger.info("[ema] no EMA state in the resume dir — restarting the average "
                             "from the restored weights.")
-        _gov_state = _resume_meta.get("movement_governor")
-        if governor is not None and _gov_state:
-            governor.mult = float(_gov_state.get("mult", 1.0))
-            _sm = _gov_state.get("smooth")
-            governor._smooth = float(_sm) if _sm is not None else None
-            logger.info(f"[governor] restored throttle — effective LR resumes at "
-                        f"{100 * governor.mult:.0f}% of the configured value")
         logger.info(f"[resume] from {resume_state_dir}: continuing at epoch "
                     f"{start_epoch + 1}/{max_train_epochs} (global_step {global_step})")
         if start_epoch >= max_train_epochs:
@@ -1719,7 +1717,7 @@ def train_minimax(
                            f"nothing left to train. Writing the final LoRA from the restored "
                            f"state. To train further, raise Max Train Epochs and resume again.")
 
-    if warmup_steps > 0 or governor is not None:
+    if warmup_steps > 0:
         # Stashed AFTER the resume block: optimizer.load_state_dict replaces the param-group
         # dicts, so a stash made earlier would not survive a resume. Derived from the CONFIGURED
         # rate (x the group's depth-split scale), not the group's current lr, which a resumed
@@ -1729,7 +1727,7 @@ def train_minimax(
     # WHOEVER OWNS THE LR SETS IT — and when nobody does, the configured value must win.
     # NOT an elif on the block above: warmup CONFIGURED but already FINISHED lands here too,
     # and that was exactly the case the first version of this fix missed.
-    if should_reassert_lr(resuming=bool(resume_state_dir), adaptive=adaptive, governor=governor,
+    if should_reassert_lr(resuming=bool(resume_state_dir), adaptive=adaptive,
                           warmup_steps=warmup_steps, global_step=global_step):
         _stale = float(optimizer.param_groups[0].get("lr", learning_rate))
         for _g in optimizer.param_groups:
@@ -1771,7 +1769,6 @@ def train_minimax(
             "ss_block_limit": str(block_limit or 0),
             "ss_lr_warmup_epochs": f"{lr_warmup_epochs:g}",
             "ss_ema_decay": f"{ema_decay:g}" if ema is not None else "0",
-            "ss_movement_budget": f"{movement_budget:g}" if governor is not None else "0",
             "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
             "ss_max_grad_norm": f"{max_grad_norm:g}",
@@ -1791,14 +1788,7 @@ def train_minimax(
         return md
 
     def _state_extra():
-        extra = {}
-        if adaptive:
-            extra["adaptive_lr_state"] = adaptive.state_dict()
-        if governor is not None:
-            # Two scalars, JSON-safe. Without them a resume restarts the throttle at 100% and
-            # takes ~5-10 steps to re-clamp — a small over-dose burp on every resume.
-            extra["movement_governor"] = {"mult": governor.mult, "smooth": governor._smooth}
-        return extra or None
+        return {"adaptive_lr_state": adaptive.state_dict()} if adaptive else None
 
     # Encoded override prompt, kept between epochs: re-encoding costs a TE load, so only redo it
     # when the prompt text actually changes.
@@ -2091,19 +2081,18 @@ def train_minimax(
             loss.backward()
             if max_grad_norm and max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
-            if (warmup_steps and global_step < warmup_steps) or governor is not None:
-                _wf = (min(1.0, (global_step + 1) / warmup_steps) if warmup_steps else 1.0)
-                _gm = governor.mult if governor is not None else 1.0
+            if warmup_steps and global_step < warmup_steps:
+                _wf = (global_step + 1) / warmup_steps
                 for _g in optimizer.param_groups:
-                    _g["lr"] = _g["_warmup_base_lr"] * _wf * _gm
+                    _g["lr"] = _g["_warmup_base_lr"] * _wf
+            if limiter is not None:
+                limiter.pre_step()    # snapshot BEFORE the optimizer moves anything
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             if limiter is not None:
                 limiter.step()
-            if governor is not None:
-                governor.step()       # post-limiter weights; updates the mult for the NEXT step
             if ema is not None:
-                ema.update()          # after the limiter, so the shadow tracks clamped weights
+                ema.update()          # after the clip, so the shadow tracks clipped weights
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)
@@ -2130,8 +2119,6 @@ def train_minimax(
             pass
         if limiter is not None:
             logger.info(limiter.epoch_report())
-        if governor is not None:
-            logger.info(governor.epoch_report(steps_per_epoch))
         if adaptive is not None:
             adaptive.epoch_boundary(epoch, loss_recorder.moving_average, network, optimizer)
         if save_every_n_epochs and (epoch + 1) % save_every_n_epochs == 0 and (epoch + 1) < max_train_epochs:

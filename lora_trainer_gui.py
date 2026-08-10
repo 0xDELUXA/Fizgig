@@ -426,7 +426,7 @@ LORA_NAME_SUFFIXES = {c["lora_name_suffix"] for c in ARCHITECTURES.values()
 # override stopped at 1024, so a run previewing at 1280+ could not be reproduced by the override,
 # which silently downgraded it. Nothing downstream caps the value (Krea 2 rounds up to alignment,
 # Klein floors to a multiple of 16), so the ceiling was purely this list.
-SAMPLE_RESOLUTIONS = ["512", "768", "1024", "1280", "1536"]
+SAMPLE_RESOLUTIONS = ["512", "640", "768", "1024", "1280", "1536"]
 
 # Fizgig installation directory (where this GUI lives)
 FIZGIG_DIR = os.path.dirname(os.path.abspath(__file__))

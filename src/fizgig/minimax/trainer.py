@@ -2055,12 +2055,21 @@ def train_minimax(
                 decoder = MiniMaxH3VideoVAEDecoder()
                 with _safe_open(vae_path, framework="pt", device="cpu") as _f:
                     decoder.load_state_dict({k: _f.get_tensor(k) for k in _f.keys()}, strict=False)
-                # bf16, NOT fp32: 2.4 B params is 4.8 GB vs 9.7 GB. And it stays on CPU until
-                # the DECODE phase: previews used to put it on the GPU before sampling even
-                # started, which cost the sampling forward 4.85 GB of headroom it never used —
-                # harmless for a 256-token still, an OOM for a 124-frame clip whose forward is
-                # ~30x the tokens (real 32 GB-card failure, 8 Aug).
-                decoder = decoder.to(dtype).eval()
+                # FP16, not the training dtype and not fp32. ComfyUI allows this VAE exactly
+                # [float16, float32] (sd.py:951) where its class default and every neighbouring
+                # video VAE also list bfloat16 — bf16 was singled out and removed for this
+                # decoder. The weights ship fp16 (minimax_h3_video_vae_fp16.safetensors), so
+                # casting to bf16 threw away 3 mantissa bits at load, and 36 pre-norm residual
+                # blocks feed a proj_out that emits 3072 pixel values per token: the error lands
+                # straight on pixels as softness and gradient banding, with nothing downstream to
+                # smooth it. fp16 costs the same 4.8 GB as bf16 (fp32 would be 9.7), so this is
+                # free. Overflow is covered by the same nan_to_num guard ComfyUI relies on
+                # (vae.py, attention output) — fp16 is the regime that guard was written for.
+                # It also stays on CPU until the DECODE phase: previews used to put it on the GPU
+                # before sampling even started, which cost the sampling forward 4.85 GB of
+                # headroom it never used — harmless for a 256-token still, an OOM for a 124-frame
+                # clip whose forward is ~30x the tokens (real 32 GB-card failure, 8 Aug).
+                decoder = decoder.to(torch.float16).eval()
             # Live override from the GUI, re-read every epoch so it can be turned on, changed or
             # switched off mid-run without touching the paused/resume path.
             _prompts, _w, _h = encoded_prompts, sample_width, sample_height

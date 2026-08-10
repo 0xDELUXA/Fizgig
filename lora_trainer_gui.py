@@ -398,13 +398,17 @@ ARCHITECTURES = {
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 20,   # the reference pipeline default
-        # 512x512, NOT the 768 canvas convention: preview cost scales with tokens, and a
-        # 124-frame CLIP at 768^2 is ~2.25x the rows of 512^2 — measured on a 32 GB card,
-        # that is the difference between fitting with headroom and spilling to system RAM at
-        # 3-6x the step time (8 Aug). 768 stays one dropdown click away for final-quality
-        # checks; the real 768-canvas judgement belongs in ComfyUI anyway.
-        "sample_width_default": 512,
-        "sample_height_default": 512,
+        # 1024x1024. A LoRA is resolution-SPECIFIC in a way the base model is not: it learns its
+        # deltas at the training latent's token count and RoPE positions, so previewing well
+        # below that applies it out of distribution and it renders soft — measured 10 Aug, a
+        # 1 MP-trained adapter was soft at 512 AND at 768, sharp at 1024, while the base model
+        # looked fine at 512 throughout. The old 512 default was chosen for clip-preview cost
+        # back when training was 0.25 MP and the two happened to match; once training moved up
+        # it silently became a preview that could not show what had been made, and cost a day
+        # of chasing quality that was never missing. Previews are dearer here — that is the
+        # price of an honest one.
+        "sample_width_default": 1024,
+        "sample_height_default": 1024,
         "lora_name_suffix": "mmh3",
     },
 }
@@ -754,7 +758,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     # leading. 50% is worth trying: its shift is exactly 1.00, i.e. the plain logit-normal that
     # earlier runs recorded as overdriving adapters — on adamw8bit, before the optimizer was
     # understood.
-    "✨ MiniMax H3 Defaults (LoKR 8, 0.25 MP)": {
+    "✨ MiniMax H3 Defaults (LoKR 8, 1 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
         # 2e-4 is HEADROOM, not a dose: the governor throttles the effective LR to hold the
@@ -771,10 +775,12 @@ MINIMAX_BUILT_IN_PRESETS = {
         # fine detail. Costs ~1.2 GB of fp32 state against a 21 GB resident base.
         "OPTIMIZER_TYPE": "adamw",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        # 0.25 MP (Peter, 9 Aug): paired with Image Prep's face-crop mode this is the quality
-        # AND speed recipe — the crop puts the identity pixels where 0.25 MP can see them, and
-        # the smaller latents cut step time hugely.
-        "DATASET_MEGAPIXELS": "0.25",
+        # 1.0 MP (Peter, 10 Aug). H3's own canvas is 768 short edge, so 0.25 MP (496px) trains
+        # the model BELOW the distribution it was built for — the same out-of-distribution
+        # class as single-frame previews on a video model. 0.25 is still right for a tightly
+        # face-cropped set, where the crop puts the identity pixels where a small latent can
+        # see them, but as a default it silently starved every wider-framed dataset.
+        "DATASET_MEGAPIXELS": "1.0",
         "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
         # The experiment knobs all ship OFF, so the preset is the plain baseline every A/B is
         # measured against. Each of these was built to be TRIED, not to be on by default:

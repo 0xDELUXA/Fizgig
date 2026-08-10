@@ -145,9 +145,11 @@ One built-in preset ships, applied the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoKR factor 8, dim/alpha 16, 60 epochs, 0.25 MP, 60% low noise + mid-concentrated, `adamw`, LR 2e-4 — plus the training-stability stack: **per-step movement clip** (1.25× median), **LR warmup** (2 epochs) and **EMA weights** (0.99) |
+| **✨ MiniMax H3 Defaults** | LoKR factor 8, dim/alpha 16, 60 epochs, **1 MP**, 60% low noise + mid-concentrated, `adamw`, LR 2e-4 — plus the training-stability stack: **per-step movement clip** (1.25× median), **LR warmup** (2 epochs) and **EMA weights** (0.99) |
 
-The 0.25 MP default pairs with **face cropping in Image Prep**: crop your dataset to faces there and the identity pixels land where 0.25 MP can see them — you keep the likeness quality and the smaller latents make every training step much faster. On a ~50-image face-cropped set, expect likeness to arrive around **3,000 steps**.
+**Train at 1 MP unless your images are tightly cropped.** H3's own canvas is 768 on the short edge, so training much below that puts the model outside the distribution it was built for and the results come out soft no matter what else you change. 0.25 MP is still the right call for a **face-cropped** set — the crop puts the identity pixels where a small latent can see them, and the smaller latents make every step much faster — but for anything wider-framed it quietly starves the detail.
+
+**And preview at your training resolution.** A LoRA is resolution-specific in a way the base model isn't: it learns its deltas at the training latent's size, so rendering samples well below that applies it outside its own distribution and it looks soft even when it's fine. The MiniMax sample default is 1024×1024 for that reason. If you train at a much higher or lower resolution, move the sample Width/Height on the Samples tab to match — otherwise the preview can't show you what you've actually made.
 
 The stability stack is what makes MiniMax training clean end-to-end: the per-step clip stops any single block overshooting in a step (the cause of distorted eyes and worse), warmup eases the first epochs in, and EMA saves a smoothed version of the weights so checkpoints come out crisp. Each has its own dropdown on the Training tab if you want to experiment — turning the clip off is only recommended for a deliberate A/B.
 

@@ -794,20 +794,23 @@ MINIMAX_BUILT_IN_PRESETS = {
         # The one experiment that graduated: the limiter ships ON. Validated on a real A/B
         # (8 Aug) — the last trained block always hogs 2-4x the median block's movement and
         # over-edits fine detail (distorted eyes); capping it fixed epoch-1 quality outright
-        # with zero cost to the healthy blocks. Default is the TIGHT 1.25 notch (validated at
-        # 1.5) — one extra safety notch for the wide release; the pack median is untouched
-        # either way, so tighter costs nothing but clamps the caboose sooner.
-        "MINIMAX_BLOCK_LIMIT": "1.25 x median (default)",
-        # High-LR smoothing: warmup keeps full-size Adam strides off the zero-init adapter
-        # (the epoch-1 damage); EMA saves the smoothed center of the stride zigzag instead
-        # of a raw corner of it.
-        "MINIMAX_LR_WARMUP": "2 epochs", "MINIMAX_EMA": "0.99 (recommended)",
+        # Per-step clip and LR warmup are RETIRED (Peter, 10 Aug) and hidden — both were
+        # after-the-fact answers to epoch-1 overshoot, which the Adapter-relative LR ramp
+        # removes at its root by holding the step/size ratio steady. Kept as keys so old
+        # presets and saved configs still load; the command builder never emits them.
+        "MINIMAX_BLOCK_LIMIT": "Off",
+        "MINIMAX_LR_WARMUP": "Off",
+        # EMA stays available but OFF by default: it saves the smoothed centre of the stride
+        # zigzag instead of a raw corner of it, which is worth having when a run is pushed hard
+        # and unnecessary when it is not.
+        "MINIMAX_EMA": "Off",
         "MINIMAX_DISTILL": False,
     },
-    # The separate "Fast (adaptive LR)" preset was retired 9 Aug: the governor made it
-    # redundant — speed now comes from the movement budget (0.22 vs 0.15), not from letting
-    # adaptive LR off the leash, and one preset with the full protection stack (limiter +
-    # warmup + EMA + governor) is the recipe every real run validated.
+    # The separate "Fast (adaptive LR)" preset was retired 9 Aug: one preset carrying the
+    # validated recipe beats two that drift apart. What that recipe IS has since changed —
+    # the governor, the per-step clip and LR warmup were all retired in turn as the
+    # Adapter-relative LR ramp replaced the whole after-the-fact protection stack with one
+    # dial that holds the step/size ratio steady.
 }
 
 # Directory for dataset configurations
@@ -3871,7 +3874,7 @@ class LoRATrainerGUI:
                                                  "3.0 x median (safety net only)"],
             width=26, state="readonly")
         self.entries["MINIMAX_BLOCK_LIMIT"].set(
-            str(self.settings.get("MINIMAX_BLOCK_LIMIT", "1.25 x median (default)")))
+            str(self.settings.get("MINIMAX_BLOCK_LIMIT", "Off")))
         self.entries["MINIMAX_BLOCK_LIMIT"].pack(side=tk.LEFT)
         self._minimax_limiter_hint = ttk.Label(
             training_content,
@@ -3936,34 +3939,34 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_quant_hint.grid(row=40, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
-        # --- High-LR smoothing (MiniMax only): warmup + EMA --------------------------------
-        # The two machines that make a high STATIC LR trainable. Damage at e.g. 1e-4 comes from
-        # oversized Adam strides: worst at epoch 1 (zero-init adapters, steepest surface) and
-        # rough thereafter (the weights zigzag around the good solution). Warmup fixes the first,
-        # EMA the second — together they keep the speed of the high LR without its roughness.
-        self._minimax_smooth_label = ttk.Label(training_content, text="High-LR smoothing:")
+        # --- Weight averaging (MiniMax only): EMA ------------------------------------------
+        # Damage at a high static LR comes from oversized Adam strides: worst at epoch 1
+        # (zero-init adapters, steepest surface) and rough thereafter (the weights zigzag around
+        # the good solution). EMA addresses the second by saving a smoothed average.
+        #
+        # WARMUP is retired (Peter, 10 Aug): the Adapter-relative LR ramp is the better answer to
+        # the epoch-1 problem — it holds the step/size RATIO steady instead of guessing an epoch
+        # count, so it eases in by construction and keeps doing so. The widget is kept (the
+        # launch dict and presets still carry the key) but is never packed and is forced Off.
+        self._minimax_smooth_label = ttk.Label(training_content, text="Weight averaging (EMA):")
         self._minimax_smooth_label.grid(row=41, column=0, sticky=tk.W, padx=5, pady=(8, 0))
         self._minimax_smooth_frame = ttk.Frame(training_content)
         self._minimax_smooth_frame.grid(row=41, column=1, sticky=tk.W, padx=5, pady=(8, 0))
-        ttk.Label(self._minimax_smooth_frame, text="Warmup ").pack(side=tk.LEFT)
-        self.entries["MINIMAX_LR_WARMUP"] = ttk.Combobox(
+        self.entries["MINIMAX_LR_WARMUP"] = ttk.Combobox(     # retired — never packed
             self._minimax_smooth_frame, values=["Off", "1 epoch", "2 epochs", "3 epochs"],
             width=10, state="readonly")
-        self.entries["MINIMAX_LR_WARMUP"].set(
-            str(self.settings.get("MINIMAX_LR_WARMUP", "2 epochs")))
-        self.entries["MINIMAX_LR_WARMUP"].pack(side=tk.LEFT)
-        ttk.Label(self._minimax_smooth_frame, text="   EMA ").pack(side=tk.LEFT)
+        self.entries["MINIMAX_LR_WARMUP"].set("Off")
         self.entries["MINIMAX_EMA"] = ttk.Combobox(
             self._minimax_smooth_frame, values=["Off", "0.98 (light)", "0.99 (recommended)",
                                                 "0.995 (strong)"],
             width=18, state="readonly")
-        self.entries["MINIMAX_EMA"].set(
-            str(self.settings.get("MINIMAX_EMA", "0.99 (recommended)")))
+        self.entries["MINIMAX_EMA"].set(str(self.settings.get("MINIMAX_EMA", "Off")))
         self.entries["MINIMAX_EMA"].pack(side=tk.LEFT)
         self._minimax_smooth_hint = ttk.Label(
             training_content,
-            text="Warmup eases the first epochs in; EMA saves a smoothed average of the "
-                 "weights. Neither costs speed — leave both on. Full write-up in the README.",
+            text="Saves a smoothed average of the weights alongside the raw ones, so a "
+                 "checkpoint is the centre of the zigzag rather than wherever the last step "
+                 "landed. Costs no speed. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_smooth_hint.grid(row=42, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -6095,19 +6098,26 @@ class LoRATrainerGUI:
                   self._minimax_distill_frame, self._minimax_distill_hint,
                   self._minimax_quant_label, self._minimax_quant_frame,
                   self._minimax_quant_hint,
-                  self._minimax_limiter_label, self._minimax_limiter_frame,
-                  self._minimax_limiter_hint,
                   self._minimax_smooth_label, self._minimax_smooth_frame,
                   self._minimax_smooth_hint,
                   self._minimax_ramp_label, self._minimax_ramp_frame, self._minimax_ramp_hint,
                   ):
             self._set_widget_visible(w, is_minimax)
-        # Retired MiniMax controls (Peter, 9 Aug) — never shown under any family. AdaLN can't
-        # deploy on the pruned builds; depth-split LR was superseded by the limiter + governor.
-        # The command builder locks both regardless of saved settings.
+        # Retired MiniMax controls — never shown under any family. AdaLN can't deploy on the
+        # pruned builds; depth-split LR was superseded by the limiter (9 Aug). The per-step clip
+        # and LR warmup joined them 10 Aug: the Adapter-relative LR ramp addresses the same
+        # epoch-1 overshoot at its root by holding the step/size ratio steady, so a movement cap
+        # and a fixed warmup count are both guesses at a problem that no longer needs them. The
+        # command builder locks every one of these regardless of saved settings.
         for w in (self._minimax_adaln_cb, self._minimax_adaln_hint,
-                  self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint):
+                  self._minimax_slow_label, self._minimax_slow_frame, self._minimax_slow_hint,
+                  self._minimax_limiter_label, self._minimax_limiter_frame,
+                  self._minimax_limiter_hint):
             self._set_widget_visible(w, False)
+        if is_minimax:
+            for _k, _off in (("MINIMAX_BLOCK_LIMIT", "Off"), ("MINIMAX_LR_WARMUP", "Off")):
+                if str(self.entries[_k].get()) != _off:
+                    self.entries[_k].set(_off)     # a preset or saved config must not revive it
         # Adaptive LR is hidden under MiniMax: ticking it silently disabled the governor +
         # warmup (they defer to it). The var is forced off so the greyed-LR-box state and the
         # curated launch dict can't carry a stale True into a run.
@@ -22699,9 +22709,9 @@ class LoRATrainerGUI:
         # Base Precision. Always sent, including "auto", so the launched command records which
         # base a run used rather than leaving it implicit — these get A/B'd against each other.
         cmd += ["--base_quant", minimax_base_quant(self.settings.get("MINIMAX_BASE_QUANT"))]
-        _bl = str(self.settings.get("MINIMAX_BLOCK_LIMIT", "Off") or "Off").split(" ")[0]
-        if _bl.replace(".", "", 1).isdigit():
-            cmd += ["--block_limit", _bl]
+        # Per-step movement clip: RETIRED (Peter, 10 Aug) — the Adapter-relative LR ramp removes
+        # the overshoot at its root rather than capping it after the fact. Never emitted, so an
+        # old preset or a saved config cannot revive it.
         # Gradient Accumulation (Optimizer section). The field was visible under MiniMax but
         # never emitted, so it silently did nothing on this family.
         try:
@@ -22710,10 +22720,9 @@ class LoRATrainerGUI:
             _accum = 1
         if _accum > 1:
             cmd += ["--gradient_accumulation_steps", str(_accum)]
-        # High-LR smoothing: warmup ("2 epochs" -> 2) and EMA ("0.99 (recommended)" -> 0.99).
-        _wu = str(self.settings.get("MINIMAX_LR_WARMUP", "Off") or "Off").split(" ")[0]
-        if _wu.replace(".", "", 1).isdigit():
-            cmd += ["--lr_warmup_epochs", _wu]
+        # LR warmup: RETIRED alongside the clip — the ramp eases the first epochs in by
+        # construction, and does not need an epoch count guessed up front. Never emitted.
+        # EMA stays: "0.99 (recommended)" -> 0.99.
         _em = str(self.settings.get("MINIMAX_EMA", "Off") or "Off").split(" ")[0]
         if _em.replace(".", "", 1).isdigit():
             cmd += ["--ema_decay", _em]

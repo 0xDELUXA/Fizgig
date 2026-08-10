@@ -853,10 +853,24 @@ class MovementGovernor:
     exponent so the multiplier converges without oscillating. Returns the multiplier; the
     trainer composes it with the warmup factor. Runs on the post-limiter weights."""
 
+    # The budget is calibrated PER STEP, not per epoch. Distortion comes from individual
+    # oversized strides, so the step is the unit the damage mechanism lives in; "per epoch" only
+    # looked equivalent because the thresholds were all measured on ONE dataset — 38 images, so
+    # 38 steps per epoch. Read literally as per-epoch, the same number delivers 7x less movement
+    # per step on a 272-step dataset: measured on a real run, 0.22/epoch there was 0.0008/step
+    # against the 0.0045/step that was clean on the 38-image set, and it crawled for 84 epochs
+    # while the governor behaved exactly as designed. Normalising against the reference size
+    # keeps every label meaning what it measured, and scales bigger datasets up automatically.
+    _REFERENCE_STEPS_PER_EPOCH = 38
+
     def __init__(self, network, budget_per_epoch: float, steps_per_epoch: int):
         import re as _re
         self.budget = float(budget_per_epoch)
-        self.per_step_target = self.budget / max(1, int(steps_per_epoch))
+        self.steps_per_epoch = max(1, int(steps_per_epoch))
+        self.per_step_target = self.budget / self._REFERENCE_STEPS_PER_EPOCH
+        # What this works out to over one pass of THIS dataset — the number to compare against
+        # the per-epoch rates in the logs.
+        self.effective_budget = self.per_step_target * self.steps_per_epoch
         self.mult = 1.0
         self._smooth = None          # EMA of the per-step movement increment
         self.groups = {}
@@ -909,8 +923,8 @@ class MovementGovernor:
             tail = f"; hottest block {_pk_blk} at {_pk / _med:.2f}x median" if _med > 0 else ""
         except Exception:
             tail = ""
-        return (f"[governor] movement rate ~{rate:.3f}/epoch (target {self.budget:g}) — "
-                f"effective LR at {100 * self.mult:.0f}% of the configured value{tail}")
+        return (f"[governor] movement rate ~{rate:.3f}/epoch (target {self.effective_budget:.2f}) "
+                f"— effective LR at {100 * self.mult:.0f}% of the configured value{tail}")
 
 
 def should_reassert_lr(*, resuming, adaptive, governor, warmup_steps, global_step) -> bool:
@@ -1654,10 +1668,12 @@ def train_minimax(
     governor = None
     if movement_budget and float(movement_budget) > 0:
         governor = MovementGovernor(network, float(movement_budget), steps_per_epoch)
-        logger.info(f"[governor] ON — holding the median block at ~{float(movement_budget):g} "
-                    f"movement per epoch ({len(governor.groups)} blocks measured). The "
-                    f"configured LR is a ceiling; the governor throttles it to keep the dose "
-                    f"at the clean rate, whatever the network type.")
+        logger.info(f"[governor] ON at {float(movement_budget):g} — the budget is per STEP "
+                    f"(calibrated on a {MovementGovernor._REFERENCE_STEPS_PER_EPOCH}-step "
+                    f"epoch), so on your {steps_per_epoch}-step epoch it works out at "
+                    f"~{governor.effective_budget:.2f} movement per epoch "
+                    f"({len(governor.groups)} blocks measured). The configured LR is a ceiling; "
+                    f"the governor throttles it to hold that rate, whatever the network type.")
 
     os.makedirs(output_dir, exist_ok=True)
     pause_flag = os.path.join(output_dir, ".pause_requested")

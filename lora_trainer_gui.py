@@ -797,13 +797,13 @@ MINIMAX_BUILT_IN_PRESETS = {
         # (the epoch-1 damage); EMA saves the smoothed center of the stride zigzag instead
         # of a raw corner of it.
         "MINIMAX_LR_WARMUP": "2 epochs", "MINIMAX_EMA": "0.99 (recommended)",
-        # The governor makes the LR box a ceiling: distortion tracks MOVEMENT per epoch
-        # (~0.15 clean, ~0.23 visible — measured 8 Aug across LoRA and LoKR runs), and the
-        # governor throttles the effective LR to hold that rate whatever the network type.
-        # 0.22 is Peter's speed/quality call after real runs at 0.15 ("worked well but takes
-        # a lot of steps") — just under the visible-damage line, with the raw-metric limiter
-        # holding the tail at <= 1.25x that. Drop to 0.15 for extra margin on a hard dataset.
-        "MINIMAX_GOVERNOR": "0.22 / epoch (default)",
+        # The governor makes the LR box a ceiling: distortion tracks MOVEMENT (~0.15 clean,
+        # ~0.23 visible on the 38-image set the thresholds were measured on), and the governor
+        # throttles the effective LR to hold that rate whatever the network type. The budget is
+        # PER STEP against that reference size, so bigger datasets scale up automatically —
+        # read as literally per-epoch it starved a 272-step run for 84 epochs. 0.22 is Peter's
+        # speed/quality call; drop to 0.15 for extra margin on a hard dataset.
+        "MINIMAX_GOVERNOR": "0.22 (default)",
         "MINIMAX_DISTILL": False,
     },
     # The separate "Fast (adaptive LR)" preset was retired 9 Aug: the governor made it
@@ -3974,18 +3974,19 @@ class LoRATrainerGUI:
         self._minimax_governor_frame = ttk.Frame(training_content)
         self._minimax_governor_frame.grid(row=43, column=1, sticky=tk.W, padx=5, pady=(8, 0))
         self.entries["MINIMAX_GOVERNOR"] = ttk.Combobox(
-            self._minimax_governor_frame, values=["Off", "0.10 / epoch (gentle)",
-                                                  "0.15 / epoch (extra safe)",
-                                                  "0.22 / epoch (default)"],
+            self._minimax_governor_frame, values=["Off", "0.10 (gentle)",
+                                                  "0.15 (extra safe)",
+                                                  "0.22 (default)"],
             width=24, state="readonly")
         self.entries["MINIMAX_GOVERNOR"].set(
-            str(self.settings.get("MINIMAX_GOVERNOR", "0.22 / epoch (default)")))
+            str(self.settings.get("MINIMAX_GOVERNOR", "0.22 (default)")))
         self.entries["MINIMAX_GOVERNOR"].pack(side=tk.LEFT)
         self._minimax_governor_hint = ttk.Label(
             training_content,
             text="The speed limit that makes the Learning Rate box safe: it holds how far the "
-                 "weights actually move each epoch at the clean rate, so the LR you set is a "
-                 "ceiling, not a dose. Full write-up in the README.",
+                 "weights actually move at the clean rate, so the LR you set is a ceiling, not "
+                 "a dose. The budget is per training step, so it scales with your dataset "
+                 "size automatically. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_governor_hint.grid(row=44, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 

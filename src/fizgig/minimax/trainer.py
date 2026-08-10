@@ -1685,6 +1685,22 @@ def train_minimax(
         # mid-ramp state would have left partway up.
         for _g in optimizer.param_groups:
             _g["_warmup_base_lr"] = learning_rate * float(_g.get("lr_scale", 1.0))
+    elif resume_state_dir and adaptive is None:
+        # WHOEVER OWNS THE LR SETS IT — and when nobody does, the configured value must win.
+        # torch's optimizer.load_state_dict restores the saved param_groups INCLUDING lr. With
+        # warmup finished and the governor off, nothing in the step loop ever rewrites lr, so a
+        # run resumed from a GOVERNED state silently inherited that state's last throttled rate
+        # and kept it for the rest of the run — measured on a real 98-epoch run as 3.28e-5
+        # against a configured 2e-4 (16%), which reads from outside as "training mysteriously
+        # stopped moving". Adaptive is excluded on purpose: it owns the LR and its restored
+        # mid-flight value is the correct one to continue from.
+        _stale = float(optimizer.param_groups[0].get("lr", learning_rate))
+        for _g in optimizer.param_groups:
+            _g["lr"] = learning_rate * float(_g.get("lr_scale", 1.0))
+        if abs(_stale - learning_rate) > 1e-12:
+            logger.info("[resume] the saved state carried lr=%.3e (a throttled value from when "
+                        "it was written); nothing is modulating the LR this run, so the "
+                        "configured %.3e is reasserted.", _stale, learning_rate)
 
     def _run_provenance():
         """What actually produced this LoRA — the facts you need to compare two of them.

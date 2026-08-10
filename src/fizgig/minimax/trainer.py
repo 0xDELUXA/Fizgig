@@ -1297,6 +1297,7 @@ def train_minimax(
     distill_weight: float = 0.8,     # teacher share of the loss; the rest is the real photo
     slow_blocks: str = None,         # block spec trained at a reduced LR ("21-49")
     block_limit: float = 0.0,   # >0 = per-block movement cap at N x the median block (the limiter)
+    gradient_accumulation_steps: int = 1,  # batches summed per optimizer step (effective batch)
     lr_warmup_epochs: float = 0.0,  # >0 = linear LR ramp over the first N epochs (static LR only)
     ema_decay: float = 0.0,     # >0 = save/preview the EMA of the adapter instead of raw weights
     slow_block_lr_scale: float = 1.0,  # the multiplier applied to those blocks' LR
@@ -1708,6 +1709,18 @@ def train_minimax(
     except TypeError:
         steps_per_epoch = group.num_train_items
 
+    # Gradient accumulation. Batch size 1 means every step is aimed by ONE image, so a large
+    # stride follows an equally large random walk — the roughness that reads as "quality loss
+    # without distortion" when a run covers ground fast. Averaging the gradient over N images
+    # before stepping makes a big step PRECISE instead of rough, at the same wall-clock per
+    # epoch (same forwards, N times fewer optimizer steps).
+    _accum_n = max(1, int(gradient_accumulation_steps or 1))
+    if _accum_n > 1:
+        logger.info(f"[accum] gradient accumulation {_accum_n} — effective batch {_accum_n}, "
+                    f"{steps_per_epoch // _accum_n} optimizer steps per epoch instead of "
+                    f"{steps_per_epoch}. Each step is aimed by {_accum_n} images, so the same "
+                    f"stride carries far less sampling noise.")
+
     warmup_steps = int(round(float(lr_warmup_epochs or 0.0) * steps_per_epoch))
     if warmup_steps > 0:
         logger.info(f"[warmup] LR ramps linearly over the first {lr_warmup_epochs:g} epoch(s) "
@@ -1797,6 +1810,7 @@ def train_minimax(
             "ss_distill_weight": (f"{distill_weight:g}" if distill else "0"),
             "ss_slow_blocks": _slow_used or "none",
             "ss_block_limit": str(block_limit or 0),
+            "ss_gradient_accumulation": str(_accum_n),
             "ss_lr_warmup_epochs": f"{lr_warmup_epochs:g}",
             "ss_ema_decay": f"{ema_decay:g}" if ema is not None else "0",
             "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
@@ -2108,21 +2122,26 @@ def train_minimax(
                     distill_weight=distill_weight, shift=shift, seed=seed)
             else:
                 loss, _ = compute_loss(dit, latents, text, shift=shift)
-            loss.backward()
-            if max_grad_norm and max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
-            if warmup_steps and global_step < warmup_steps:
-                _wf = (global_step + 1) / warmup_steps
-                for _g in optimizer.param_groups:
-                    _g["lr"] = _g["_warmup_base_lr"] * _wf
-            if limiter is not None:
-                limiter.pre_step()    # snapshot BEFORE the optimizer moves anything
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            if limiter is not None:
-                limiter.step()
-            if ema is not None:
-                ema.update()          # after the clip, so the shadow tracks clipped weights
+            # Divide so the accumulated gradient is the MEAN over the window, not the sum —
+            # otherwise the effective LR scales with the accumulation count.
+            (loss / _accum_n if _accum_n > 1 else loss).backward()
+            # Step on the window boundary, and always on the last batch of the epoch so a
+            # partial tail window is never silently discarded.
+            if (i + 1) % _accum_n == 0 or (i + 1) >= steps_per_epoch:
+                if max_grad_norm and max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                if warmup_steps and global_step < warmup_steps:
+                    _wf = (global_step + 1) / warmup_steps
+                    for _g in optimizer.param_groups:
+                        _g["lr"] = _g["_warmup_base_lr"] * _wf
+                if limiter is not None:
+                    limiter.pre_step()   # snapshot BEFORE the optimizer moves anything
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                if limiter is not None:
+                    limiter.step()
+                if ema is not None:
+                    ema.update()         # after the clip, so the shadow tracks clipped weights
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)

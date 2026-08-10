@@ -97,6 +97,10 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Per-step movement clip: cap any block's movement in a SINGLE step at "
                         "N x the median block's step (1.25 recommended). Prevents the overshoot "
                         "rather than undoing accumulated learning. 0 = off.")
+    p.add_argument("--gradient_accumulation_steps", type=int, default=1, metavar="N",
+                   help="Sum the gradient over N batches before each optimizer step (effective "
+                        "batch N). Same wall-clock per epoch; each step is aimed by N images "
+                        "instead of one, so a large stride carries far less sampling noise.")
     p.add_argument("--lr_warmup_epochs", type=float, default=0.0, metavar="N",
                    help="Ramp the LR linearly from 0 to the configured rate over the first N "
                         "epochs (fractions allowed). Static LR only — ignored under adaptive. "
@@ -213,6 +217,7 @@ def main():
         slow_blocks=args.slow_blocks,
         slow_block_lr_scale=args.slow_block_lr_scale,
         block_limit=args.block_limit,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         lr_warmup_epochs=args.lr_warmup_epochs,
         ema_decay=args.ema_decay,
         quantize=not args.no_quantize,

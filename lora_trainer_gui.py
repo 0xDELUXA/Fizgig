@@ -22663,6 +22663,14 @@ class LoRATrainerGUI:
         _bl = str(self.settings.get("MINIMAX_BLOCK_LIMIT", "Off") or "Off").split(" ")[0]
         if _bl.replace(".", "", 1).isdigit():
             cmd += ["--block_limit", _bl]
+        # Gradient Accumulation (Optimizer section). The field was visible under MiniMax but
+        # never emitted, so it silently did nothing on this family.
+        try:
+            _accum = int(str(self.settings.get("GRADIENT_ACCUMULATION", 1) or 1).strip() or 1)
+        except ValueError:
+            _accum = 1
+        if _accum > 1:
+            cmd += ["--gradient_accumulation_steps", str(_accum)]
         # High-LR smoothing: warmup ("2 epochs" -> 2) and EMA ("0.99 (recommended)" -> 0.99).
         _wu = str(self.settings.get("MINIMAX_LR_WARMUP", "Off") or "Off").split(" ")[0]
         if _wu.replace(".", "", 1).isdigit():

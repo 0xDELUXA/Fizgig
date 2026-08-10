@@ -840,18 +840,21 @@ class MovementGovernor:
     """Hold the adapter's MOVEMENT RATE at a clean target by throttling the effective LR.
 
     The finding behind this (8 Aug, measured across six real runs, LoRA and LoKR): visible
-    distortion tracks the median block's ||dW|| added PER EPOCH, not the LR number. ~0.17
-    per epoch is clean; ~0.23 is visibly distorted; the same 1e-4 was 0.57/epoch on LoRA and
-    ~1.4/epoch on LoKR (7x the zero-init params -> bigger delta per Adam stride). LR is a
-    request; movement is the dose. The governor measures the dose every step and scales the
-    LR so the run cruises at the target — put any LR in the box and excess becomes headroom,
-    for every network type, optimizer and dataset, with no calibration.
+    distortion tracks the median block's ||dW|| ADDED PER STEP, not the LR number. On the
+    38-image dataset every threshold was measured on, ~0.0045/step was clean and ~0.006/step
+    visibly distorted; the same 1e-4 was 0.015/step on LoRA and ~4x that on LoKR (7x the
+    zero-init params -> bigger delta per Adam stride). LR is a request; movement is the dose.
+    The governor measures the dose every step and scales the LR so the run cruises at the
+    target — put any LR in the box and excess becomes headroom, for every network type,
+    optimizer and dataset size, with no calibration.
 
     Mechanics: per step, median across blocks of cumulative raw ||dW|| (all H3 blocks are
     identical shapes, so raw norms are comparable — no base-norm division needed); the
-    EMA-smoothed per-step increment is servo'd onto budget/steps_per_epoch through a gentle
-    exponent so the multiplier converges without oscillating. Returns the multiplier; the
-    trainer composes it with the warmup factor. Runs on the post-limiter weights."""
+    EMA-smoothed per-step increment is servo'd onto budget/_REFERENCE_STEPS_PER_EPOCH through
+    a gentle exponent so the multiplier converges without oscillating. Note the REFERENCE, not
+    this run's steps_per_epoch: that is what makes the same budget mean the same dose on any
+    dataset size (see below). Returns the multiplier; the trainer composes it with the warmup
+    factor. Runs on the post-limiter weights."""
 
     # The budget is calibrated PER STEP, not per epoch. Distortion comes from individual
     # oversized strides, so the step is the unit the damage mechanism lives in; "per epoch" only

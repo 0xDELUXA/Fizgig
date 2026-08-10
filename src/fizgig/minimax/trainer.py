@@ -1063,9 +1063,20 @@ class AdapterRamp:
         self._smooth = rel if self._smooth is None else 0.9 * self._smooth + 0.1 * rel
         if self._smooth > 1e-12:
             err = self._smooth / self.target
-            # Same gentle servo shape as the retired governor, but capped at 1.0 so the
-            # configured LR is a genuine ceiling the ramp climbs toward and never exceeds.
-            self.mult = min(1.0, max(0.02, self.mult * min(1.03, max(0.7, err ** -0.3))))
+            # Per-step gain caps, both damped after a real run hunted and then DAMAGED the
+            # model on the way back up: 22 -> 77 -> 73 -> 68 -> 63 -> 29 -> 100 across
+            # consecutive epochs, and the jump to 100% hit an adapter that was not ready for
+            # it. The RELEASE rate is therefore a safety parameter in its own right, not a
+            # tuning nicety — the old 1.03 compounds to 3.9x over a 46-step epoch, enough to
+            # go from a third of the ceiling to all of it in one epoch. 1.01 caps that at
+            # ~1.6x per epoch, so the ceiling is approached over several epochs and the
+            # adapter has time to grow into it.
+            #
+            # The old 0.70 down cap compounds to 4e-8 over the same epoch — a 12:1 asymmetry
+            # against the up-gain that caused the slam-to-floor half of the oscillation, whose
+            # rebound was what overshot. 0.95 keeps a safety bias (still ~5x faster down than
+            # up) without flooring the LR from a single noisy reading.
+            self.mult = min(1.0, max(0.02, self.mult * min(1.01, max(0.95, err ** -0.3))))
         return self.mult
 
     def epoch_report(self) -> str:

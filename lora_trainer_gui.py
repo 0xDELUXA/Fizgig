@@ -398,17 +398,16 @@ ARCHITECTURES = {
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
         "sample_steps_default": 20,   # the reference pipeline default
-        # 1024x1024. A LoRA is resolution-SPECIFIC in a way the base model is not: it learns its
-        # deltas at the training latent's token count and RoPE positions, so previewing well
-        # below that applies it out of distribution and it renders soft — measured 10 Aug, a
-        # 1 MP-trained adapter was soft at 512 AND at 768, sharp at 1024, while the base model
-        # looked fine at 512 throughout. The old 512 default was chosen for clip-preview cost
-        # back when training was 0.25 MP and the two happened to match; once training moved up
-        # it silently became a preview that could not show what had been made, and cost a day
-        # of chasing quality that was never missing. Previews are dearer here — that is the
-        # price of an honest one.
-        "sample_width_default": 1024,
-        "sample_height_default": 1024,
+        # 512x512, paired with the 56-frame clip default. The softness that once argued for
+        # 1024 was measured on STILLS (10 Aug): a 1 MP-trained adapter looked soft at 512 and
+        # 768, sharp at 1024. But a still is the most out-of-distribution render H3 has —
+        # ComfyUI cannot even build one (its video latent floor is 2 frames) — so that reading
+        # was dominated by the missing temporal axis, not by the pixel size. Once the preview
+        # is a clip the model recognises, 512 holds up (Peter, 10 Aug), and it costs a quarter
+        # of the video rows of 1024, which is what makes a per-epoch clip affordable at all.
+        # Raise both if a preview needs to be judged rather than glanced at.
+        "sample_width_default": 512,
+        "sample_height_default": 512,
         "lora_name_suffix": "mmh3",
     },
 }
@@ -9020,11 +9019,13 @@ class LoRATrainerGUI:
         # Shown/hidden by update_samples_ui_for_architecture.
         self.sample_frames_label = ttk.Label(prompt_card, text="Sample length:")
         self.sample_frames_label.grid(row=8, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        # Default 22 frames (Peter, 9 Aug): a run saves a checkpoint every epoch, so previews
-        # are a heartbeat, not the verdict — ~1s of clip shows likeness arriving at a fraction
-        # of the render cost. 124 (the trained minimum) stays one click away for a full read.
+        # Default 56 frames (Peter, 10 Aug): the shortest length that reliably renders like
+        # ComfyUI does. 22 was too close to the still end to shake off the out-of-distribution
+        # look, and 141 at 1024 OOMs a 32 GB card next to the resident base. 56 at the 512
+        # default is 17408 video rows — a quarter of 141's, and previews are a heartbeat
+        # between per-epoch checkpoints, not the verdict.
         self.sample_frames_var = tk.StringVar(
-            value=self.last_used.get("sample_frames", "22 frames (~1s)"))
+            value=self.last_used.get("sample_frames", "56 frames (~2.3s)"))
         self.sample_frames_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_frames_var, state="readonly", width=34,
             values=["Still (1 frame)", "22 frames (~1s)", "56 frames (~2.3s)",

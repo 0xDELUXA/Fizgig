@@ -2046,11 +2046,11 @@ def train_minimax(
         logger.warning(
             f"[preview] step {step}/{total} took {seconds:.0f}s — far slower than this should "
             f"be, which almost always means the preview does not fit in VRAM and is spilling "
-            f"into system RAM. This preview will finish, just slowly. For future previews, "
-            f"lower Width/Height on the Samples tab (and Sample length if you are rendering "
-            f"clips) — previews are a heartbeat between checkpoints, not the verdict, so a "
-            f"smaller one costs you nothing. Every epoch still saves a .safetensors, and final "
-            f"quality is best judged by loading one of those in ComfyUI.")
+            f"into system RAM. It will finish, just slowly. For future previews, lower "
+            f"Width/Height on the Samples tab (and Sample length if you are rendering clips). "
+            f"Previews are a heartbeat between checkpoints, not the verdict: every epoch saves "
+            f"a .safetensors, and you can Pause the run to free the GPU, judge an epoch in "
+            f"ComfyUI, then close ComfyUI and Resume.")
 
     def _render_previews(epoch):
         """Render one still per prompt on the RESIDENT training DiT and write them where the

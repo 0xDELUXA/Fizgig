@@ -3404,6 +3404,22 @@ class LoRATrainerGUI:
         if folder:
             self._concept_folder_vars[0].set(folder)
 
+    def _sync_distill_weight_state(self):
+        """Grey the teacher-weight box while identity-first is running the show.
+
+        In that mode phase 1 is teacher-ONLY (weight forced to 1.0) and phase 2 is
+        photographs-only, so the box changes nothing. Leaving it live invites people to tune a
+        dial that is not connected to anything."""
+        w = self.entries.get("MINIMAX_DISTILL_WEIGHT")
+        p1 = self.entries.get("MINIMAX_DISTILL_PHASE1")
+        if w is None or p1 is None:
+            return
+        _blended = str(p1.get()).startswith("Off")
+        try:
+            w.config(state=("readonly" if _blended else "disabled"))
+        except tk.TclError:
+            pass
+
     def _on_minimax_multiconcept_toggle(self):
         """Show the extra folder row, and lock caption dropout off while the mode is on.
 
@@ -3990,6 +4006,8 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_DISTILL_PHASE1"].set(
             str(self.settings.get("MINIMAX_DISTILL_PHASE1", "Auto (from dataset size)")))
         self.entries["MINIMAX_DISTILL_PHASE1"].pack(side=tk.LEFT)
+        self.entries["MINIMAX_DISTILL_PHASE1"].bind(
+            "<<ComboboxSelected>>", lambda _e: self._sync_distill_weight_state())
         self._minimax_distill_hint = ttk.Label(
             training_content,
             text="EXPERIMENT — teaches your LoRA to reproduce identity from the trigger word "
@@ -4994,6 +5012,10 @@ class LoRATrainerGUI:
                 self._on_minimax_multiconcept_toggle()
             except Exception:
                 pass
+        try:
+            self._sync_distill_weight_state()
+        except Exception:
+            pass
 
         # Model Area to Train (training preset dropdown)
         if "TARGET_LAYERS" in preset and hasattr(self, 'training_preset_var'):
@@ -6310,6 +6332,7 @@ class LoRATrainerGUI:
         # under MiniMax until the box is ticked), so route them through it rather than the loop.
         if is_minimax:
             self._on_minimax_multiconcept_toggle()
+            self._sync_distill_weight_state()
         else:
             for w in (self._minimax_mc_dir_frame, self._minimax_mc_hint,
                       self._minimax_mc_nodistill_hint):

@@ -22654,8 +22654,14 @@ class LoRATrainerGUI:
             return self._build_krea2_cache_command("krea2_cache_latents.py",
                                                    "--vae", self._krea2_pref("krea2_vae"))
         if config.get("is_minimax"):
-            return self._build_krea2_cache_command("minimax_cache_latents.py",
-                                                   "--vae", self._krea2_pref("minimax_vae"))
+            # --skip_existing: re-launching the same dataset should not re-encode every image.
+            # Safe on LATENTS specifically because the skip validates the cached latent against
+            # the CURRENT bucket, not just the filename — change Target Megapixels and it
+            # re-encodes anyway. Deliberately NOT passed to text caching, where the skip is
+            # filename-only and would silently reuse the embedding of an edited caption.
+            return self._build_krea2_cache_command(
+                "minimax_cache_latents.py", "--vae", self._krea2_pref("minimax_vae")) + \
+                ["--skip_existing"]
         arch = self.settings["ARCHITECTURE"]
         python_path = self._venv_python()
         cache_script_path = self._resolve_script(config, "cache_latents_script")

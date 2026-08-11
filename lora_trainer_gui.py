@@ -3924,69 +3924,6 @@ class LoRATrainerGUI:
                        "the scores with your dataset. Batch size 1.",
                   foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._krea2_losswatch_hint.grid(row=24, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
-        # --- Low-noise training share (MiniMax H3 only) -----------------------------------
-        # One number, uncapped: what fraction of steps train below sigma 0.5. Converted to the
-        # trainer's shift by minimax_lownoise_to_shift. Hidden for other families by
-        # _apply_training_arch_visibility.
-        self._minimax_shift_label = ttk.Label(training_content, text="Low-noise training:")
-        self._minimax_shift_label.grid(row=26, column=0, sticky=tk.W, padx=5, pady=(8, 2))
-        self._minimax_shift_frame = ttk.Frame(training_content)
-        self._minimax_shift_frame.grid(row=26, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
-        self.entries["MINIMAX_LOWNOISE_PCT"] = ttk.Entry(self._minimax_shift_frame, width=8)
-        self.entries["MINIMAX_LOWNOISE_PCT"].insert(
-            0, str(self.settings.get("MINIMAX_LOWNOISE_PCT", "60")))
-        self.entries["MINIMAX_LOWNOISE_PCT"].pack(side=tk.LEFT)
-        ttk.Label(self._minimax_shift_frame, text="% of steps").pack(side=tk.LEFT, padx=(4, 0))
-        # Live readout: the number you type is the thing you care about, but the schedule it
-        # produces is worth seeing — especially at the extremes, where a couple of percent of
-        # change swings the shift enormously.
-        self._minimax_shift_match = tk.Label(self._minimax_shift_frame, text="",
-                                             font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
-        self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
-        self.minimax_lognorm_var = tk.BooleanVar(
-            value=bool(self.settings.get("MINIMAX_LOGNORM", True)))
-        ttk.Checkbutton(self._minimax_shift_frame, text="mid-concentrated",
-                        variable=self.minimax_lognorm_var,
-                        command=lambda: self._refresh_minimax_shift_match()).pack(side=tk.LEFT,
-                                                                                 padx=(10, 0))
-        self.entries["MINIMAX_LOWNOISE_PCT"].bind(
-            "<KeyRelease>", lambda _e: self._refresh_minimax_shift_match())
-        self._minimax_shift_hint = ttk.Label(
-            training_content,
-            text="How much of the run trains on nearly-clean images — where fine detail and "
-                 "likeness are learned. 60% with mid-concentrated ticked is the tuned default. "
-                 "Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_shift_hint.grid(row=27, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
-        # --- Blocks to Train (MiniMax only, experimental) ---------------------------------
-        self._minimax_blocks_label = ttk.Label(training_content, text="Blocks to Train:")
-        self._minimax_blocks_label.grid(row=28, column=0, sticky=tk.W, padx=5, pady=(8, 2))
-        self._minimax_blocks_frame = ttk.Frame(training_content)
-        self._minimax_blocks_frame.grid(row=28, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
-        # Editable, not readonly — the presets are starting points and the real control is typing
-        # a spec. Anything the trainer's parser takes is legal here.
-        self.entries["MINIMAX_BLOCKS"] = ttk.Combobox(
-            self._minimax_blocks_frame, values=MINIMAX_BLOCK_OPTIONS, width=34)
-        self.entries["MINIMAX_BLOCKS"].pack(side=tk.LEFT)
-        self._select_combo_by_token(self.entries["MINIMAX_BLOCKS"],
-                                    self.settings.get("MINIMAX_BLOCKS", "all"))
-        # Live readout: a typed spec is easy to fat-finger, and "trained 3 blocks when you meant
-        # 30" is invisible in the output. Says how many blocks the box currently means.
-        self._minimax_blocks_count = tk.Label(self._minimax_blocks_frame, text="",
-                                              font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
-        self._minimax_blocks_count.pack(side=tk.LEFT, padx=(10, 0))
-        self.entries["MINIMAX_BLOCKS"].bind(
-            "<KeyRelease>", lambda _e: self._refresh_minimax_blocks_count())
-        self.entries["MINIMAX_BLOCKS"].bind(
-            "<<ComboboxSelected>>", lambda _e: self._refresh_minimax_blocks_count())
-        self._minimax_blocks_hint = ttk.Label(
-            training_content,
-            text="EXPERIMENT — train only a subset of the 50 blocks. Type ranges and single "
-                 "blocks, comma-separated, like 3-12, 22, 31-33 (blocks 0-49). No recommended "
-                 "answer yet. Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_blocks_hint.grid(row=29, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
-        self._refresh_minimax_blocks_count()
 
         # --- Per-step movement clip (MiniMax only) -----------------------------------------
         # Whichever block sits LAST in the trained range absorbs 2-4x the median block's
@@ -4072,110 +4009,9 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_distill_hint.grid(row=36, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
-        # --- Base Precision (MiniMax only) -------------------------------------------------
-        # Auto picks the quantisation and the block-swap count TOGETHER. Deciding swap alone,
-        # with the precision already fixed by which file you loaded, gives mid-range cards the
-        # worst of both: the int8 base is ~21 GB, so a 24 GB card parks 38 of 50 blocks on CPU
-        # and crosses PCIe every step for ~4x the runtime, when the same file loaded 4-bit is
-        # ~11 GB and needs no swap at all.
-        self._minimax_quant_label = ttk.Label(training_content, text="Base Precision:")
-        self._minimax_quant_label.grid(row=39, column=0, sticky=tk.W, padx=5, pady=(8, 0))
-        self._minimax_quant_frame = ttk.Frame(training_content)
-        self._minimax_quant_frame.grid(row=39, column=1, sticky=tk.W, padx=5, pady=(8, 0))
-        self.entries["MINIMAX_BASE_QUANT"] = ttk.Combobox(
-            self._minimax_quant_frame, values=list(MINIMAX_BASE_QUANT_OPTIONS), width=30,
-            state="readonly")
-        self.entries["MINIMAX_BASE_QUANT"].set(
-            str(self.settings.get("MINIMAX_BASE_QUANT", MINIMAX_BASE_QUANT_OPTIONS[0])))
-        self.entries["MINIMAX_BASE_QUANT"].pack(side=tk.LEFT)
-        self._minimax_quant_hint = ttk.Label(
-            training_content,
-            text="Auto reads your FREE VRAM at launch and picks the base precision and block "
-                 "swap together — int8 is the most accurate, 4-bit fits smaller cards. Full "
-                 "write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_quant_hint.grid(row=40, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
-        # --- Weight averaging (MiniMax only): EMA ------------------------------------------
-        # Damage at a high static LR comes from oversized Adam strides: worst at epoch 1
-        # (zero-init adapters, steepest surface) and rough thereafter (the weights zigzag around
-        # the good solution). EMA addresses the second by saving a smoothed average.
-        #
-        # WARMUP is retired (Peter, 10 Aug): the Adapter-relative LR ramp is the better answer to
-        # the epoch-1 problem — it holds the step/size RATIO steady instead of guessing an epoch
-        # count, so it eases in by construction and keeps doing so. The widget is kept (the
-        # launch dict and presets still carry the key) but is never packed and is forced Off.
-        self._minimax_smooth_label = ttk.Label(training_content, text="Weight averaging (EMA):")
-        self._minimax_smooth_label.grid(row=41, column=0, sticky=tk.W, padx=5, pady=(8, 0))
-        self._minimax_smooth_frame = ttk.Frame(training_content)
-        self._minimax_smooth_frame.grid(row=41, column=1, sticky=tk.W, padx=5, pady=(8, 0))
-        self.entries["MINIMAX_LR_WARMUP"] = ttk.Combobox(     # retired — never packed
-            self._minimax_smooth_frame, values=["Off", "1 epoch", "2 epochs", "3 epochs"],
-            width=10, state="readonly")
-        self.entries["MINIMAX_LR_WARMUP"].set("Off")
-        self.entries["MINIMAX_EMA"] = ttk.Combobox(
-            self._minimax_smooth_frame, values=["Off", "0.98 (light)", "0.99 (recommended)",
-                                                "0.995 (strong)"],
-            width=18, state="readonly")
-        self.entries["MINIMAX_EMA"].set(str(self.settings.get("MINIMAX_EMA", "Off")))
-        self.entries["MINIMAX_EMA"].pack(side=tk.LEFT)
-        self._minimax_smooth_hint = ttk.Label(
-            training_content,
-            text="Saves a smoothed average of the weights, so checkpoints come out crisper "
-                 "when you push the LR hard. Costs no speed. Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_smooth_hint.grid(row=42, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
-        # --- Adapter-relative LR ramp (MiniMax only, EXPERIMENT, default Off) ---------------
-        # From a real run: an adapter at ||dW||~53 took a full 2e-4 for ten epochs with no
-        # distortion and gave the best likeness of the project, while a fresh adapter is
-        # visibly damaged by half that. Same step, 9% perturbation vs 150% — a LoRA starts at
-        # zero, so step/size is worst at step 1 and improves from there. This holds that RATIO
-        # steady, which ramps the LR up toward the box value as the adapter grows.
-        self._minimax_ramp_label = ttk.Label(training_content, text="Adapter-relative LR:")
-        self._minimax_ramp_label.grid(row=45, column=0, sticky=tk.W, padx=5, pady=(8, 0))
-        self._minimax_ramp_frame = ttk.Frame(training_content)
-        self._minimax_ramp_frame.grid(row=45, column=1, sticky=tk.W, padx=5, pady=(8, 0))
-        self.entries["MINIMAX_ADAPTER_RAMP"] = ttk.Combobox(
-            self._minimax_ramp_frame, values=["Off", "0.003 (slow build)",
-                                              "0.005 (recommended)", "0.01 (fast build)"],
-            width=24, state="readonly")
-        self.entries["MINIMAX_ADAPTER_RAMP"].set(
-            str(self.settings.get("MINIMAX_ADAPTER_RAMP", "Off")))
-        self.entries["MINIMAX_ADAPTER_RAMP"].pack(side=tk.LEFT)
-        self._minimax_ramp_hint = ttk.Label(
-            training_content,
-            text="Needed to train MiniMax effectively — leave it on. The Learning Rate box "
-                 "becomes a CEILING the run climbs toward, so set it to where you want to end "
-                 "up. Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_ramp_hint.grid(row=46, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
-        # --- Caption dropout (MiniMax only) -------------------------------------------------
-        # A fraction of steps train the image against the EMPTY prompt instead of its caption.
-        # On a single-concept set that is healthy regularisation — it stops the LoRA leaning on
-        # the trigger token alone. On a MULTI-concept set it is the opposite: those steps teach
-        # the model to produce the concept with no trigger at all, which is exactly how one
-        # subject leaks into the other's prompts. Was hardcoded at 0.05 (the CLI default) with
-        # no way to change it from the GUI.
-        self._minimax_capdrop_label = ttk.Label(training_content, text="Caption dropout:")
-        self._minimax_capdrop_label.grid(row=47, column=0, sticky=tk.W, padx=5, pady=(8, 0))
-        self._minimax_capdrop_frame = ttk.Frame(training_content)
-        self._minimax_capdrop_frame.grid(row=47, column=1, sticky=tk.W, padx=5, pady=(8, 0))
-        self.entries["MINIMAX_CAPTION_DROPOUT"] = ttk.Combobox(
-            self._minimax_capdrop_frame,
-            values=["Off", "0.05 (default)", "0.10 (strong)"],
-            width=24, state="readonly")
-        self.entries["MINIMAX_CAPTION_DROPOUT"].set(
-            str(self.settings.get("MINIMAX_CAPTION_DROPOUT", "0.05 (default)")))
-        self.entries["MINIMAX_CAPTION_DROPOUT"].pack(side=tk.LEFT)
-        self._minimax_capdrop_hint = ttk.Label(
-            training_content,
-            text="Trains a few percent of steps with no caption, so the LoRA does not lean "
-                 "entirely on the trigger word.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_capdrop_hint.grid(row=48, column=0, columnspan=2, sticky=tk.W, padx=5,
-                                        pady=(0, 4))
 
         # --- Multi Concept (MiniMax only) ---------------------------------------------------
         # Two subjects in ONE folder get cross-referenced by reference distillation: the pairing
@@ -4289,7 +4125,6 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_adaln_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
-        self._refresh_minimax_shift_match()
 
         # Answers "when do changes take effect?" (issue #40) right where people wonder it.
         ttk.Label(training_content,
@@ -4621,6 +4456,188 @@ class LoRATrainerGUI:
         # call ran before it was created, so this applies the NF4→force-GC-on lock
         # when a saved config has 4-bit already enabled.
         self._on_quant_4bit_toggle()
+
+        # === MiniMax H3 rows that belong in OTHER sections ===============================
+        # Created here rather than up in Training Parameters because Tkinter cannot re-parent
+        # a widget, and these two content frames do not exist until this point in the method.
+        # Section display order follows CollapsibleFrame construction order, so the sections
+        # themselves must not be reordered to make the parents available earlier.
+        # Base Precision -> Memory & Precision; the rest -> Other Options.
+
+        # --- Base Precision (MiniMax only) -------------------------------------------------
+        # Auto picks the quantisation and the block-swap count TOGETHER. Deciding swap alone,
+        # with the precision already fixed by which file you loaded, gives mid-range cards the
+        # worst of both: the int8 base is ~21 GB, so a 24 GB card parks 38 of 50 blocks on CPU
+        # and crosses PCIe every step for ~4x the runtime, when the same file loaded 4-bit is
+        # ~11 GB and needs no swap at all.
+        self._minimax_quant_label = ttk.Label(memory_content, text="Base Precision:")
+        self._minimax_quant_label.grid(row=16, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_quant_frame = ttk.Frame(memory_content)
+        self._minimax_quant_frame.grid(row=16, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_BASE_QUANT"] = ttk.Combobox(
+            self._minimax_quant_frame, values=list(MINIMAX_BASE_QUANT_OPTIONS), width=30,
+            state="readonly")
+        self.entries["MINIMAX_BASE_QUANT"].set(
+            str(self.settings.get("MINIMAX_BASE_QUANT", MINIMAX_BASE_QUANT_OPTIONS[0])))
+        self.entries["MINIMAX_BASE_QUANT"].pack(side=tk.LEFT)
+        self._minimax_quant_hint = ttk.Label(
+            memory_content,
+            text="Auto reads your FREE VRAM at launch and picks the base precision and block "
+                 "swap together — int8 is the most accurate, 4-bit fits smaller cards. Full "
+                 "write-up in the README.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_quant_hint.grid(row=17, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
+        # --- Weight averaging (MiniMax only): EMA ------------------------------------------
+        # Damage at a high static LR comes from oversized Adam strides: worst at epoch 1
+        # (zero-init adapters, steepest surface) and rough thereafter (the weights zigzag around
+        # the good solution). EMA addresses the second by saving a smoothed average.
+        #
+        # WARMUP is retired (Peter, 10 Aug): the Adapter-relative LR ramp is the better answer to
+        # the epoch-1 problem — it holds the step/size RATIO steady instead of guessing an epoch
+        # count, so it eases in by construction and keeps doing so. The widget is kept (the
+        # launch dict and presets still carry the key) but is never packed and is forced Off.
+        self._minimax_smooth_label = ttk.Label(scheduler_content, text="Weight averaging (EMA):")
+        self._minimax_smooth_label.grid(row=25, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_smooth_frame = ttk.Frame(scheduler_content)
+        self._minimax_smooth_frame.grid(row=25, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_LR_WARMUP"] = ttk.Combobox(     # retired — never packed
+            self._minimax_smooth_frame, values=["Off", "1 epoch", "2 epochs", "3 epochs"],
+            width=10, state="readonly")
+        self.entries["MINIMAX_LR_WARMUP"].set("Off")
+        self.entries["MINIMAX_EMA"] = ttk.Combobox(
+            self._minimax_smooth_frame, values=["Off", "0.98 (light)", "0.99 (recommended)",
+                                                "0.995 (strong)"],
+            width=18, state="readonly")
+        self.entries["MINIMAX_EMA"].set(str(self.settings.get("MINIMAX_EMA", "Off")))
+        self.entries["MINIMAX_EMA"].pack(side=tk.LEFT)
+        self._minimax_smooth_hint = ttk.Label(
+            scheduler_content,
+            text="Saves a smoothed average of the weights, so checkpoints come out crisper "
+                 "when you push the LR hard. Costs no speed. Full write-up in the README.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_smooth_hint.grid(row=26, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
+        # --- Adapter-relative LR ramp (MiniMax only, EXPERIMENT, default Off) ---------------
+        # From a real run: an adapter at ||dW||~53 took a full 2e-4 for ten epochs with no
+        # distortion and gave the best likeness of the project, while a fresh adapter is
+        # visibly damaged by half that. Same step, 9% perturbation vs 150% — a LoRA starts at
+        # zero, so step/size is worst at step 1 and improves from there. This holds that RATIO
+        # steady, which ramps the LR up toward the box value as the adapter grows.
+        self._minimax_ramp_label = ttk.Label(scheduler_content, text="Adapter-relative LR:")
+        self._minimax_ramp_label.grid(row=27, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_ramp_frame = ttk.Frame(scheduler_content)
+        self._minimax_ramp_frame.grid(row=27, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_ADAPTER_RAMP"] = ttk.Combobox(
+            self._minimax_ramp_frame, values=["Off", "0.003 (slow build)",
+                                              "0.005 (recommended)", "0.01 (fast build)"],
+            width=24, state="readonly")
+        self.entries["MINIMAX_ADAPTER_RAMP"].set(
+            str(self.settings.get("MINIMAX_ADAPTER_RAMP", "Off")))
+        self.entries["MINIMAX_ADAPTER_RAMP"].pack(side=tk.LEFT)
+        self._minimax_ramp_hint = ttk.Label(
+            scheduler_content,
+            text="Makes the Learning Rate box a CEILING the run climbs toward instead of a rate "
+                 "it starts at, so set the LR to where you want to end up. Full write-up in the "
+                 "README.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_ramp_hint.grid(row=28, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
+        # --- Caption dropout (MiniMax only) -------------------------------------------------
+        # A fraction of steps train the image against the EMPTY prompt instead of its caption.
+        # On a single-concept set that is healthy regularisation — it stops the LoRA leaning on
+        # the trigger token alone. On a MULTI-concept set it is the opposite: those steps teach
+        # the model to produce the concept with no trigger at all, which is exactly how one
+        # subject leaks into the other's prompts. Was hardcoded at 0.05 (the CLI default) with
+        # no way to change it from the GUI.
+        self._minimax_capdrop_label = ttk.Label(scheduler_content, text="Caption dropout:")
+        self._minimax_capdrop_label.grid(row=29, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_capdrop_frame = ttk.Frame(scheduler_content)
+        self._minimax_capdrop_frame.grid(row=29, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_CAPTION_DROPOUT"] = ttk.Combobox(
+            self._minimax_capdrop_frame,
+            values=["Off", "0.05 (default)", "0.10 (strong)"],
+            width=24, state="readonly")
+        self.entries["MINIMAX_CAPTION_DROPOUT"].set(
+            str(self.settings.get("MINIMAX_CAPTION_DROPOUT", "0.05 (default)")))
+        self.entries["MINIMAX_CAPTION_DROPOUT"].pack(side=tk.LEFT)
+        self._minimax_capdrop_hint = ttk.Label(
+            scheduler_content,
+            text="Trains a few percent of steps with no caption, so the LoRA does not lean "
+                 "entirely on the trigger word.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_capdrop_hint.grid(row=30, column=0, columnspan=2, sticky=tk.W, padx=5,
+                                        pady=(0, 4))
+
+        # --- Blocks to Train (MiniMax only, experimental) ---------------------------------
+        self._minimax_blocks_label = ttk.Label(scheduler_content, text="Blocks to Train:")
+        self._minimax_blocks_label.grid(row=31, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self._minimax_blocks_frame = ttk.Frame(scheduler_content)
+        self._minimax_blocks_frame.grid(row=31, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        # Editable, not readonly — the presets are starting points and the real control is typing
+        # a spec. Anything the trainer's parser takes is legal here.
+        self.entries["MINIMAX_BLOCKS"] = ttk.Combobox(
+            self._minimax_blocks_frame, values=MINIMAX_BLOCK_OPTIONS, width=34)
+        self.entries["MINIMAX_BLOCKS"].pack(side=tk.LEFT)
+        self._select_combo_by_token(self.entries["MINIMAX_BLOCKS"],
+                                    self.settings.get("MINIMAX_BLOCKS", "all"))
+        # Live readout: a typed spec is easy to fat-finger, and "trained 3 blocks when you meant
+        # 30" is invisible in the output. Says how many blocks the box currently means.
+        self._minimax_blocks_count = tk.Label(self._minimax_blocks_frame, text="",
+                                              font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
+        self._minimax_blocks_count.pack(side=tk.LEFT, padx=(10, 0))
+        self.entries["MINIMAX_BLOCKS"].bind(
+            "<KeyRelease>", lambda _e: self._refresh_minimax_blocks_count())
+        self.entries["MINIMAX_BLOCKS"].bind(
+            "<<ComboboxSelected>>", lambda _e: self._refresh_minimax_blocks_count())
+        self._minimax_blocks_hint = ttk.Label(
+            scheduler_content,
+            text="EXPERIMENT — train only a subset of the 50 blocks. Type ranges and single "
+                 "blocks, comma-separated, like 3-12, 22, 31-33 (blocks 0-49). No recommended "
+                 "answer yet. Full write-up in the README.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_blocks_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+        self._refresh_minimax_blocks_count()
+
+        # --- Low-noise training share (MiniMax H3 only) -----------------------------------
+        # One number, uncapped: what fraction of steps train below sigma 0.5. Converted to the
+        # trainer's shift by minimax_lownoise_to_shift. Hidden for other families by
+        # _apply_training_arch_visibility.
+        self._minimax_shift_label = ttk.Label(scheduler_content, text="Low-noise training:")
+        self._minimax_shift_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self._minimax_shift_frame = ttk.Frame(scheduler_content)
+        self._minimax_shift_frame.grid(row=33, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
+        self.entries["MINIMAX_LOWNOISE_PCT"] = ttk.Entry(self._minimax_shift_frame, width=8)
+        self.entries["MINIMAX_LOWNOISE_PCT"].insert(
+            0, str(self.settings.get("MINIMAX_LOWNOISE_PCT", "60")))
+        self.entries["MINIMAX_LOWNOISE_PCT"].pack(side=tk.LEFT)
+        ttk.Label(self._minimax_shift_frame, text="% of steps").pack(side=tk.LEFT, padx=(4, 0))
+        # Live readout: the number you type is the thing you care about, but the schedule it
+        # produces is worth seeing — especially at the extremes, where a couple of percent of
+        # change swings the shift enormously.
+        self._minimax_shift_match = tk.Label(self._minimax_shift_frame, text="",
+                                             font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
+        self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
+        self.minimax_lognorm_var = tk.BooleanVar(
+            value=bool(self.settings.get("MINIMAX_LOGNORM", True)))
+        ttk.Checkbutton(self._minimax_shift_frame, text="mid-concentrated",
+                        variable=self.minimax_lognorm_var,
+                        command=lambda: self._refresh_minimax_shift_match()).pack(side=tk.LEFT,
+                                                                                 padx=(10, 0))
+        self.entries["MINIMAX_LOWNOISE_PCT"].bind(
+            "<KeyRelease>", lambda _e: self._refresh_minimax_shift_match())
+        self._minimax_shift_hint = ttk.Label(
+            scheduler_content,
+            text="How much of the run trains on nearly-clean images — where fine detail and "
+                 "likeness are learned. 60% with mid-concentrated ticked is the tuned default. "
+                 "Full write-up in the README.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_shift_hint.grid(row=34, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
+
+        # Block A's initial populate — it used to sit at the tail of Training Parameters,
+        # which is now BEFORE the widget exists; the readout would have stayed blank until
+        # the user typed in the box.
+        self._refresh_minimax_shift_match()
 
 
         # === Timestep & Noise Schedule Section (Collapsed by default) ===

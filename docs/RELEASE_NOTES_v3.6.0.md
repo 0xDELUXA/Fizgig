@@ -7,8 +7,18 @@ new **Fast** preset reaches full likeness in a few hundred steps, and the lower 
 tends to come out *more* flexible rather than less. On top of that, a single LoRA can now hold
 **two subjects**, each with its own folder and its own trigger word.
 
-Underneath it, five real accuracy fixes in the model path — two of which improve training, not
-just what you look at.
+## The short version: load Fast, press Start
+
+MiniMax has a reputation for being awkward to train, so it is worth saying plainly that it
+does not need much from you any more.
+
+Load the **✨ MiniMax H3 Fast** preset, point the Start tab at a folder of images, give them
+captions with your trigger word, and press Start. The preset carries the rank, the epoch count
+and the learning rate, and the memory settings work themselves out from your card. **You should
+not need to change anything else**, and the defaults are where we would start ourselves.
+
+Twenty or so varied images is plenty. Every epoch saves a file, so you are choosing a favourite
+from the run rather than hoping the last one landed — and likeness usually arrives early.
 
 ## Judging quality: use Pause, not the previews
 
@@ -27,24 +37,6 @@ give you.
 saves a `.safetensors`, and **Pause** frees the GPU — so the reliable loop is: pause the run,
 load an epoch in ComfyUI, close ComfyUI, resume. It costs a couple of minutes and it is the only
 read you should trust.
-
-## Five accuracy fixes in the preview and training path
-
-Each was small on its own; together they were the difference between a sample that shows your
-LoRA and one that only hints at it — and two of them change what your LoRA is actually fitted
-against.
-
-| | |
-|---|---|
-| **Video decode** | Runs at the precision the decoder's own weights ship in. Fixes soft detail and banding in smooth gradients. |
-| **Audio track** | H3 generates sound alongside picture, and the picture is conditioned on it every step. The audio is now stepped exactly as ComfyUI steps it. |
-| **Base weights** | The quantised base is unpacked without the small per-channel gain error it used to pick up. |
-| **Modulation** | The per-block gain that scales attention and MLP now runs at full precision, as the reference does. |
-| **Prompt length** | Prompts are no longer cut at 512 tokens. A long prompt used to lose its tail in silence — and because the prompt's length sets the video's temporal origin, it also rendered on a different grid than the same prompt in ComfyUI. |
-
-**Two of those improve training, not just previews.** Your LoRA is now fitted against a more
-accurate base, so runs from this version won't line up exactly with older ones. If you're
-mid-comparison, finish it on one version or the other.
 
 ## Multi Concept — two subjects, one LoRA
 
@@ -167,3 +159,8 @@ resuming. A proper fix is coming.
 
 Nothing to do. Your model paths, datasets and caches are untouched. If you've saved MiniMax
 presets, they'll load with the retired controls off.
+
+One thing worth knowing if you're mid-experiment: this version fixes several accuracy problems in
+how the base model is loaded and run, so your LoRA is now fitted against a slightly different
+base than it was. Runs from this version won't line up exactly with older ones — finish any
+comparison on one version or the other.

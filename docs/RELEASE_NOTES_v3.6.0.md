@@ -45,6 +45,13 @@ You get a gentle start without picking a warmup length, and full speed later wit
 moment. Every epoch the console prints the adapter's size, its growth rate, and how much of your
 ceiling is in use.
 
+## The MiniMax preset now defaults to LoRA
+
+The shipped preset is **standard LoRA at dim/alpha 16**, not LoKR. LoKR moves considerably
+further per unit of learning rate, which meant the same Learning Rate box behaved very
+differently depending on which Network Type sat above it. LoRA is the one the best results on
+this family came from, and LoKR is still a dropdown away if you prefer it.
+
 ## A simpler Training tab
 
 With the above doing the job, three controls came off:

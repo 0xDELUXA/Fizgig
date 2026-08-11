@@ -757,13 +757,15 @@ MINIMAX_BUILT_IN_PRESETS = {
     # leading. 50% is worth trying: its shift is exactly 1.00, i.e. the plain logit-normal that
     # earlier runs recorded as overdriving adapters — on adamw8bit, before the optimizer was
     # understood.
-    "✨ MiniMax H3 Defaults (LoKR 8, 1 MP)": {
+    # LoRA, not LoKR (Peter, 10 Aug). The runs that produced the best likeness on this family
+    # were standard LoRA at dim/alpha 16, and LoKR moves ~7-10x further per unit LR — which made
+    # the same Learning Rate box mean two very different things depending on the Network Type
+    # sitting above it. LoKR stays one dropdown away for anyone who wants it.
+    "✨ MiniMax H3 Defaults (LoRA 16, 1 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
-        "NETWORK_TYPE": "LoKR (Kronecker)", "LOKR_FACTOR": 8,
-        # 2e-4 is HEADROOM, not a dose: the governor throttles the effective LR to hold the
-        # movement budget, and late in a run (gradients cooling) a 1e-4 ceiling runs out of
-        # authority to keep the rate at target. The bigger ceiling costs nothing early (the
-        # governor spends what the budget allows) and sustains the clean rate longer.
+        "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": 8,
+        # 2e-4 is a CEILING, not a dose — it is what Adapter-relative LR works its way up toward,
+        # and a flat run should be judged from its samples rather than trusted to this number.
         "LEARNING_RATE": 2e-4,
         "MAX_TRAIN_EPOCHS": 60, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",

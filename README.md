@@ -145,7 +145,7 @@ One built-in preset ships, applied the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoKR factor 8, dim/alpha 16, 60 epochs, **1 MP**, 60% low noise + mid-concentrated, `adamw`, LR 2e-4 |
+| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **1 MP**, 60% low noise + mid-concentrated, `adamw`, LR 2e-4 |
 
 **Train at 1 MP unless your images are tightly cropped.** H3's own canvas is 768 on the short edge, so training much below that puts the model outside the distribution it was built for and the results come out soft no matter what else you change. 0.25 MP is still the right call for a **face-cropped** set — the crop puts the identity pixels where a small latent can see them, and the smaller latents make every step much faster — but for anything wider-framed it quietly starves the detail.
 

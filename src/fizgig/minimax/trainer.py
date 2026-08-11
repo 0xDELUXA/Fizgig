@@ -1966,6 +1966,13 @@ def train_minimax(
             "ss_ema_decay": f"{ema_decay:g}" if ema is not None else "0",
             "ss_slow_block_lr_scale": (f"{slow_block_lr_scale:g}" if _slow_used else "1"),
             "ss_caption_dropout": f"{caption_dropout:g}" if uncond_text is not None else "0",
+            # One [[datasets]] block per subject is how Multi Concept keeps two people apart, so
+            # a deployed LoRA should say how many it carries and where they came from — six
+            # months later the trigger words are the only other clue.
+            "ss_multi_concept": str(len(group.datasets)),
+            "ss_concept_dirs": ",".join(
+                os.path.basename(str(getattr(d, "image_directory", "") or "").rstrip("/\\"))
+                for d in group.datasets),
             "ss_max_grad_norm": f"{max_grad_norm:g}",
             "ss_bucket_resolutions": ",".join(_res),
             "ss_gradient_checkpointing": "1" if use_ckpt else "0",

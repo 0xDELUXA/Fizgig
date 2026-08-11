@@ -844,6 +844,7 @@ def load_last_used():
     defaults = {
         "image_prep_source": "",
         "image_folder": "",  # Start tab: training image folder (shared with Captions)
+        "image_folder2": "",  # Multi Concept (MiniMax): second subject, TRAINING ONLY
         "caption_trigger": "trigger_word",
         "dataset_cache_dir": CACHE_DIR,
         "sample_prompt": "A high quality photo",
@@ -1435,6 +1436,9 @@ class LoRATrainerGUI:
                    self.dataset_megapixels_var, self.dataset_batch_size_var,
                    self.dataset_enable_bucket_var, self.dataset_no_upscale_var):
             _v.trace_add("write", _auto_save_ds)
+        # Multi Concept adds [[datasets]] blocks, so its toggle and folders have to rewrite the
+        # TOML too — they are created later (Training tab), hence the deferred hook-up.
+        self._auto_save_ds = _auto_save_ds
 
         # Initialize settings with default values, including conversion settings
         # Klein 9B Base is the only supported architecture. A few legacy keys
@@ -2096,6 +2100,8 @@ class LoRATrainerGUI:
             "prep_replace_originals": bool(self.delete_originals_var.get()),
             "prep_megapixels": self.prep_megapixels_var.get(),
             "image_folder": self.image_folder_var.get(),
+            "image_folder2": (self._concept_folder_vars[0].get()
+                              if getattr(self, "_concept_folder_vars", None) else ""),
             "caption_trigger": self.caption_text_var.get(),
             "dataset_cache_dir": self.dataset_cache_dir_var.get(),
         })
@@ -3382,6 +3388,48 @@ class LoRATrainerGUI:
 
         self._add_youtube_help_button(scrollable_frame, "start", prominent=True)
 
+    def _browse_concept_folder(self):
+        """Folder picker for the second Multi Concept subject.
+
+        Deliberately NOT wired to image_folder_var: that one is the Start tab's, and Captions,
+        Image Prep, the Look filter, the gallery scorer and the loss watch all follow it."""
+        folder = filedialog.askdirectory(
+            initialdir=(self._concept_folder_vars[0].get()
+                        or self.image_folder_var.get()
+                        or self._pref_initialdir("input_dataset_dir")
+                        or os.getcwd()))
+        if folder:
+            self._concept_folder_vars[0].set(folder)
+
+    def _on_minimax_multiconcept_toggle(self):
+        """Show the extra folder row, and lock caption dropout off while the mode is on.
+
+        Caption dropout trains a fraction of steps against the EMPTY prompt. With two subjects
+        that teaches the model to produce one with no trigger at all — the exact mechanism by
+        which they bleed. Forced rather than merely recommended, and the command builder locks it
+        too, so a preset or a restored config cannot revive it."""
+        on = bool(self.minimax_multiconcept_var.get()) and self._is_minimax_arch()
+        for w in (getattr(self, "_minimax_mc_dir_frame", None),
+                  getattr(self, "_minimax_mc_hint", None)):
+            if w is not None:
+                self._set_widget_visible(w, on)
+        cd = self.entries.get("MINIMAX_CAPTION_DROPOUT")
+        if cd is not None:
+            if on:
+                cd.set("Off — multi-concept")
+                cd.config(state="disabled")
+            else:
+                cd.config(state="readonly")
+        if hasattr(self, "_minimax_capdrop_label"):
+            self._minimax_capdrop_label.config(
+                foreground=(COLORS["text_muted"] if on else COLORS["text_secondary"]))
+        # The "no reference steering" warning only makes sense in multi-concept with distill off.
+        _nd = getattr(self, "_minimax_mc_nodistill_hint", None)
+        if _nd is not None:
+            _distill = bool(getattr(self, "minimax_distill_var", None)
+                            and self.minimax_distill_var.get())
+            self._set_widget_visible(_nd, on and not _distill)
+
     def _browse_image_folder(self):
         """Folder picker for the Start tab (unified image folder).
 
@@ -3904,6 +3952,10 @@ class LoRATrainerGUI:
             self._minimax_distill_frame, text="Learn identity from my dataset (reference distillation)",
             variable=self.minimax_distill_var)
         self._minimax_distill_cb.pack(side=tk.LEFT)
+        # Multi Concept shows a warning while identity-learn is OFF (no reference steering), so
+        # that hint has to refresh when this checkbox moves, not only when the mode is toggled.
+        self.minimax_distill_var.trace_add(
+            "write", lambda *_a: self._on_minimax_multiconcept_toggle())
         ttk.Label(self._minimax_distill_frame, text="   teacher ").pack(side=tk.LEFT)
         self.entries["MINIMAX_DISTILL_WEIGHT"] = ttk.Combobox(
             self._minimax_distill_frame, values=["0.6", "0.7", "0.8", "0.9", "1.0"], width=5)
@@ -4030,6 +4082,65 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_capdrop_hint.grid(row=48, column=0, columnspan=2, sticky=tk.W, padx=5,
                                         pady=(0, 4))
+
+        # --- Multi Concept (MiniMax only) ---------------------------------------------------
+        # Two subjects in ONE folder get cross-referenced by reference distillation: the pairing
+        # rotation runs per [[datasets]] block, so a single block marks subject A's answers
+        # against photos of subject B — which blends them rather than separating them. Giving
+        # each subject its own folder makes the rotation per-subject for free.
+        self.minimax_multiconcept_var = tk.BooleanVar(
+            value=bool(self.settings.get("MINIMAX_MULTICONCEPT", False)))
+        self._minimax_mc_frame = ttk.Frame(training_content)
+        self._minimax_mc_frame.grid(row=49, column=0, columnspan=2, sticky=tk.W, padx=5,
+                                    pady=(8, 0))
+        self._minimax_mc_cb = ttk.Checkbutton(
+            self._minimax_mc_frame, text="Multi Concept — a second subject in its own folder",
+            variable=self.minimax_multiconcept_var,
+            command=self._on_minimax_multiconcept_toggle)
+        self._minimax_mc_cb.pack(side=tk.LEFT)
+
+        # A LIST even though the UI shows one — a third concept is then a widget, not a rewrite.
+        self._concept_folder_vars = [tk.StringVar(
+            value=str(self.last_used.get("image_folder2", "") or ""))]
+        self._minimax_mc_dir_frame = ttk.Frame(training_content)
+        self._minimax_mc_dir_frame.grid(row=50, column=0, columnspan=2, sticky=tk.EW, padx=5,
+                                        pady=(2, 0))
+        ttk.Label(self._minimax_mc_dir_frame, text="Subject 2 folder:").pack(side=tk.LEFT,
+                                                                             padx=(20, 6))
+        self._minimax_mc_entry = ttk.Entry(self._minimax_mc_dir_frame,
+                                           textvariable=self._concept_folder_vars[0],
+                                           state="readonly", width=52)
+        self._minimax_mc_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(self._minimax_mc_dir_frame, text="Browse…",
+                   command=self._browse_concept_folder).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(self._minimax_mc_dir_frame, text="Clear",
+                   command=lambda: self._concept_folder_vars[0].set("")).pack(side=tk.LEFT,
+                                                                             padx=(4, 0))
+        self._minimax_mc_hint = ttk.Label(
+            training_content,
+            text="Each folder needs its OWN trigger word, in every caption — that is the only "
+                 "thing telling the two apart. Caption and prep both folders yourself first; "
+                 "this box is training-only. Full write-up in the README.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT,
+            wraplength=720)
+        self._minimax_mc_hint.grid(row=51, column=0, columnspan=2, sticky=tk.W, padx=5,
+                                   pady=(0, 4))
+        # Only shown when Multi Concept is on AND identity-learn is off — see the toggle handler.
+        self._minimax_mc_nodistill_hint = ttk.Label(
+            training_content,
+            text="Identity-learn is off, so the reference steering that keeps two subjects "
+                 "apart is not running — separation rests on your trigger words alone.",
+            foreground=COLORS["warning"], font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT,
+            wraplength=720)
+        self._minimax_mc_nodistill_hint.grid(row=52, column=0, columnspan=2, sticky=tk.W,
+                                             padx=5, pady=(0, 4))
+        # These change the [[datasets]] blocks, so the TOML has to be rewritten when they move.
+        # Without this the mode looks enabled and silently trains the old single-folder config.
+        if hasattr(self, "_auto_save_ds"):
+            self.minimax_multiconcept_var.trace_add("write", self._auto_save_ds)
+            for _cv in self._concept_folder_vars:
+                _cv.trace_add("write", self._auto_save_ds)
+                _cv.trace_add("write", lambda *_a: self._save_last_used_paths())
 
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
@@ -5029,6 +5140,9 @@ class LoRATrainerGUI:
             "queued_at": _time.strftime("%Y-%m-%d %H:%M"),
             "architecture": self.architecture_var.get(),
             "image_folder": self.image_folder_var.get().strip(),
+            # A queued Multi Concept run loses its second subject without this.
+            "concept_folders": [v.get().strip() for v in
+                                getattr(self, "_concept_folder_vars", [])],
             "preset": self._collect_preset_values(),
             "samples": samples,
         }
@@ -5046,6 +5160,11 @@ class LoRATrainerGUI:
         folder = str(item.get("image_folder") or "").strip()
         if folder:
             self.image_folder_var.set(folder)   # traces regenerate Fizgig_train.toml
+        # Multi Concept's extra folders ride separately: they are not the Start folder and must
+        # not overwrite it. Restored before the toggle so the TOML rewrite sees them.
+        _cf = item.get("concept_folders") or []
+        for _i, _v in enumerate(getattr(self, "_concept_folder_vars", [])):
+            _v.set(str(_cf[_i]).strip() if _i < len(_cf) else "")
         _samples = item.get("samples")
         for k, v in (_samples.items() if isinstance(_samples, dict) else ()):
             entry = self.entries.get(k)
@@ -5601,6 +5720,7 @@ class LoRATrainerGUI:
         # above does NOT see it — without this a queued distillation run loses its reference
         # and silently becomes an ordinary run (tests/test_minimax_distill_gui.py).
         _grab("minimax_distill_var", "MINIMAX_DISTILL")
+        _grab("minimax_multiconcept_var", "MINIMAX_MULTICONCEPT")
         _grab("minimax_lognorm_var", "MINIMAX_LOGNORM")
         _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
@@ -6136,8 +6256,17 @@ class LoRATrainerGUI:
                   self._minimax_ramp_label, self._minimax_ramp_frame, self._minimax_ramp_hint,
                   self._minimax_capdrop_label, self._minimax_capdrop_frame,
                   self._minimax_capdrop_hint,
+                  self._minimax_mc_frame,
                   ):
             self._set_widget_visible(w, is_minimax)
+        # The Multi Concept sub-rows are owned by its own toggle handler (they are hidden even
+        # under MiniMax until the box is ticked), so route them through it rather than the loop.
+        if is_minimax:
+            self._on_minimax_multiconcept_toggle()
+        else:
+            for w in (self._minimax_mc_dir_frame, self._minimax_mc_hint,
+                      self._minimax_mc_nodistill_hint):
+                self._set_widget_visible(w, False)
         # Retired MiniMax controls — never shown under any family. AdaLN can't deploy on the
         # pruned builds; depth-split LR was superseded by the limiter (9 Aug). The per-step clip
         # and LR warmup joined them 10 Aug: the Adapter-relative LR ramp addresses the same
@@ -21103,11 +21232,72 @@ class LoRATrainerGUI:
 
     # endregion
 
+    @staticmethod
+    def _cache_dir_for(cache_root: str, image_dir: str) -> str:
+        """`<cache_root>/<folder name>-<hash of full path>` — one cache dir per image folder.
+
+        The trainer builds its item list by GLOBBING the cache directory, so two datasets sharing
+        one folder would train on each other's leftovers; the dataset layer refuses outright
+        (dataset/config.py: "cache_directory must be unique for each dataset"). The hash keeps it
+        stable per folder and unique across same-named folders, and normalises case and trailing
+        slash — which is also why the GUI must treat `C:\\A` and `c:/a/` as the SAME folder when
+        validating Multi Concept."""
+        import hashlib
+        norm = image_dir.lower().replace("\\", "/").rstrip("/")
+        h = hashlib.sha1(norm.encode("utf-8")).hexdigest()[:8]
+        nm = "".join(c if (c.isalnum() or c in "-_") else "_"
+                     for c in os.path.basename(image_dir.rstrip("/\\"))) or "dataset"
+        return os.path.join(cache_root, f"{nm}-{h}")
+
+    def _dataset_folders(self) -> list:
+        """Every image folder that should become a `[[datasets]]` block, in order.
+
+        Normally just the Start-tab folder. Multi Concept (MiniMax only) appends the extra
+        concept folders, so each subject gets its own block — which is what makes reference
+        distillation pair each image only with OTHERS OF ITS OWN SUBJECT (the rotation in
+        scripts/minimax_cache_text.py runs per dataset block).
+
+        The Start folder stays the single source of truth for Captions, Image Prep, the Look
+        filter and the gallery; only the TOML writer and validation ever see this list."""
+        folders = [self.image_folder_var.get().strip()]
+        if (getattr(self, "minimax_multiconcept_var", None) is not None
+                and self.minimax_multiconcept_var.get() and self._is_minimax_arch()):
+            for var in getattr(self, "_concept_folder_vars", []):
+                extra = var.get().strip()
+                # Skip blanks and duplicates — the dataset layer hard-fails on a repeated
+                # cache_directory, and two spellings of one path hash to the same place.
+                if not extra:
+                    continue
+                norm = extra.lower().replace("\\", "/").rstrip("/")
+                if norm in [f.lower().replace("\\", "/").rstrip("/") for f in folders]:
+                    continue
+                folders.append(extra)
+        return [f for f in folders if f]
+
     def auto_save_dataset_config_silent(self):
-        """Silently auto-save dataset config on startup if all required fields are valid"""
+        """Write the dataset TOML on startup and on every relevant edit (no Save button)."""
         if _persist_disabled():
             return
         try:
+            built = self._build_dataset_toml_text()
+            if built is None:
+                return
+            dataset_name, toml_content = built
+            output_path = os.path.join(DATASET_DIR, f"{dataset_name}.toml")
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write(toml_content)
+            self._dataset_config_var.set(output_path)
+            self.settings["DATASET_CONFIG"] = output_path
+        except Exception:
+            pass  # Silently fail - user can manually save if needed
+
+    def _build_dataset_toml_text(self):
+        """-> (dataset_name, toml text), or None when the config is not writable yet.
+
+        Split out of auto_save_dataset_config_silent so the CONTENT can be tested without
+        touching the filesystem: the writer is guarded by _persist_disabled(), and defeating
+        that guard in a test is how the real prefs got clobbered once already."""
+        if True:
             dataset_name = self.dataset_name_var.get().strip()
             dataset_type = self.dataset_type_var.get()
 
@@ -21174,12 +21364,7 @@ class LoRATrainerGUI:
             if cache_dir and not is_jsonl and not is_video:
                 _cache_img_dir = self.image_folder_var.get().strip()
                 if _cache_img_dir:
-                    import hashlib
-                    _h = hashlib.sha1(_cache_img_dir.lower().replace("\\", "/").rstrip("/")
-                                      .encode("utf-8")).hexdigest()[:8]
-                    _nm = "".join(c if (c.isalnum() or c in "-_") else "_"
-                                  for c in os.path.basename(_cache_img_dir.rstrip("/\\"))) or "dataset"
-                    cache_dir = os.path.join(cache_dir, f"{_nm}-{_h}")
+                    cache_dir = self._cache_dir_for(cache_dir, _cache_img_dir)
 
             # MiniMax uses ONE dataset at the Target Megapixels you set, exactly like Klein and
             # Krea 2. It briefly mirrored ai-toolkit's resolution: [512, 768, 1024], which copies
@@ -21200,8 +21385,24 @@ class LoRATrainerGUI:
                     video_dir = self.dataset_video_dir_var.get().strip().replace("\\", "/")
                     toml_lines.append(f'video_directory = "{video_dir}"')
                 else:
-                    image_dir = self.image_folder_var.get().strip().replace("\\", "/")
-                    toml_lines.append(f'image_directory = "{image_dir}"')
+                    # One block per concept folder. Normally a single folder, so the output is
+                    # byte-identical to the old single-block writer; Multi Concept adds a block
+                    # per extra folder, each with its OWN cache directory (which is what keeps
+                    # the reference rotation inside one subject).
+                    _folders = self._dataset_folders()
+                    _root = (self.prefs_vars["cache_dir"].get().strip()
+                             if "cache_dir" in self.prefs_vars else "")
+                    for _i, _folder in enumerate(_folders):
+                        if _i:                       # the first block's header is already down
+                            toml_lines.append("")
+                            toml_lines.append("[[datasets]]")
+                        toml_lines.append(
+                            f'image_directory = "{_folder.replace(chr(92), "/")}"')
+                        _cd = self._cache_dir_for(_root, _folder) if _root else ""
+                        if _cd:
+                            toml_lines.append(
+                                f'cache_directory = "{_cd.replace(chr(92), "/")}"')
+                    cache_dir = ""                   # emitted per block above
 
             if cache_dir:
                 toml_lines.append(f'cache_directory = "{cache_dir.replace(chr(92), "/")}"')
@@ -21216,20 +21417,7 @@ class LoRATrainerGUI:
                 except ValueError:
                     pass
 
-            toml_content = "\n".join(toml_lines) + "\n"
-
-            # Save to file (silently overwrite if exists)
-            output_path = os.path.join(DATASET_DIR, f"{dataset_name}.toml")
-
-            with open(output_path, 'w', encoding='utf-8') as f:
-                f.write(toml_content)
-
-            # Set as active dataset
-            self._dataset_config_var.set(output_path)
-            self.settings["DATASET_CONFIG"] = output_path
-
-        except Exception:
-            pass  # Silently fail - user can manually save if needed
+            return dataset_name, "\n".join(toml_lines) + "\n"
 
     def show_context_menu(self, event):
         """Show context menu on right-click"""
@@ -21431,6 +21619,36 @@ class LoRATrainerGUI:
                                   "model from the one above and the only H3 build that takes "
                                   "reference images.")
                 _check_num("References each", self.entries["MINIMAX_DISTILL_REFS"].get(), int, 1)
+            # Multi Concept: each extra folder becomes its own [[datasets]] block, so it has to
+            # exist, be distinct, and carry its own captions. The dataset layer refuses two
+            # blocks sharing a cache_directory, and the cache path hashes a case-folded,
+            # slash-stripped path — so C:\A and c:/a/ are the SAME folder as far as it cares.
+            if (getattr(self, "minimax_multiconcept_var", None)
+                    and self.minimax_multiconcept_var.get()):
+                _seen = {self.image_folder_var.get().strip().lower()
+                         .replace("\\", "/").rstrip("/")}
+                _extra = [v.get().strip() for v in getattr(self, "_concept_folder_vars", [])]
+                if not any(_extra):
+                    errors.append("Multi Concept is on but no second subject folder is set — "
+                                  "pick one, or turn the mode off.")
+                for _f in _extra:
+                    if not _f:
+                        continue
+                    _norm = _f.lower().replace("\\", "/").rstrip("/")
+                    if _norm in _seen:
+                        errors.append(f"Multi Concept: {_f} is the same folder as another "
+                                      f"subject — each needs its own folder.")
+                        continue
+                    _seen.add(_norm)
+                    if not os.path.isdir(_f):
+                        errors.append(f"Multi Concept: folder does not exist: {_f}")
+                        continue
+                    _ext = (self.dataset_caption_ext_var.get().strip() or ".txt")
+                    if not any(fn.lower().endswith(_ext.lower()) for fn in os.listdir(_f)):
+                        errors.append(
+                            f"Multi Concept: no {_ext} captions in {_f}. Caption both folders "
+                            f"before training — each subject needs its own trigger word in "
+                            f"every caption, or they will blend.")
         elif config.get("is_krea2"):
             # Krea 2 reads its own four model paths from Preferences (krea2_*). The
             # Turbo DiT is only required when in-training previews are enabled.
@@ -21853,6 +22071,9 @@ class LoRATrainerGUI:
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
+            "MINIMAX_MULTICONCEPT": bool(self.minimax_multiconcept_var.get()),
+            "MINIMAX_CONCEPT_DIRS": [v.get().strip() for v in
+                                     getattr(self, "_concept_folder_vars", [])],
             "MINIMAX_BASE_QUANT": self.entries["MINIMAX_BASE_QUANT"].get(),
             "MINIMAX_BLOCK_LIMIT": self.entries["MINIMAX_BLOCK_LIMIT"].get(),
             "MINIMAX_LR_WARMUP": self.entries["MINIMAX_LR_WARMUP"].get(),
@@ -22859,6 +23080,8 @@ class LoRATrainerGUI:
         # Caption dropout. ALWAYS sent, including 0 — the trainer's own default is 0.05, so
         # "Off" has to be stated explicitly or it silently keeps dropping captions.
         _cd = str(self.settings.get("MINIMAX_CAPTION_DROPOUT", "0.05") or "0.05").split(" ")[0]
+        if self.settings.get("MINIMAX_MULTICONCEPT"):
+            _cd = "0"      # belt and braces: the UI forces it, and so does the builder
         cmd += ["--caption_dropout", _cd if _cd.replace(".", "", 1).isdigit() else "0"]
         # Gradient Checkpointing. The flag used to not be sent at all here, so the checkbox was
         # decorative on this family. Ticked (the default) means AUTO — the planner decides from

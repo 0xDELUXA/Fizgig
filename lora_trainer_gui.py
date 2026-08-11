@@ -3436,7 +3436,21 @@ class LoRATrainerGUI:
             return
         _blended = str(p1.get()).startswith("Off")
         try:
-            w.config(state=("readonly" if _blended else "disabled"))
+            if _blended:
+                w.config(state="readonly")
+                # Hand back whatever the user had before identity-first took the dial over.
+                _stash = getattr(self, "_distill_weight_stash", None)
+                if _stash:
+                    w.set(_stash)
+                    self._distill_weight_stash = None
+            else:
+                # Show 1.0, because that is what phase 1 ACTUALLY runs at — leaving 0.8 sitting
+                # there greyed out told the user something untrue about their own run. (Phase 2
+                # then drops the teacher entirely; the log line says so at the switch.)
+                if str(w.get()) != "1.0" and not getattr(self, "_distill_weight_stash", None):
+                    self._distill_weight_stash = str(w.get())
+                w.set("1.0")
+                w.config(state="disabled")
         except tk.TclError:
             pass
 

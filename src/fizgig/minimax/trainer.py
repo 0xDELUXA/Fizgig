@@ -1668,10 +1668,14 @@ def train_minimax(
                     "included. Nobody has mapped what H3's blocks do — judge this against a "
                     "full-model run on the same dataset, not on its own.",
                     _blocks_used, len(_sel), _n_blocks)
+    # Report what is ACTUALLY targeted: this used to key off the checkpoint alone, so a run with
+    # --no_train_adaln announced "+ AdaLN" one line after saying AdaLN adapters were off.
+    _adaln_on = bool(dit.pruned_adaln and train_adaln)
     logger.info("[base] %s checkpoint; LoRA targets: attention + MLP + token refiner%s",
                 "pruned (curve-table AdaLN)" if dit.pruned_adaln else "full bf16",
-                " + AdaLN (deploy-consistent on this build; rank caps at 8)"
-                if dit.pruned_adaln else " (AdaLN excluded - dropped by pruned inference builds)")
+                " + AdaLN (deploy-consistent on this build; rank caps at 8)" if _adaln_on
+                else (" (AdaLN excluded - turned off for this run)" if dit.pruned_adaln
+                      else " (AdaLN excluded - dropped by pruned inference builds)"))
     if network_type == "lokr":
         # LoKR (Kronecker) — same mechanism as Krea 2's: module_class swaps the parametrization
         # inside the identical scan/wrap machinery, so include_patterns (adaln exclusion) and the

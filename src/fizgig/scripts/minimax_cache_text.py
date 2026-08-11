@@ -124,7 +124,8 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
         logger.info("[reference] dataset %d: %d images, %d reference(s) each (rotation) — every "
                     "image is used as a reference %d time(s)", ds_i, n, kk, kk)
         process_batches(args, [ds], [all_files[ds_i]], [all_paths[ds_i]],
-                        lambda batch: encode_and_save_reference_text(encoder, batch, reference_for))
+                        lambda batch: encode_and_save_reference_text(encoder, batch, reference_for),
+                        index_offset=ds_i)
 
 
 def main():

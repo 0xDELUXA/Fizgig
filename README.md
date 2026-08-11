@@ -141,11 +141,12 @@ int8 is the checkpoint's own storage and the most accurate base (~0.17% error); 
 
 **Quality:** H3 LoRAs used to get pose, hair and framing right while staying soft on the face. That's fixed — the fix was the optimizer, and MiniMax now trains with `adamw` rather than `adamw8bit` by default. If you're loading an older preset or your own saved settings, set **Optimizer Type** to `adamw` on the Training tab; it costs about 1.9 GB more VRAM and nothing else.
 
-One built-in preset ships, applied the moment you pick the family:
+Two built-in presets ship. **Defaults** is applied the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
 | **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, 60% low noise + mid-concentrated, `adamw`, LR ceiling 2e-4 with **Adapter-relative LR** on at `0.003` |
+| **✨ MiniMax H3 Fast** | The same, at **rank 8 for 40 epochs** with a **flat 2e-4** (no Adapter-relative LR). Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible — it has no room to memorise your backgrounds and framing, so it encodes the subject instead. |
 
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
 

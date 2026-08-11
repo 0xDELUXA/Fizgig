@@ -823,11 +823,30 @@ MINIMAX_BUILT_IN_PRESETS = {
         "MINIMAX_EMA": "Off",
         "MINIMAX_DISTILL": False,
     },
-    # The separate "Fast (adaptive LR)" preset was retired 9 Aug: one preset carrying the
-    # validated recipe beats two that drift apart. What that recipe IS has since changed —
-    # the governor, the per-step clip and LR warmup were all retired in turn as the
-    # Adapter-relative LR ramp replaced the whole after-the-fact protection stack with one
-    # dial that holds the step/size ratio steady.
+    # (An earlier "Fast (adaptive LR)" preset was retired 9 Aug when its recipe drifted from the
+    # main one. The Fast preset below avoids that by DERIVING from Defaults — see the comment.)
+}
+
+# --- MiniMax H3 Fast ------------------------------------------------------------------------
+# Peter's rank-8 recipe (11 Aug): the run that reached full likeness in ~400 steps and came out
+# noticeably more flexible than the rank-16 ones. Low rank cannot memorise backgrounds and
+# framing in the time available, so it is forced to encode the subject instead.
+#
+# Built by SPREADING Defaults rather than copying it, so a change to the shipped recipe cannot
+# silently leave this one behind — which is exactly how the last Fast preset earned its
+# retirement. Keyed off the first entry rather than the title, because the title has been
+# renamed twice already.
+_MM_DEFAULTS_KEY = next(iter(MINIMAX_BUILT_IN_PRESETS))
+MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"] = {
+    **MINIMAX_BUILT_IN_PRESETS[_MM_DEFAULTS_KEY],
+    "NETWORK_DIM": 8, "NETWORK_ALPHA": 8,
+    "MAX_TRAIN_EPOCHS": 40,
+    "LEARNING_RATE": 2e-4,
+    # Flat, not ramped. The ramp exists to stop a full-size stride landing on a near-zero
+    # adapter; at rank 8 there are half as many directions to move, and the measured run that
+    # this preset reproduces had no ramp at all.
+    "MINIMAX_ADAPTER_RAMP": "Off",
+    "ADAPTIVE_LR": False,
 }
 
 # Directory for dataset configurations

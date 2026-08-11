@@ -9018,6 +9018,7 @@ class LoRATrainerGUI:
         self.sample_ref_image_var = tk.StringVar(value=self.last_used.get("sample_ref_image", ""))
         _ref_row = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
         _ref_row.grid(row=6, column=1, columnspan=2, sticky=tk.EW, pady=4)
+        self._sample_ref_row = _ref_row        # hidden wholesale for MiniMax (no ref path)
         self.sample_ref_entry = ttk.Entry(_ref_row, textvariable=self.sample_ref_image_var, state="readonly")
         self.sample_ref_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.sample_ref_browse_btn = ttk.Button(_ref_row, text="Browse…", command=self._browse_sample_ref)
@@ -9561,10 +9562,13 @@ class LoRATrainerGUI:
             self.sample_steps_note.configure(text=_MM["steps"])
 
         # Klein's sample-model choice and its RAM cache have no MiniMax equivalent — previews
-        # always render on the resident training DiT. Hide rather than grey: a disabled control
-        # still reads as "something I could turn on".
+        # always render on the resident training DiT. The Reference row goes too: it exists
+        # because Klein is an EDIT model (and Krea 2 has a vision path); H3 has neither, and its
+        # own r2v reference conditioning is a training feature, not a sample one. Hide rather
+        # than grey — a disabled control still reads as "something I could turn on".
         for _attr in ("use_distilled_check", "cache_sample_model_label",
-                      "cache_sample_model_combo"):
+                      "cache_sample_model_combo",
+                      "sample_ref_label", "_sample_ref_row", "sample_ref_note"):
             _w = getattr(self, _attr, None)
             if _w is None:
                 continue

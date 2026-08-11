@@ -84,7 +84,14 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Teacher share of the loss (default 0.8); the remaining 1-W is the "
                         "ordinary flow loss against the real photo. 1.0 is pure distillation, "
                         "which caps the LoRA at exactly the teacher's habits; a little photo "
-                        "keeps real photographic detail reachable.")
+                        "keeps real photographic detail reachable. Ignored when "
+                        "--distill_phase1_epochs is active.")
+    p.add_argument("--distill_phase1_epochs", type=int, default=-1, metavar="N",
+                   help="Identity-first: train the first N epochs against the TEACHER ONLY, then "
+                        "drop the teacher and train on the photographs alone. -1 (default) picks "
+                        "N from the dataset size so phase 1 is ~650 gradient steps, which is "
+                        "where the teacher objective converges. 0 = off (blended loss "
+                        "throughout, using --distill_weight).")
     p.add_argument("--slow_blocks", default=None, metavar="SPEC",
                    help="EXPERIMENT: train these blocks at a reduced learning rate (same syntax "
                         "as --train_blocks). A perturbation in a late block reaches the output "
@@ -218,6 +225,7 @@ def main():
         train_blocks=args.train_blocks,
         distill=args.distill,
         distill_weight=args.distill_weight,
+        distill_phase1_epochs=args.distill_phase1_epochs,
         train_adaln=args.train_adaln,
         slow_blocks=args.slow_blocks,
         slow_block_lr_scale=args.slow_block_lr_scale,

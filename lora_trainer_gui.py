@@ -3978,6 +3978,18 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_DISTILL_REFS"].set(
             str(self.settings.get("MINIMAX_DISTILL_REFS", "2")))
         self.entries["MINIMAX_DISTILL_REFS"].pack(side=tk.LEFT)
+        # Identity-first: teacher-ONLY for the first stretch, then photos-only. A hard switch,
+        # not a blend — the point is where the adapter STARTS, so what phase 2 forgets about the
+        # teacher does not matter. Auto sizes phase 1 from the dataset (~650 steps, which is
+        # where the teacher error was measured to converge on a real run).
+        ttk.Label(self._minimax_distill_frame, text="   identity-first ").pack(side=tk.LEFT)
+        self.entries["MINIMAX_DISTILL_PHASE1"] = ttk.Combobox(
+            self._minimax_distill_frame, state="readonly", width=22,
+            values=["Auto (from dataset size)", "Off — blend throughout",
+                    "2 epochs", "4 epochs", "8 epochs", "16 epochs", "30 epochs"])
+        self.entries["MINIMAX_DISTILL_PHASE1"].set(
+            str(self.settings.get("MINIMAX_DISTILL_PHASE1", "Auto (from dataset size)")))
+        self.entries["MINIMAX_DISTILL_PHASE1"].pack(side=tk.LEFT)
         self._minimax_distill_hint = ttk.Label(
             training_content,
             text="EXPERIMENT — teaches your LoRA to reproduce identity from the trigger word "
@@ -23151,6 +23163,12 @@ class LoRATrainerGUI:
         if self.settings.get("MINIMAX_DISTILL"):
             cmd += ["--distill",
                     "--distill_weight", str(self.settings.get("MINIMAX_DISTILL_WEIGHT", "0.8"))]
+            # Identity-first phase length. "Auto" -> -1 (the trainer sizes it from the dataset),
+            # "Off" -> 0 (blended throughout), otherwise the leading number of epochs.
+            _p1 = str(self.settings.get("MINIMAX_DISTILL_PHASE1", "Auto") or "Auto")
+            _p1n = "-1" if _p1.startswith("Auto") else ("0" if _p1.startswith("Off")
+                                                        else _p1.split(" ")[0])
+            cmd += ["--distill_phase1_epochs", _p1n if _p1n.lstrip("-").isdigit() else "-1"]
         # AdaLN LOCKED off (Peter, 9 Aug): the pruned builds everyone deploys on cannot load
         # AdaLN LoRA keys, so training it only wastes capacity. Checkbox hidden; always opt out.
         cmd.append("--no_train_adaln")

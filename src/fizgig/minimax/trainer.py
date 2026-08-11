@@ -1432,6 +1432,8 @@ def train_minimax(
     train_adaln: bool = True,        # False = drop adaln_proj from the targets (pruned only)
     distill: bool = False,           # reference distillation (references come from the dataset)
     distill_weight: float = 0.8,     # teacher share of the loss; the rest is the real photo
+    distill_phase1_epochs: int = -1,  # identity-first: teacher-ONLY epochs, then photos-only
+                                      # (-1 = auto from dataset size, 0 = off/blended)
     slow_blocks: str = None,         # block spec trained at a reduced LR ("21-49")
     block_limit: float = 0.0,   # >0 = per-block movement cap at N x the median block (the limiter)
     adapter_ramp: float = 0.0,  # >0 = hold each step at this FRACTION of the adapter's size
@@ -1865,6 +1867,33 @@ def train_minimax(
         steps_per_epoch = len(loader)
     except TypeError:
         steps_per_epoch = group.num_train_items
+
+    # --- identity-first (two-phase distillation) --------------------------------------------
+    # Phase 1 trains ONLY against the teacher, so the adapter learns who the trigger means
+    # before it is asked to reproduce any particular photograph. Phase 2 then drops the teacher
+    # entirely and trains on the photos alone, starting from an adapter that already has the
+    # identity in the right places. A hard switch, not a decay: this is an INITIALISATION
+    # strategy, so what phase 2 forgets about the teacher does not matter.
+    #
+    # AUTO length comes from a real run (11 Aug, 82 images): the teacher error fell 0.069 ->
+    # 0.051 -> 0.050 over epochs 7-9 — converged by epoch 8, i.e. ~650 gradient STEPS. Steps,
+    # not epochs, is the invariant: a 24-image set needs the same number of steps, which is
+    # many more epochs. Held at one epoch minimum.
+    _p1_epochs = 0
+    if distill:
+        _p1_epochs = (max(1, math.ceil(650 / max(1, steps_per_epoch)))
+                      if distill_phase1_epochs is None or distill_phase1_epochs < 0
+                      else int(distill_phase1_epochs))
+        _p1_epochs = min(_p1_epochs, max_train_epochs)
+        if _p1_epochs > 0:
+            logger.info(
+                f"[distill] IDENTITY-FIRST: epochs 1-{_p1_epochs} train against the teacher "
+                f"ONLY (~{_p1_epochs * steps_per_epoch} steps), then the teacher is dropped and "
+                f"epochs {_p1_epochs + 1}-{max_train_epochs} train on the photographs alone. "
+                f"The teacher weight box does not apply in this mode."
+                + ("" if distill_phase1_epochs is not None and distill_phase1_epochs >= 0 else
+                   "  (length chosen from the dataset size — the teacher objective converges in "
+                   "roughly 650 steps whatever the image count.)"))
 
     # Gradient accumulation. Batch size 1 means every step is aimed by ONE image, so a large
     # stride follows an equally large random walk — the roughness that reads as "quality loss
@@ -2321,6 +2350,13 @@ def train_minimax(
         shared_epoch.value = epoch + 1
         network.train()
         _distill_acc[:] = [0.0, 0.0, 0]
+        # Identity-first: teacher-only while inside phase 1, photos-only after. Phase 2 takes the
+        # ORDINARY loss path, so it never runs the teacher forward at all — half the compute of a
+        # blended step, and no reference cache is touched.
+        _teacher_phase = bool(distill and _p1_epochs and epoch < _p1_epochs)
+        if _p1_epochs and epoch == _p1_epochs and epoch > start_epoch:
+            logger.info(f"[distill] identity-first phase 1 complete after {_p1_epochs} epoch(s) "
+                        f"— dropping the teacher; from here it trains on the photographs alone.")
         for i, batch in enumerate(loader):
             latents = batch["latents"].to(device, dtype)           # (1, 24, H, W)
             if latents.dim() == 4:
@@ -2328,7 +2364,7 @@ def train_minimax(
             text = batch["hidden_states"].to(device, dtype)        # (1, L, 5120)
             if uncond_text is not None and random.random() < caption_dropout:
                 text = uncond_text.to(device, dtype)               # caption dropout step
-            if distill and "ref_hidden_states" in batch:
+            if distill and (_teacher_phase or not _p1_epochs) and "ref_hidden_states" in batch:
                 _rz = batch["ref_latent"].to(device, dtype)      # (1, 24, h, w) from the cache
                 if _rz.dim() == 4:
                     _rz = _rz.unsqueeze(2)                       # -> (1, 24, 1, h, w)
@@ -2337,8 +2373,9 @@ def train_minimax(
                     text_ref=batch["ref_hidden_states"].to(device, dtype),
                     ref_latents=[_rz],
                     text_token_tags=batch["ref_token_tags"][0],
-                    distill_weight=distill_weight, shift=shift, seed=seed,
-                    parts_out=_distill_parts)
+                    # Phase 1 is teacher-ONLY (weight 1.0); the blended mode keeps the box value.
+                    distill_weight=(1.0 if _teacher_phase else distill_weight),
+                    shift=shift, seed=seed, parts_out=_distill_parts)
                 _distill_acc[0] += _distill_parts["teacher"]
                 _distill_acc[1] += _distill_parts["photo"]
                 _distill_acc[2] += 1
@@ -2394,10 +2431,13 @@ def train_minimax(
                 logger.info(f"[drift] max|lora_up|={_drift:.4f} (bound ~{_bound:.4f} — healthy)")
         except Exception:
             pass
+        if _p1_epochs and not _teacher_phase and distill:
+            logger.info(f"[distill] photos only (identity-first phase 2) — the teacher was "
+                        f"dropped after epoch {_p1_epochs}.")
         if _distill_acc[2]:
             _t = _distill_acc[0] / _distill_acc[2]
             _p = _distill_acc[1] / _distill_acc[2]
-            _w = float(distill_weight)
+            _w = 1.0 if _teacher_phase else float(distill_weight)
             # Weighted contributions are what the optimizer actually sees. The raw errors are
             # printed too, because the interesting question is whether the photo term is HARDER
             # (bigger error) than the teacher term, which is what lets 20% punch above its weight.

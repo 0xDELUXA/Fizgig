@@ -773,6 +773,11 @@ MINIMAX_BUILT_IN_PRESETS = {
         # 2e-4 is a CEILING, not a dose — it is what Adapter-relative LR works its way up toward,
         # and a flat run should be judged from its samples rather than trusted to this number.
         "LEARNING_RATE": 2e-4,
+        # Ships ON at the slow build (Peter, 11 Aug). A LoRA starts at zero, so the first steps
+        # are enormous relative to its own size — the ramp holds that ratio steady instead of
+        # asking for a number that is wrong at one end of the run or the other. Off is still a
+        # dropdown away for a flat run.
+        "MINIMAX_ADAPTER_RAMP": "0.003 (slow build)",
         "MAX_TRAIN_EPOCHS": 60, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         # adamw, NOT adamw8bit — the single biggest likeness change measured on H3 (2026-08-06).
@@ -6099,7 +6104,7 @@ class LoRATrainerGUI:
         for w in (self.labels["NETWORK_TYPE"], self._network_type_rowf):
             self._set_widget_visible(w, native)
         self._network_type_hint.config(
-            text="LoKR: higher quality" if is_minimax
+            text="LoRA recommended for MiniMax" if is_minimax
             else "LoKR: higher quality · LoRA: ~20% faster training")
 
         # Detail Focus is the inverse: MiniMax ONLY. Klein and Krea 2 already derive their shift

@@ -31,19 +31,19 @@ epoch-1 distortion comes from. Later, once the adapter has grown, the same learn
 barely moving it. The rate that's safe at the start is too slow by the end, and there's no single
 number that's right for both.
 
-Switch **Adapter-relative LR** on and the Learning Rate box becomes a **ceiling** rather than a
-setting. The run starts well below it and works its way up, holding every step at a fixed
-fraction of the adapter's current size:
+**Adapter-relative LR** turns the Learning Rate box into a **ceiling** rather than a setting. The
+run starts well below it and works its way up, holding every step at a fixed fraction of the
+adapter's current size:
 
 | Setting | |
 |---|---|
-| `0.003` | slow build |
-| `0.005` | a good starting point |
+| `0.003` | slow build — **the shipped default** |
+| `0.005` | climbs faster |
 | `0.01` | fast build |
 
 You get a gentle start without picking a warmup length, and full speed later without picking the
 moment. Every epoch the console prints the adapter's size, its growth rate, and how much of your
-ceiling is in use.
+ceiling is in use. Set it Off for a flat run at whatever the box says.
 
 ## The MiniMax preset now defaults to LoRA
 

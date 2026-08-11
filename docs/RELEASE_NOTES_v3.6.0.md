@@ -152,6 +152,11 @@ Existing presets and saved configs still load; the retired settings load as off.
   you at Pause → check an epoch in ComfyUI → Resume.
 - **Re-caching with fewer references no longer leaves the old ones behind**, where they could
   still be picked up and train against a pairing from a previous configuration.
+- **Identity mode tells you when the model it needs is missing.** It runs on the reference
+  (ref2va) DiT, and Fizgig used to let you set the whole run up and only refuse at Start — with
+  a 21 GB download as the remedy. It now says so the moment you switch the mode on. **Download
+  models for me** can fetch that file too: tick *Include the reference DiT* beside the button.
+  It stays off by default, since it's 21 GB that ordinary training never touches.
 - **The Samples tab no longer describes other models** when MiniMax is selected — the controls
   that don't apply to it are gone rather than greyed.
 - **The Training tab is sorted into its sections.** Base Precision moved to *Memory & Precision*;

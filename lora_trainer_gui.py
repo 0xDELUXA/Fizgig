@@ -4004,6 +4004,33 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_ramp_hint.grid(row=46, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
+        # --- Caption dropout (MiniMax only) -------------------------------------------------
+        # A fraction of steps train the image against the EMPTY prompt instead of its caption.
+        # On a single-concept set that is healthy regularisation — it stops the LoRA leaning on
+        # the trigger token alone. On a MULTI-concept set it is the opposite: those steps teach
+        # the model to produce the concept with no trigger at all, which is exactly how one
+        # subject leaks into the other's prompts. Was hardcoded at 0.05 (the CLI default) with
+        # no way to change it from the GUI.
+        self._minimax_capdrop_label = ttk.Label(training_content, text="Caption dropout:")
+        self._minimax_capdrop_label.grid(row=47, column=0, sticky=tk.W, padx=5, pady=(8, 0))
+        self._minimax_capdrop_frame = ttk.Frame(training_content)
+        self._minimax_capdrop_frame.grid(row=47, column=1, sticky=tk.W, padx=5, pady=(8, 0))
+        self.entries["MINIMAX_CAPTION_DROPOUT"] = ttk.Combobox(
+            self._minimax_capdrop_frame,
+            values=["Off — multi-concept", "0.05 (default)", "0.10 (strong)"],
+            width=24, state="readonly")
+        self.entries["MINIMAX_CAPTION_DROPOUT"].set(
+            str(self.settings.get("MINIMAX_CAPTION_DROPOUT", "0.05 (default)")))
+        self.entries["MINIMAX_CAPTION_DROPOUT"].pack(side=tk.LEFT)
+        self._minimax_capdrop_hint = ttk.Label(
+            training_content,
+            text="Trains a few percent of steps with no caption, which keeps the LoRA from "
+                 "leaning entirely on the trigger word. Turn it OFF when one LoRA holds two "
+                 "subjects — untriggered steps are how they bleed into each other.",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_capdrop_hint.grid(row=48, column=0, columnspan=2, sticky=tk.W, padx=5,
+                                        pady=(0, 4))
+
         # --- Slow blocks (MiniMax only, experimental): depth-dependent LR -------------------
         self._minimax_slow_label = ttk.Label(training_content, text="Slower LR for blocks:")
         self._minimax_slow_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
@@ -6107,6 +6134,8 @@ class LoRATrainerGUI:
                   self._minimax_smooth_label, self._minimax_smooth_frame,
                   self._minimax_smooth_hint,
                   self._minimax_ramp_label, self._minimax_ramp_frame, self._minimax_ramp_hint,
+                  self._minimax_capdrop_label, self._minimax_capdrop_frame,
+                  self._minimax_capdrop_hint,
                   ):
             self._set_widget_visible(w, is_minimax)
         # Retired MiniMax controls — never shown under any family. AdaLN can't deploy on the
@@ -21829,6 +21858,7 @@ class LoRATrainerGUI:
             "MINIMAX_LR_WARMUP": self.entries["MINIMAX_LR_WARMUP"].get(),
             "MINIMAX_EMA": self.entries["MINIMAX_EMA"].get(),
             "MINIMAX_ADAPTER_RAMP": self.entries["MINIMAX_ADAPTER_RAMP"].get(),
+            "MINIMAX_CAPTION_DROPOUT": self.entries["MINIMAX_CAPTION_DROPOUT"].get(),
             "MINIMAX_DISTILL_WEIGHT": str(self.entries["MINIMAX_DISTILL_WEIGHT"].get() or "0.8").strip(),
             "MINIMAX_DISTILL_REFS": str(self.entries["MINIMAX_DISTILL_REFS"].get() or "2").strip(),
             "MINIMAX_SLOW_BLOCKS": str(self.entries["MINIMAX_SLOW_BLOCKS"].get() or "").strip(),
@@ -22826,6 +22856,10 @@ class LoRATrainerGUI:
         _ar = str(self.settings.get("MINIMAX_ADAPTER_RAMP", "Off") or "Off").split(" ")[0]
         if _ar.replace(".", "", 1).isdigit():
             cmd += ["--adapter_ramp", _ar]
+        # Caption dropout. ALWAYS sent, including 0 — the trainer's own default is 0.05, so
+        # "Off" has to be stated explicitly or it silently keeps dropping captions.
+        _cd = str(self.settings.get("MINIMAX_CAPTION_DROPOUT", "0.05") or "0.05").split(" ")[0]
+        cmd += ["--caption_dropout", _cd if _cd.replace(".", "", 1).isdigit() else "0"]
         # Gradient Checkpointing. The flag used to not be sent at all here, so the checkbox was
         # decorative on this family. Ticked (the default) means AUTO — the planner decides from
         # free VRAM, exactly like Blocks Swap and Base Precision, and in practice that is "on"

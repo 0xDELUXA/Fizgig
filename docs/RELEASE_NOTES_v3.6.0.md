@@ -81,7 +81,7 @@ Phase 2 skips the teacher pass entirely, so it also runs at about half the cost 
 
 ## Adapter-relative LR
 
-**This is what MiniMax needs to train effectively, and it's on by default.**
+**On by default in the Defaults preset** (Fast runs flat instead).
 
 A LoRA starts at zero, so a rate that's safe at epoch 1 is far too slow by epoch 50 — and one
 that's right later wrecks a fresh adapter. There's no single number that works for both.
@@ -149,6 +149,10 @@ Existing presets and saved configs still load; the retired settings load as off.
   still be picked up and train against a pairing from a previous configuration.
 - **The Samples tab no longer describes other models** when MiniMax is selected — the controls
   that don't apply to it are gone rather than greyed.
+- **The Training tab is sorted into its sections.** Base Precision moved to *Memory & Precision*;
+  Weight averaging, Adapter-relative LR, Caption dropout, Blocks to Train and the low-noise share
+  moved to *Other Options*. Training Parameters keeps the settings you actually reach for. Purely
+  a move — no value, default or preset changed.
 
 ## Known issue
 

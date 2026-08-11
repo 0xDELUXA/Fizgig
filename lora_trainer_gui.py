@@ -778,6 +778,9 @@ MINIMAX_BUILT_IN_PRESETS = {
         # asking for a number that is wrong at one end of the run or the other. Off is still a
         # dropdown away for a flat run.
         "MINIMAX_ADAPTER_RAMP": "0.003 (slow build)",
+        # Carried so "load Defaults" genuinely resets it. Multi Concept overrides this to Off
+        # when it is on, and the command builder locks it there regardless.
+        "MINIMAX_CAPTION_DROPOUT": "0.05 (default)",
         "MAX_TRAIN_EPOCHS": 60, "SAVE_EVERY_N_EPOCHS": 1, "SEED": 42,
         "ADAPTIVE_LR": False, "ADAPTIVE_LR_MIN": "1e-5", "ADAPTIVE_LR_MAX": "4e-4",
         # adamw, NOT adamw8bit — the single biggest likeness change measured on H3 (2026-08-06).
@@ -4083,9 +4086,8 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_CAPTION_DROPOUT"].pack(side=tk.LEFT)
         self._minimax_capdrop_hint = ttk.Label(
             training_content,
-            text="Trains a few percent of steps with no caption, which keeps the LoRA from "
-                 "leaning entirely on the trigger word. Turn it OFF when one LoRA holds two "
-                 "subjects — untriggered steps are how they bleed into each other.",
+            text="Trains a few percent of steps with no caption, so the LoRA does not lean "
+                 "entirely on the trigger word.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_capdrop_hint.grid(row=48, column=0, columnspan=2, sticky=tk.W, padx=5,
                                         pady=(0, 4))
@@ -4972,6 +4974,10 @@ class LoRATrainerGUI:
                 _v.set(str(_dirs[_i]).strip() if _i < len(_dirs) else "")
         if "MINIMAX_MULTICONCEPT" in preset and hasattr(self, "minimax_multiconcept_var"):
             self.minimax_multiconcept_var.set(bool(preset["MINIMAX_MULTICONCEPT"]))
+        # Re-run unconditionally: a preset that carries MINIMAX_CAPTION_DROPOUT (the Defaults one
+        # does) would otherwise leave the box showing 0.05 while Multi Concept is on. Training
+        # was never at risk - the command builder locks it either way - but the UI would lie.
+        if hasattr(self, "minimax_multiconcept_var"):
             try:
                 self._on_minimax_multiconcept_toggle()
             except Exception:

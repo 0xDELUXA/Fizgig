@@ -67,10 +67,9 @@ Existing presets and saved configs still load; the retired settings load as off.
 
 - **Gradient accumulation now works on MiniMax.** The field was on the tab but never reached the
   trainer, so it silently did nothing on this family.
-- **Previews are clips.** Samples render as 56-frame clips at 640×640 that you can scrub in the
-  gallery — the regime the model was built for. Both are dropdowns on the Samples tab; raise them
-  when a preview needs to be judged rather than glanced at, and set *Generate every N epochs* to
-  match, because a clip costs minutes rather than seconds.
+- **Previews can be clips.** A new **Sample length** dropdown renders each sample as a short
+  video you can scrub in the gallery, for when motion is what you need to check. Stills at
+  1024×1024 remain the default — they render in seconds where a clip takes minutes.
 - **640** added to the sample resolution list.
 - **Train at 1 MP by default.** H3's canvas is 768 on the short edge, so training much below that
   starves the detail. 0.25 MP is still right for a tightly face-cropped set.

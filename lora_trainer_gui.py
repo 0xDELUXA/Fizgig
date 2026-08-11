@@ -404,16 +404,16 @@ ARCHITECTURES = {
         "sample_is_distilled": True,
         "sample_cfg_fixed": True,
         "sample_steps_default": 20,   # the reference pipeline default
-        # 640x640, paired with the 56-frame clip default (Peter, 10 Aug). The softness that
-        # once argued for 1024 turned out not to be about pixel size at all: previews were
-        # diverging from ComfyUI on four 16-bit dtype/integration decisions (VAE decode dtype,
-        # audio integration order, the int8 per-row scale, and AdaLN precision — see the
-        # matching commits). With those matched, previews track ComfyUI and the resolution is
-        # free to be chosen for COST rather than for legibility. At 56 frames 640 is 6800 video
-        # rows, against 9792 at 768 and 17408 at 1024 — the cheapest size that still reads
-        # clearly per epoch. Raise it when a preview needs to be judged rather than glanced at.
-        "sample_width_default": 640,
-        "sample_height_default": 640,
+        # 1024x1024 STILLS (Peter, 11 Aug). Once the four dtype/integration divergences from
+        # ComfyUI were fixed (VAE decode dtype, audio integration order, the int8 per-row scale,
+        # AdaLN precision) previews stopped being soft, and a still at full size became the
+        # better trade than a clip at a small one: 1 latent frame is 1/17th the video rows of a
+        # 56-frame clip, so 1024 costs less than 640 did before and renders in seconds instead
+        # of minutes. Our still decode is its own path (a 5-token group, keeping frame 3) and
+        # measures ~28 dB against the VAE's own reconstruction, well clear of the reference's
+        # single-frame route. Clips are still a dropdown away when motion is what you need.
+        "sample_width_default": 1024,
+        "sample_height_default": 1024,
         "lora_name_suffix": "mmh3",
     },
 }
@@ -9045,13 +9045,13 @@ class LoRATrainerGUI:
         # Shown/hidden by update_samples_ui_for_architecture.
         self.sample_frames_label = ttk.Label(prompt_card, text="Sample length:")
         self.sample_frames_label.grid(row=8, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        # Default 56 frames (Peter, 10 Aug): the shortest length that reliably renders like
-        # ComfyUI does. 22 was too close to the still end to shake off the out-of-distribution
-        # look, and 141 at 1024 OOMs a 32 GB card next to the resident base (43008 video rows
-        # against 9792 for 56 at the 768 default). Previews are a heartbeat between per-epoch
-        # checkpoints, not the verdict.
+        # Default: STILL (Peter, 11 Aug). Previews are a heartbeat between per-epoch
+        # checkpoints, not the verdict, and a still renders in seconds where a clip takes
+        # minutes — at 1024 it is 1024 video rows against 17408 for a 56-frame clip. The
+        # softness that once argued for clips was four dtype/integration divergences from
+        # ComfyUI, since fixed. Pick a clip length when motion is what you need to see.
         self.sample_frames_var = tk.StringVar(
-            value=self.last_used.get("sample_frames", "56 frames (~2.3s)"))
+            value=self.last_used.get("sample_frames", "Still (1 frame)"))
         self.sample_frames_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_frames_var, state="readonly", width=34,
             values=["Still (1 frame)", "22 frames (~1s)", "56 frames (~2.3s)",

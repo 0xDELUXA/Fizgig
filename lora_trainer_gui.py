@@ -3455,21 +3455,15 @@ class LoRATrainerGUI:
             arch_combo.bind("<<ComboboxSelected>>", self._on_architecture_selected)
             ToolTip(arch_combo, "Model family to train (Klein 9B, Krea 2 or MiniMax H3)")
 
-            # MiniMax renders its previews as a SINGLE video frame, which the H3 VAE decoder was
-            # not trained to produce — every workaround is a compromise (see vae.py). Previews
-            # are honest about relative progress but understate quality, so say so where the
-            # family is chosen rather than leaving people to mistrust their own run.
+            # Previews track likeness honestly but are not the place to compare quality — say
+            # so where the family is chosen, along with the Pause/Resume route that makes
+            # judging in ComfyUI practical on one GPU.
             self._minimax_sample_note = tk.Label(
                 model_card,
-                text=("⏱ MiniMax samples render as short CLIPS by default — they take longer "
-                      "than stills, and longer clips take longer still. Everything about this "
-                      "is tuned on the SAMPLES tab: render less often (Generate every N "
-                      "epochs), smaller (Width/Height), shorter (Sample length — 'Still' is "
-                      "the old fast mode), or untick sample generation entirely. Clips scrub "
-                      "in the gallery and sample the video regime the model was trained in; "
-                      "final judgement still belongs in ComfyUI. 📖 Every MiniMax control on "
-                      "this tab has a full write-up in the README — worth a read before your "
-                      "first run."),
+                text=("⏱ Previews track LIKENESS, not quality. Judge quality in ComfyUI — Pause "
+                      "frees the GPU, so you can check an epoch there and Resume.\n"
+                      "Defaults are 1024×1024 stills; Sample length gives clips. 📖 Full "
+                      "write-ups in the README."),
                 font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
                 wraplength=760, justify=tk.LEFT,
             )

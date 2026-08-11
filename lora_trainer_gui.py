@@ -3421,30 +3421,19 @@ class LoRATrainerGUI:
             pass
 
     def _on_minimax_multiconcept_toggle(self):
-        """Show the extra folder row, and lock caption dropout off while the mode is on.
+        """Show the extra folder row. Caption dropout is deliberately NOT touched.
 
-        Caption dropout trains a fraction of steps against the EMPTY prompt. With two subjects
-        that teaches the model to produce one with no trigger at all — the exact mechanism by
-        which they bleed. Forced rather than merely recommended, and the command builder locks it
-        too, so a preset or a restored config cannot revive it."""
+        It used to be forced off here, on the theory that training a few percent of steps against
+        the EMPTY prompt teaches the model to produce a subject with no trigger — the mechanism by
+        which two subjects bleed. Peter's own A/B said otherwise (11 Aug): with distillation off,
+        one folder WITH dropout beat two folders without it. Whatever dropout costs in bleed, it
+        appears to be worth more as regularisation at this scale. The dial goes back to the user
+        rather than being locked to a theory the data does not support."""
         on = bool(self.minimax_multiconcept_var.get()) and self._is_minimax_arch()
         for w in (getattr(self, "_minimax_mc_dir_frame", None),
                   getattr(self, "_minimax_mc_hint", None)):
             if w is not None:
                 self._set_widget_visible(w, on)
-        cd = self.entries.get("MINIMAX_CAPTION_DROPOUT")
-        if cd is not None:
-            if on:
-                cd.set("Off")
-                cd.config(state="disabled")
-            else:
-                cd.config(state="readonly")
-        if hasattr(self, "_minimax_capdrop_label"):
-            # ttk.Label: setting an explicit foreground STICKS, and text_secondary is a grey that
-            # does not match the untouched labels around it. Clearing it hands the widget back to
-            # the theme, so "enabled" looks exactly like every other row.
-            self._minimax_capdrop_label.config(
-                foreground=(COLORS["text_muted"] if on else ""))
         # The "no reference steering" warning only makes sense in multi-concept with distill off.
         _nd = getattr(self, "_minimax_mc_nodistill_hint", None)
         if _nd is not None:
@@ -23149,9 +23138,10 @@ class LoRATrainerGUI:
             cmd += ["--adapter_ramp", _ar]
         # Caption dropout. ALWAYS sent, including 0 — the trainer's own default is 0.05, so
         # "Off" has to be stated explicitly or it silently keeps dropping captions.
+        # Whatever the box says, including under Multi Concept — the builder used to force it to
+        # 0 there, which quietly made every multi-concept run a dropout-off run and confounded
+        # the very comparison it was meant to help.
         _cd = str(self.settings.get("MINIMAX_CAPTION_DROPOUT", "0.05") or "0.05").split(" ")[0]
-        if self.settings.get("MINIMAX_MULTICONCEPT"):
-            _cd = "0"      # belt and braces: the UI forces it, and so does the builder
         cmd += ["--caption_dropout", _cd if _cd.replace(".", "", 1).isdigit() else "0"]
         # Gradient Checkpointing. The flag used to not be sent at all here, so the checkbox was
         # decorative on this family. Ticked (the default) means AUTO — the planner decides from

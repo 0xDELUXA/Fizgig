@@ -3416,13 +3416,16 @@ class LoRATrainerGUI:
         cd = self.entries.get("MINIMAX_CAPTION_DROPOUT")
         if cd is not None:
             if on:
-                cd.set("Off — multi-concept")
+                cd.set("Off")
                 cd.config(state="disabled")
             else:
                 cd.config(state="readonly")
         if hasattr(self, "_minimax_capdrop_label"):
+            # ttk.Label: setting an explicit foreground STICKS, and text_secondary is a grey that
+            # does not match the untouched labels around it. Clearing it hands the widget back to
+            # the theme, so "enabled" looks exactly like every other row.
             self._minimax_capdrop_label.config(
-                foreground=(COLORS["text_muted"] if on else COLORS["text_secondary"]))
+                foreground=(COLORS["text_muted"] if on else ""))
         # The "no reference steering" warning only makes sense in multi-concept with distill off.
         _nd = getattr(self, "_minimax_mc_nodistill_hint", None)
         if _nd is not None:
@@ -4073,7 +4076,7 @@ class LoRATrainerGUI:
         self._minimax_capdrop_frame.grid(row=47, column=1, sticky=tk.W, padx=5, pady=(8, 0))
         self.entries["MINIMAX_CAPTION_DROPOUT"] = ttk.Combobox(
             self._minimax_capdrop_frame,
-            values=["Off — multi-concept", "0.05 (default)", "0.10 (strong)"],
+            values=["Off", "0.05 (default)", "0.10 (strong)"],
             width=24, state="readonly")
         self.entries["MINIMAX_CAPTION_DROPOUT"].set(
             str(self.settings.get("MINIMAX_CAPTION_DROPOUT", "0.05 (default)")))
@@ -4958,6 +4961,21 @@ class LoRATrainerGUI:
             self.minimax_distill_var.set(bool(preset["MINIMAX_DISTILL"]))
         if "MINIMAX_LOGNORM" in preset and hasattr(self, "minimax_lognorm_var"):
             self.minimax_lognorm_var.set(bool(preset["MINIMAX_LOGNORM"]))
+        # Multi Concept: a BooleanVar plus a LIST of folders, so neither is reachable by the
+        # generic self.entries loop above. Restore the folders BEFORE the toggle so the handler
+        # that rewrites the TOML and locks caption dropout sees the finished state.
+        if "MINIMAX_CONCEPT_DIRS" in preset:
+            _dirs = preset.get("MINIMAX_CONCEPT_DIRS") or []
+            if isinstance(_dirs, str):                     # tolerate an older single-string save
+                _dirs = [_dirs] if _dirs.strip() else []
+            for _i, _v in enumerate(getattr(self, "_concept_folder_vars", [])):
+                _v.set(str(_dirs[_i]).strip() if _i < len(_dirs) else "")
+        if "MINIMAX_MULTICONCEPT" in preset and hasattr(self, "minimax_multiconcept_var"):
+            self.minimax_multiconcept_var.set(bool(preset["MINIMAX_MULTICONCEPT"]))
+            try:
+                self._on_minimax_multiconcept_toggle()
+            except Exception:
+                pass
 
         # Model Area to Train (training preset dropdown)
         if "TARGET_LAYERS" in preset and hasattr(self, 'training_preset_var'):
@@ -5702,6 +5720,13 @@ class LoRATrainerGUI:
                     preset[key] = getattr(self, attr).get()
                 except Exception:
                     pass
+
+        # Multi Concept's folders are a LIST on a dedicated attribute, so neither the entries
+        # loop nor _grab reaches them — and without this "Load Settings From Last Train" brings
+        # the toggle back with no second subject behind it.
+        if getattr(self, "_concept_folder_vars", None):
+            preset["MINIMAX_CONCEPT_DIRS"] = [v.get().strip()
+                                              for v in self._concept_folder_vars]
 
         _grab("preserve_dist_var", "PRESERVE_DISTRIBUTION")
         _grab("fp8_var", "FP8")

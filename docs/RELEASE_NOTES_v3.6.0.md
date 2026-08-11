@@ -159,8 +159,3 @@ resuming. A proper fix is coming.
 
 Nothing to do. Your model paths, datasets and caches are untouched. If you've saved MiniMax
 presets, they'll load with the retired controls off.
-
-One thing worth knowing if you're mid-experiment: this version fixes several accuracy problems in
-how the base model is loaded and run, so your LoRA is now fitted against a slightly different
-base than it was. Runs from this version won't line up exactly with older ones — finish any
-comparison on one version or the other.

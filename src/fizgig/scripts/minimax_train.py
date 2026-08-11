@@ -78,8 +78,9 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="EXPERIMENT: reference distillation. Instead of only reconstructing each "
                         "photo, the LoRA is taught to behave — from text alone — as the model "
                         "does when SHOWN a reference. The references are OTHER images from this "
-                        "same dataset, paired by minimax_cache_text --reference_count. Train and "
-                        "deploy on the ref2va checkpoint.")
+                        "same dataset, paired by minimax_cache_text --reference_count. The whole "
+                        "run trains on ref2va (it is the only build that accepts references), "
+                        "but the resulting LoRA deploys fine on the ordinary fl2va model.")
     p.add_argument("--distill_weight", type=float, default=0.8, metavar="W",
                    help="Teacher share of the loss (default 0.8); the remaining 1-W is the "
                         "ordinary flow loss against the real photo. 1.0 is pure distillation, "

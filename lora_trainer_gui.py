@@ -9160,6 +9160,10 @@ class LoRATrainerGUI:
             "non-distilled models disable CFG Scale.",
         )
         self._samples_arch_card = arch_card       # description reworded per family
+        # The whole card is hidden for MiniMax (every row in it is inapplicable), so keep the
+        # OUTER frame — _start_section_card returns the inner content frame, and it is the outer
+        # that was packed into sample_settings_frame.
+        self._samples_arch_outer = arch_card.master.master
         arch_card.grid_columnconfigure(1, weight=1)
 
         def _arch_note(parent, text):
@@ -9209,6 +9213,9 @@ class LoRATrainerGUI:
             self.sample_settings_frame, "Viewer",
             "Browse generated samples without leaving the app, or open the folder in Explorer.",
         )
+        # Anchor for re-showing the Advanced card: pack() alone would re-add it at the BOTTOM,
+        # below Viewer, so it has to go back in before this one.
+        self._samples_viewer_outer = viewer_card.master.master
 
         viewer_buttons = tk.Frame(viewer_card, bg=COLORS["bg_surface"])
         viewer_buttons.pack(anchor=tk.W)
@@ -9552,6 +9559,20 @@ class LoRATrainerGUI:
         _adv = getattr(self, "_samples_arch_card", None)
         if _adv is not None and getattr(_adv, "_desc_label", None) is not None:
             _adv._desc_label.configure(text=_t["advanced"])
+
+        # The whole Advanced card goes for MiniMax: Flow Shift is fixed at 12, and Negative
+        # Prompt and CFG Scale are both inert on a CFG-free family — three greyed rows under a
+        # heading is just a card asking to be misread.
+        _adv_outer = getattr(self, "_samples_arch_outer", None)
+        if _adv_outer is not None:
+            if is_minimax:
+                _adv_outer.pack_forget()
+            elif not _adv_outer.winfo_manager():
+                _anchor = getattr(self, "_samples_viewer_outer", None)
+                if _anchor is not None and _anchor.winfo_manager():
+                    _adv_outer.pack(fill=tk.X, padx=36, pady=(0, 16), before=_anchor)
+                else:
+                    _adv_outer.pack(fill=tk.X, padx=36, pady=(0, 16))
         for _attr, _key in (("_sample_flow_note", "flow"), ("_sample_neg_note", "neg"),
                             ("_sample_cfg_note", "cfg")):
             _w = getattr(self, _attr, None)

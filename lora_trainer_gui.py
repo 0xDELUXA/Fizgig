@@ -3457,9 +3457,11 @@ class LoRATrainerGUI:
     # The recipe Multi Concept switches you into (Peter, 11 Aug). Applied ONCE, when the box is
     # ticked — not locked. Locking caption dropout to a theory is what broke the last version of
     # this mode, so these are starting points the user can still argue with.
+    # Deliberately NOT here: Adapter-relative LR. It is an LR strategy, and the two presets own
+    # that choice (Defaults on, Fast flat) - a box describing how your DATA is laid out has no
+    # business overruling the preset the user just loaded.
     _MULTICONCEPT_DEFAULTS = {
         "MINIMAX_CAPTION_DROPOUT": "0.10 (strong)",
-        "MINIMAX_ADAPTER_RAMP": "Off",
         "MINIMAX_DISTILL_REFS": "4",
         "MINIMAX_DISTILL_PHASE1": "2 epochs",
     }

@@ -57,32 +57,36 @@ compared against A. Put two people in one folder and the pairing crosses them, w
 together rather than keeping them apart.
 
 Ticking the mode also sets the settings that suit it — identity-learn on, 4 references, a short
-identity-first phase, caption dropout at `0.10`, Adapter-relative LR off — and tells you in the
-console what it changed. **Nothing is locked**; they're starting points.
+identity-first phase and caption dropout at `0.10` — and tells you in the console what it
+changed. **Nothing is locked**; they're starting points. It leaves the learning rate alone:
+which LR strategy you want is the preset's business, not this box's.
 
 Two things it expects of you: **caption both folders yourself**, each with its own unique trigger
 word in *every* caption (that word is the only thing telling the two apart), and note the second
 folder is training-only — Image Prep, Captions and the Look filter still follow the Start folder.
 
-## Identity-first
+### Identity-first
 
-**Both identity-learn and this are aimed at Multi Concept.** That is where they have been tested
-and where they demonstrably help — holding two people apart. On a single character they are
-unproven: not known to be worse, just untested, so treat them as an experiment there rather than
-something we are recommending.
+Part of identity-learn, and a good deal of why two subjects stay apart. It trains the first
+stretch against the **teacher only** — the model as it behaves when shown a reference photo —
+then drops the teacher entirely and trains on the **photographs only**.
 
-An option on identity-learn mode: train the first stretch against the **teacher only**, then drop
-the teacher entirely and train on the **photographs only**.
+Photo training then starts from an adapter that already knows who each trigger word means,
+instead of discovering the identities and the detail at the same time. Phase 1 runs at a third
+of the Learning Rate box, since it is placing identity rather than reproducing detail, and phase
+2 skips the teacher pass altogether so it costs about half as much per step.
 
-The idea is that photo training then starts from an adapter that already knows who the trigger
-word means, instead of discovering the identity and the detail at the same time. Phase 1 runs at
-a third of the Learning Rate box, since it's placing the identity rather than reproducing detail.
+**Auto** sizes the first phase from your dataset — enough steps for the teacher side to
+converge, which is roughly the same number of steps whatever your image count and therefore
+rather more epochs on a small set. Or pick a fixed number of epochs; **Off** keeps the blended
+loss throughout.
 
-**Auto** sizes the first phase from your dataset — enough steps for the teacher side to converge,
-which is roughly the same number of steps whatever your image count, and therefore rather more
-epochs on a small set. Or pick a fixed number of epochs. Off keeps the blended loss.
-
-Phase 2 skips the teacher pass entirely, so it also runs at about half the cost per step.
+**Where else it might help.** Two subjects is where this has been tested, but nothing about it
+is specific to them. The same argument applies to a single character whose likeness is competing
+with strong backgrounds, to a subject you have few photos of, or to any run where identity
+arrives late and the rest arrives early. That is untested rather than known to be wrong — worth
+trying if the ordinary route is not getting you there, but not something we are recommending
+yet. It does need the reference DiT either way.
 
 ## Adapter-relative LR
 

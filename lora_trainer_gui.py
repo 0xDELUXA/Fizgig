@@ -767,7 +767,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     # were standard LoRA at dim/alpha 16, and LoKR moves ~7-10x further per unit LR — which made
     # the same Learning Rate box mean two very different things depending on the Network Type
     # sitting above it. LoKR stays one dropdown away for anyone who wants it.
-    "✨ MiniMax H3 Defaults (LoRA 16, 1 MP)": {
+    "✨ MiniMax H3 Defaults (LoRA 16, 0.25 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": 8,
         # 2e-4 is a CEILING, not a dose — it is what Adapter-relative LR works its way up toward,
@@ -790,12 +790,13 @@ MINIMAX_BUILT_IN_PRESETS = {
         # fine detail. Costs ~1.2 GB of fp32 state against a 21 GB resident base.
         "OPTIMIZER_TYPE": "adamw",
         "GRADIENT_ACCUMULATION": 1, "MAX_GRAD_NORM": 1.0,
-        # 1.0 MP (Peter, 10 Aug). H3's own canvas is 768 short edge, so 0.25 MP (496px) trains
-        # the model BELOW the distribution it was built for — the same out-of-distribution
-        # class as single-frame previews on a video model. 0.25 is still right for a tightly
-        # face-cropped set, where the crop puts the identity pixels where a small latent can
-        # see them, but as a default it silently starved every wider-framed dataset.
-        "DATASET_MEGAPIXELS": "1.0",
+        # Back to 0.25 MP (Peter, 11 Aug). The 1.0 default lasted a day: it came from the theory
+        # that 496px trains below H3's 768 short-edge canvas and must therefore starve detail —
+        # the same out-of-distribution argument that was being made about previews at the time.
+        # A day of real runs did not bear it out, and 0.25 is four times cheaper per step.
+        # The canvas number is about what the model RENDERS; it turned out to say much less than
+        # expected about what it can be TRAINED on.
+        "DATASET_MEGAPIXELS": "0.25",
         "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
         # The experiment knobs all ship OFF, so the preset is the plain baseline every A/B is
         # measured against. Each of these was built to be TRIED, not to be on by default:

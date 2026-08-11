@@ -145,9 +145,9 @@ One built-in preset ships, applied the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **1 MP**, 60% low noise + mid-concentrated, `adamw`, LR ceiling 2e-4 with **Adapter-relative LR** on at `0.003` |
+| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, 60% low noise + mid-concentrated, `adamw`, LR ceiling 2e-4 with **Adapter-relative LR** on at `0.003` |
 
-**Train at 1 MP unless your images are tightly cropped.** H3's own canvas is 768 on the short edge, so training much below that puts the model outside the distribution it was built for and the results come out soft no matter what else you change. 0.25 MP is still the right call for a **face-cropped** set — the crop puts the identity pixels where a small latent can see them, and the smaller latents make every step much faster — but for anything wider-framed it quietly starves the detail.
+**0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
 
 **Previews are 1024×1024 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch.
 

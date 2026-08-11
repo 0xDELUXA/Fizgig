@@ -71,8 +71,6 @@ Existing presets and saved configs still load; the retired settings load as off.
   video you can scrub in the gallery, for when motion is what you need to check. Stills at
   1024×1024 remain the default — they render in seconds where a clip takes minutes.
 - **640** added to the sample resolution list.
-- **Train at 1 MP by default.** H3's canvas is 768 on the short edge, so training much below that
-  starves the detail. 0.25 MP is still right for a tightly face-cropped set.
 - **A clip preview that runs out of memory now retries shorter** — 141 → 56 → 22 frames — instead
   of dropping the whole run to single frames.
 

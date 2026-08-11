@@ -17,8 +17,16 @@ captions with your trigger word, and press Start. The preset carries the rank, t
 and the learning rate, and the memory settings work themselves out from your card. **You should
 not need to change anything else**, and the defaults are where we would start ourselves.
 
-Twenty or so varied images is plenty. Every epoch saves a file, so you are choosing a favourite
-from the run rather than hoping the last one landed — and likeness usually arrives early.
+**How many images?** Thirty-five to forty-five is plenty. For a character the easiest route
+there is 20–25 full-length and mid-length shots at the highest resolution you have, then
+**Resize + face close-ups** on the Image Prep tab — it keeps each photo and saves a zoomed face
+crop beside it, which lands you at the right number without going hunting for more pictures.
+
+If you would rather not use it, make sure you include some tight shots yourself. A set of nothing
+but full-length photos does not give the model enough of the face to work with.
+
+Every epoch saves a file, so you are choosing a favourite from the run rather than hoping the
+last one landed — and likeness usually arrives early.
 
 ## Judging quality: use Pause, not the previews
 

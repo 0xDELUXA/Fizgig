@@ -66,6 +66,11 @@ folder is training-only — Image Prep, Captions and the Look filter still follo
 
 ## Identity-first
 
+**Both identity-learn and this are aimed at Multi Concept.** That is where they have been tested
+and where they demonstrably help — holding two people apart. On a single character they are
+unproven: not known to be worse, just untested, so treat them as an experiment there rather than
+something we are recommending.
+
 An option on identity-learn mode: train the first stretch against the **teacher only**, then drop
 the teacher entirely and train on the **photographs only**.
 

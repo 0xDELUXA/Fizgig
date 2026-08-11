@@ -3421,6 +3421,38 @@ class LoRATrainerGUI:
         except tk.TclError:
             pass
 
+    # The recipe Multi Concept switches you into (Peter, 11 Aug). Applied ONCE, when the box is
+    # ticked — not locked. Locking caption dropout to a theory is what broke the last version of
+    # this mode, so these are starting points the user can still argue with.
+    _MULTICONCEPT_DEFAULTS = {
+        "MINIMAX_CAPTION_DROPOUT": "0.10 (strong)",
+        "MINIMAX_ADAPTER_RAMP": "Off",
+        "MINIMAX_DISTILL_REFS": "4",
+        "MINIMAX_DISTILL_PHASE1": "2 epochs",
+    }
+
+    def _on_minimax_multiconcept_clicked(self):
+        """User CLICKED the box — apply the recipe, then refresh the rows.
+
+        Separate from _on_minimax_multiconcept_toggle because that one also runs on an
+        architecture switch and on every preset load; applying the recipe there would silently
+        overwrite settings the user had changed, every time they visited the tab."""
+        if self.minimax_multiconcept_var.get():
+            _changed = []
+            for _k, _v in self._MULTICONCEPT_DEFAULTS.items():
+                _w = self.entries.get(_k)
+                if _w is not None and str(_w.get()) != _v:
+                    _w.set(_v)
+                    _changed.append(f"{_k.replace('MINIMAX_', '').lower()}={_v}")
+            if hasattr(self, "minimax_distill_var") and not self.minimax_distill_var.get():
+                self.minimax_distill_var.set(True)
+                _changed.append("identity-learn=on")
+            if _changed:
+                self.update_console("[multi concept] applied: " + ", ".join(_changed)
+                                    + "  (all still editable)\n")
+        self._on_minimax_multiconcept_toggle()
+        self._sync_distill_weight_state()
+
     def _on_minimax_multiconcept_toggle(self):
         """Show the extra folder row. Caption dropout is deliberately NOT touched.
 
@@ -4125,7 +4157,7 @@ class LoRATrainerGUI:
         self._minimax_mc_cb = ttk.Checkbutton(
             self._minimax_mc_frame, text="Multi Concept — a second subject in its own folder",
             variable=self.minimax_multiconcept_var,
-            command=self._on_minimax_multiconcept_toggle)
+            command=self._on_minimax_multiconcept_clicked)
         self._minimax_mc_cb.pack(side=tk.LEFT)
 
         # A LIST even though the UI shows one — a third concept is then a widget, not a rewrite.
@@ -4149,7 +4181,9 @@ class LoRATrainerGUI:
             training_content,
             text="Each folder needs its OWN trigger word, in every caption — that is the only "
                  "thing telling the two apart. Caption and prep both folders yourself first; "
-                 "this box is training-only. Full write-up in the README.",
+                 "this box is training-only. Ticking the mode also sets the settings that suit "
+                 "it (identity-learn on, 4 references, identity-first 2 epochs, dropout 0.10, "
+                 "adapter-relative LR off) — all still yours to change.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT,
             wraplength=720)
         self._minimax_mc_hint.grid(row=51, column=0, columnspan=2, sticky=tk.W, padx=5,

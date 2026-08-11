@@ -2030,7 +2030,27 @@ def train_minimax(
     # off on any preview exception. A clip-specific failure must degrade to a SHORTER clip that
     # fits, not take every future preview down with it — so the frame count lives in mutable
     # state the failure handlers can lower.
-    _clip_state = {"frames": max(1, int(sample_frames or 1)), "notice_done": False}
+    _clip_state = {"frames": max(1, int(sample_frames or 1)), "notice_done": False,
+                   "slow_done": False}
+
+    def _slow_step_notice(seconds, step, total):
+        """Told once when a preview step runs absurdly long.
+
+        A preview that does not fit in VRAM does NOT raise on Windows — the driver pages to
+        system RAM and the render succeeds at roughly a hundred times the cost, so the
+        clip->stills fallback (which is exception-driven) never fires and the run looks hung.
+        Wall time is the only symptom that survives, so it is what we watch."""
+        if _clip_state["slow_done"]:
+            return
+        _clip_state["slow_done"] = True
+        logger.warning(
+            f"[preview] step {step}/{total} took {seconds:.0f}s — far slower than this should "
+            f"be, which almost always means the preview does not fit in VRAM and is spilling "
+            f"into system RAM. This preview will finish, just slowly. For future previews, "
+            f"lower Width/Height on the Samples tab (and Sample length if you are rendering "
+            f"clips) — previews are a heartbeat between checkpoints, not the verdict, so a "
+            f"smaller one costs you nothing. Every epoch still saves a .safetensors, and final "
+            f"quality is best judged by loading one of those in ComfyUI.")
 
     def _render_previews(epoch):
         """Render one still per prompt on the RESIDENT training DiT and write them where the
@@ -2162,7 +2182,7 @@ def train_minimax(
                     uncond_embeds=(encoded_negative.to(device, dtype)
                                    if encoded_negative is not None else None),
                     seed=_seed + i, device=device, dtype=dtype, log_steps=True,
-                    num_frames=_frames)
+                    num_frames=_frames, on_slow_step=_slow_step_notice)
                 _rendered.append((f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}",
                                   lat.to("cpu")))
                 del lat

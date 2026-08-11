@@ -138,7 +138,8 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                  uncond_embeds=None, seed=0, shift=12.0, device="cuda",
                  dtype=torch.bfloat16, latent_channels=24, spatial=16, log_steps=False,
                  sampler="res_multistep", schedule_mode="comfy",
-                 ref_latents=None, text_token_tags=None, num_frames: int = 1):
+                 ref_latents=None, text_token_tags=None, num_frames: int = 1,
+                 on_slow_step=None, slow_step_s: float = 120.0):
     """Denoise one image OR clip and return its LATENT [1, 24, T, H/16, W/16].
 
     num_frames is PIXEL frames on the model's 17n+5 grid (5, 22, ..., 124, 141); off-grid
@@ -162,6 +163,11 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     as condition rows in every evaluation, and the tags mark which conditioning rows are the
     `<Picture i>` vision blocks. Both are passed straight through to the DiT, unchanged across
     steps — the references are conditioning, not something being denoised.
+
+    on_slow_step(seconds, step, total) fires ONCE if any step exceeds slow_step_s. It exists
+    because the interesting failure here is not an exception: when a preview oversubscribes
+    VRAM, Windows pages to system RAM rather than raising, so the render succeeds at ~100x the
+    cost and every exception-driven fallback stays quiet. Wall time is the only symptom.
     """
     lat_h, lat_w = height // spatial, width // spatial
     # The DiT patchifies 2x2, so the latent grid must be even (compute_loss crops for the same
@@ -199,12 +205,14 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
     n_eval = len(sigmas) - 1                            # the terminal 0 is not an evaluation
     prev_denoised = None                                # res_multistep's one-step memory
     prev_denoised_a = None                              # ...and the audio stream's own
+    import time as _t
     _last = [None]                                      # per-step wall time for the log
+    _slow_fired = False                                 # on_slow_step is a ONE-shot notice
     for i in range(n_eval):
+        _step_t0 = _t.time()
         s_curr, s_next = sigmas[i], sigmas[i + 1]
         if log_steps:
-            import time as _t
-            _now = _t.time()
+            _now = _step_t0
             _dt = f"  ({_now - _last[0]:.1f}s)" if _last[0] is not None else ""
             _last[0] = _now
             print(f"[preview] step {i + 1}/{n_eval}  sigma {s_curr:.4f} -> {s_next:.4f}{_dt}",
@@ -256,6 +264,18 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                 audio_rows = audio_rows + (s_curr - s_next) * a_scaled
             prev_denoised_a = denoised_a
         prev_denoised = denoised
+        # One-shot slow-step notice. A preview that oversubscribes VRAM does NOT raise on
+        # Windows — the driver pages to system RAM and the forward just crawls, so every
+        # exception-driven fallback in the trainer stays silent while a step takes minutes.
+        # Timing the step is the only signal that survives that failure mode.
+        if on_slow_step is not None and not _slow_fired:
+            _elapsed = _t.time() - _step_t0
+            if _elapsed > slow_step_s:
+                _slow_fired = True
+                try:
+                    on_slow_step(_elapsed, i + 1, n_eval)
+                except Exception:       # a notice must never take the preview down with it
+                    pass
     return x
 
 

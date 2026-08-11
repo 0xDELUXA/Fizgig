@@ -3958,7 +3958,11 @@ class LoRATrainerGUI:
             "write", lambda *_a: self._on_minimax_multiconcept_toggle())
         ttk.Label(self._minimax_distill_frame, text="   teacher ").pack(side=tk.LEFT)
         self.entries["MINIMAX_DISTILL_WEIGHT"] = ttk.Combobox(
-            self._minimax_distill_frame, values=["0.6", "0.7", "0.8", "0.9", "1.0"], width=5)
+            # 0.4/0.5 added 11 Aug — an even split is a reasonable thing to want and the list
+            # stopped at 0.6, so it could not be asked for. 1.0 removes the photo term entirely,
+            # which caps the LoRA at what reference mode can already do.
+            self._minimax_distill_frame,
+            values=["0.4", "0.5", "0.6", "0.7", "0.8", "0.9", "1.0"], width=5)
         self.entries["MINIMAX_DISTILL_WEIGHT"].set(
             str(self.settings.get("MINIMAX_DISTILL_WEIGHT", "0.8")))
         self.entries["MINIMAX_DISTILL_WEIGHT"].pack(side=tk.LEFT)

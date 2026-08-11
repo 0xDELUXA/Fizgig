@@ -508,7 +508,7 @@ def lora_disabled(network):
 
 def compute_distill_loss(model, network, latent, text_plain, *, text_ref, ref_latents,
                          text_token_tags=None, distill_weight=0.8, shift=None, generator=None,
-                         noise=None, seed=0):
+                         noise=None, seed=0, parts_out=None):
     """Reference distillation: teach the LoRA to behave, from text alone, as if it had been
     shown the reference photo.
 
@@ -561,9 +561,19 @@ def compute_distill_loss(model, network, latent, text_plain, *, text_ref, ref_la
     student = model(noised, t, text_plain, audio_noise).float()
 
     w = float(distill_weight)
-    loss = w * F.mse_loss(student, teacher.detach())
+    teacher_mse = F.mse_loss(student, teacher.detach())
+    loss = w * teacher_mse
+    photo_mse = None
     if w < 1.0:
-        loss = loss + (1.0 - w) * F.mse_loss(student, (x0 - noise).float())
+        photo_mse = F.mse_loss(student, (x0 - noise).float())
+        loss = loss + (1.0 - w) * photo_mse
+    if parts_out is not None:
+        # The RAW errors, before the 0.8/0.2 weights. The weights are already known; what is not
+        # is how BIG each error is — and "how much of the learning comes from real pixels" is a
+        # question about the errors, not the weights. Matching a real photograph is harder than
+        # matching the model's own output, so the photo term can punch well above its weight.
+        parts_out["teacher"] = float(teacher_mse.detach())
+        parts_out["photo"] = float(photo_mse.detach()) if photo_mse is not None else 0.0
     return loss, float(sigma.reshape(-1)[0])
 
 
@@ -2302,9 +2312,15 @@ def train_minimax(
                                f"continues; per-epoch previews will still be attempted.")
     progress_bar = tqdm(total=steps_per_epoch * max_train_epochs, initial=global_step,
                         desc="minimax-h3")
+    # Distillation only: the two loss terms, summed over the epoch. The 0.8/0.2 weights are known
+    # up front; what is not is how BIG each error is, and that is what actually decides how much
+    # of the learning comes from real pixels versus from the teacher's rendering of them.
+    _distill_parts = {}
+    _distill_acc = [0.0, 0.0, 0]        # teacher sum, photo sum, count
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         network.train()
+        _distill_acc[:] = [0.0, 0.0, 0]
         for i, batch in enumerate(loader):
             latents = batch["latents"].to(device, dtype)           # (1, 24, H, W)
             if latents.dim() == 4:
@@ -2321,7 +2337,11 @@ def train_minimax(
                     text_ref=batch["ref_hidden_states"].to(device, dtype),
                     ref_latents=[_rz],
                     text_token_tags=batch["ref_token_tags"][0],
-                    distill_weight=distill_weight, shift=shift, seed=seed)
+                    distill_weight=distill_weight, shift=shift, seed=seed,
+                    parts_out=_distill_parts)
+                _distill_acc[0] += _distill_parts["teacher"]
+                _distill_acc[1] += _distill_parts["photo"]
+                _distill_acc[2] += 1
             else:
                 loss, _ = compute_loss(dit, latents, text, shift=shift)
             # Divide so the accumulated gradient is the MEAN over the window, not the sum —
@@ -2374,6 +2394,20 @@ def train_minimax(
                 logger.info(f"[drift] max|lora_up|={_drift:.4f} (bound ~{_bound:.4f} — healthy)")
         except Exception:
             pass
+        if _distill_acc[2]:
+            _t = _distill_acc[0] / _distill_acc[2]
+            _p = _distill_acc[1] / _distill_acc[2]
+            _w = float(distill_weight)
+            # Weighted contributions are what the optimizer actually sees. The raw errors are
+            # printed too, because the interesting question is whether the photo term is HARDER
+            # (bigger error) than the teacher term, which is what lets 20% punch above its weight.
+            _wt, _wp = _w * _t, (1.0 - _w) * _p
+            _tot = _wt + _wp
+            logger.info(
+                f"[distill] teacher err {_t:.4f} x{_w:.2f} = {_wt:.4f} | "
+                f"photo err {_p:.4f} x{1 - _w:.2f} = {_wp:.4f} | "
+                f"real pixels are {100 * _wp / _tot if _tot else 0:.0f}% of this epoch's loss "
+                f"(the weight alone says {100 * (1 - _w):.0f}%)")
         if limiter is not None:
             logger.info(limiter.epoch_report())
         if ramp is not None:

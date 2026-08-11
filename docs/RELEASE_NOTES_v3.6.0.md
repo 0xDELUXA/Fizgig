@@ -1,16 +1,38 @@
-# Fizgig v3.6.0 — Two subjects in one MiniMax LoRA, and previews you can trust
+# Fizgig v3.6.0 — MiniMax H3: have the cake and eat it
 
 > **DRAFT — not tagged.** Multi Concept and identity-first are still being validated on real runs.
 
-Two big things for MiniMax H3. Samples now render the way ComfyUI does, so what you see during a
-run is what you'll get from the checkpoint. And a single LoRA can hold **two subjects**, each
-with its own folder and its own trigger word.
+**This is the release where MiniMax stops asking you to choose between quality and speed.** The
+new **Fast** preset reaches full likeness in a few hundred steps, and the lower rank it uses
+tends to come out *more* flexible rather than less. On top of that, a single LoRA can now hold
+**two subjects**, each with its own folder and its own trigger word.
 
-## Previews now match ComfyUI
+Underneath it, five real accuracy fixes in the model path — two of which improve training, not
+just what you look at.
 
-Five things in the preview path were doing something slightly different from the reference
-implementation. Each was small on its own; together they were the difference between a sample
-that shows your LoRA and one that only hints at it.
+## Judging quality: use Pause, not the previews
+
+Read this bit even if you skip the rest.
+
+**Previews are image-based by default, and images are not what H3 is.** They will sometimes show
+wild distortion that simply is not there when you load the same checkpoint in ComfyUI. That is a
+property of asking a video model for a single frame — it is not your LoRA going wrong, and it is
+not worth reacting to.
+
+**Video previews are available** from the **Sample length** dropdown and are closer to the real
+thing, but they slow the app down considerably and still aren't a guarantee of what ComfyUI will
+give you.
+
+**So use previews to watch likeness arrive, and judge quality somewhere else.** Every epoch
+saves a `.safetensors`, and **Pause** frees the GPU — so the reliable loop is: pause the run,
+load an epoch in ComfyUI, close ComfyUI, resume. It costs a couple of minutes and it is the only
+read you should trust.
+
+## Five accuracy fixes in the preview and training path
+
+Each was small on its own; together they were the difference between a sample that shows your
+LoRA and one that only hints at it — and two of them change what your LoRA is actually fitted
+against.
 
 | | |
 |---|---|
@@ -117,9 +139,9 @@ Existing presets and saved configs still load; the retired settings load as off.
 - **Gradient accumulation now works on MiniMax.** The field was on the tab but never reached the
   trainer, so it silently did nothing on this family.
 - **Previews can be clips.** A **Sample length** dropdown renders each sample as a short video you
-  can scrub in the gallery, for when motion is what you need to check. Stills at 1024×1024 remain
-  the default — they render in seconds where a clip takes minutes. **640** added to the sample
-  resolution list.
+  can scrub in the gallery — closer to what H3 actually is, at the cost of slowing the app down
+  noticeably. Stills at 1024×1024 remain the default: seconds rather than minutes, and neither
+  option replaces checking an epoch in ComfyUI. **640** added to the sample resolution list.
 - **A preview that runs out of memory retries shorter** — 141 → 56 → 22 frames — instead of
   dropping the whole run to single frames. And a preview that's crawling now says so, and points
   you at Pause → check an epoch in ComfyUI → Resume.

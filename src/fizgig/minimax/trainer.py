@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 
 VIDEO_SIGMA_SHIFT_TRAIN = 12.0     # H3's video shift — also the reference TRAINING density
 
+# Identity-first phase 1 trains at this fraction of the Learning Rate box (Peter, 11 Aug). Phase
+# 1 places the identity on a near-zero adapter, where a full-size Adam stride does the most
+# damage and the least good; phase 2 then gets the full rate from a sensible starting point.
+_P1_LR_SCALE = 1.0 / 3.0
+
 # LoRA targets the transformer blocks' ATTENTION + MLP Linears (+ the 2-block text refiner).
 # The fp32 patch/head IO layers are left alone (wrapping them clashes fp32-base vs bf16-adapter).
 #
@@ -1888,8 +1893,10 @@ def train_minimax(
         if _p1_epochs > 0:
             logger.info(
                 f"[distill] IDENTITY-FIRST: epochs 1-{_p1_epochs} train against the teacher "
-                f"ONLY (~{_p1_epochs * steps_per_epoch} steps), then the teacher is dropped and "
-                f"epochs {_p1_epochs + 1}-{max_train_epochs} train on the photographs alone. "
+                f"ONLY (~{_p1_epochs * steps_per_epoch} steps) at "
+                f"{learning_rate * _P1_LR_SCALE:.2e} — a third of the box — then the teacher is "
+                f"dropped and epochs {_p1_epochs + 1}-{max_train_epochs} train on the "
+                f"photographs alone at the full {learning_rate:.2e}. "
                 f"The teacher weight box does not apply in this mode."
                 + ("" if distill_phase1_epochs is not None and distill_phase1_epochs >= 0 else
                    "  (length chosen from the dataset size — the teacher objective converges in "
@@ -1953,7 +1960,7 @@ def train_minimax(
                            f"nothing left to train. Writing the final LoRA from the restored "
                            f"state. To train further, raise Max Train Epochs and resume again.")
 
-    if warmup_steps > 0 or ramp is not None:
+    if warmup_steps > 0 or ramp is not None or _p1_epochs:
         # Stashed AFTER the resume block: optimizer.load_state_dict replaces the param-group
         # dicts, so a stash made earlier would not survive a resume. Derived from the CONFIGURED
         # rate (x the group's depth-split scale), not the group's current lr, which a resumed
@@ -2354,9 +2361,16 @@ def train_minimax(
         # ORDINARY loss path, so it never runs the teacher forward at all — half the compute of a
         # blended step, and no reference cache is touched.
         _teacher_phase = bool(distill and _p1_epochs and epoch < _p1_epochs)
+        # Phase 1 runs at a THIRD of the Learning Rate box. It is placing the identity, not
+        # reproducing detail, and it does that on a near-zero adapter where a full-size stride is
+        # at its most destructive. Phase 2 gets the rate you actually asked for, starting from an
+        # adapter that is already in the right place.
+        _phase_lr = _P1_LR_SCALE if _teacher_phase else 1.0
         if _p1_epochs and epoch == _p1_epochs and epoch > start_epoch:
             logger.info(f"[distill] identity-first phase 1 complete after {_p1_epochs} epoch(s) "
-                        f"— dropping the teacher; from here it trains on the photographs alone.")
+                        f"— dropping the teacher; from here it trains on the photographs alone, "
+                        f"at the full {learning_rate:.2e} (phase 1 ran at "
+                        f"{learning_rate * _P1_LR_SCALE:.2e}).")
         for i, batch in enumerate(loader):
             latents = batch["latents"].to(device, dtype)           # (1, 24, H, W)
             if latents.dim() == 4:
@@ -2389,14 +2403,15 @@ def train_minimax(
             if (i + 1) % _accum_n == 0 or (i + 1) >= steps_per_epoch:
                 if max_grad_norm and max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
-                if warmup_steps or ramp is not None:
-                    # Warmup and the ramp COMPOSE: warmup covers the first steps (where the
-                    # adapter is near zero and the ramp's ratio is undefined), the ramp takes
-                    # over from there. Either alone is fine; the product is the LR.
+                if warmup_steps or ramp is not None or _p1_epochs:
+                    # Warmup, the ramp and the identity-first phase scale all COMPOSE: warmup
+                    # covers the first steps (where the adapter is near zero and the ramp's ratio
+                    # is undefined), the ramp takes over from there, and phase 1 runs the whole
+                    # thing at a third of the box. The product is the LR.
                     _wf = (min(1.0, (global_step + 1) / warmup_steps) if warmup_steps else 1.0)
                     _rm = ramp.mult if ramp is not None else 1.0
                     for _g in optimizer.param_groups:
-                        _g["lr"] = _g["_warmup_base_lr"] * _wf * _rm
+                        _g["lr"] = _g["_warmup_base_lr"] * _wf * _rm * _phase_lr
                 if limiter is not None:
                     limiter.pre_step()   # snapshot BEFORE the optimizer moves anything
                 optimizer.step()

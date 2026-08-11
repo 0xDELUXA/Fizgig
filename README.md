@@ -149,7 +149,7 @@ One built-in preset ships, applied the moment you pick the family:
 
 **Train at 1 MP unless your images are tightly cropped.** H3's own canvas is 768 on the short edge, so training much below that puts the model outside the distribution it was built for and the results come out soft no matter what else you change. 0.25 MP is still the right call for a **face-cropped** set — the crop puts the identity pixels where a small latent can see them, and the smaller latents make every step much faster — but for anything wider-framed it quietly starves the detail.
 
-**Previews render as short clips.** H3 is a video model, so samples come out as 56-frame clips at 640×640 that you can scrub in the gallery — the regime the model was actually built for. Both are dropdowns on the Samples tab: raise the length or the size when you want a preview to be judged rather than glanced at, and remember a clip costs minutes rather than seconds, so set **Generate every N epochs** to match.
+**Previews render as short clips.** H3 is a video model, so samples come out as 56-frame clips at 640×640 you can scrub in the gallery. Raise the length or size on the Samples tab when a preview needs judging rather than glancing at — clips cost minutes each, so set **Generate every N epochs** to match.
 
 **What it needs** — three files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card at the bottom):
 

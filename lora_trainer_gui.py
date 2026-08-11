@@ -3980,9 +3980,8 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_EMA"].pack(side=tk.LEFT)
         self._minimax_smooth_hint = ttk.Label(
             training_content,
-            text="Saves a smoothed average of the weights alongside the raw ones, so a "
-                 "checkpoint is the centre of the zigzag rather than wherever the last step "
-                 "landed. Costs no speed. Full write-up in the README.",
+            text="Saves a smoothed average of the weights, so checkpoints come out crisper "
+                 "when you push the LR hard. Costs no speed. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_smooth_hint.grid(row=42, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
@@ -9060,13 +9059,9 @@ class LoRATrainerGUI:
         self.sample_frames_combo.grid(row=8, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_frames_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._sample_frames_hint = tk.Label(prompt_card,
-                 text="Clips render every sample as a short video you can SCRUB in the gallery "
-                      "(no autoplay) — the regime the model was trained in, so previews finally "
-                      "match ComfyUI. Clips take longer to render than stills, and longer clips "
-                      "take longer still: set how often with 'Generate every N epochs' on this "
-                      "tab, and how big with the Width/Height boxes above — both apply to "
-                      "clips. The gallery card, likeness scoring and the Visualiser use the "
-                      "clip's middle frame.",
+                 text="Samples render as short clips you can scrub in the gallery — the regime "
+                      "H3 was trained in. Longer clips cost minutes each, so set the cadence "
+                      "with 'Generate every N epochs'. Full write-up in the README.",
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=560, justify=tk.LEFT)
         self._sample_frames_hint.grid(row=9, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))

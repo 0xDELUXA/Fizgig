@@ -3464,6 +3464,30 @@ class LoRATrainerGUI:
         "MINIMAX_DISTILL_PHASE1": "2 epochs",
     }
 
+    def _warn_if_no_ref_dit(self):
+        """Identity-learn runs on ref2va. Say so when it is switched ON, not at Start.
+
+        validate_inputs already blocks the launch, but by then the user has captioned, cached
+        and pressed Start - and the remedy is a 21 GB download, so an hour of setup can be spent
+        before anything says the run cannot happen."""
+        if self._krea2_pref("minimax_ref_dit"):
+            return
+        messagebox.showinfo(
+            "Identity mode needs one more model",
+            "Learning identity from your dataset runs on the ref2va model - a separate 21 GB "
+            "file, and the only H3 build that accepts reference images. Fizgig does not "
+            "download it by default.\n\n"
+            "Preferences → MiniMax H3 → DiT (reference): paste the path if you "
+            "already have the file, or tick \"Include the reference DiT\" beside \"Download "
+            "models for me\" and let Fizgig fetch it.\n\n"
+            "Carry on setting the run up either way - Start will stop and remind you if the "
+            "path is still empty.")
+
+    def _on_minimax_distill_clicked(self):
+        """Only on a real click: setting the var programmatically must stay silent."""
+        if self.minimax_distill_var.get():
+            self._warn_if_no_ref_dit()
+
     def _on_minimax_multiconcept_clicked(self):
         """User CLICKED the box — apply the recipe, then refresh the rows.
 
@@ -3485,6 +3509,8 @@ class LoRATrainerGUI:
                                     + "  (all still editable)\n")
         self._on_minimax_multiconcept_toggle()
         self._sync_distill_weight_state()
+        if self.minimax_multiconcept_var.get() and self.minimax_distill_var.get():
+            self._warn_if_no_ref_dit()
 
     def _on_minimax_multiconcept_toggle(self):
         """Show the extra folder row. Caption dropout is deliberately NOT touched.
@@ -3964,7 +3990,7 @@ class LoRATrainerGUI:
         self._minimax_distill_frame.grid(row=35, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(8, 0))
         self._minimax_distill_cb = ttk.Checkbutton(
             self._minimax_distill_frame, text="Learn identity from my dataset (reference distillation)",
-            variable=self.minimax_distill_var)
+            variable=self.minimax_distill_var, command=self._on_minimax_distill_clicked)
         self._minimax_distill_cb.pack(side=tk.LEFT)
         # Multi Concept shows a warning while identity-learn is OFF (no reference steering), so
         # that hint has to refresh when this checkbox moves, not only when the mode is toggled.
@@ -15631,8 +15657,9 @@ class LoRATrainerGUI:
             "helper models (Florence-2 captioner, face model for the Look "
             "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
             "download later. No HuggingFace account needed — none of these are gated. The "
-            "optional reference DiT is NOT included (another 21 GB most setups never use) — "
-            "grab it from its own Download link above if you want reference distillation.")
+            "reference DiT is left out unless you tick it above: another 21 GB, and it is only "
+            "used by identity mode.",
+            optional_label="Include the reference DiT (+21 GB)")
 
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)
@@ -15879,7 +15906,7 @@ class LoRATrainerGUI:
         """Open a link. Central so the pod image's browser handling stays in one place."""
         webbrowser.open(url)
 
-    def _add_fetch_models_row(self, frame, row, family, blurb):
+    def _add_fetch_models_row(self, frame, row, family, blurb, optional_label=None):
         """'Download them all for me' row at the foot of a model-paths card.
 
         The per-row Download links open a browser and leave you to save the file and paste the
@@ -15895,6 +15922,13 @@ class LoRATrainerGUI:
                           fg=COLORS["text_secondary"], bg=COLORS["bg_surface"])
         status.pack(side=tk.LEFT, padx=(12, 0))
         setattr(self, f"_fetch_status_{family}", status)
+        if optional_label:
+            # Off by default: the only optional MiniMax weight is the 21 GB ref2va DiT, which a
+            # first setup does not need and most runs never use. The point is that the fetcher
+            # CAN get it - before this, its own Download link was the only route.
+            var = tk.BooleanVar(value=False)
+            setattr(self, f"_fetch_optional_{family}", var)
+            ttk.Checkbutton(bar, text=optional_label, variable=var).pack(side=tk.LEFT, padx=(16, 0))
         tk.Label(frame, text=blurb, font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=760, justify=tk.LEFT
                  ).grid(row=row + 1, column=0, columnspan=3, sticky=tk.W, pady=(0, 2))
@@ -16024,6 +16058,9 @@ class LoRATrainerGUI:
             # Re-running is cheap — everything here is a no-op once present.
             cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress",
                    "--family", "tools", "--family", family]
+            _opt = getattr(self, f"_fetch_optional_{family}", None)
+            if _opt is not None and _opt.get():
+                cmd.append("--include-optional")
             env = dict(os.environ)
             env["PYTHONPATH"] = os.path.join(FIZGIG_DIR, "src")
             env["PYTHONUNBUFFERED"] = "1"

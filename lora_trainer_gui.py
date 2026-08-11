@@ -397,6 +397,12 @@ ARCHITECTURES = {
         "supports_samples": True,
         "sample_cfg_default": 1.0,
         "sample_flow_shift_default": None,
+        # H3 samples run CFG-free on a fixed shift-12 schedule, exactly as every shipped ComfyUI
+        # workflow does (BasicGuider, no negative conditioning). Reusing the existing distilled
+        # flags greys out Negative Prompt and CFG Scale through the generic path rather than
+        # adding a MiniMax branch — nothing about them is editable on this family.
+        "sample_is_distilled": True,
+        "sample_cfg_fixed": True,
         "sample_steps_default": 20,   # the reference pipeline default
         # 640x640, paired with the 56-frame clip default (Peter, 10 Aug). The softness that
         # once argued for 1024 turned out not to be about pixel size at all: previews were
@@ -3073,16 +3079,19 @@ class LoRATrainerGUI:
                      fg=COLORS["text_primary"], bg=COLORS["bg_surface"]).pack(
                 anchor=tk.W, padx=20, pady=(16, 2 if description else 10)
             )
+        desc_label = None
         if description:
-            tk.Label(card, text=description,
-                     font=(FONT_FAMILY, 10),
-                     fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
-                     wraplength=760, justify=tk.LEFT).pack(
-                anchor=tk.W, padx=20, pady=(0, 10)
-            )
+            desc_label = tk.Label(card, text=description,
+                                  font=(FONT_FAMILY, 10),
+                                  fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                                  wraplength=760, justify=tk.LEFT)
+            desc_label.pack(anchor=tk.W, padx=20, pady=(0, 10))
 
         content = tk.Frame(card, bg=COLORS["bg_surface"])
         content.pack(fill=tk.X, padx=20, pady=(0, 16))
+        # Stashed so a caller can reword the description later (the Samples tab retitles its
+        # cards per model family). None when the card was built without one.
+        content._desc_label = desc_label
         return content
 
     def _add_field_to_section(self, parent, key, label_text, input_type, row):
@@ -8889,12 +8898,16 @@ class LoRATrainerGUI:
         outer = tk.Frame(scrollable_frame, bg=COLORS["bg_deep"])
         outer.pack(fill=tk.BOTH, expand=True)
 
-        self._add_tab_banner(
+        # Subtitle kept for reconfiguring per family — the "(Distilled 4-step)" parenthetical is
+        # Klein's preview stack and means nothing on the other two.
+        self._samples_banner = self._add_tab_banner(
             outer,
             "Sample Previews",
             "Preview prompts rendered periodically during training (Distilled 4-step). "
             "Samples land in <output_dir>/sample/ and the Gallery button below opens the viewer.",
         )
+        _bkids = self._samples_banner.winfo_children()
+        self._samples_banner_sub = _bkids[1] if len(_bkids) > 1 else None
 
         # Grid holder — video warning / master checkbox / settings block all row-managed
         # so update_samples_ui_for_architecture() can still .grid() / .grid_remove() them.
@@ -9154,6 +9167,7 @@ class LoRATrainerGUI:
             "Architecture-specific knobs. Distilled models disable Negative Prompt; "
             "non-distilled models disable CFG Scale.",
         )
+        self._samples_arch_card = arch_card       # description reworded per family
         arch_card.grid_columnconfigure(1, weight=1)
 
         def _arch_note(parent, text):
@@ -9167,7 +9181,9 @@ class LoRATrainerGUI:
         _flow_frame.grid(row=0, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_flow_shift_entry = ttk.Entry(_flow_frame, textvariable=self.sample_flow_shift_var, width=10)
         self.sample_flow_shift_entry.pack(side=tk.LEFT)
-        _arch_note(_flow_frame, "Base samples only — Distilled uses its own schedule").pack(side=tk.LEFT, padx=(10, 0))
+        self._sample_flow_note = _arch_note(
+            _flow_frame, "Base samples only — Distilled uses its own schedule")
+        self._sample_flow_note.pack(side=tk.LEFT, padx=(10, 0))
         self.sample_flow_shift_row = 0
 
         # (Guidance Scale removed — Klein Base has no guidance embed and Distilled
@@ -9181,7 +9197,8 @@ class LoRATrainerGUI:
         _neg_frame.grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_negative_entry = ttk.Entry(_neg_frame, textvariable=self.sample_negative_var, width=50)
         self.sample_negative_entry.pack(side=tk.LEFT)
-        _arch_note(_neg_frame, "Base samples only — Distilled ignores it").pack(side=tk.LEFT, padx=(10, 0))
+        self._sample_neg_note = _arch_note(_neg_frame, "Base samples only — Distilled ignores it")
+        self._sample_neg_note.pack(side=tk.LEFT, padx=(10, 0))
         self.sample_negative_row = 1
 
         self.sample_cfg_label = ttk.Label(arch_card, text="CFG Scale:")
@@ -9191,7 +9208,8 @@ class LoRATrainerGUI:
         _cfg_frame.grid(row=2, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_cfg_scale_entry = ttk.Entry(_cfg_frame, textvariable=self.sample_cfg_scale_var, width=10)
         self.sample_cfg_scale_entry.pack(side=tk.LEFT)
-        _arch_note(_cfg_frame, "Base samples only — Distilled uses no CFG").pack(side=tk.LEFT, padx=(10, 0))
+        self._sample_cfg_note = _arch_note(_cfg_frame, "Base samples only — Distilled uses no CFG")
+        self._sample_cfg_note.pack(side=tk.LEFT, padx=(10, 0))
         self.sample_cfg_row = 2
 
         # Card 4: Viewer
@@ -9489,6 +9507,9 @@ class LoRATrainerGUI:
 
             # Grey out / relabel the Klein-only sample controls when Krea 2 is selected.
             self._apply_samples_klein_only(config.get("is_krea2", False))
+            # ...then let MiniMax override the wording that is still Klein's. Runs AFTER, so the
+            # Klein/Krea 2 paths above are untouched.
+            self._apply_samples_minimax(bool(config.get("is_minimax")))
 
             # Sample length (clip) row — MiniMax only: the other families' preview stacks are
             # image pipelines with no frames axis.
@@ -9502,6 +9523,64 @@ class LoRATrainerGUI:
 
         # Update sample output path label
         self.update_sample_output_label()
+
+    def _apply_samples_minimax(self, is_minimax):
+        """Reword the Samples tab for MiniMax H3, and hide what belongs to the other families.
+
+        The tab was written for Klein and still says so: the banner advertises a Distilled
+        4-step preview, and every Advanced row is annotated 'Base samples only — Distilled ...'.
+        None of that exists on H3, which renders clips on the model being trained, CFG-free, on
+        a fixed shift-12 schedule. Runs after _apply_samples_klein_only so Klein and Krea 2 keep
+        exactly the text they had; this only rewrites when MiniMax is the selected family."""
+        _MM = {
+            "banner": "Preview prompts rendered periodically during training, as short clips on "
+                      "the model being trained. Samples land in <output_dir>/sample/ and the "
+                      "Gallery button below opens the viewer.",
+            "advanced": "H3 renders CFG-free on a fixed schedule, so the knobs it does not use "
+                        "are greyed out.",
+            "flow": "Fixed at 12 for H3 — the schedule every shipped workflow uses",
+            "neg": "Unused — H3 samples render without CFG",
+            "cfg": "H3 renders without CFG; the shipped workflow does the same",
+            "steps": "20 steps matches the shipped H3 workflow",
+        }
+        _KLEIN = {
+            "banner": "Preview prompts rendered periodically during training (Distilled 4-step). "
+                      "Samples land in <output_dir>/sample/ and the Gallery button below opens "
+                      "the viewer.",
+            "advanced": "Architecture-specific knobs. Distilled models disable Negative Prompt; "
+                        "non-distilled models disable CFG Scale.",
+            "flow": "Base samples only — Distilled uses its own schedule",
+            "neg": "Base samples only — Distilled ignores it",
+            "cfg": "Base samples only — Distilled uses no CFG",
+        }
+        _t = _MM if is_minimax else _KLEIN
+
+        if getattr(self, "_samples_banner_sub", None) is not None:
+            self._samples_banner_sub.configure(text=_t["banner"])
+        _adv = getattr(self, "_samples_arch_card", None)
+        if _adv is not None and getattr(_adv, "_desc_label", None) is not None:
+            _adv._desc_label.configure(text=_t["advanced"])
+        for _attr, _key in (("_sample_flow_note", "flow"), ("_sample_neg_note", "neg"),
+                            ("_sample_cfg_note", "cfg")):
+            _w = getattr(self, _attr, None)
+            if _w is not None:
+                _w.configure(text=_t[_key])
+        # Steps note: _apply_samples_klein_only owns the Klein/Krea 2 wording, so only override.
+        if is_minimax and hasattr(self, "sample_steps_note"):
+            self.sample_steps_note.configure(text=_MM["steps"])
+
+        # Klein's sample-model choice and its RAM cache have no MiniMax equivalent — previews
+        # always render on the resident training DiT. Hide rather than grey: a disabled control
+        # still reads as "something I could turn on".
+        for _attr in ("use_distilled_check", "cache_sample_model_label",
+                      "cache_sample_model_combo"):
+            _w = getattr(self, _attr, None)
+            if _w is None:
+                continue
+            try:
+                (_w.grid_remove if is_minimax else _w.grid)()
+            except tk.TclError:
+                pass          # packed, not gridded — leave it alone
 
     def _apply_samples_klein_only(self, is_krea2):
         """Mark the Klein-only sample controls when Krea 2 is selected.

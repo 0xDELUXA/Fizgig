@@ -4005,12 +4005,9 @@ class LoRATrainerGUI:
         self.entries["MINIMAX_ADAPTER_RAMP"].pack(side=tk.LEFT)
         self._minimax_ramp_hint = ttk.Label(
             training_content,
-            text="EXPERIMENT — off by default. Makes the Learning Rate box a CEILING the run "
-                 "climbs toward instead of a rate it starts at. Every step is a huge change to "
-                 "a brand-new adapter and a tiny one to a mature adapter, so a rate that ruins "
-                 "epoch 1 can be perfectly safe by epoch 50 — this keeps the step size a "
-                 "constant fraction of what the adapter already is. Set the LR to where you "
-                 "want to END UP. Full write-up in the README.",
+            text="Needed to train MiniMax effectively — leave it on. The Learning Rate box "
+                 "becomes a CEILING the run climbs toward, so set it to where you want to end "
+                 "up. Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_ramp_hint.grid(row=46, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 

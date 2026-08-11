@@ -26,14 +26,14 @@ mid-comparison, finish it on one version or the other.
 
 ## Adapter-relative LR
 
-A LoRA starts at zero, so the first steps are enormous relative to its own size — which is where
-epoch-1 distortion comes from. Later, once the adapter has grown, the same learning rate is
-barely moving it. The rate that's safe at the start is too slow by the end, and there's no single
-number that's right for both.
+**This is what MiniMax needs to train effectively, and it's on by default.**
+
+A LoRA starts at zero, so a rate that's safe at epoch 1 is far too slow by epoch 50 — and one
+that's right later wrecks a fresh adapter. There's no single number that works for both.
 
 **Adapter-relative LR** turns the Learning Rate box into a **ceiling** rather than a setting. The
-run starts well below it and works its way up, holding every step at a fixed fraction of the
-adapter's current size:
+run starts below it and climbs, keeping every step a fixed fraction of the adapter's current
+size:
 
 | Setting | |
 |---|---|
@@ -41,9 +41,9 @@ adapter's current size:
 | `0.005` | climbs faster |
 | `0.01` | fast build |
 
-You get a gentle start without picking a warmup length, and full speed later without picking the
-moment. Every epoch the console prints the adapter's size, its growth rate, and how much of your
-ceiling is in use. Set it Off for a flat run at whatever the box says.
+Set the Learning Rate to where you want to *end up*. Every epoch the console reports the
+adapter's size, its growth rate, and how much of the ceiling is in use. Off gives a flat run at
+the box value.
 
 ## The MiniMax preset now defaults to LoRA
 

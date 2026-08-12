@@ -1,4 +1,4 @@
-<h1 align="center">Fizgig — Klein 9B & Krea 2 LoRA Studio</h1>
+<h1 align="center">Fizgig — Klein 9B, Krea 2 & MiniMax H3 LoRA Studio</h1>
 
 <p align="center">
   <strong>Fix broken LoRAs without retraining. Remix any LoRA into new variations in seconds.</strong><br>

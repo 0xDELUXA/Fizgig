@@ -365,7 +365,7 @@ ARCHITECTURES = {
         "sample_height_default": 1024,
         "lora_name_suffix": "krea2",
     },
-    "MiniMax H3 (experimental)": {
+    "MiniMax H3": {
         # MiniMax H3 trains natively via fizgig.scripts.minimax_* (single-process). The command
         # builders branch on "is_minimax". Barebones IMAGE-ONLY: no samples, no preview, no
         # per-image loss watch, no LoKR — the most minimal training surface. The Klein-shaped keys
@@ -418,7 +418,22 @@ ARCHITECTURES = {
     },
 }
 
-ARCHITECTURE_LIST = list(ARCHITECTURES.keys())
+# Saved configs written before 3.6.1 carry the old label. Every lookup here is a .get() that
+# falls back to Klein, so without an alias a MiniMax preset would silently come back as a Klein
+# one - wrong family, no error. The alias points at the same config; _canon_arch maps it forward
+# so what the user then SEES is the current name.
+_ARCH_ALIASES = {"MiniMax H3 (experimental)": "MiniMax H3",
+                 "Krea 2 (experimental)": "Krea 2"}       # pre-rename saves (2026-07-28)
+for _old, _new in _ARCH_ALIASES.items():
+    ARCHITECTURES[_old] = ARCHITECTURES[_new]
+
+# Aliases are readable, not offerable: the dropdown lists current names only.
+ARCHITECTURE_LIST = [k for k in ARCHITECTURES if k not in _ARCH_ALIASES]
+
+
+def _canon_arch(name):
+    """Old label in, current label out."""
+    return _ARCH_ALIASES.get(name, name)
 
 # Every family suffix we recognise on a LoRA name. Used to swap ONE tag for another when the
 # model family changes — matching this set (never "the last underscore segment") is what stops
@@ -3570,9 +3585,7 @@ class LoRATrainerGUI:
         # saved value isn't a known architecture (e.g. a removed/renamed entry).
         _saved_arch = "Flux 2 Klein Base 9B"
         try:
-            _candidate = self.last_used.get("architecture", _saved_arch)
-            if _candidate == "Krea 2 (experimental)":   # pre-rename saves (2026-07-28)
-                _candidate = "Krea 2"
+            _candidate = _canon_arch(self.last_used.get("architecture", _saved_arch))
             if _candidate in ARCHITECTURE_LIST:
                 _saved_arch = _candidate
         except Exception:
@@ -5204,6 +5217,7 @@ class LoRATrainerGUI:
             # snapshot just restored. Older snapshots have no architecture — they simply skip this.
             _arch = snapshot.pop("__architecture__", None)
             _switched = ""
+            _arch = _canon_arch(_arch) if _arch else _arch
             if _arch and _arch in ARCHITECTURES and _arch != self.architecture_var.get():
                 self.architecture_var.set(_arch)
                 self.on_architecture_changed()
@@ -5313,7 +5327,7 @@ class LoRATrainerGUI:
 
     def _apply_queue_item(self, item):
         """Load a queue item's settings back into the GUI (arch first — it swaps the UI)."""
-        arch = item.get("architecture", "")
+        arch = _canon_arch(item.get("architecture", ""))
         if isinstance(arch, str) and arch and arch in ARCHITECTURES and self.architecture_var.get() != arch:
             self.architecture_var.set(arch)
             try:

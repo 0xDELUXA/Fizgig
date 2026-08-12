@@ -17983,18 +17983,12 @@ class LoRATrainerGUI:
         _pr = tk.Frame(setup, bg=_sbg); _pr.grid(row=r, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.royale_seed_var = tk.StringVar(value=self.last_used.get("royale_seed", "42"))
         ttk.Entry(_pr, textvariable=self.royale_seed_var, width=10).pack(side=tk.LEFT)
-        tk.Label(_pr, text="W", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
-        self.royale_w_var = tk.StringVar(value=self.last_used.get("royale_w", "512"))
-        ttk.Combobox(_pr, textvariable=self.royale_w_var, values=["384", "512", "768", "1024", "1280", "1536", "2048"],
-                     state="readonly", width=5).pack(side=tk.LEFT)
-        tk.Label(_pr, text="H", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(8, 3))
-        self.royale_h_var = tk.StringVar(value=self.last_used.get("royale_h", "512"))
-        ttk.Combobox(_pr, textvariable=self.royale_h_var, values=["384", "512", "768", "1024", "1280", "1536", "2048"],
-                     state="readonly", width=5).pack(side=tk.LEFT)
-        tk.Label(_pr, text="Max renders", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(12, 3))
-        self.royale_max_var = tk.StringVar(value=self.last_used.get("royale_max", "12"))
-        ttk.Combobox(_pr, textvariable=self.royale_max_var, values=["All", "6", "8", "10", "12", "16", "20"],
-                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(_pr, text="shared by the crossfade, prompt travel and strength travel",
+                 bg=_sbg, fg=COLORS["text_muted"], font=(FONT_FAMILY, 9)).pack(side=tk.LEFT, padx=(10, 0))
+        # Size and Max renders USED to sit here, beside the seed. They only ever drove the
+        # crossfade - every travel card and the comparison sheet carry their own - so in a card
+        # called Setup they read as global and were silently ignored by four of the six modes.
+        # They now live in Crossfade, next to the thing they size.
         r += 1
 
         ttk.Label(setup, text="Reference:").grid(row=r, column=0, sticky=tk.W, padx=(0, 10), pady=4)
@@ -18014,9 +18008,10 @@ class LoRATrainerGUI:
                       "LoRA renders the prompt), lower lets the prompt vary more, 0 = off.")
         r += 1
 
-        # Remember the render inputs across sessions.
-        for _v in (self.royale_prompt_var, self.royale_seed_var, self.royale_w_var, self.royale_h_var,
-                   self.royale_max_var, self.royale_ref_var, self.royale_ref_strength_var):
+        # Remember the render inputs across sessions. Size and Max renders are bound with the
+        # Crossfade card below, where they are now built.
+        for _v in (self.royale_prompt_var, self.royale_seed_var,
+                   self.royale_ref_var, self.royale_ref_strength_var):
             _v.trace_add("write", lambda *a: self._save_last_used_paths())
 
         _br = tk.Frame(setup, bg=_sbg); _br.grid(row=r, column=0, columnspan=3, sticky=tk.W, pady=(8, 0))
@@ -18032,6 +18027,26 @@ class LoRATrainerGUI:
 
         cf = self._start_section_card(outer, "Crossfade",
                                       "Drag to blend between consecutive epochs — stop where it looks best.")
+        _cfr = tk.Frame(cf, bg=_sbg); _cfr.pack(anchor=tk.W, pady=(0, 8))
+        tk.Label(_cfr, text="Size", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(0, 6))
+        self.royale_w_var = tk.StringVar(value=self.last_used.get("royale_w", "512"))
+        ttk.Combobox(_cfr, textvariable=self.royale_w_var,
+                     values=["384", "512", "768", "1024", "1280", "1536", "2048"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        tk.Label(_cfr, text="x", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(6, 6))
+        self.royale_h_var = tk.StringVar(value=self.last_used.get("royale_h", "512"))
+        ttk.Combobox(_cfr, textvariable=self.royale_h_var,
+                     values=["384", "512", "768", "1024", "1280", "1536", "2048"],
+                     state="readonly", width=5).pack(side=tk.LEFT)
+        tk.Label(_cfr, text="Max renders", bg=_sbg, fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(16, 6))
+        self.royale_max_var = tk.StringVar(value=self.last_used.get("royale_max", "12"))
+        ttk.Combobox(_cfr, textvariable=self.royale_max_var,
+                     values=["All", "6", "8", "10", "12", "16", "20"],
+                     state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(_cfr, text="how many epochs to render, newest first",
+                 bg=_sbg, fg=COLORS["text_muted"], font=(FONT_FAMILY, 9)).pack(side=tk.LEFT, padx=(10, 0))
+        for _v in (self.royale_w_var, self.royale_h_var, self.royale_max_var):
+            _v.trace_add("write", lambda *a: self._save_last_used_paths())
         holder = tk.Frame(cf, width=512, height=512, bg="#1c1c1c", highlightthickness=0)
         holder.pack(pady=(0, 8))
         holder.pack_propagate(False)

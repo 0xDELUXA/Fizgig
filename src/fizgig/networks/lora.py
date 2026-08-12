@@ -1749,6 +1749,74 @@ class UnsupportedLoRAFormat(RuntimeError):
     decompositions that would need separate module classes."""
 
 
+class LoRAFamilyMismatch(RuntimeError):
+    """Raised when a LoRA's trained-for family doesn't match the family a caller
+    (Royale / Explorer / Repair Studio) is about to load it against. Callers should
+    catch this the same way they catch UnsupportedLoRAFormat — a clean single-line
+    message, no traceback — since it's an expected user-facing outcome, not a bug."""
+
+
+# Family display names, keyed by the same "klein" / "krea2" / "minimax" strings the
+# GUI's *_family_var StringVars already use — lets callers compare lora_family_from_file's
+# result against a family_var.get() directly with no translation step.
+FAMILY_DISPLAY_NAMES = {
+    "klein": "Klein 9B",
+    "krea2": "Krea 2",
+    "minimax": "MiniMax H3",
+}
+
+
+def lora_family_from_file(path: str) -> Optional[str]:
+    """Identify which model family a LoRA/LyCORIS file was trained for, from its
+    safetensors header alone — no tensor data read, no pipeline load, microseconds.
+
+    Returns "klein", "krea2", "minimax", or None if the file doesn't match any
+    known signature (callers should not block on None — fail open and let the
+    real loader be the judge, the same as an unreadable/corrupt file).
+
+    The three families never share a discriminating substring, so a plain
+    membership check on the raw key strings is enough — it works whether the file
+    uses Fizgig's own native prefixes (`diffusion_model.`, `transformer.`), the
+    kohya/sd-scripts flattened form (`lora_unet_*`), or another tool's dotted
+    diffusers export; none of those rewrite the block-name segments checked here.
+    """
+    from fizgig.utils.safetensors import MemoryEfficientSafeOpen
+    try:
+        with MemoryEfficientSafeOpen(path) as f:
+            keys = f.keys()
+    except Exception:
+        return None
+    for k in keys:
+        if "double_blocks" in k or "single_blocks" in k:
+            return "klein"
+    for k in keys:
+        if "text_fusion" in k or "txtfusion" in k:
+            return "krea2"
+    for k in keys:
+        if "token_refiner" in k or "adaln_proj" in k:
+            return "minimax"
+    return None
+
+
+def assert_lora_family_matches(path: str, selected_family: str, tab_label: str) -> None:
+    """Guard for the family/LoRA mismatch in issue #62: check the file's family against
+    what the tab's selector is set to BEFORE a caller commits to a full pipeline load.
+    No-op when the file's family can't be determined (fail open) or already matches.
+
+    Raises LoRAFamilyMismatch with a plain-English message on a real mismatch — callers
+    should catch it alongside UnsupportedLoRAFormat and show it without a traceback.
+    """
+    detected = lora_family_from_file(path)
+    if detected is None or detected == selected_family:
+        return
+    detected_name = FAMILY_DISPLAY_NAMES.get(detected, detected)
+    selected_name = FAMILY_DISPLAY_NAMES.get(selected_family, selected_family)
+    raise LoRAFamilyMismatch(
+        f"This LoRA was trained for {detected_name}, but the {tab_label} family selector "
+        f"is on {selected_name}. Switch it to {detected_name} to use this file."
+    )
+
+
 def ensure_kohya_lora_state_dict(weights_sd: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
     """Convert the state dict to kohya module-name convention if needed.
     Pass-through for already-kohya files. Raises UnsupportedLoRAFormat for

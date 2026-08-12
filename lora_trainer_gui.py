@@ -2388,14 +2388,26 @@ class LoRATrainerGUI:
         except Exception:
             pass
 
+    def _visible_gpu_index(self):
+        """The physical GPU index training will actually use.
+
+        NVML and nvidia-smi index every card in the machine; CUDA_VISIBLE_DEVICES does not
+        change that, it only changes what torch can see. So on a two-GPU box with
+        CUDA_VISIBLE_DEVICES=1, training runs on physical card 1 while an unqualified NVML read
+        reports card 0 — the status bar then shows a card that is doing nothing (issue #60).
+        Torch's cuda:0 is the FIRST entry in the list, hence [0]. A UUID rather than an index
+        is valid too; there is no cheap mapping for it, so fall back to 0."""
+        raw = (os.environ.get("CUDA_VISIBLE_DEVICES") or "").split(",")[0].strip()
+        return int(raw) if raw.isdigit() else 0
+
     def _read_vram(self):
-        """Return (used_bytes, total_bytes) for GPU 0, or None. Prefers pynvml
+        """Return (used_bytes, total_bytes) for the GPU training uses, or None. Prefers pynvml
         (fast); falls back to a one-shot nvidia-smi query."""
         try:
             import pynvml
             if not getattr(self, "_nvml_init", False):
                 pynvml.nvmlInit()
-                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(self._visible_gpu_index())
                 self._nvml_init = True
             m = pynvml.nvmlDeviceGetMemoryInfo(self._nvml_handle)
             return int(m.used), int(m.total)
@@ -2404,7 +2416,8 @@ class LoRATrainerGUI:
         try:
             import subprocess
             out = subprocess.run(
-                ["nvidia-smi", "--query-gpu=memory.used,memory.total",
+                ["nvidia-smi", "-i", str(self._visible_gpu_index()),
+                 "--query-gpu=memory.used,memory.total",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=4,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

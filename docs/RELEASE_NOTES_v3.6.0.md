@@ -1,7 +1,5 @@
 # Fizgig v3.6.0 — MiniMax H3: have the cake and eat it
 
-> **DRAFT — not tagged.** Multi Concept and identity-first are still being validated on real runs.
-
 **This is the release where MiniMax stops asking you to choose between quality and speed.** The
 new **Fast** preset reaches full likeness in a few hundred steps, and the lower rank it uses
 tends to come out *more* flexible rather than less. On top of that, a single LoRA can now hold

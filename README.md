@@ -185,10 +185,14 @@ A clip has to be on spec, and Fizgig refuses one that isn't rather than quietly 
 
 **Gizmo makes clips that hit it.** It ships with Fizgig — open it from the **Image Prep** tab, or
 double-click *Launch Gizmo (Video clip prep tool).bat*. Open any video, scrub to a moment, pick a
-length, save; it handles the frame rate, the frame count, the sizing and the audio. Six sections
-out of one source is six marks and six clicks. From high-frame-rate footage it can also keep more
-frames than real time gives, which plays back as slow motion — offered as a choice, never applied
-behind your back.
+length, add it to the queue; it handles the frame rate, the frame count, the sizing and the audio.
+
+Marking is instant and encoding isn't, so they're separate: mark every section you want from a
+video — arrow keys step a frame at a time, and you see the first and last frame of each clip
+before you commit — then export the lot in one go. You can **play the sound** under a clip before
+deciding whether to train on it, and from high-frame-rate footage you can keep more frames than
+real time gives, which plays back as slow motion — offered as a choice, never applied behind your
+back.
 
 **22 frames is the useful length**, and it costs about **7× what a still of the same size costs**
 — attention scales with the square of that, which is why 39 frames is the ceiling. Gizmo shows the

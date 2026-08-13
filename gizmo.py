@@ -30,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -61,7 +62,8 @@ COLORS = {
 }
 FONT_FAMILY = "Segoe UI"
 
-PREVIEW_W, PREVIEW_H = 640, 360
+PREVIEW_W, PREVIEW_H = 512, 288
+END_W, END_H = 320, 180
 
 # Windows: every ffmpeg call would flash a console window, and under pythonw there is no console
 # to inherit in the first place.
@@ -203,8 +205,11 @@ def build_export_command(ffmpeg, src, dst, start_s, frames, width, height,
     return cmd + ["-movflags", "+faststart", dst]
 
 
-def output_name(src_path, out_dir, muted):
+def output_name(src_path, out_dir, muted, claimed=()):
     """<source stem>_01.mp4, or _01_mute.mp4, skipping past anything already there.
+
+    `claimed` is names the queue has spoken for but not yet written — without it, two clips marked
+    before either is exported would both be handed _01 and the second would overwrite the first.
 
     A source whose own name ends in _mute has that stripped first — otherwise every clip cut from
     it would read as muted to Fizgig regardless of what was chosen here.
@@ -218,10 +223,55 @@ def output_name(src_path, out_dir, muted):
         # hand out _01 and _01_mute as two different clips from the same source, which reads as
         # one clip saved twice.
         taken = any(os.path.exists(os.path.join(out_dir, f"{stem}_{i:02d}{suffix}.mp4"))
+                    or f"{stem}_{i:02d}{suffix}.mp4" in claimed
                     for suffix in ("", MUTE_SUFFIX))
         if not taken:
             return os.path.join(out_dir, f"{stem}_{i:02d}{MUTE_SUFFIX if muted else ''}.mp4")
     raise RuntimeError("1000 clips from one source — give the output folder a clean start.")
+
+
+def audio_playback_backend():
+    """How this machine can play a WAV, or None if it cannot.
+
+    Windows has winsound in the standard library, which is the whole reason listening costs no
+    new dependency. Linux — which is what a RunPod pod is — usually has neither a player nor an
+    audio device in the container, so the feature disables itself with a reason rather than
+    failing at the moment someone presses the button.
+    """
+    if os.name == "nt":
+        try:
+            import winsound  # noqa: F401
+            return "winsound"
+        except Exception:
+            return None
+    import shutil
+    for exe in ("paplay", "aplay", "afplay"):
+        if shutil.which(exe):
+            return exe
+    return None
+
+
+_PLAYBACK = None            # resolved once, on first use
+
+
+def _play_wav(path):
+    global _PLAYBACK
+    if _PLAYBACK is None:
+        _PLAYBACK = audio_playback_backend() or ""
+    if not _PLAYBACK:
+        raise RuntimeError("no way to play audio on this machine")
+    if _PLAYBACK == "winsound":
+        import winsound
+        winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+    else:
+        subprocess.Popen([_PLAYBACK, path], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+
+
+def _stop_wav():
+    if _PLAYBACK == "winsound":
+        import winsound
+        winsound.PlaySound(None, winsound.SND_PURGE)
 
 
 def count_frames(ffmpeg, path):
@@ -235,23 +285,77 @@ def count_frames(ffmpeg, path):
 
 # --- the app -----------------------------------------------------------------------------------
 
+class ToolTip:
+    """Hover help. Same behaviour and look as Fizgig's, reimplemented rather than imported —
+    gizmo.py must never load lora_trainer_gui.py.
+
+    Delayed by half a second so sweeping the mouse across the frame-step buttons does not leave a
+    trail of popups, and bound to <Button> as well as <Leave> because a tooltip left hanging over
+    a button you just clicked hides the thing you clicked.
+    """
+
+    def __init__(self, widget, text, delay=500):
+        self.widget, self.text, self.delay = widget, text, delay
+        self.window = None
+        self._after = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<Button>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after is not None:
+            try:
+                self.widget.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+    def _show(self):
+        if self.window or not self.widget.winfo_exists():
+            return
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self.window = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(tw, text=self.text, justify=tk.LEFT, wraplength=380,
+                 background=COLORS["bg_surface"], foreground=COLORS["text_primary"],
+                 relief=tk.SOLID, borderwidth=1, font=(FONT_FAMILY, 9),
+                 padx=8, pady=6).pack()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self.window:
+            self.window.destroy()
+            self.window = None
+
+
 class Gizmo:
     def __init__(self, root):
         self.root = root
         root.title("Gizmo — video clip prep for Fizgig")
         root.configure(bg=COLORS["bg_deep"])
-        root.geometry("1000x900")
-        root.minsize(880, 700)
+        # Wide enough that the vertical scrollbar never eats into the content (which measures
+        # ~985 px), tall enough for two cards at a time. The rest scrolls.
+        root.geometry("1060x900")
+        root.minsize(1010, 620)
 
         self.ffmpeg = find_ffmpeg()
         self.src = None
         self.info = None
         self.frame_pos = 0            # in SOURCE frames
-        self.photo = None             # a live reference, or Tk garbage-collects the image
+        self.photo = None             # live references, or Tk garbage-collects the images
+        self.end_photo = None
         self._scrub_job = None
         self._busy = False
         self._motion_keep = [None]    # parallel to the Motion dropdown; see _keep_every
-        self.saved = []
+        self.queue = []               # marked clips, exported in one go — see add_to_queue
+        self._playing = False
+        self._play_job = None
 
         self._style()
         self._build()
@@ -290,17 +394,39 @@ class Gizmo:
         body.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
         return body
 
-    def _button(self, parent, text, command, kind="normal"):
+    def _button(self, parent, text, command, kind="normal", tip=None, pad=14):
         bg = {"normal": COLORS["bg_hover"], "accent": COLORS["accent"]}[kind]
         fg = COLORS["text_primary"]
         b = tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
                       activebackground=COLORS["accent_hover"], activeforeground=fg,
                       font=(FONT_FAMILY, 10, "bold" if kind == "accent" else "normal"),
-                      relief=tk.FLAT, bd=0, padx=14, pady=7, cursor="hand2")
+                      relief=tk.FLAT, bd=0, padx=pad, pady=7, cursor="hand2")
+        if tip:
+            ToolTip(b, tip)
         return b
 
     def _build(self):
-        head = tk.Frame(self.root, bg=COLORS["bg_deep"])
+        # Scrollable, because the whole app is four stacked cards and a 1080p laptop with a
+        # taskbar has about 950 usable pixels. Without this the Save button is the thing that
+        # falls off the bottom.
+        shell = tk.Frame(self.root, bg=COLORS["bg_deep"])
+        shell.pack(fill=tk.BOTH, expand=True)
+        self._scroll_canvas = canvas = tk.Canvas(shell, bg=COLORS["bg_deep"],
+                                                 highlightthickness=0)
+        bar = ttk.Scrollbar(shell, orient=tk.VERTICAL, command=canvas.yview)
+        body = tk.Frame(canvas, bg=COLORS["bg_deep"])
+        self._scroll_window = canvas.create_window((0, 0), window=body, anchor="nw")
+        canvas.configure(yscrollcommand=bar.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        bar.pack(side=tk.RIGHT, fill=tk.Y)
+        body.bind("<Configure>",
+                  lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>",
+                    lambda e: canvas.itemconfigure(self._scroll_window, width=e.width))
+        self.root.bind_all("<MouseWheel>",
+                           lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+
+        head = tk.Frame(body, bg=COLORS["bg_deep"])
         head.pack(fill=tk.X, padx=16, pady=(14, 10))
         tk.Label(head, text="Gizmo", font=(FONT_FAMILY, 22, "bold"),
                  bg=COLORS["bg_deep"], fg=COLORS["text_primary"]).pack(anchor="w")
@@ -310,123 +436,274 @@ class Gizmo:
                  fg=COLORS["text_secondary"]).pack(anchor="w")
 
         # --- source ---------------------------------------------------------------------------
-        c = self._card(self.root, "1. Source video", "Any format, any frame rate, any size.")
+        c = self._card(body, "1. Source video", "Any format, any frame rate, any size.")
         row = tk.Frame(c, bg=COLORS["bg_surface"])
         row.pack(fill=tk.X)
-        self._button(row, "Open video…", self.open_video, "accent").pack(side=tk.LEFT)
+        self._button(row, "Open video…", self.open_video, "accent",
+                     tip="Open the video you want to cut clips out of.\n\n"
+                         "Anything ffmpeg can read: phone footage, a camera file, a download. "
+                         "Gizmo never modifies it — it only reads.").pack(side=tk.LEFT)
         self.src_label = tk.Label(row, text="No video open", font=(FONT_FAMILY, 10),
                                   bg=COLORS["bg_surface"], fg=COLORS["text_muted"])
         self.src_label.pack(side=tk.LEFT, padx=12)
         self.src_info = tk.Label(c, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                  bg=COLORS["bg_surface"], fg=COLORS["text_explain"])
         self.src_info.pack(anchor="w", pady=(8, 0))
+        ToolTip(self.src_info,
+                "What Gizmo read from the file. None of it has to be right — the whole point is "
+                "that Gizmo converts it. It is here so you can see what you are starting from.")
 
         # --- scrub ----------------------------------------------------------------------------
-        c = self._card(self.root, "2. Find the moment",
-                       "The playhead is where the clip STARTS. Step a frame at a time to land it "
-                       "exactly.")
-        self.canvas = tk.Canvas(c, width=PREVIEW_W, height=PREVIEW_H, bg="#000000",
+        c = self._card(body, "2. Find the moment",
+                       "The playhead is where the clip STARTS. Arrow keys step one frame, "
+                       "Shift+arrow steps ten, Home jumps to the beginning.")
+        shots = tk.Frame(c, bg=COLORS["bg_surface"])
+        shots.pack()
+        # Two frames, not one: choosing a clip means knowing what is in it, and the end frame is
+        # the half you cannot see from the playhead. It costs one more ffmpeg seek per scrub,
+        # which is why it is small and shares the same debounce.
+        first = tk.Frame(shots, bg=COLORS["bg_surface"])
+        first.pack(side=tk.LEFT)
+        tk.Label(first, text="FIRST FRAME", font=(FONT_FAMILY, 8, "bold"),
+                 bg=COLORS["bg_surface"], fg=COLORS["text_muted"]).pack(anchor="w")
+        self.canvas = tk.Canvas(first, width=PREVIEW_W, height=PREVIEW_H, bg="#000000",
                                 highlightthickness=1, highlightbackground=COLORS["border"])
         self.canvas.pack()
+        ToolTip(self.canvas, "The first frame of the clip you are about to save.")
+
+        last = tk.Frame(shots, bg=COLORS["bg_surface"])
+        last.pack(side=tk.LEFT, padx=(12, 0))
+        tk.Label(last, text="LAST FRAME", font=(FONT_FAMILY, 8, "bold"),
+                 bg=COLORS["bg_surface"], fg=COLORS["text_muted"]).pack(anchor="w")
+        self.end_canvas = tk.Canvas(last, width=END_W, height=END_H, bg="#000000",
+                                    highlightthickness=1, highlightbackground=COLORS["border"])
+        self.end_canvas.pack()
+        ToolTip(self.end_canvas,
+                "Where the clip ENDS, at the length you have chosen.\n\n"
+                "Worth a glance before saving: it is how you catch a clip that runs past the "
+                "moment you wanted, or into a cut.")
+
         self.scale = ttk.Scale(c, from_=0, to=100, orient=tk.HORIZONTAL,
                                command=self._on_scrub, style="G.Horizontal.TScale")
         self.scale.pack(fill=tk.X, pady=(10, 6))
+        ToolTip(self.scale, "Drag to move through the source video. The clip starts here.")
+
         nav = tk.Frame(c, bg=COLORS["bg_surface"])
         nav.pack()
-        for label, delta in (("⏮", -1000), ("◀◀", -10), ("◀", -1), ("▶", 1), ("▶▶", 10)):
-            self._button(nav, label, lambda d=delta: self.step(d)).pack(side=tk.LEFT, padx=3)
+        self._button(nav, "⏮ Start", self.go_to_start, pad=10,
+                     tip="Jump to the beginning of the source video.  (Home)").pack(
+            side=tk.LEFT, padx=3)
+        for text, delta, tip in (
+                ("◀◀ 10", -10, "Back ten frames.  (Shift + ←)"),
+                ("◀ 1", -1, "Back one frame.  (←)"),
+                ("1 ▶", 1, "Forward one frame.  (→)"),
+                ("10 ▶▶", 10, "Forward ten frames.  (Shift + →)")):
+            self._button(nav, text, lambda d=delta: self.step(d), pad=10,
+                         tip=tip).pack(side=tk.LEFT, padx=3)
         self.pos_label = tk.Label(c, text="", font=(FONT_FAMILY, 10, "bold"),
                                   bg=COLORS["bg_surface"], fg=COLORS["text_primary"])
         self.pos_label.pack(pady=(8, 0))
         self.span_label = tk.Label(c, text="", font=(FONT_FAMILY, 9),
                                    bg=COLORS["bg_surface"], fg=COLORS["text_explain"])
         self.span_label.pack()
+        ToolTip(self.span_label,
+                "How much of the SOURCE this clip uses. Slow motion uses more of it than real "
+                "time does for the same number of output frames.")
 
         # --- settings -------------------------------------------------------------------------
-        c = self._card(self.root, "3. Clip settings")
+        c = self._card(body, "3. Clip settings")
         grid = tk.Frame(c, bg=COLORS["bg_surface"])
         grid.pack(fill=tk.X)
         grid.columnconfigure(1, weight=1)
 
-        def label(r, text):
-            tk.Label(grid, text=text, font=(FONT_FAMILY, 10), bg=COLORS["bg_surface"],
-                     fg=COLORS["text_secondary"]).grid(row=r, column=0, sticky="w", pady=5,
-                                                       padx=(0, 12))
+        def label(r, text, tip):
+            lbl = tk.Label(grid, text=text, font=(FONT_FAMILY, 10), bg=COLORS["bg_surface"],
+                           fg=COLORS["text_secondary"])
+            lbl.grid(row=r, column=0, sticky="w", pady=5, padx=(0, 12))
+            ToolTip(lbl, tip)
+            return lbl
 
-        label(0, "Length:")
+        LEN_TIP = ("How many frames the clip is.\n\n"
+                   "Not a free choice: H3 encodes video in groups, so only 5, 22 and 39 frames "
+                   "exist. 22 is the useful one — 5 is barely movement, and 39 costs nearly "
+                   "twice what 22 does.")
+        label(0, "Length:", LEN_TIP)
         self.len_var = tk.StringVar()
         self.len_box = ttk.Combobox(grid, textvariable=self.len_var, state="readonly",
-                                    style="G.TCombobox", width=42,
+                                    style="G.TCombobox", width=46,
                                     values=[self._length_label(f) for f in GRID_FRAMES])
         self.len_box.current(1)
         self.len_box.grid(row=0, column=1, sticky="w", pady=5)
-        self.len_box.bind("<<ComboboxSelected>>", lambda _e: self._refresh_cost())
+        self.len_box.bind("<<ComboboxSelected>>", lambda _e: self._on_length_changed())
+        ToolTip(self.len_box, LEN_TIP)
 
-        label(1, "Size:")
+        SIZE_TIP = ("How big the saved clip is.\n\n"
+                    "Both sides land on a multiple of 32, which is what H3 needs, and the aspect "
+                    "ratio is kept. Gizmo never scales UP — a small source stays its own size "
+                    "rather than being blown up into detail that was never there.")
+        label(1, "Size:", SIZE_TIP)
         self.size_var = tk.StringVar()
         self.size_box = ttk.Combobox(grid, textvariable=self.size_var, state="readonly",
-                                     style="G.TCombobox", width=42, values=[])
+                                     style="G.TCombobox", width=46, values=[])
         self.size_box.grid(row=1, column=1, sticky="w", pady=5)
         self.size_box.bind("<<ComboboxSelected>>", lambda _e: self._refresh_cost())
+        ToolTip(self.size_box, SIZE_TIP)
 
-        label(2, "Motion:")
+        MOTION_TIP = ("Real time is what you want almost always: whatever the source runs at, one "
+                      "real second stays one second.\n\n"
+                      "The slow-motion options keep MORE of the original frames instead of "
+                      "resampling, so the action plays back slower than life. Only worth it when "
+                      "the slow-motion look is the thing you are training.")
+        label(2, "Motion:", MOTION_TIP)
         self.motion_var = tk.StringVar()
         self.motion_box = ttk.Combobox(grid, textvariable=self.motion_var, state="readonly",
-                                       style="G.TCombobox", width=42, values=[])
+                                       style="G.TCombobox", width=46, values=[])
         self.motion_box.grid(row=2, column=1, sticky="w", pady=5)
+        self.motion_box.bind("<<ComboboxSelected>>", lambda _e: self._on_motion_changed())
+        ToolTip(self.motion_box, MOTION_TIP)
 
-        label(3, "Sound:")
+        SOUND_TIP = ("H3 generates sound as well as video, so a clip's audio can be training data "
+                     "too.\n\n"
+                     "Mute the ones where it should not be — a cough, the wrong speaker, music "
+                     "over the top. A muted clip trains its video exactly the same; only the "
+                     "sound is ignored.")
+        label(3, "Sound:", SOUND_TIP)
         snd = tk.Frame(grid, bg=COLORS["bg_surface"])
         snd.grid(row=3, column=1, sticky="w", pady=5)
         # Sticky between saves on purpose: one source video routinely has sections worth training
         # on and sections with a cough, the wrong speaker, or music over the top, so this gets
         # toggled far more often than it gets reset.
         self.mute_var = tk.BooleanVar(value=False)
-        for text, val in (("Train on this clip's sound", False), ("Mute — video only", True)):
-            tk.Radiobutton(snd, text=text, variable=self.mute_var, value=val,
-                           bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
-                           selectcolor=COLORS["bg_deep"], activebackground=COLORS["bg_surface"],
-                           activeforeground=COLORS["text_primary"], font=(FONT_FAMILY, 10),
-                           highlightthickness=0, bd=0).pack(side=tk.LEFT, padx=(0, 16))
+        self._sound_radios = []
+        for text, val, tip in (
+                ("Train on this clip's sound", False,
+                 "The clip's audio becomes a training target — this is how H3 learns a voice."),
+                ("Mute — video only", True,
+                 "Saves with _mute in the filename. Fizgig trains the video and ignores the "
+                 "sound.\n\nThe audio stays in the file, so you can still play it back — and "
+                 "change your mind later by renaming, without re-exporting.")):
+            rb = tk.Radiobutton(snd, text=text, variable=self.mute_var, value=val,
+                                command=self._refresh_planned_name,
+                                bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+                                selectcolor=COLORS["bg_deep"],
+                                activebackground=COLORS["bg_surface"],
+                                activeforeground=COLORS["text_primary"], font=(FONT_FAMILY, 10),
+                                highlightthickness=0, bd=0, cursor="hand2")
+            rb.pack(side=tk.LEFT, padx=(0, 16))
+            ToolTip(rb, tip)
+            self._sound_radios.append(rb)
+
+        # Listen before deciding. Muting is a judgement about what the clip actually sounds like,
+        # and there is no way to make that judgement from a picture of it.
+        label(4, "Listen:", "Play the marked section so you can hear what you would be training "
+                            "on before you choose.")
+        listen = tk.Frame(grid, bg=COLORS["bg_surface"])
+        listen.grid(row=4, column=1, sticky="w", pady=5)
+        self.play_btn = self._button(
+            listen, "▶  Play sound", self.toggle_play, pad=10,
+            tip="Play the audio under the clip you have marked — exactly the section that would "
+                "be saved.\n\nTakes a moment to extract the first time you press it.")
+        self.play_btn.pack(side=tk.LEFT)
+        tk.Label(listen, text="Volume", font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"],
+                 fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.volume_var = tk.DoubleVar(value=70)
+        self.volume_scale = ttk.Scale(listen, from_=0, to=100, orient=tk.HORIZONTAL, length=150,
+                                      variable=self.volume_var, style="G.Horizontal.TScale")
+        self.volume_scale.pack(side=tk.LEFT)
+        ToolTip(self.volume_scale,
+                "Listening volume only. The saved clip's audio is never touched — a quiet source "
+                "stays quiet, and H3 sees exactly what your camera recorded.")
+
         self.sound_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                    wraplength=820, bg=COLORS["bg_surface"],
                                    fg=COLORS["text_explain"])
-        self.sound_note.grid(row=4, column=1, sticky="w")
+        self.sound_note.grid(row=5, column=1, sticky="w")
 
-        label(5, "Save to:")
+        OUT_TIP = ("Where the clips land.\n\n"
+                   "Point it at your Fizgig training folder and the clips are ready to caption "
+                   "the moment you are done here. Defaults to a fizgig_clips folder beside the "
+                   "source video.")
+        label(6, "Save to:", OUT_TIP)
         outrow = tk.Frame(grid, bg=COLORS["bg_surface"])
-        outrow.grid(row=5, column=1, sticky="ew", pady=5)
+        outrow.grid(row=6, column=1, sticky="ew", pady=5)
         self.out_var = tk.StringVar(value="")
-        tk.Entry(outrow, textvariable=self.out_var, bg=COLORS["bg_hover"],
-                 fg=COLORS["text_primary"], insertbackground=COLORS["text_primary"],
-                 relief=tk.FLAT, font=(FONT_FAMILY, 10)).pack(side=tk.LEFT, fill=tk.X,
-                                                              expand=True, ipady=4)
-        self._button(outrow, "Browse…", self.pick_output).pack(side=tk.LEFT, padx=(8, 0))
+        self.out_var.trace_add("write", lambda *_a: self._refresh_planned_name())
+        out_entry = tk.Entry(outrow, textvariable=self.out_var, bg=COLORS["bg_hover"],
+                             fg=COLORS["text_primary"], insertbackground=COLORS["text_primary"],
+                             relief=tk.FLAT, font=(FONT_FAMILY, 10))
+        out_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, ipady=4)
+        self._shield_from_hotkeys(out_entry)
+        ToolTip(out_entry, OUT_TIP)
+        self._button(outrow, "Browse…", self.pick_output,
+                     tip="Choose the folder to save clips into.").pack(side=tk.LEFT, padx=(8, 0))
 
         self.cost_label = tk.Label(c, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                    wraplength=900, bg=COLORS["bg_surface"],
                                    fg=COLORS["text_explain"])
         self.cost_label.pack(anchor="w", pady=(10, 0))
+        ToolTip(self.cost_label,
+                "Training cost, so a length is never an accidental decision.\n\n"
+                "Attention scales with the square of this number, so a clip is dramatically more "
+                "expensive to train than a still — that is the whole reason clips are short.")
 
-        # --- save -----------------------------------------------------------------------------
-        c = self._card(self.root, "4. Save it",
-                       "Then move the playhead and save again — a source video usually gives up "
-                       "several good clips.")
+        # --- queue ----------------------------------------------------------------------------
+        c = self._card(body, "4. Mark it, then move on",
+                       "Marking is fast and encoding is slow, so they are separate. Add every "
+                       "section you want from this video, then export the lot in one go — and "
+                       "keep scrubbing while it runs.")
         row = tk.Frame(c, bg=COLORS["bg_surface"])
         row.pack(fill=tk.X)
-        self.save_btn = self._button(row, "Save clip", self.save_clip, "accent")
-        self.save_btn.pack(side=tk.LEFT)
+        self.add_btn = self._button(
+            row, "➕  Add to queue", self.add_to_queue, "accent",
+            tip="Remember this clip — where it starts, how long, its size, its sound.  (Ctrl+S)"
+                "\n\nNothing is written yet, so adding is instant and you can carry on marking.")
+        self.add_btn.pack(side=tk.LEFT)
+        self.export_btn = self._button(
+            row, "Export queue", self.export_queue,
+            tip="Encode everything in the queue, one after another.\n\nA second or two per clip. "
+                "Anything that fails says why and the rest still finish.")
+        self.export_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.status = tk.Label(row, text="", font=(FONT_FAMILY, 10), bg=COLORS["bg_surface"],
                                fg=COLORS["text_secondary"])
         self.status.pack(side=tk.LEFT, padx=12)
-        self.saved_box = tk.Listbox(c, height=6, bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
+        self.open_btn = self._button(row, "📂 Open folder", self.open_output_folder,
+                                     tip="Open the save folder in your file browser.")
+        self.open_btn.pack(side=tk.RIGHT)
+
+        # The filename BEFORE anything is written, so the mute decision is visible as a
+        # consequence rather than as a radio button whose meaning has to be remembered.
+        self.name_label = tk.Label(c, text="", font=("Consolas", 9), justify=tk.LEFT,
+                                   bg=COLORS["bg_surface"], fg=COLORS["text_muted"])
+        self.name_label.pack(anchor="w", pady=(8, 0))
+        ToolTip(self.name_label,
+                "What Add would queue right now. The number steps past both the files already in "
+                "the folder and anything else waiting in the queue.")
+
+        self.queue_box = tk.Listbox(c, height=7, bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
                                     font=("Consolas", 9), relief=tk.FLAT, highlightthickness=1,
                                     highlightbackground=COLORS["border"],
                                     selectbackground=COLORS["accent"])
-        self.saved_box.pack(fill=tk.X, pady=(10, 0))
+        self.queue_box.pack(fill=tk.X, pady=(10, 0))
+        self.queue_box.bind("<Double-Button-1>", lambda _e: self.recall_selected())
+        ToolTip(self.queue_box,
+                "The queue. ✓ has been written, · is still waiting.\n\n"
+                "Double-click a waiting row to put the playhead and settings back where they "
+                "were when you added it. Gizmo keeps no project file — when you have what you "
+                "need, close it.")
 
+        qrow = tk.Frame(c, bg=COLORS["bg_surface"])
+        qrow.pack(fill=tk.X, pady=(6, 0))
+        self._button(qrow, "Remove selected", self.remove_selected, pad=10,
+                     tip="Drop the selected row from the queue. Already-exported clips stay on "
+                         "disk — delete those in your file browser.").pack(side=tk.LEFT)
+        self._button(qrow, "Clear queue", self.clear_queue, pad=10,
+                     tip="Empty the waiting list. Nothing already exported is "
+                         "touched.").pack(side=tk.LEFT, padx=(8, 0))
+
+        self._bind_keys()
         self._set_enabled(False)
         self._refresh_cost()
+        self._refresh_queue_box()
 
     # -- state ----------------------------------------------------------------------------------
     def _length_label(self, frames):
@@ -449,8 +726,59 @@ class Gizmo:
 
     def _set_enabled(self, on):
         state = tk.NORMAL if on else tk.DISABLED
-        for w in (self.save_btn, self.scale):
+        for w in (self.add_btn, self.export_btn, self.scale, self.open_btn,
+                  *self._sound_radios):
             w.configure(state=state)
+        for box in (self.len_box, self.size_box, self.motion_box):
+            box.configure(state="readonly" if on else tk.DISABLED)
+        # Listening needs a track to listen to AND a way to play it. Both reasons are spelled out
+        # in _fill_sound_note rather than left as a greyed button with no explanation.
+        can_play = bool(on and self.info and self.info["has_audio"]
+                        and (audio_playback_backend() or ""))
+        self.play_btn.configure(state=tk.NORMAL if can_play else tk.DISABLED)
+        self.volume_scale.configure(state=tk.NORMAL if can_play else tk.DISABLED)
+
+    # -- keyboard ---------------------------------------------------------------------------------
+    def _bind_keys(self):
+        """Frame-accurate marking with a mouse is miserable, and this is a tool you use thirty
+        times in a row. Bound on the root so they work wherever focus happens to be — except
+        inside the output-folder Entry, where a left arrow has to mean 'move the cursor'."""
+        for seq, fn in (("<Left>", lambda: self.step(-1)),
+                        ("<Right>", lambda: self.step(1)),
+                        ("<Shift-Left>", lambda: self.step(-10)),
+                        ("<Shift-Right>", lambda: self.step(10)),
+                        ("<Home>", self.go_to_start),
+                        ("<Control-s>", self.add_to_queue)):
+            self.root.bind(seq, lambda _e, f=fn: (f(), "break")[1])
+
+    @staticmethod
+    def _shield_from_hotkeys(widget):
+        """Stop root-level hotkeys reaching a text field.
+
+        Tk delivers a key along the widget's bindtags — widget, class, toplevel, all — so a hotkey
+        bound on the root fires even while someone is typing, and ← would scrub the video instead
+        of moving the cursor. Dropping the toplevel tag is the fix; the class bindings that make
+        an Entry an Entry are untouched.
+
+        This is done by bindtags rather than by inspecting the event, because event.widget reports
+        the TOPLEVEL for a key that arrived at a child — so the obvious check silently never
+        matches, which is exactly the kind of guard that looks right and does nothing.
+        """
+        widget.bindtags((str(widget), widget.winfo_class(), "all"))
+
+    def go_to_start(self):
+        if self.src:
+            self.scale.set(0)
+
+    # Length and motion both move the END of the clip, so both have to redraw the last-frame
+    # preview as well as the cost line.
+    def _on_length_changed(self):
+        self._refresh_cost()
+        self.show_frame()
+
+    def _on_motion_changed(self):
+        self._update_pos_labels()
+        self.show_frame()
 
     # -- opening ---------------------------------------------------------------------------------
     def open_video(self):
@@ -468,7 +796,9 @@ class Gizmo:
     def load_video(self, path):
         """Everything opening a video does, with no dialog in the way — so it can be tested."""
         info = probe_source(self.ffmpeg, path)
+        self._stop_audio()
         self.src, self.info = path, info
+        self.root.title(f"Gizmo — {os.path.basename(path)}")
         self.frame_pos = 0
         total = int((info["duration"] or 0) * info["fps"])
         self.scale.configure(from_=0, to=max(1, total - 1))
@@ -504,6 +834,7 @@ class Gizmo:
         self._set_enabled(True)
         self.show_frame()
         self._refresh_cost()
+        self._refresh_planned_name()
 
     def _fill_sizes(self):
         w, h = self.info["width"], self.info["height"]
@@ -547,11 +878,15 @@ class Gizmo:
                 text="This source has no audio track, so there is nothing to train on either way.",
                 fg=COLORS["text_muted"])
             return
-        self.sound_note.configure(
-            text="Muting adds _mute to the filename and Fizgig trains that clip's video only. The "
-                 "audio stays in the file, so you can still play it back and change your mind by "
-                 "renaming.",
-            fg=COLORS["text_explain"])
+        note = ("Muting adds _mute to the filename and Fizgig trains that clip's video only. The "
+                "audio stays in the file, so you can still play it back and change your mind by "
+                "renaming.")
+        if not (audio_playback_backend() or ""):
+            # Almost always a pod: the container has no audio device and no player. Worth naming,
+            # because a greyed Play button with no reason reads as a bug.
+            note += ("\nPlayback is not available on this machine, so the Play button is off — "
+                     "everything else works normally.")
+        self.sound_note.configure(text=note, fg=COLORS["text_explain"])
 
     # -- scrubbing --------------------------------------------------------------------------------
     def _on_scrub(self, value):
@@ -594,24 +929,105 @@ class Gizmo:
         self._scrub_job = None
         if not self.src:
             return
-        seconds = self.frame_pos / self.info["fps"]
-        threading.Thread(target=self._grab_worker, args=(seconds,), daemon=True).start()
+        fps = self.info["fps"]
+        start = self.frame_pos / fps
+        k = self._keep_every()
+        span = self._frames() * k / fps if k else self._frames() / FPS
+        # The last frame of the clip, not the frame after it — hence the one-frame step back.
+        threading.Thread(target=self._grab_worker,
+                         args=(start, max(start, start + span - 1 / fps)),
+                         daemon=True).start()
 
-    def _grab_worker(self, seconds):
+    def _grab_worker(self, start_s, end_s):
         try:
-            img = grab_frame(self.ffmpeg, self.src, seconds)
+            first = grab_frame(self.ffmpeg, self.src, start_s)
         except Exception:
-            img = None
-        self.root.after(0, self._show_image, img)
+            first = None
+        try:
+            last = grab_frame(self.ffmpeg, self.src, end_s, box=(END_W, END_H))
+        except Exception:
+            last = None
+        self.root.after(0, self._show_images, first, last)
 
-    def _show_image(self, img):
-        self.canvas.delete("all")
+    def _show_images(self, first, last):
+        self.photo = self._paint(self.canvas, first, PREVIEW_W, PREVIEW_H)
+        self.end_photo = self._paint(self.end_canvas, last, END_W, END_H)
+
+    def _paint(self, canvas, img, w, h):
+        """Draw into a canvas and hand back the PhotoImage — which the caller MUST keep, or Tk
+        garbage-collects it and the canvas goes blank."""
+        canvas.delete("all")
         if img is None:
-            self.canvas.create_text(PREVIEW_W // 2, PREVIEW_H // 2, text="(no frame here)",
-                                    fill=COLORS["text_muted"], font=(FONT_FAMILY, 11))
+            canvas.create_text(w // 2, h // 2, text="(no frame here)",
+                               fill=COLORS["text_muted"], font=(FONT_FAMILY, 10))
+            return None
+        photo = ImageTk.PhotoImage(img)
+        canvas.create_image(w // 2, h // 2, image=photo)
+        return photo
+
+    # -- listening --------------------------------------------------------------------------------
+    def toggle_play(self):
+        """Play the marked section's audio, or stop it if it is already playing.
+
+        The volume slider is applied by ffmpeg while extracting, because the only playback that
+        needs no new dependency is winsound, and winsound has no volume of its own. That also
+        keeps the promise the tooltip makes: the gain exists in a temp file for listening and
+        never reaches the saved clip.
+        """
+        if self._playing:
+            self._stop_audio()
             return
-        self.photo = ImageTk.PhotoImage(img)
-        self.canvas.create_image(PREVIEW_W // 2, PREVIEW_H // 2, image=self.photo)
+        if not self.src or not self.info or not self.info["has_audio"]:
+            return
+        fps = self.info["fps"]
+        start = self.frame_pos / fps
+        k = self._keep_every()
+        # Real time: the audio you would get. Slow motion: the source audio under the section,
+        # which is what you are judging — the saved clip's audio comes from the same span.
+        span = self._frames() * k / fps if k else self._frames() / FPS
+        gain = max(0.0, float(self.volume_var.get())) / 100.0
+        self.play_btn.configure(text="■  Stop")
+        self._playing = True
+        threading.Thread(target=self._play_worker, args=(start, span, gain), daemon=True).start()
+
+    def _play_worker(self, start, span, gain):
+        err = None
+        try:
+            wav = os.path.join(tempfile.gettempdir(), "gizmo_preview.wav")
+            p = _run([self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                      "-ss", f"{start:.3f}", "-t", f"{span:.3f}", "-i", self.src,
+                      "-vn", "-af", f"volume={gain:.3f}", "-ac", "2", "-ar", "44100",
+                      "-c:a", "pcm_s16le", wav])
+            if p.returncode != 0 or not os.path.exists(wav):
+                raise RuntimeError((p.stderr or b"").decode("utf-8", "replace")[-300:]
+                                   or "could not extract the audio")
+            _play_wav(wav)
+        except Exception as exc:
+            err = str(exc)
+        self.root.after(0, self._play_done, span, err)
+
+    def _play_done(self, span, err):
+        if err:
+            self._playing = False
+            self.play_btn.configure(text="▶  Play sound")
+            self.status.configure(text="Could not play the sound", fg=COLORS["error"])
+            messagebox.showerror("Gizmo — cannot play that audio", err)
+            return
+        # winsound plays asynchronously and never says when it finished, so the button is reset
+        # on a timer the length of the clip. Under a second either way — nobody is counting.
+        self._play_job = self.root.after(int(span * 1000) + 200, self._stop_audio)
+
+    def _stop_audio(self):
+        if self._play_job is not None:
+            try:
+                self.root.after_cancel(self._play_job)
+            except Exception:
+                pass
+            self._play_job = None
+        _stop_wav()
+        self._playing = False
+        if self.play_btn.winfo_exists():
+            self.play_btn.configure(text="▶  Play sound")
 
     # -- cost -------------------------------------------------------------------------------------
     def _refresh_cost(self):
@@ -637,64 +1053,211 @@ class Gizmo:
         if d:
             self.out_var.set(d)
 
-    def save_clip(self):
-        if not self.src or self._busy:
+    def open_output_folder(self):
+        d = self.out_var.get().strip()
+        if not d or not os.path.isdir(d):
+            messagebox.showinfo("Gizmo", "Nothing there yet — export a clip first.")
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(d)                                     # noqa: S606
+            else:
+                subprocess.Popen(["xdg-open", d], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            messagebox.showerror("Gizmo", f"Cannot open {d}\n\n{exc}")
+
+    # -- the queue ---------------------------------------------------------------------------------
+    def _claimed_names(self):
+        """Names already spoken for by the queue. output_name only checks the disk, so without
+        this two clips added before either is exported would both be handed _01."""
+        return {os.path.basename(j["dst"]) for j in self.queue}
+
+    def _planned_job(self):
+        """The job Add would create right now, or None if there isn't one."""
+        out_dir = self.out_var.get().strip()
+        if not self.src or not out_dir:
+            return None
+        w, h = self._size()
+        if not w:
+            return None
+        muted = bool(self.mute_var.get())
+        return {
+            "src": self.src, "dst": output_name(self.src, out_dir, muted, self._claimed_names()),
+            "start_frame": self.frame_pos, "start": self.frame_pos / self.info["fps"],
+            "frames": self._frames(), "w": w, "h": h,
+            "keep_every": self._keep_every(), "muted": muted,
+            # A muted clip still carries its audio: the _mute suffix is the instruction, and
+            # keeping the track means the decision is reversible by rename, not by re-export.
+            "with_audio": bool(self.info["has_audio"]),
+            "size_index": self.size_box.current(), "motion_index": self.motion_box.current(),
+            "done": False, "error": None,
+        }
+
+    def _refresh_planned_name(self, *_a):
+        job = self._planned_job()
+        self.name_label.configure(
+            text=(f"next:  {os.path.basename(job['dst'])}" if job else ""))
+
+    def add_to_queue(self):
+        if not self.src:
             return
         out_dir = self.out_var.get().strip()
         if not out_dir:
-            messagebox.showwarning("Gizmo", "Choose a folder to save the clips into.")
+            messagebox.showwarning("Gizmo", "Choose a folder to save the clips into first.")
             return
+        job = self._planned_job()
+        if job is None:
+            return
+        # Refused at ADD time rather than at export, so a queue of thirty does not stop halfway
+        # for something that was knowable the moment it was marked.
+        duration = self.info["duration"] or 0
+        k = job["keep_every"]
+        span = (job["frames"] * k / self.info["fps"]) if k else job["frames"] / FPS
+        if duration and job["start"] + span > duration + 1e-3:
+            messagebox.showwarning(
+                "Gizmo — that clip runs off the end",
+                f"The source ends at {duration:.2f} s, and this clip would need up to "
+                f"{job['start'] + span:.2f} s.\n\nMove the playhead earlier, or choose a shorter "
+                f"length.")
+            return
+        self.queue.append(job)
+        self._refresh_queue_box()
+        self._refresh_planned_name()
+        self.status.configure(text=f"Queued {os.path.basename(job['dst'])}",
+                              fg=COLORS["text_secondary"])
+
+    def _queue_row(self, i, job):
+        mark = "✗" if job["error"] else ("✓" if job["done"] else "·")
+        sound = "muted" if job["muted"] else ("sound" if job["with_audio"] else "silent")
+        slow = f" {self.info['fps'] / job['keep_every'] / FPS:.2f}x slow" \
+            if job["keep_every"] and self.info else ""
+        return (f"{mark} {i + 1:2d}  {os.path.basename(job['dst']):<28} "
+                f"{job['frames']:>2}f  {job['w']}x{job['h']}  @{job['start']:6.2f}s  "
+                f"{sound}{slow}")
+
+    def _refresh_queue_box(self):
+        self.queue_box.delete(0, tk.END)
+        for i, job in enumerate(self.queue):
+            self.queue_box.insert(tk.END, self._queue_row(i, job))
+            if job["error"]:
+                self.queue_box.itemconfigure(i, foreground=COLORS["error"])
+            elif job["done"]:
+                self.queue_box.itemconfigure(i, foreground=COLORS["success"])
+        pending = sum(1 for j in self.queue if not j["done"])
+        self.export_btn.configure(
+            text=f"Export queue ({pending})" if pending else "Export queue")
+        self.queue_box.see(tk.END)
+
+    def recall_selected(self):
+        """Put the playhead and settings back where they were when a row was added — the undo
+        for 'I queued that one two frames late'."""
+        sel = self.queue_box.curselection()
+        if not sel or self._busy:
+            return
+        job = self.queue[sel[0]]
+        if job["done"]:
+            return
+        if job["src"] != self.src:
+            messagebox.showinfo("Gizmo", "That clip came from a different source video.")
+            return
+        self.len_box.current(GRID_FRAMES.index(job["frames"]))
+        if 0 <= job["size_index"] < len(self.size_box["values"]):
+            self.size_box.current(job["size_index"])
+        if 0 <= job["motion_index"] < len(self.motion_box["values"]):
+            self.motion_box.current(job["motion_index"])
+        self.mute_var.set(job["muted"])
+        self.scale.set(job["start_frame"])
+        self._refresh_cost()
+        self._refresh_planned_name()
+
+    def remove_selected(self):
+        sel = self.queue_box.curselection()
+        if not sel or self._busy:
+            return
+        if self.queue[sel[0]]["done"]:
+            messagebox.showinfo("Gizmo", "That one is already written. Delete the file itself if "
+                                         "you don't want it.")
+            return
+        del self.queue[sel[0]]
+        self._refresh_queue_box()
+        self._refresh_planned_name()
+
+    def clear_queue(self):
+        if self._busy:
+            return
+        self.queue = [j for j in self.queue if j["done"]]
+        self._refresh_queue_box()
+        self._refresh_planned_name()
+
+    # -- exporting ---------------------------------------------------------------------------------
+    def export_queue(self):
+        if self._busy:
+            return
+        pending = [j for j in self.queue if not j["done"]]
+        if not pending:
+            messagebox.showinfo("Gizmo", "Nothing queued. Mark a clip and press Add to queue.")
+            return
+        out_dir = self.out_var.get().strip()
         try:
             os.makedirs(out_dir, exist_ok=True)
         except Exception as exc:
             messagebox.showerror("Gizmo", f"Cannot create {out_dir}\n\n{exc}")
             return
 
-        frames = self._frames()
-        w, h = self._size()
-        muted = self.mute_var.get()
-        # A muted clip still carries its audio: the _mute suffix is the instruction, and keeping
-        # the track means the decision is reversible by rename rather than by re-export.
-        with_audio = bool(self.info["has_audio"])
-        dst = output_name(self.src, out_dir, muted)
-        cmd = build_export_command(self.ffmpeg, self.src, dst, self.frame_pos / self.info["fps"],
-                                   frames, w, h, self._keep_every(), with_audio)
-
         self._busy = True
-        self.save_btn.configure(state=tk.DISABLED)
-        self.status.configure(text="Saving…", fg=COLORS["text_secondary"])
-        threading.Thread(target=self._save_worker, args=(cmd, dst, frames), daemon=True).start()
+        self.export_btn.configure(state=tk.DISABLED)
+        self.add_btn.configure(state=tk.DISABLED)
+        threading.Thread(target=self._export_worker, args=(pending,), daemon=True).start()
 
-    def _save_worker(self, cmd, dst, want_frames):
+    def _export_worker(self, jobs):
+        for n, job in enumerate(jobs, 1):
+            self.root.after(0, lambda n=n, job=job: self.status.configure(
+                text=f"Exporting {n} of {len(jobs)} — {os.path.basename(job['dst'])}",
+                fg=COLORS["text_secondary"]))
+            job["error"] = self._export_one(job)
+            job["done"] = job["error"] is None
+            self.root.after(0, self._refresh_queue_box)
+        self.root.after(0, self._export_done, jobs)
+
+    def _export_one(self, job):
+        """Write one clip. Returns an error string, or None on success."""
         try:
+            cmd = build_export_command(self.ffmpeg, job["src"], job["dst"], job["start"],
+                                       job["frames"], job["w"], job["h"], job["keep_every"],
+                                       job["with_audio"])
             p = _run(cmd, text=True)
-            if p.returncode != 0 or not os.path.exists(dst):
-                raise RuntimeError((p.stderr or "").strip()[-600:] or "ffmpeg failed")
+            if p.returncode != 0 or not os.path.exists(job["dst"]):
+                return (p.stderr or "").strip()[-400:] or "ffmpeg failed"
             # Verified, not assumed: frame count is the one thing Fizgig refuses a clip over, and
             # a source that ends mid-clip silently yields a short one.
-            got = count_frames(self.ffmpeg, dst)
-            if got is not None and got != want_frames:
-                os.remove(dst)
-                raise RuntimeError(
-                    f"that mark only yields {got} frames, not {want_frames} — the source runs out "
-                    f"before the clip does. Move the playhead earlier, or pick a shorter length.")
-            err = None
+            got = count_frames(self.ffmpeg, job["dst"])
+            if got is not None and got != job["frames"]:
+                os.remove(job["dst"])
+                return (f"only {got} frames, not {job['frames']} — the source runs out before "
+                        f"the clip does")
+            return None
         except Exception as exc:
-            err = str(exc)
-        self.root.after(0, self._save_done, dst, err)
+            return f"{type(exc).__name__}: {exc}"
 
-    def _save_done(self, dst, err):
+    def _export_done(self, jobs):
         self._busy = False
-        self.save_btn.configure(state=tk.NORMAL)
-        if err:
-            self.status.configure(text="Not saved", fg=COLORS["error"])
-            messagebox.showerror("Gizmo — could not save that clip", err)
-            return
-        name = os.path.basename(dst)
-        self.saved.append(dst)
-        self.saved_box.insert(tk.END, f"{len(self.saved):3d}  {name}")
-        self.saved_box.see(tk.END)
-        self.status.configure(text=f"Saved {name}", fg=COLORS["success"])
+        self.export_btn.configure(state=tk.NORMAL)
+        self.add_btn.configure(state=tk.NORMAL)
+        failed = [j for j in jobs if j["error"]]
+        ok = len(jobs) - len(failed)
+        if failed:
+            self.status.configure(text=f"{ok} written, {len(failed)} failed",
+                                  fg=COLORS["warning"])
+            detail = "\n\n".join(f"{os.path.basename(j['dst'])}: {j['error']}" for j in failed[:6])
+            messagebox.showwarning(
+                "Gizmo — some clips did not export",
+                f"{ok} written, {len(failed)} failed. The failures are marked ✗ in the queue and "
+                f"can be adjusted and exported again.\n\n{detail}")
+        else:
+            self.status.configure(text=f"{ok} clip{'' if ok == 1 else 's'} written",
+                                  fg=COLORS["success"])
+        self._refresh_planned_name()
 
 
 def main():

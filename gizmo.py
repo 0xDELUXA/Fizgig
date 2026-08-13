@@ -455,8 +455,9 @@ class Gizmo:
 
         # --- scrub ----------------------------------------------------------------------------
         c = self._card(body, "2. Find the moment",
-                       "The playhead is where the clip STARTS. Arrow keys step one frame, "
-                       "Shift+arrow steps ten, Home jumps to the beginning.")
+                       "The playhead is where the clip STARTS. Drag it, step with the arrow keys "
+                       "(Shift for ten at a time, Home for the beginning), or type an exact frame "
+                       "below.")
         shots = tk.Frame(c, bg=COLORS["bg_surface"])
         shots.pack()
         # Two frames, not one: choosing a clip means knowing what is in it, and the end frame is
@@ -500,9 +501,31 @@ class Gizmo:
                 ("10 ▶▶", 10, "Forward ten frames.  (Shift + →)")):
             self._button(nav, text, lambda d=delta: self.step(d), pad=10,
                          tip=tip).pack(side=tk.LEFT, padx=3)
-        self.pos_label = tk.Label(c, text="", font=(FONT_FAMILY, 10, "bold"),
+        # Typed as well as dragged. A slider cannot land on frame 1483 of 9000, and "start it
+        # exactly where the last clip ended" is an ordinary thing to want.
+        posrow = tk.Frame(c, bg=COLORS["bg_surface"])
+        posrow.pack(pady=(10, 0))
+        tk.Label(posrow, text="Start at frame", font=(FONT_FAMILY, 10),
+                 bg=COLORS["bg_surface"], fg=COLORS["text_secondary"]).pack(side=tk.LEFT)
+        self.pos_var = tk.StringVar(value="0")
+        self.pos_entry = tk.Entry(posrow, textvariable=self.pos_var, width=8,
+                                  justify="right", bg=COLORS["bg_hover"],
+                                  fg=COLORS["text_primary"],
+                                  insertbackground=COLORS["text_primary"], relief=tk.FLAT,
+                                  font=("Consolas", 10))
+        self.pos_entry.pack(side=tk.LEFT, padx=6, ipady=3)
+        self._shield_from_hotkeys(self.pos_entry)
+        self.pos_entry.bind("<Return>", lambda _e: self._go_to_typed())
+        self.pos_entry.bind("<KP_Enter>", lambda _e: self._go_to_typed())
+        self.pos_entry.bind("<FocusOut>", lambda _e: self._go_to_typed())
+        POS_TIP = ("Type an exact frame and press Enter.\n\n"
+                   "Add s for seconds instead — 12.5s. Out-of-range values are pulled back to "
+                   "the nearest frame that exists rather than refused.")
+        ToolTip(self.pos_entry, POS_TIP)
+        self.pos_label = tk.Label(posrow, text="", font=(FONT_FAMILY, 10, "bold"),
                                   bg=COLORS["bg_surface"], fg=COLORS["text_primary"])
-        self.pos_label.pack(pady=(8, 0))
+        self.pos_label.pack(side=tk.LEFT, padx=(6, 0))
+        ToolTip(self.pos_label, POS_TIP)
         self.span_label = tk.Label(c, text="", font=(FONT_FAMILY, 9),
                                    bg=COLORS["bg_surface"], fg=COLORS["text_explain"])
         self.span_label.pack()
@@ -726,7 +749,7 @@ class Gizmo:
 
     def _set_enabled(self, on):
         state = tk.NORMAL if on else tk.DISABLED
-        for w in (self.add_btn, self.export_btn, self.scale, self.open_btn,
+        for w in (self.add_btn, self.export_btn, self.scale, self.open_btn, self.pos_entry,
                   *self._sound_radios):
             w.configure(state=state)
         for box in (self.len_box, self.size_box, self.motion_box):
@@ -904,10 +927,45 @@ class Gizmo:
             return
         self.scale.set(max(0, self.frame_pos + delta))
 
+    def _last_frame(self):
+        """The last frame that exists in the source, as an index."""
+        return max(0, int((self.info["duration"] or 0) * self.info["fps"]) - 1)
+
+    def _go_to_typed(self):
+        """Jump to a typed frame — or a typed time, with an s on the end.
+
+        Clamped rather than refused: someone typing 9999 into a 600-frame video means 'the end',
+        and an error dialog for that is a worse answer than going there. A value that is not a
+        number at all just snaps back to where the playhead already is.
+        """
+        if not self.src:
+            return
+        raw = self.pos_var.get().strip().lower().replace(",", "")
+        try:
+            if raw.endswith("s"):
+                frame = int(round(float(raw[:-1]) * self.info["fps"]))
+            else:
+                frame = int(round(float(raw)))
+        except ValueError:
+            self._sync_pos_entry()
+            return
+        frame = max(0, min(frame, self._last_frame()))
+        if frame != self.frame_pos:
+            self.scale.set(frame)
+        self._sync_pos_entry()
+
+    def _sync_pos_entry(self):
+        """Keep the box showing the truth — it is an input AND a readout, and after a drag the
+        two disagree unless this runs."""
+        if self.pos_var.get() != str(self.frame_pos):
+            self.pos_var.set(str(self.frame_pos))
+
     def _update_pos_labels(self):
         fps = self.info["fps"]
         t = self.frame_pos / fps
-        self.pos_label.configure(text=f"frame {self.frame_pos}   ·   {t:6.2f} s")
+        self._sync_pos_entry()
+        self.pos_label.configure(
+            text=f"of {self._last_frame()}   ·   {t:6.2f} s")
         frames = self._frames()
         k = self._keep_every()
         # How much SOURCE this clip eats depends on the motion choice: real time takes the same

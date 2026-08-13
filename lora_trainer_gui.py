@@ -11686,6 +11686,28 @@ class LoRATrainerGUI:
             row=1, column=1, sticky=tk.W, pady=(0, 4)
         )
 
+        # Working from video — sits ABOVE the prep steps because clips are cut first, and the
+        # clips then land in the same training folder as everything else. Shown to everyone
+        # rather than only under MiniMax: the person who needs it is the one who has not chosen
+        # a model yet and is looking at an hour of footage wondering where to start.
+        gizmo_card = self._start_section_card(
+            outer, "Working from video?",
+            "Gizmo cuts training clips from your footage — scrub to a moment, pick a length, "
+            "save. It handles the frame rate, the frame count, the sizing and the audio, so the "
+            "clips come out on spec. Video training is MiniMax H3 only; still images need none "
+            "of this.",
+        )
+        _gz_row = tk.Frame(gizmo_card, bg=COLORS["bg_surface"])
+        _gz_row.pack(anchor=tk.W)
+        tk.Button(_gz_row, text="🎬  Open Gizmo", command=self._launch_gizmo,
+                  bg=COLORS["accent"], fg=COLORS["text_primary"],
+                  activebackground=COLORS["accent_hover"],
+                  activeforeground=COLORS["text_primary"], font=(FONT_FAMILY, 10, "bold"),
+                  relief=tk.FLAT, bd=0, padx=16, pady=8, cursor="hand2").pack(side=tk.LEFT)
+        tk.Label(_gz_row, text="opens in its own window — Fizgig keeps running",
+                 font=(FONT_FAMILY, 9), fg=COLORS["text_muted"],
+                 bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=12)
+
         # Card 2: What to do — one radio per outcome, plain-language hint under each. The radio
         # VALUES stay the historical mode strings so persistence and the convert pipeline are
         # untouched; only the visible labels changed.
@@ -12538,6 +12560,40 @@ class LoRATrainerGUI:
     # region Image Prep Helpers
 
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+
+    def _launch_gizmo(self):
+        """Open Gizmo, the clip prep tool, as its own process.
+
+        On a pod this button is the ONLY route — there is no desktop icon and a .bat is useless
+        on Linux. It works because the container runs openbox and DISPLAY=:1 is set in the image,
+        both of which this process already inherited, so the child does too.
+
+        Not a "close Fizgig and open Gizmo" flow, deliberately: on a pod Fizgig is PID 1's
+        successor and closing it would kill the pod.
+        """
+        script = os.path.join(FIZGIG_DIR, "gizmo.pyw" if os.name == "nt" else "gizmo.py")
+        if not os.path.isfile(script):
+            messagebox.showerror("Gizmo not found",
+                                 f"{os.path.basename(script)} is missing from your Fizgig folder. "
+                                 "Update Fizgig to get it.")
+            return
+
+        proc = getattr(self, "_gizmo_proc", None)
+        if proc is not None and proc.poll() is None:
+            messagebox.showinfo("Gizmo is already open",
+                                "Gizmo is running — look for its window behind this one.")
+            return
+
+        exe = self._venv_python()
+        if os.name == "nt":
+            # pythonw, or the child inherits a console window Fizgig itself does not have.
+            cand = os.path.join(FIZGIG_DIR, "venv", "Scripts", "pythonw.exe")
+            if os.path.isfile(cand):
+                exe = cand
+        try:
+            self._gizmo_proc = subprocess.Popen([exe, script], cwd=FIZGIG_DIR)
+        except Exception as exc:
+            messagebox.showerror("Gizmo could not start", f"{type(exc).__name__}: {exc}")
 
     @staticmethod
     def _atomic_png_save(img, output_path):

@@ -454,13 +454,25 @@ def sample_sigmas(batch: int, device, shift=None, generator=None,
 
 def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
                  sigma: torch.Tensor = None, shift: float = None, generator=None,
-                 noise: torch.Tensor = None):
-    """One image-training step's loss.
+                 noise: torch.Tensor = None, audio_latent: torch.Tensor = None,
+                 audio_weight: float = 1.0, parts_out: dict = None):
+    """One training step's loss.
 
-    latent      : [1, 24, 1, H, W] clean VAE latent (x0).
+    latent      : [1, 24, T, H, W] clean VAE latent (x0). T=1 is a still.
     text_embeds : [1, L, text_dim] Qwen3-VL states.
     noise       : optional fixed noise (reproducible steps / tests); else sampled.
-    Returns (loss, sigma_used) — MSE of the DiT's video_out against (x0 - noise).
+    audio_latent: optional [A*2, 32] clean audio rows (channel-major, as cached). Given, the
+                  audio stream gets a REAL target instead of silence and its error joins the
+                  loss. Absent — a still, or a clip the user muted — nothing changes: the rows
+                  are still packed as noised silence so the frozen base runs in the layout it
+                  was trained in, they simply contribute no gradient.
+    audio_weight: multiplier on the audio term. Audio is only ~4% of the packed sequence at any
+                  clip length, so an unweighted term barely moves; this is the dial for that,
+                  and it starts at parity until a measurement says otherwise.
+
+    Returns (loss, sigma_used). parts_out, if given, receives the video and audio terms
+    separately — they are on different noise schedules and averaging them into one number hides
+    which stream is actually learning.
     """
     if latent.shape[0] != 1:
         raise ValueError("MiniMax H3 image training is batch size 1")
@@ -488,9 +500,38 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
 
     noised = (1.0 - s) * x0 + s * noise
     t = (1.0 - sigma).to(device)
-    pred = model(noised.to(latent.dtype), t, text_embeds)
-    target = (x0 - noise).to(pred.dtype)
-    return F.mse_loss(pred.float(), target.float()), float(sigma.reshape(-1)[0])
+
+    if audio_latent is None:
+        pred = model(noised.to(latent.dtype), t, text_embeds)
+        loss = F.mse_loss(pred.float(), (x0 - noise).to(pred.dtype).float())
+        if parts_out is not None:
+            parts_out.update(video=float(loss.detach()), audio=None)
+        return loss, float(sigma.reshape(-1)[0])
+
+    # The audio stream denoises on its OWN schedule — shift 3 against video's 12 — and
+    # remap_sigma is the closed form that keeps the two at the same underlying point. Noising the
+    # audio rows at the VIDEO sigma would put the stream somewhere the base has never seen it,
+    # and the frozen model would spend the step disagreeing with the layout rather than learning.
+    from fizgig.minimax.model import remap_sigma
+    sigma_v = float(sigma.reshape(-1)[0])
+    sigma_a = float(remap_sigma(torch.tensor(sigma_v)))
+
+    a0 = audio_latent.to(device=device, dtype=torch.float32)
+    a_noise = torch.randn(a0.shape, device=device, generator=generator, dtype=torch.float32)
+    a_noised = (1.0 - sigma_a) * a0 + sigma_a * a_noise
+
+    pred, pred_a = model(noised.to(latent.dtype), t, text_embeds,
+                         audio_rows=a_noised, return_audio=True)
+    v_loss = F.mse_loss(pred.float(), (x0 - noise).to(pred.dtype).float())
+    if pred_a is None:                      # pack_audio_rows off — nothing to train against
+        if parts_out is not None:
+            parts_out.update(video=float(v_loss.detach()), audio=None)
+        return v_loss, sigma_v
+    a_loss = F.mse_loss(pred_a.float(), (a0 - a_noise).float())
+    if parts_out is not None:
+        parts_out.update(video=float(v_loss.detach()), audio=float(a_loss.detach()),
+                         sigma_audio=sigma_a)
+    return v_loss + audio_weight * a_loss, sigma_v
 
 
 @contextlib.contextmanager

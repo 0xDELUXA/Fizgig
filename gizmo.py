@@ -369,6 +369,84 @@ def output_name(src_path, out_dir, muted, claimed=()):
     raise RuntimeError("1000 clips from one source — give the output folder a clean start.")
 
 
+def enable_file_drop(root, on_drop):
+    """Let a file be dragged onto the window. Returns True if it took.
+
+    Done through the Windows shell API rather than by adding tkinterdnd2, because a new
+    dependency would mean everyone re-running the installer for a convenience — and Gizmo's
+    whole install story is that it needs nothing Fizgig does not already have.
+
+    Tk has no drag-and-drop of its own, so the window procedure is subclassed to catch
+    WM_DROPFILES. Everything it does not recognise is passed straight to the original proc, and
+    any failure at all leaves the app exactly as it was: the whole thing is wrapped, the callback
+    swallows its own errors, and a window proc that raised into Tk would take the app down with
+    it. Non-Windows returns False and nothing is lost but the convenience.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        root.update_idletasks()
+        # wm_frame is the REAL top-level window. winfo_id is Tk's child frame, which never
+        # receives WM_DROPFILES however willing it looks.
+        hwnd = int(root.wm_frame(), 16)
+        user32, shell32 = ctypes.windll.user32, ctypes.windll.shell32
+        WM_DROPFILES, GWLP_WNDPROC = 0x0233, -4
+
+        # Pointer-sized by hand rather than via wintypes: WPARAM and LPARAM are not consistently
+        # 64-bit there, and the handle this hands back does not fit a default c_int. Left to
+        # ctypes' defaults it raises INSIDE the window procedure, which is not an exception that
+        # lands anywhere catchable — it killed the interpreter outright.
+        _64 = ctypes.sizeof(ctypes.c_void_p) == 8
+        LONG_PTR = ctypes.c_longlong if _64 else ctypes.c_long
+        UINT_PTR = ctypes.c_ulonglong if _64 else ctypes.c_ulong
+        WNDPROC = ctypes.WINFUNCTYPE(LONG_PTR, ctypes.c_void_p, ctypes.c_uint,
+                                     UINT_PTR, LONG_PTR)
+        user32.CallWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+                                           UINT_PTR, LONG_PTR]
+        user32.CallWindowProcW.restype = LONG_PTR
+        user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+        user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+        user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint, UINT_PTR, LONG_PTR]
+        user32.DefWindowProcW.restype = LONG_PTR
+
+        shell32.DragAcceptFiles(wintypes.HWND(hwnd), True)
+        old = [None]
+
+        def proc(h, msg, wparam, lparam):
+            # EVERYTHING is inside the guard. This runs on every message the window receives, and
+            # an exception escaping it does not propagate up a stack — it lands in Tk's message
+            # loop and takes the process with it. Whatever goes wrong, the window must still work.
+            try:
+                if msg == WM_DROPFILES:
+                    try:
+                        buf = ctypes.create_unicode_buffer(1024)
+                        if shell32.DragQueryFileW(wintypes.HWND(wparam), 0, buf, 1024):
+                            # Marshalled onto the Tk thread: opening a video from inside a window
+                            # procedure would re-enter Tk in the middle of a message.
+                            root.after(0, lambda p=buf.value: on_drop(p))
+                    finally:
+                        shell32.DragFinish(wintypes.HWND(wparam))
+                    return 0
+                return user32.CallWindowProcW(old[0], h, msg, wparam, lparam)
+            except Exception:
+                try:
+                    return user32.DefWindowProcW(h, msg, wparam, lparam)
+                except Exception:
+                    return 0
+
+        cb = WNDPROC(proc)
+        old[0] = user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ctypes.cast(cb, ctypes.c_void_p))
+        if not old[0]:
+            return False
+        root._drop_callback = cb          # held, or it is collected and the window proc dangles
+        return True
+    except Exception:
+        return False
+
+
 def audio_playback_backend():
     """How this machine can play a WAV, or None if it cannot.
 
@@ -501,6 +579,15 @@ class Gizmo:
 
         self._style()
         self._build()
+        # Three ways in besides the Open button, none of which cost a dependency: drop a file on
+        # the window, hand one to Gizmo on the command line (which is what dropping a video onto
+        # the launcher does, and what "Open with" does), or paste a path.
+        self.can_drop = enable_file_drop(self.root, self.open_path)
+        self.root.bind("<Control-v>", lambda _e: self.paste_path())
+        if not self.can_drop:
+            self.drop_hint.configure(
+                text="Tip: Gizmo also opens a video handed to it on the command line, or a path "
+                     "pasted with Ctrl+V.")
         if not self.ffmpeg:
             messagebox.showerror(
                 "Gizmo — no ffmpeg",
@@ -636,6 +723,10 @@ class Gizmo:
         self.src_label = tk.Label(row, text="No video open", font=(FONT_FAMILY, 10),
                                   bg=COLORS["bg_surface"], fg=COLORS["text_muted"])
         self.src_label.pack(side=tk.LEFT, padx=12)
+        self.drop_hint = tk.Label(row, text="…or just drag a video onto this window",
+                                  font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"],
+                                  fg=COLORS["text_muted"])
+        self.drop_hint.pack(side=tk.RIGHT)
         self.src_info = tk.Label(c, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                  bg=COLORS["bg_surface"], fg=COLORS["text_explain"])
         self.src_info.pack(anchor="w", pady=(8, 0))
@@ -1081,6 +1172,30 @@ class Gizmo:
             self.load_video(path)
         except Exception as exc:
             messagebox.showerror("Gizmo — cannot read that file", str(exc))
+
+    def open_path(self, path):
+        """Open a file that arrived from somewhere other than the Open button — a drop, the
+        command line, or the clipboard. Refuses politely rather than by traceback."""
+        path = str(path).strip().strip('"')
+        if not path or not os.path.isfile(path):
+            messagebox.showwarning("Gizmo", f"Not a file:\n{path}")
+            return
+        if os.path.splitext(path)[1].lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            messagebox.showinfo(
+                "Gizmo — that is a still",
+                "Gizmo cuts clips out of video. Still images go straight into your training "
+                "folder and are prepared on Fizgig's Image Prep tab.")
+            return
+        try:
+            self.load_video(path)
+        except Exception as exc:
+            messagebox.showerror("Gizmo — cannot read that file", str(exc))
+
+    def paste_path(self):
+        try:
+            self.open_path(self.root.clipboard_get())
+        except tk.TclError:
+            pass                              # empty or non-text clipboard
 
     def load_video(self, path):
         """Everything opening a video does, with no dialog in the way — so it can be tested."""
@@ -1804,7 +1919,11 @@ class Gizmo:
 
 def main():
     root = tk.Tk()
-    Gizmo(root)
+    app = Gizmo(root)
+    # A path on the command line, which is what Windows hands over when a video is dropped onto
+    # the launcher or opened with Gizmo from Explorer.
+    if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
+        root.after(50, lambda: app.open_path(sys.argv[1]))
     root.mainloop()
 
 

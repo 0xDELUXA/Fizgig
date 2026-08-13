@@ -1033,6 +1033,10 @@ DEFAULT_PREFS = {
     "minimax_ref_dit": "",
     "minimax_text_encoder": "",
     "minimax_vae": "",
+    # Audio VAE — optional, and only video clips ever use it. With it, a clip's sound becomes a
+    # real training target; without it, clips train video only, which is what every dataset did
+    # before clips existed. Never loaded for a stills folder.
+    "minimax_audio_vae": "",
     # Output directories — relative to repo root, portable across clones/moves.
     # Resolved to absolute in load_prefs(); in-memory pref values are absolute.
     # All three live as top-level folders inside the repo:
@@ -15778,8 +15782,8 @@ class LoRATrainerGUI:
             "Image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the pruned int8 DiT "
             "— the same file ComfyUI runs — quantized to NF4 at load, so the resident base is "
             "~11 GB. The Qwen3-VL-32B text encoder and the video VAE are only needed for the "
-            "one-time caching pass; the compact nvfp4 TE is recommended. Stills only — no video, "
-            "no audio.",
+            "one-time caching pass; the compact nvfp4 TE is recommended. Trains on stills, or on "
+            "short video clips — and with the audio VAE set, on their sound too.",
         )
         mm_card.columnconfigure(1, weight=1)
         mr = 0
@@ -15830,9 +15834,19 @@ class LoRATrainerGUI:
             download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors",
             download_note="~4.9GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_fp16.safetensors",
         )
+        mr = self._add_pref_row(
+            mm_card, mr, "Audio VAE:", "minimax_audio_vae",
+            "OPTIONAL — set this to train on the sound in your video clips. H3 generates audio and "
+            "video together, so a clip with sound can teach it a voice, and nothing else can. "
+            "Used only during caching, and only by clips: a folder of stills never loads it, and "
+            "neither does a clip you muted (a _mute on the filename trains that clip's video and "
+            "ignores its sound). Leave blank and clips train silent, exactly as they did before.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+            download_note="~605MB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_audio_vae_fp32.safetensors",
+        )
         self._add_fetch_models_row(
             mm_card, mr, "minimax",
-            "Fetches the DiT, text encoder and VAE above, plus the Krea 2 Qwen3-VL captioning "
+            "Fetches the DiT, text encoder and both VAEs above, plus the Krea 2 Qwen3-VL captioning "
             "text encoder (~47 GB all in), and fills in these paths for you — plus the small "
             "helper models (Florence-2 captioner, face model for the Look "
             "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
@@ -23077,9 +23091,16 @@ class LoRATrainerGUI:
             # the CURRENT bucket, not just the filename — change Target Megapixels and it
             # re-encodes anyway. Deliberately NOT passed to text caching, where the skip is
             # filename-only and would silently reuse the embedding of an edited caption.
-            return self._build_krea2_cache_command(
+            cmd = self._build_krea2_cache_command(
                 "minimax_cache_latents.py", "--vae", self._krea2_pref("minimax_vae")) + \
                 ["--skip_existing"]
+            # Passed whenever it's set — the script itself decides whether to load it, and only
+            # does when the dataset actually contains clips. A stills folder never pays the
+            # 605 MB, so there's nothing to gate on here.
+            _avae = self._krea2_pref("minimax_audio_vae")
+            if _avae:
+                cmd += ["--audio_vae", _avae]
+            return cmd
         arch = self.settings["ARCHITECTURE"]
         python_path = self._venv_python()
         cache_script_path = self._resolve_script(config, "cache_latents_script")

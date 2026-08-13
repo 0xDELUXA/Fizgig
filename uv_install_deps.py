@@ -127,7 +127,10 @@ def _parse_requirements(requirements_path):
                 continue  # dropped — the PyPI-only call never sees this index at all
             other_lines.append(raw.rstrip("\n"))
             if code:
-                pkg = re.split(r"[=<>!~\s\[;]", code, 1)[0]
+                # maxsplit by keyword: 3.13 deprecates passing it positionally to re.split, and
+                # this runs on every update, so positionally it prints a DeprecationWarning above
+                # the install output on every user's console.
+                pkg = re.split(r"[=<>!~\s\[;]", code, maxsplit=1)[0]
                 if pkg in TORCH_ECOSYSTEM:
                     torch_specs.append(code)
     return extra_index_url, torch_specs, other_lines

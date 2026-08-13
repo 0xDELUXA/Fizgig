@@ -312,10 +312,28 @@ cd Fizgig
 
 **Clone it rather than downloading the ZIP.** `update_fizgig.bat` updates you by pulling the
 latest changes with git, and a ZIP arrives without the information git needs, so updating fails
-with `fatal: not a git repository`. If you have already installed from a ZIP, you don't have to
-start over — [issue #67](https://github.com/shootthesound/Fizgig/issues/67) has six commands that
-convert the folder you already have into a proper checkout, leaving your models, LoRAs, caches,
-presets and venv exactly where they are.
+with `fatal: not a git repository`.
+
+<details>
+<summary><b>Already installed from a ZIP? Fix it without starting over</b></summary>
+
+Open a terminal in your Fizgig folder and run these six commands:
+
+```bash
+git init
+git remote add origin https://github.com/shootthesound/Fizgig.git
+git fetch --depth 1 origin master
+git reset --hard FETCH_HEAD
+git branch -M master
+git branch --set-upstream-to=origin/master master
+```
+
+That turns the folder you already have into a proper checkout and brings it up to the current
+release. Your model paths, output LoRAs, caches, dataset configs, presets and the venv are all left
+alone — git ignores every one of those, so it only replaces Fizgig's own program files.
+`update_fizgig.bat` will work normally from then on.
+
+</details>
 
 **Windows (one-click)** — double-click `install_fizgig.bat`. It creates a venv, installs CUDA 12.8 PyTorch and all dependencies, pre-downloads the InsightFace models, and verifies CUDA is visible to PyTorch. Launch with `run_fizgig.bat`; update later with `update_fizgig.bat`.
 

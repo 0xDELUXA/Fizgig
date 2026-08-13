@@ -34,9 +34,13 @@ AUDIO_CHANNELS = 2
 SIZE_STEP = 32
 MUTE_SUFFIX = "_mute"
 
-# 17n+5 for n = 0..2. Longer is not withheld, it is unaffordable: a 124-frame clip is 37 latent
-# frames against a still's 1, and attention is quadratic in that.
-GRID_FRAMES = tuple(pixel_frames_for_latent(5 * n + 2) for n in range(3))    # (5, 22, 39)
+# Every length the VAE can encode: 17n+5, which is 5, 22, 39, 56, 73, 90, 107, 124.
+#
+# The long end used to be withheld on cost grounds. That was the wrong place to make the
+# decision: a 124-frame clip is unaffordable on a 16 GB card and perfectly reasonable on a 96 GB
+# one, and refusing it here takes the choice away from the person who knows which they have.
+# Gizmo shows what each length needs; this module's job is only to say what the model accepts.
+GRID_FRAMES = tuple(pixel_frames_for_latent(5 * n + 2) for n in range(8))
 
 
 class ClipRejected(ValueError):

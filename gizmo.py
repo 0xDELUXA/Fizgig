@@ -43,12 +43,41 @@ from PIL import Image, ImageTk
 # because it loaded CUDA would be a bad tool. tests/test_gizmo_spec.py asserts the two agree, so
 # the copy cannot drift without something failing loudly.
 FPS = 24
-GRID_FRAMES = (5, 22, 39)            # 17n+5 for n = 0..2
-LATENT_FRAMES = {5: 2, 22: 7, 39: 12}  # 5n+2 — what each length costs in the DiT
+GRID_FRAMES = (5, 22, 39, 56, 73, 90, 107, 124)          # 17n+5, every length the VAE encodes
+LATENT_FRAMES = {f: 5 * n + 2 for n, f in enumerate(GRID_FRAMES)}   # what each costs in the DiT
+
+# What each length can be TRAINED at, by card: frames -> {free VRAM in GB: largest training
+# megapixels}. None means that card cannot place the run at all.
+#
+# Generated from Fizgig's own MiniMax swap planner (trainer.plan_vram) rather than guessed, by
+# feeding a clip's token load in as the equivalent megapixel value — which is arithmetically what
+# it is. Frozen into a table because Gizmo must not import the trainer: that would pull in torch,
+# and a prep tool that takes ten seconds to open because it loaded CUDA is a bad tool.
+#
+# Treat it as a starting point, not a promise. The planner's activation term is LINEAR in tokens
+# while attention is quadratic, and it was anchored on stills of 256-1024 tokens — a 124-frame
+# clip is 30x beyond that. Where it is wrong it will be optimistic, so the long lengths want a
+# real run before anyone plans a dataset around them.
+CLIP_VRAM = {
+    5: {16: 1.0, 24: 1.0, 32: 1.0},
+    22: {16: 0.5, 24: 1.0, 32: 1.0},
+    39: {16: 0.25, 24: 0.5, 32: 1.0},
+    56: {16: 0.25, 24: 0.5, 32: 0.5},
+    73: {16: None, 24: 0.25, 32: 0.5},
+    90: {16: None, 24: 0.25, 32: 0.5},
+    107: {16: None, 24: 0.25, 32: 0.25},
+    124: {16: None, 24: 0.25, 32: 0.25},
+}
 SIZE_STEP = 32
 AUDIO_SAMPLE_RATE = 32000
 AUDIO_CHANNELS = 2
 MUTE_SUFFIX = "_mute"
+
+# There is deliberately no size choice. Fizgig resizes clips down to the Target Megapixels on its
+# Training tab — measured: a 1280x704 clip reaches the VAE as 672x384 at 0.25 MP and untouched at
+# 1.0 — so cutting at native resolution keeps that decision open for every run afterwards, while
+# cutting small forecloses it and can only be undone by re-cutting the set. Nothing is upscaled,
+# so native is only ever the source's own detail.
 
 # Crop shapes. H3 puts no constraint on aspect at all — its rotary position grid is normalised by
 # sqrt(h*w), so it is aspect-agnostic by construction, and the only hard rule is that both sides
@@ -705,9 +734,13 @@ class Gizmo:
             return lbl
 
         LEN_TIP = ("How many frames the clip is.\n\n"
-                   "Not a free choice: H3 encodes video in groups, so only 5, 22 and 39 frames "
-                   "exist. 22 is the useful one — 5 is barely movement, and 39 costs nearly "
-                   "twice what 22 does.")
+                   "Not a free choice: H3's VAE encodes video in groups of 17, so the only "
+                   "lengths that exist are 5, 22, 39, 56, 73, 90, 107 and 124.\n\n"
+                   "22 is the shortest that shows real movement. Beyond that the cost climbs "
+                   "hard — attention scales with the square of the token count — so the line "
+                   "below says what each length can be trained at on 16, 24 and 32 GB. Longer is "
+                   "offered rather than withheld: whether it is affordable depends on the card "
+                   "you have, and you know which that is.")
         label(0, "Length:", LEN_TIP)
         self.len_var = tk.StringVar()
         self.len_box = ttk.Combobox(grid, textvariable=self.len_var, state="readonly",
@@ -717,29 +750,35 @@ class Gizmo:
         self.len_box.grid(row=0, column=1, sticky="w", pady=5)
         self.len_box.bind("<<ComboboxSelected>>", lambda _e: self._on_length_changed())
         ToolTip(self.len_box, LEN_TIP)
+        self.len_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
+                                 wraplength=820, bg=COLORS["bg_surface"],
+                                 fg=COLORS["text_explain"])
+        self.len_note.grid(row=1, column=1, sticky="w")
+        ToolTip(self.len_note, LEN_TIP)
 
-        SIZE_TIP = ("How big the saved clip is.\n\n"
-                    "Both sides land on a multiple of 32, which is what H3 needs, and the aspect "
-                    "ratio is kept. Gizmo never scales UP — a small source stays its own size "
-                    "rather than being blown up into detail that was never there.")
-        label(1, "Size:", SIZE_TIP)
-        self.size_var = tk.StringVar()
-        self.size_box = ttk.Combobox(grid, textvariable=self.size_var, state="readonly",
-                                     style="G.TCombobox", width=46, values=[])
-        self.size_box.grid(row=1, column=1, sticky="w", pady=5)
-        self.size_box.bind("<<ComboboxSelected>>", lambda _e: self._refresh_cost())
-        ToolTip(self.size_box, SIZE_TIP)
+        SIZE_TIP = ("The size the clip is saved at — whatever you cut, at its own resolution.\n\n"
+                    "There is nothing to choose because there is no good reason to throw pixels "
+                    "away here: Fizgig resizes clips down to the Target Megapixels on its "
+                    "Training tab, so cutting large keeps that decision open, and cutting small "
+                    "cannot be undone without re-cutting the set.\n\n"
+                    "Both sides land on a multiple of 32, which is what H3 needs, and the shape "
+                    "is kept — nothing is ever scaled up.")
+        label(2, "Size:", SIZE_TIP)
+        self.size_label = tk.Label(grid, text="", font=(FONT_FAMILY, 10),
+                                   bg=COLORS["bg_surface"], fg=COLORS["text_primary"])
+        self.size_label.grid(row=2, column=1, sticky="w", pady=5)
+        ToolTip(self.size_label, SIZE_TIP)
 
         MOTION_TIP = ("Real time is what you want almost always: whatever the source runs at, one "
                       "real second stays one second.\n\n"
                       "The slow-motion options keep MORE of the original frames instead of "
                       "resampling, so the action plays back slower than life. Only worth it when "
                       "the slow-motion look is the thing you are training.")
-        label(2, "Motion:", MOTION_TIP)
+        label(4, "Motion:", MOTION_TIP)
         self.motion_var = tk.StringVar()
         self.motion_box = ttk.Combobox(grid, textvariable=self.motion_var, state="readonly",
                                        style="G.TCombobox", width=46, values=[])
-        self.motion_box.grid(row=2, column=1, sticky="w", pady=5)
+        self.motion_box.grid(row=4, column=1, sticky="w", pady=5)
         self.motion_box.bind("<<ComboboxSelected>>", lambda _e: self._on_motion_changed())
         ToolTip(self.motion_box, MOTION_TIP)
 
@@ -750,9 +789,9 @@ class Gizmo:
                     "The crop holds still for the whole clip, so check the LAST frame preview: "
                     "the rectangle is drawn on both, and a subject that walks out of it is "
                     "obvious there and nowhere else.")
-        label(3, "Crop:", CROP_TIP)
+        label(5, "Crop:", CROP_TIP)
         croprow = tk.Frame(grid, bg=COLORS["bg_surface"])
-        croprow.grid(row=3, column=1, sticky="w", pady=5)
+        croprow.grid(row=5, column=1, sticky="w", pady=5)
         self.crop_var = tk.BooleanVar(value=False)
         for text, val, tip in (
                 ("Whole frame", False, "Use everything in shot."),
@@ -794,16 +833,16 @@ class Gizmo:
         self.crop_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                   wraplength=820, bg=COLORS["bg_surface"],
                                   fg=COLORS["text_explain"])
-        self.crop_note.grid(row=4, column=1, sticky="w")
+        self.crop_note.grid(row=6, column=1, sticky="w")
 
         SOUND_TIP = ("H3 generates sound as well as video, so a clip's audio can be training data "
                      "too.\n\n"
                      "Mute the ones where it should not be — a cough, the wrong speaker, music "
                      "over the top. A muted clip trains its video exactly the same; only the "
                      "sound is ignored.")
-        label(5, "Sound:", SOUND_TIP)
+        label(7, "Sound:", SOUND_TIP)
         snd = tk.Frame(grid, bg=COLORS["bg_surface"])
-        snd.grid(row=5, column=1, sticky="w", pady=5)
+        snd.grid(row=7, column=1, sticky="w", pady=5)
         # Sticky between saves on purpose: one source video routinely has sections worth training
         # on and sections with a cough, the wrong speaker, or music over the top, so this gets
         # toggled far more often than it gets reset.
@@ -828,10 +867,10 @@ class Gizmo:
 
         # Listen before deciding. Muting is a judgement about what the clip actually sounds like,
         # and there is no way to make that judgement from a picture of it.
-        label(6, "Listen:", "Play the marked section so you can hear what you would be training "
+        label(8, "Listen:", "Play the marked section so you can hear what you would be training "
                             "on before you choose.")
         listen = tk.Frame(grid, bg=COLORS["bg_surface"])
-        listen.grid(row=6, column=1, sticky="w", pady=5)
+        listen.grid(row=8, column=1, sticky="w", pady=5)
         self.play_btn = self._button(
             listen, "▶  Play sound", self.toggle_play, pad=10,
             tip="Play the audio under the clip you have marked — exactly the section that would "
@@ -850,15 +889,15 @@ class Gizmo:
         self.sound_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                    wraplength=820, bg=COLORS["bg_surface"],
                                    fg=COLORS["text_explain"])
-        self.sound_note.grid(row=7, column=1, sticky="w")
+        self.sound_note.grid(row=9, column=1, sticky="w")
 
         OUT_TIP = ("Where the clips land.\n\n"
                    "Point it at your Fizgig training folder and the clips are ready to caption "
                    "the moment you are done here. Defaults to a fizgig_clips folder beside the "
                    "source video.")
-        label(8, "Save to:", OUT_TIP)
+        label(10, "Save to:", OUT_TIP)
         outrow = tk.Frame(grid, bg=COLORS["bg_surface"])
-        outrow.grid(row=8, column=1, sticky="ew", pady=5)
+        outrow.grid(row=10, column=1, sticky="ew", pady=5)
         self.out_var = tk.StringVar(value="")
         self.out_var.trace_add("write", lambda *_a: self._refresh_planned_name())
         out_entry = tk.Entry(outrow, textvariable=self.out_var, bg=COLORS["bg_hover"],
@@ -941,9 +980,20 @@ class Gizmo:
         return GRID_FRAMES[self.len_box.current()] if self.len_box.current() >= 0 else 22
 
     def _size(self):
-        """The chosen output size, as (w, h)."""
-        m = re.search(r"(\d+)\s*x\s*(\d+)", self.size_var.get())
-        return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+        """The export size: the crop at its own resolution, or the whole frame at its own.
+
+        There is no size CHOICE any more. Fizgig rescales clips down to its Target Megapixels at
+        training time, so cutting at native keeps that decision open for every run afterwards,
+        while cutting small forecloses it and can only be undone by re-cutting the whole set.
+        Nothing is ever scaled up, so this is only ever the source's own detail.
+        """
+        if not self.info:
+            return (None, None)
+        if self.crop:
+            return (self.crop[2], self.crop[3])
+        # The /32 pair nearest the source's own shape and area — the aspect search with the
+        # target clamped to what the source holds, which is exactly "as big as it goes".
+        return target_size(self.info["display_width"], self.info["display_height"], 99.0)
 
     def _keep_every(self):
         """None for real time, else keep every k-th source frame. Read from a list held beside
@@ -957,7 +1007,7 @@ class Gizmo:
         for w in (self.add_btn, self.export_btn, self.scale, self.open_btn, self.pos_entry,
                   self.crop_clear_btn, *self._radios):
             w.configure(state=state)
-        for box in (self.len_box, self.size_box, self.motion_box, self.shape_box):
+        for box in (self.len_box, self.motion_box, self.shape_box):
             box.configure(state="readonly" if on else tk.DISABLED)
         # Listening needs a track to listen to AND a way to play it. Both reasons are spelled out
         # in _fill_sound_note rather than left as a greyed button with no explanation.
@@ -1063,42 +1113,12 @@ class Gizmo:
 
         if not self.out_var.get():
             self.out_var.set(os.path.join(os.path.dirname(path), "fizgig_clips"))
-        self._fill_sizes()
         self._fill_motion()
         self._fill_sound_note()
         self._set_enabled(True)
         self.show_frame()
         self._refresh_cost()
         self._refresh_planned_name()
-
-    def _fill_sizes(self):
-        # From the CROP when there is one — it decides both the shape and how many real pixels
-        # are behind the output. Otherwise the display size, so an anamorphic source is offered
-        # the shape it is meant to be seen at.
-        if self.crop:
-            w, h = self.crop[2], self.crop[3]
-        else:
-            w, h = self.info["display_width"], self.info["display_height"]
-        # The chosen TIER survives a refill, not the pixel dimensions — someone who picked
-        # "medium" once should not be bumped back to a default every time they redraw a crop.
-        previous = re.search(r"\((\w[\w ]*),", self.size_var.get())
-        previous = previous.group(1) if previous else None
-        # De-duplicated because target_size never upscales: for a 640x480 source all three
-        # presets land on the same dimensions, and offering "small / medium / large" that are
-        # secretly identical is worse than offering one.
-        seen, opts = {}, []
-        for mp, name in ((0.26, "small"), (0.59, "medium"), (1.05, "large")):
-            tw, th = target_size(w, h, mp)
-            if (tw, th) in seen:
-                continue
-            seen[(tw, th)] = True
-            note = "source size" if (tw, th) == (snap(w), snap(h)) else name
-            opts.append(f"{tw} x {th}  ({note}, {tw * th / 1e6:.2f} MP)")
-        self.size_box.configure(values=opts)
-        keep = next((i for i, o in enumerate(opts) if previous and f"({previous}," in o), None)
-        # Medium by default where there is a choice: 768-ish is where H3 stills already train
-        # well, and a clip's token cost climbs fast enough that "large" should be a decision.
-        self.size_box.current(keep if keep is not None else min(1, len(opts) - 1))
 
     def _fill_motion(self):
         fps = self.info["fps"]
@@ -1296,7 +1316,6 @@ class Gizmo:
             # The crop decides the shape AND how many pixels there are to work with, so the size
             # menu is rebuilt from it — keeping whichever tier was chosen rather than the pixel
             # dimensions, which have just changed under it.
-            self._fill_sizes()
             self._refresh_cost()
             self.show_frame()
         self._describe_crop()
@@ -1395,7 +1414,6 @@ class Gizmo:
                 ny = max(0, min(int((cy - nh / 2) // SIZE_STEP) * SIZE_STEP,
                                 int(self.info["display_height"] // SIZE_STEP) * SIZE_STEP - nh))
                 self.crop = (nx, ny, nw, nh)
-            self._fill_sizes()
             self._refresh_cost()
             self._draw_crop_overlay()
             self.show_frame()
@@ -1412,7 +1430,6 @@ class Gizmo:
         self.crop_var.set(False)
         self._crop_anchor = None
         if self.info:
-            self._fill_sizes()
             self._refresh_cost()
         self._draw_crop_overlay()
         self._describe_crop()
@@ -1514,19 +1531,45 @@ class Gizmo:
             self.play_btn.configure(text="▶  Play sound")
 
     # -- cost -------------------------------------------------------------------------------------
+    def _refresh_length_note(self):
+        """What this length can be trained at, per card. The number people actually need is not
+        the token count — it is whether their own card can run it."""
+        frames = self._frames()
+        by_card = CLIP_VRAM.get(frames, {})
+        parts = []
+        for gb in (16, 24, 32):
+            mp = by_card.get(gb)
+            parts.append(f"{gb} GB: {'—' if mp is None else f'up to {mp:g} MP'}")
+        note = "Trainable at  " + "   ·   ".join(parts)
+        if by_card.get(16) is None:
+            note += "   (a 16 GB card cannot place a clip this long at all)"
+        self.len_note.configure(
+            text=note + "\nEstimated from Fizgig's own swap planner and not yet confirmed by a "
+                        "real run at these lengths — where it is wrong it will be optimistic.",
+            fg=COLORS["warning"] if by_card.get(24) is None else COLORS["text_explain"])
+
     def _refresh_cost(self):
+        self._refresh_length_note()
         frames = self._frames()
         w, h = self._size()
         if not w:
+            self.size_label.configure(text="—")
             self.cost_label.configure(text="")
             return
-        tok = tokens_for(w, h, frames)
-        still = (w // SIZE_STEP) * (h // SIZE_STEP)
+        self.size_label.configure(
+            text=f"{w} x {h}   ({w * h / 1e6:.2f} MP)"
+                 + ("   — the crop, at its own resolution" if self.crop
+                    else "   — the whole frame, at its own resolution"))
+        # Costed at the TRAINING resolution, not at the size on disk. The stored size is native
+        # and training rescales it, so counting tokens at 1888x1056 would report a number no run
+        # ever pays — the useful figure is what a step costs at the megapixels you train at.
+        lat = LATENT_FRAMES[frames]
+        tok = int(0.25e6 / (SIZE_STEP * SIZE_STEP)) * lat
         self.cost_label.configure(
-            text=f"This clip is {tok:,} tokens for the DiT — {tok / still:.0f}x what one still of "
-                 f"the same size costs, and attention scales with the square of that. It is the "
-                 f"reason clips stop at 39 frames.",
-            fg=COLORS["warning"] if tok > 6000 else COLORS["text_explain"])
+            text=f"{frames} frames is {lat} latent frames — about {tok:,} tokens a step at "
+                 f"0.25 MP training, {lat}x a still, and four times that at 1 MP. Attention "
+                 f"scales with the square of it, which is what the line above is really saying.",
+            fg=COLORS["warning"] if lat > 12 else COLORS["text_explain"])
         if self.src:
             self._update_pos_labels()
 
@@ -1575,7 +1618,7 @@ class Gizmo:
             # A muted clip still carries its audio: the _mute suffix is the instruction, and
             # keeping the track means the decision is reversible by rename, not by re-export.
             "with_audio": bool(self.info["has_audio"]),
-            "size_index": self.size_box.current(), "motion_index": self.motion_box.current(),
+            "motion_index": self.motion_box.current(),
             "done": False, "error": None,
         }
 
@@ -1651,10 +1694,7 @@ class Gizmo:
         # Crop first: it rebuilds the size menu, so restoring the size before it would be undone.
         self.crop = job.get("crop")
         self.crop_var.set(bool(self.crop))
-        self._fill_sizes()
         self._describe_crop()
-        if 0 <= job["size_index"] < len(self.size_box["values"]):
-            self.size_box.current(job["size_index"])
         if 0 <= job["motion_index"] < len(self.motion_box["values"]):
             self.motion_box.current(job["motion_index"])
         self.mute_var.set(job["muted"])

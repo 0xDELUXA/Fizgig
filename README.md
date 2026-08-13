@@ -179,7 +179,7 @@ A clip has to be on spec, and Fizgig refuses one that isn't rather than quietly 
 |---|---|
 | Container | `.mp4` |
 | Frame rate | exactly 24 fps — H3's own clock |
-| Frame count | 5, 22 or 39 frames |
+| Frame count | 5, 22, 39, 56, 73, 90, 107 or 124 frames |
 | Dimensions | multiples of 32 |
 | Audio | 32 kHz stereo, or no track at all |
 
@@ -206,9 +206,25 @@ dropdown locks the drag to 1:1, 16:9, 9:16, 4:3, 4:5 and so on when you want a s
 consistently framed; leave it on *Free* to drag whatever suits each shot. Mixing shapes across one
 dataset is fine — training buckets by size already.
 
-**22 frames is the useful length**, and it costs about **7× what a still of the same size costs**
-— attention scales with the square of that, which is why 39 frames is the ceiling. Gizmo shows the
-number against each length before you save.
+**22 frames is the shortest that shows real movement**, and it already costs about **7× what a
+still costs per step**; 124 frames costs 37×, and attention scales with the square of that. Every
+length H3's VAE can encode is offered rather than withheld — whether one is affordable depends on
+your card, and Gizmo says which lengths each card can train, at which Target Megapixels, before
+you cut anything:
+
+| Clip | 16 GB | 24 GB | 32 GB |
+|---|---|---|---|
+| 22 frames | up to 0.5 MP | up to 1 MP | up to 1 MP |
+| 39 frames | up to 0.25 MP | up to 0.5 MP | up to 1 MP |
+| 73 frames | — | up to 0.25 MP | up to 0.5 MP |
+| 124 frames | — | up to 0.25 MP | up to 0.25 MP |
+
+Estimated from Fizgig's own swap planner and **not yet confirmed by a real run** at the longer
+lengths — where it's wrong it will be optimistic.
+
+**There's no size to pick.** Clips are saved at the resolution of whatever you cut, and Fizgig
+resizes them down to your Target Megapixels at training time — so cutting large keeps that choice
+open for every run afterwards, and nothing is ever scaled up.
 
 **Don't want a clip's sound in the training?** Mute it. In Gizmo that's a per-clip toggle, and it
 adds `_mute` to the filename — so you can also do it later by renaming, and undo it the same way.

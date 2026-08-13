@@ -13619,8 +13619,18 @@ class LoRATrainerGUI:
         # alone, microseconds, so do it BEFORE _explorer_ensure_engine() commits to loading
         # the wrong family's DiT/VAE/TE. Only a genuinely unrecognized file falls through to
         # the generic error below, same as before.
-        from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES
+        from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES, INFERENCE_FAMILIES
         detected = lora_family_from_file(path)
+        if detected is not None and detected not in INFERENCE_FAMILIES:
+            # The Explorer only offers Klein 9B / Krea 2 radios — setting the var to a
+            # detected MiniMax H3 (or any future train-only family) leaves both radios
+            # blank instead of following it. Refuse rather than land on a family this tab
+            # has no engine for.
+            messagebox.showerror(
+                "Unsupported family",
+                f"{os.path.basename(path)} was trained for {FAMILY_DISPLAY_NAMES.get(detected, detected)}, "
+                f"but the Explorer doesn't support {FAMILY_DISPLAY_NAMES.get(detected, detected)} LoRAs yet.")
+            return
         selected = "krea2" if self._explorer_is_krea2() else "klein"
         if detected is not None and detected != selected:
             self.explorer_family_var.set(detected)
@@ -19241,7 +19251,7 @@ class LoRATrainerGUI:
         in. None paths are skipped so callers can pass tuples straight from
         _royale_current_epoch(). Only shows a dialog when it can't resolve things automatically
         (a second family in the same selection); an unrecognized file is simply ignored."""
-        from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES
+        from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES, INFERENCE_FAMILIES
         seen = []          # (path, family) for every path with a determinable family
         checked = set()
         for path in paths:
@@ -19262,6 +19272,17 @@ class LoRATrainerGUI:
                     f"but this selection also includes {FAMILY_DISPLAY_NAMES.get(target, target)} files "
                     f"(e.g. {os.path.basename(target_path)}). Pick LoRAs from a single family.")
                 return False
+        if target not in INFERENCE_FAMILIES:
+            # Royale only offers Klein 9B / Krea 2 radios — setting the var to anything else
+            # (e.g. a detected MiniMax H3 LoRA) leaves both radios blank and silently falls
+            # back to Klein internally (issue #62 review, shootthesound). Refuse outright
+            # instead of following into a family this tab can't actually render.
+            messagebox.showerror(
+                "Unsupported family",
+                f"{os.path.basename(target_path)} was trained for "
+                f"{FAMILY_DISPLAY_NAMES.get(target, target)}, but Royale doesn't support "
+                f"{FAMILY_DISPLAY_NAMES.get(target, target)} LoRAs yet.")
+            return False
         selected = str(self.royale_family_var.get())
         if target != selected:
             target_name = FAMILY_DISPLAY_NAMES.get(target, target)
@@ -20698,8 +20719,18 @@ class LoRATrainerGUI:
         # alone, microseconds, so do it BEFORE _ensure_repair_engine() commits to loading the
         # wrong family's DiT/VAE/TE. Only a genuinely unrecognized file falls through to the
         # generic error below, same as before.
-        from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES
+        from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES, INFERENCE_FAMILIES
         detected = lora_family_from_file(path)
+        if detected is not None and detected not in INFERENCE_FAMILIES:
+            # Repair Studio only offers Klein 9B / Krea 2 radios — setting the var to a
+            # detected MiniMax H3 (or any future train-only family) leaves both radios
+            # blank instead of following it. Refuse rather than land on a family this tab
+            # has no engine for.
+            messagebox.showerror(
+                "Unsupported family",
+                f"{os.path.basename(path)} was trained for {FAMILY_DISPLAY_NAMES.get(detected, detected)}, "
+                f"but Repair Studio doesn't support {FAMILY_DISPLAY_NAMES.get(detected, detected)} LoRAs yet.")
+            return
         selected = "krea2" if self.repair_family_var.get() == "krea2" else "klein"
         if detected is not None and detected != selected:
             self.repair_family_var.set(detected)

@@ -1765,6 +1765,26 @@ FAMILY_DISPLAY_NAMES = {
     "minimax": "MiniMax H3",
 }
 
+# Families that actually have an inference-side selector (Royale, Explorer, Repair Studio all
+# offer only these two radios). MiniMax H3 is train-only right now — no engine, no pipeline, no
+# widget for it in any of those tabs — so a caller auto-following lora_family_from_file's result
+# must refuse rather than tk.StringVar.set() a value neither radio button carries (issue #62
+# follow-up: the var still holds it, both radios go blank, and the family that actually loads is
+# whichever one the "else" branch of the caller's own is_krea2 ternary falls back to).
+INFERENCE_FAMILIES = ("klein", "krea2")
+
+# Klein 9B's block depth (Klein9BParams in klein/model.py: depth=8, depth_single_blocks=24).
+# double_blocks/single_blocks (native/kohya) and transformer_blocks/single_transformer_blocks
+# (diffusers) are BFL naming shared with other Flux variants at different depths — Flux.1
+# dev/schnell is 19+38, full Flux.2 is 8+48 — so the family can't be read off the block-name
+# substring alone; the deepest block index actually present has to fall inside Klein's own
+# shape. A negative lookbehind keeps "single_transformer_blocks.N" from also matching the
+# double/transformer_blocks pattern (it contains "transformer_blocks.N" as a substring).
+_KLEIN_MAX_DOUBLE_BLOCKS = 8
+_KLEIN_MAX_SINGLE_BLOCKS = 24
+_KLEIN_DOUBLE_BLOCK_RE = re.compile(r"(?<!single_)(?:double_blocks|transformer_blocks)[._](\d+)")
+_KLEIN_SINGLE_BLOCK_RE = re.compile(r"single_(?:transformer_)?blocks[._](\d+)")
+
 
 def lora_family_from_file(path: str) -> Optional[str]:
     """Identify which model family a LoRA/LyCORIS file was trained for, from its
@@ -1772,13 +1792,17 @@ def lora_family_from_file(path: str) -> Optional[str]:
 
     Returns "klein", "krea2", "minimax", or None if the file doesn't match any
     known signature (callers should not block on None — fail open and let the
-    real loader be the judge, the same as an unreadable/corrupt file).
+    real loader be the judge, the same as an unreadable/corrupt file). None also
+    covers a file that uses Klein's own block-name segments at a depth Klein 9B
+    doesn't have (a Flux.1 or full-Flux.2 LoRA) — see _KLEIN_MAX_DOUBLE_BLOCKS.
 
-    The three families never share a discriminating substring, so a plain
-    membership check on the raw key strings is enough — it works whether the file
-    uses Fizgig's own native prefixes (`diffusion_model.`, `transformer.`), the
-    kohya/sd-scripts flattened form (`lora_unet_*`), or another tool's dotted
-    diffusers export; none of those rewrite the block-name segments checked here.
+    Krea 2 and MiniMax H3 are each identified by a substring nothing else uses, so a
+    plain membership check is enough for them regardless of whether the file uses
+    Fizgig's own native prefixes (`diffusion_model.`, `transformer.`), the kohya/
+    sd-scripts flattened form (`lora_unet_*`), or another tool's dotted diffusers
+    export. Klein 9B shares its block-name segments with other Flux depths, so it's
+    identified by block count instead (checked last, after Krea 2 and MiniMax H3 are
+    ruled out — diffusers-form Krea 2 also says `transformer_blocks.`).
     """
     from fizgig.utils.safetensors import MemoryEfficientSafeOpen
     try:
@@ -1787,14 +1811,27 @@ def lora_family_from_file(path: str) -> Optional[str]:
     except Exception:
         return None
     for k in keys:
-        if "double_blocks" in k or "single_blocks" in k:
-            return "klein"
-    for k in keys:
         if "text_fusion" in k or "txtfusion" in k:
             return "krea2"
+    if _is_diffusers_krea2_lora(keys):
+        return "krea2"
     for k in keys:
         if "token_refiner" in k or "adaln_proj" in k:
             return "minimax"
+    max_double = -1
+    max_single = -1
+    for k in keys:
+        m = _KLEIN_DOUBLE_BLOCK_RE.search(k)
+        if m:
+            max_double = max(max_double, int(m.group(1)))
+            continue
+        m = _KLEIN_SINGLE_BLOCK_RE.search(k)
+        if m:
+            max_single = max(max_single, int(m.group(1)))
+    if max_double < 0 and max_single < 0:
+        return None
+    if max_double < _KLEIN_MAX_DOUBLE_BLOCKS and max_single < _KLEIN_MAX_SINGLE_BLOCKS:
+        return "klein"
     return None
 
 

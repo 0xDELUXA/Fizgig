@@ -72,6 +72,11 @@ def setup_parser() -> argparse.ArgumentParser:
     p.add_argument("--caption_dropout", type=float, default=0.05,
                    help="Fraction of steps trained on the empty prompt (reference default 0.05; "
                         "needs the uncond embed cached by minimax_cache_text). 0 disables.")
+    p.add_argument("--audio_weight", type=float, default=1.0,
+                   help="Weight on the audio term for video clips that carry sound. Audio is "
+                        "only ~4%% of the packed sequence, so parity may be too quiet to teach "
+                        "anything — raise it if the per-epoch [audio] line shows sound winning "
+                        "a negligible share of the loss. Ignored by stills and muted clips.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
     p.add_argument("--distill", action="store_true",
@@ -221,6 +226,7 @@ def main():
         optimizer_type=args.optimizer_type,
         optimizer_args=args.optimizer_args,
         caption_dropout=args.caption_dropout,
+        audio_weight=args.audio_weight,
         base_quant=args.base_quant,
         include_patterns=args.include_patterns,
         train_blocks=args.train_blocks,

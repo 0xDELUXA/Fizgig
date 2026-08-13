@@ -1472,6 +1472,10 @@ def train_minimax(
     optimizer_type: str = "adamw8bit",
     optimizer_args: str = "",
     caption_dropout: float = 0.05,
+    # Clips with sound only. Audio is ~4% of the packed sequence at any clip length, so parity
+    # may well be too quiet to teach anything — but it starts there, and moves on a measurement
+    # rather than a guess. The per-epoch [audio] line reports the share it is actually winning.
+    audio_weight: float = 1.0,
     base_quant: str = "auto",
     include_patterns: list = None,
     train_blocks: str = None,        # "14-37" = train only that block range (experiment)
@@ -2409,6 +2413,10 @@ def train_minimax(
     # of the learning comes from real pixels versus from the teacher's rendering of them.
     _distill_parts = {}
     _distill_acc = [0.0, 0.0, 0]        # teacher sum, photo sum, count
+    # Clips with sound only. Reported separately per epoch because the two streams sit on
+    # different noise schedules — one averaged number would hide which of them is learning.
+    _audio_parts = {}
+    _audio_acc = [0.0, 0.0, 0]          # video sum, audio sum, count
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         network.train()
@@ -2450,7 +2458,18 @@ def train_minimax(
                 _distill_acc[1] += _distill_parts["photo"]
                 _distill_acc[2] += 1
             else:
-                loss, _ = compute_loss(dit, latents, text, shift=shift)
+                # A clip that carried usable sound cached an audio_latent; a still, a muted clip
+                # and a silent one did not, and for those this is the original call unchanged.
+                _a = batch.get("audio_latent")
+                if _a is not None:
+                    _a = _a[0].to(device)            # (1, A*2, 32) -> the DiT's row block
+                loss, _ = compute_loss(dit, latents, text, shift=shift,
+                                       audio_latent=_a, audio_weight=audio_weight,
+                                       parts_out=_audio_parts)
+                if _a is not None and _audio_parts.get("audio") is not None:
+                    _audio_acc[0] += _audio_parts["video"]
+                    _audio_acc[1] += _audio_parts["audio"]
+                    _audio_acc[2] += 1
             # Divide so the accumulated gradient is the MEAN over the window, not the sum —
             # otherwise the effective LR scales with the accumulation count.
             (loss / _accum_n if _accum_n > 1 else loss).backward()
@@ -2505,6 +2524,18 @@ def train_minimax(
         if _p1_epochs and not _teacher_phase and distill:
             logger.info(f"[distill] photos only (identity-first phase 2) — the teacher was "
                         f"dropped after epoch {_p1_epochs}.")
+        if _audio_acc[2]:
+            _av, _aa = _audio_acc[0] / _audio_acc[2], _audio_acc[1] / _audio_acc[2]
+            _wa = float(audio_weight) * _aa
+            _share = 100 * _wa / (_av + _wa) if (_av + _wa) else 0.0
+            # The share is the number to watch. Audio is only ~4% of the packed sequence, so if
+            # its weighted contribution is a rounding error the LoRA is not learning sound no
+            # matter how healthy the total loss looks — that is what audio_weight is for.
+            logger.info(
+                f"[audio] {_audio_acc[2]} clip(s) with sound | video err {_av:.4f} | "
+                f"audio err {_aa:.4f} x{float(audio_weight):.2f} = {_wa:.4f} | "
+                f"sound is {_share:.1f}% of their loss")
+            _audio_acc[:] = [0.0, 0.0, 0]
         if _distill_acc[2]:
             _t = _distill_acc[0] / _distill_acc[2]
             _p = _distill_acc[1] / _distill_acc[2]

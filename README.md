@@ -194,6 +194,12 @@ deciding whether to train on it, and from high-frame-rate footage you can keep m
 real time gives, which plays back as slow motion — offered as a choice, never applied behind your
 back.
 
+**Crop to the subject.** A clip's cost is its pixels, so a wide shot spends most of that budget on
+background. Pick *Choose an area* and drag a rectangle on the preview: every token then goes on
+what you actually want learned, and one source can give you several clips, one per subject. The
+crop holds still for the clip, so glance at the last-frame preview — the rectangle is drawn on
+both, and a subject who walks out of it is obvious there and nowhere else.
+
 **22 frames is the useful length**, and it costs about **7× what a still of the same size costs**
 — attention scales with the square of that, which is why 39 frames is the ceiling. Gizmo shows the
 number against each length before you save.

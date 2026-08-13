@@ -218,7 +218,7 @@ def tokens_for(width, height, frames):
 
 
 def build_export_command(ffmpeg, src, dst, start_s, frames, width, height,
-                         keep_every=None, with_audio=True):
+                         keep_every=None, with_audio=True, crop=None, sar=1.0):
     """One pass: trim, retime, resize, and normalise the audio.
 
     Frame RATE is where a dataset goes quietly wrong, so it is worth being explicit about the two
@@ -242,6 +242,15 @@ def build_export_command(ffmpeg, src, dst, start_s, frames, width, height,
         vf = f"select='not(mod(n\\,{keep_every}))',setpts=N/({FPS}*TB)"
     else:
         vf = f"fps={FPS}"
+
+    if crop:
+        cx, cy, cw, ch = crop
+        # A crop is expressed in DISPLAY pixels, because that is what the user drew on. For the
+        # rare anamorphic source those are not the stored pixels, so the frame is normalised to
+        # square pixels first and the crop lands where it was drawn.
+        if abs(sar - 1.0) > 1e-3:
+            vf += ",scale=iw*sar:ih:flags=lanczos,setsar=1"
+        vf += f",crop={cw}:{ch}:{cx}:{cy}"
     # Cover, then crop — never stretch. force_original_aspect_ratio=increase scales the frame
     # until it covers the target box with its shape intact, and the crop takes the middle. The
     # target is chosen to sit within ~2% of the source aspect, so what the crop removes is a
@@ -414,6 +423,9 @@ class Gizmo:
         self._busy = False
         self._motion_keep = [None]    # parallel to the Motion dropdown; see _keep_every
         self.queue = []               # marked clips, exported in one go — see add_to_queue
+        self.crop = None              # (x, y, w, h) in the source's DISPLAY pixels, or None
+        self._crop_anchor = None
+        self._radios = []             # every radio button, armed together once a video is open
         self._playing = False
         self._play_job = None
 
@@ -578,7 +590,13 @@ class Gizmo:
         self.canvas = tk.Canvas(first, width=PREVIEW_W, height=PREVIEW_H, bg="#000000",
                                 highlightthickness=1, highlightbackground=COLORS["border"])
         self.canvas.pack()
-        ToolTip(self.canvas, "The first frame of the clip you are about to save.")
+        ToolTip(self.canvas,
+                "The first frame of the clip you are about to save.\n\n"
+                "With Choose an area set above, drag here to pick the part of the frame to train "
+                "on. Drag again to redraw it.")
+        self.canvas.bind("<Button-1>", self._crop_press)
+        self.canvas.bind("<B1-Motion>", self._crop_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._crop_release)
 
         last = tk.Frame(shots, bg=COLORS["bg_surface"])
         last.pack(side=tk.LEFT, padx=(12, 0))
@@ -695,19 +713,53 @@ class Gizmo:
         self.motion_box.bind("<<ComboboxSelected>>", lambda _e: self._on_motion_changed())
         ToolTip(self.motion_box, MOTION_TIP)
 
+        CROP_TIP = ("Train on part of the frame instead of all of it.\n\n"
+                    "A clip's cost is its pixels, so a wide shot spends most of it on background. "
+                    "Crop to the subject and every token goes on what you actually want learned — "
+                    "and one source can give several clips, one per subject.\n\n"
+                    "The crop holds still for the whole clip, so check the LAST frame preview: "
+                    "the rectangle is drawn on both, and a subject that walks out of it is "
+                    "obvious there and nowhere else.")
+        label(3, "Crop:", CROP_TIP)
+        croprow = tk.Frame(grid, bg=COLORS["bg_surface"])
+        croprow.grid(row=3, column=1, sticky="w", pady=5)
+        self.crop_var = tk.BooleanVar(value=False)
+        for text, val, tip in (
+                ("Whole frame", False, "Use everything in shot."),
+                ("Choose an area", True,
+                 "Then drag a rectangle on the FIRST FRAME preview below. It snaps to a "
+                 "multiple of 32, and drag again to redraw it.")):
+            rb = tk.Radiobutton(croprow, text=text, variable=self.crop_var, value=val,
+                                command=self._on_crop_mode_changed,
+                                bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+                                selectcolor=COLORS["bg_deep"],
+                                activebackground=COLORS["bg_surface"],
+                                activeforeground=COLORS["text_primary"],
+                                font=(FONT_FAMILY, 10), highlightthickness=0, bd=0,
+                                cursor="hand2")
+            rb.pack(side=tk.LEFT, padx=(0, 16))
+            ToolTip(rb, tip)
+            self._radios.append(rb)
+        self.crop_clear_btn = self._button(croprow, "Reset", self.clear_crop, pad=10,
+                                           tip="Go back to the whole frame.")
+        self.crop_clear_btn.pack(side=tk.LEFT)
+        self.crop_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
+                                  wraplength=820, bg=COLORS["bg_surface"],
+                                  fg=COLORS["text_explain"])
+        self.crop_note.grid(row=4, column=1, sticky="w")
+
         SOUND_TIP = ("H3 generates sound as well as video, so a clip's audio can be training data "
                      "too.\n\n"
                      "Mute the ones where it should not be — a cough, the wrong speaker, music "
                      "over the top. A muted clip trains its video exactly the same; only the "
                      "sound is ignored.")
-        label(3, "Sound:", SOUND_TIP)
+        label(5, "Sound:", SOUND_TIP)
         snd = tk.Frame(grid, bg=COLORS["bg_surface"])
-        snd.grid(row=3, column=1, sticky="w", pady=5)
+        snd.grid(row=5, column=1, sticky="w", pady=5)
         # Sticky between saves on purpose: one source video routinely has sections worth training
         # on and sections with a cough, the wrong speaker, or music over the top, so this gets
         # toggled far more often than it gets reset.
         self.mute_var = tk.BooleanVar(value=False)
-        self._sound_radios = []
         for text, val, tip in (
                 ("Train on this clip's sound", False,
                  "The clip's audio becomes a training target — this is how H3 learns a voice."),
@@ -724,14 +776,14 @@ class Gizmo:
                                 highlightthickness=0, bd=0, cursor="hand2")
             rb.pack(side=tk.LEFT, padx=(0, 16))
             ToolTip(rb, tip)
-            self._sound_radios.append(rb)
+            self._radios.append(rb)
 
         # Listen before deciding. Muting is a judgement about what the clip actually sounds like,
         # and there is no way to make that judgement from a picture of it.
-        label(4, "Listen:", "Play the marked section so you can hear what you would be training "
+        label(6, "Listen:", "Play the marked section so you can hear what you would be training "
                             "on before you choose.")
         listen = tk.Frame(grid, bg=COLORS["bg_surface"])
-        listen.grid(row=4, column=1, sticky="w", pady=5)
+        listen.grid(row=6, column=1, sticky="w", pady=5)
         self.play_btn = self._button(
             listen, "▶  Play sound", self.toggle_play, pad=10,
             tip="Play the audio under the clip you have marked — exactly the section that would "
@@ -750,15 +802,15 @@ class Gizmo:
         self.sound_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                    wraplength=820, bg=COLORS["bg_surface"],
                                    fg=COLORS["text_explain"])
-        self.sound_note.grid(row=5, column=1, sticky="w")
+        self.sound_note.grid(row=7, column=1, sticky="w")
 
         OUT_TIP = ("Where the clips land.\n\n"
                    "Point it at your Fizgig training folder and the clips are ready to caption "
                    "the moment you are done here. Defaults to a fizgig_clips folder beside the "
                    "source video.")
-        label(6, "Save to:", OUT_TIP)
+        label(8, "Save to:", OUT_TIP)
         outrow = tk.Frame(grid, bg=COLORS["bg_surface"])
-        outrow.grid(row=6, column=1, sticky="ew", pady=5)
+        outrow.grid(row=8, column=1, sticky="ew", pady=5)
         self.out_var = tk.StringVar(value="")
         self.out_var.trace_add("write", lambda *_a: self._refresh_planned_name())
         out_entry = tk.Entry(outrow, textvariable=self.out_var, bg=COLORS["bg_hover"],
@@ -855,7 +907,7 @@ class Gizmo:
     def _set_enabled(self, on):
         state = tk.NORMAL if on else tk.DISABLED
         for w in (self.add_btn, self.export_btn, self.scale, self.open_btn, self.pos_entry,
-                  *self._sound_radios):
+                  self.crop_clear_btn, *self._radios):
             w.configure(state=state)
         for box in (self.len_box, self.size_box, self.motion_box):
             box.configure(state="readonly" if on else tk.DISABLED)
@@ -925,6 +977,9 @@ class Gizmo:
         """Everything opening a video does, with no dialog in the way — so it can be tested."""
         info = probe_source(self.ffmpeg, path)
         self._stop_audio()
+        # A crop belongs to the frame it was drawn on, and a new video is a new frame.
+        self.crop = None
+        self.crop_var.set(False)
         self.src, self.info = path, info
         self.root.title(f"Gizmo — {os.path.basename(path)}")
         self.frame_pos = 0
@@ -965,8 +1020,17 @@ class Gizmo:
         self._refresh_planned_name()
 
     def _fill_sizes(self):
-        # Display width, so an anamorphic source is offered the shape it is meant to be seen at.
-        w, h = self.info["display_width"], self.info["height"]
+        # From the CROP when there is one — it decides both the shape and how many real pixels
+        # are behind the output. Otherwise the display size, so an anamorphic source is offered
+        # the shape it is meant to be seen at.
+        if self.crop:
+            w, h = self.crop[2], self.crop[3]
+        else:
+            w, h = self.info["display_width"], self.info["height"]
+        # The chosen TIER survives a refill, not the pixel dimensions — someone who picked
+        # "medium" once should not be bumped back to a default every time they redraw a crop.
+        previous = re.search(r"\((\w[\w ]*),", self.size_var.get())
+        previous = previous.group(1) if previous else None
         # De-duplicated because target_size never upscales: for a 640x480 source all three
         # presets land on the same dimensions, and offering "small / medium / large" that are
         # secretly identical is worse than offering one.
@@ -979,9 +1043,10 @@ class Gizmo:
             note = "source size" if (tw, th) == (snap(w), snap(h)) else name
             opts.append(f"{tw} x {th}  ({note}, {tw * th / 1e6:.2f} MP)")
         self.size_box.configure(values=opts)
+        keep = next((i for i, o in enumerate(opts) if previous and f"({previous}," in o), None)
         # Medium by default where there is a choice: 768-ish is where H3 stills already train
         # well, and a clip's token cost climbs fast enough that "large" should be a decision.
-        self.size_box.current(min(1, len(opts) - 1))
+        self.size_box.current(keep if keep is not None else min(1, len(opts) - 1))
 
     def _fill_motion(self):
         fps = self.info["fps"]
@@ -1117,6 +1182,7 @@ class Gizmo:
     def _show_images(self, first, last):
         self.photo = self._paint(self.canvas, first, PREVIEW_W, PREVIEW_H)
         self.end_photo = self._paint(self.end_canvas, last, END_W, END_H)
+        self._draw_crop_overlay()
 
     def _paint(self, canvas, img, w, h):
         """Draw into a canvas and hand back the PhotoImage — which the caller MUST keep, or Tk
@@ -1125,10 +1191,144 @@ class Gizmo:
         if img is None:
             canvas.create_text(w // 2, h // 2, text="(no frame here)",
                                fill=COLORS["text_muted"], font=(FONT_FAMILY, 10))
+            canvas._shown = None
             return None
         photo = ImageTk.PhotoImage(img)
         canvas.create_image(w // 2, h // 2, image=photo)
+        # Remembered so canvas coordinates can be turned back into source ones: the image is
+        # centred, so it sits at an offset that depends on its shape.
+        canvas._shown = (img.size[0], img.size[1],
+                         (w - img.size[0]) // 2, (h - img.size[1]) // 2)
         return photo
+
+    # -- cropping ---------------------------------------------------------------------------------
+    def _canvas_to_source(self, canvas, cx, cy):
+        """A point on a preview canvas -> a point in the source's display pixels."""
+        shown = getattr(canvas, "_shown", None)
+        if not shown or not self.info:
+            return None
+        iw, ih, ox, oy = shown
+        sx = (cx - ox) / iw * self.info["display_width"]
+        sy = (cy - oy) / ih * self.info["height"]
+        return sx, sy
+
+    def _source_to_canvas(self, canvas, sx, sy):
+        shown = getattr(canvas, "_shown", None)
+        if not shown or not self.info:
+            return None
+        iw, ih, ox, oy = shown
+        return (ox + sx / self.info["display_width"] * iw,
+                oy + sy / self.info["height"] * ih)
+
+    def _crop_press(self, event):
+        if not self.src or not self.crop_var.get():
+            return
+        pt = self._canvas_to_source(self.canvas, event.x, event.y)
+        if pt:
+            self._crop_anchor = pt
+
+    def _crop_drag(self, event):
+        if not getattr(self, "_crop_anchor", None):
+            return
+        pt = self._canvas_to_source(self.canvas, event.x, event.y)
+        if not pt:
+            return
+        self.crop = self._snap_crop(self._crop_anchor, pt)
+        self._draw_crop_overlay()
+
+    def _crop_release(self, _event):
+        if not getattr(self, "_crop_anchor", None):
+            return
+        self._crop_anchor = None
+        if self.crop:
+            # The crop decides the shape AND how many pixels there are to work with, so the size
+            # menu is rebuilt from it — keeping whichever tier was chosen rather than the pixel
+            # dimensions, which have just changed under it.
+            self._fill_sizes()
+            self._refresh_cost()
+            self.show_frame()
+        self._describe_crop()
+
+    def _snap_crop(self, a, b):
+        """Two dragged corners -> an (x, y, w, h) box on the /32 grid, inside the frame.
+
+        Snapped because H3 needs multiples of 32 and because a crop that is 31 pixels off the
+        grid would otherwise be quietly rounded later, moving the framing away from what was
+        drawn. Anything smaller than 32 in either direction is not a crop, it is a slip.
+        """
+        dw, dh = self.info["display_width"], self.info["height"]
+        x0, x1 = sorted((max(0.0, min(a[0], dw)), max(0.0, min(b[0], dw))))
+        y0, y1 = sorted((max(0.0, min(a[1], dh)), max(0.0, min(b[1], dh))))
+        x = int(x0 // SIZE_STEP) * SIZE_STEP
+        y = int(y0 // SIZE_STEP) * SIZE_STEP
+        w = max(SIZE_STEP, int(round((x1 - x) / SIZE_STEP)) * SIZE_STEP)
+        h = max(SIZE_STEP, int(round((y1 - y) / SIZE_STEP)) * SIZE_STEP)
+        w = min(w, int(dw // SIZE_STEP) * SIZE_STEP - x)
+        h = min(h, int(dh // SIZE_STEP) * SIZE_STEP - y)
+        if w < SIZE_STEP or h < SIZE_STEP:
+            return None
+        return (x, y, w, h)
+
+    def _draw_crop_overlay(self):
+        """Outline the crop on BOTH previews. The last frame is the point: a crop holds still and
+        a subject does not, so whether they are still inside at the end is only visible there."""
+        for canvas in (self.canvas, self.end_canvas):
+            canvas.delete("crop")
+            if not self.crop or not getattr(canvas, "_shown", None):
+                continue
+            x, y, w, h = self.crop
+            p0 = self._source_to_canvas(canvas, x, y)
+            p1 = self._source_to_canvas(canvas, x + w, y + h)
+            if not p0 or not p1:
+                continue
+            iw, ih, ox, oy = canvas._shown
+            # Dim what is being thrown away rather than only ringing what is kept — the discarded
+            # part is the thing worth seeing.
+            for box in ((ox, oy, ox + iw, p0[1]), (ox, p1[1], ox + iw, oy + ih),
+                        (ox, p0[1], p0[0], p1[1]), (p1[0], p0[1], ox + iw, p1[1])):
+                canvas.create_rectangle(*box, fill="#000000", outline="", stipple="gray50",
+                                        tags="crop")
+            canvas.create_rectangle(*p0, *p1, outline=COLORS["accent"], width=2, tags="crop")
+
+    def _on_crop_mode_changed(self):
+        if not self.crop_var.get():
+            self.clear_crop()
+            return
+        self._describe_crop()
+
+    def clear_crop(self):
+        self.crop = None
+        self.crop_var.set(False)
+        self._crop_anchor = None
+        if self.info:
+            self._fill_sizes()
+            self._refresh_cost()
+        self._draw_crop_overlay()
+        self._describe_crop()
+        self._refresh_planned_name()
+
+    def _describe_crop(self):
+        if not self.crop_var.get():
+            self.crop_note.configure(text="", fg=COLORS["text_explain"])
+            return
+        if not self.crop:
+            self.crop_note.configure(
+                text="Drag a rectangle on the FIRST FRAME preview below.",
+                fg=COLORS["accent"])
+            return
+        x, y, w, h = self.crop
+        share = (w * h) / (self.info["display_width"] * self.info["height"]) * 100
+        text = f"Cropping to {w} x {h} at ({x}, {y}) — {share:.0f}% of the frame."
+        tw, th = self._size()
+        # Cropped below the output size means the clip is upscaled-in-effect: there is simply
+        # less real detail behind the same number of pixels. Worth saying, not worth refusing.
+        if tw and (w < tw or h < th):
+            self.crop_note.configure(
+                text=text + f" That is smaller than the {tw} x {th} output, so the clip will be "
+                            f"softer than the source — crop wider, or pick a smaller size.",
+                fg=COLORS["warning"])
+        else:
+            self.crop_note.configure(text=text, fg=COLORS["text_explain"])
 
     # -- listening --------------------------------------------------------------------------------
     def toggle_play(self):
@@ -1252,6 +1452,7 @@ class Gizmo:
             "start_frame": self.frame_pos, "start": self.frame_pos / self.info["fps"],
             "frames": self._frames(), "w": w, "h": h,
             "keep_every": self._keep_every(), "muted": muted,
+            "crop": self.crop, "sar": self.info["sar"],
             # A muted clip still carries its audio: the _mute suffix is the instruction, and
             # keeping the track means the decision is reversible by rename, not by re-export.
             "with_audio": bool(self.info["has_audio"]),
@@ -1297,9 +1498,10 @@ class Gizmo:
         sound = "muted" if job["muted"] else ("sound" if job["with_audio"] else "silent")
         slow = f" {self.info['fps'] / job['keep_every'] / FPS:.2f}x slow" \
             if job["keep_every"] and self.info else ""
+        crop = "  cropped" if job.get("crop") else ""
         return (f"{mark} {i + 1:2d}  {os.path.basename(job['dst']):<28} "
                 f"{job['frames']:>2}f  {job['w']}x{job['h']}  @{job['start']:6.2f}s  "
-                f"{sound}{slow}")
+                f"{sound}{slow}{crop}")
 
     def _refresh_queue_box(self):
         self.queue_box.delete(0, tk.END)
@@ -1327,6 +1529,11 @@ class Gizmo:
             messagebox.showinfo("Gizmo", "That clip came from a different source video.")
             return
         self.len_box.current(GRID_FRAMES.index(job["frames"]))
+        # Crop first: it rebuilds the size menu, so restoring the size before it would be undone.
+        self.crop = job.get("crop")
+        self.crop_var.set(bool(self.crop))
+        self._fill_sizes()
+        self._describe_crop()
         if 0 <= job["size_index"] < len(self.size_box["values"]):
             self.size_box.current(job["size_index"])
         if 0 <= job["motion_index"] < len(self.motion_box["values"]):
@@ -1390,7 +1597,7 @@ class Gizmo:
         try:
             cmd = build_export_command(self.ffmpeg, job["src"], job["dst"], job["start"],
                                        job["frames"], job["w"], job["h"], job["keep_every"],
-                                       job["with_audio"])
+                                       job["with_audio"], job.get("crop"), job.get("sar", 1.0))
             p = _run(cmd, text=True)
             if p.returncode != 0 or not os.path.exists(job["dst"]):
                 return (p.stderr or "").strip()[-400:] or "ffmpeg failed"

@@ -164,6 +164,33 @@ class MiniMaxH3VideoVAEEncoder(nn.Module):
         self.register_buffer("pixel_std", torch.tensor(IMAGENET_STD).view(1, 3, 1, 1, 1), persistent=False)
 
     @torch.no_grad()
+    @staticmethod
+    def plan_clip_bucket(free_gb, width, height, reserve_gb=1.5):
+        """Largest /32 bucket of this shape whose clip encode fits in `free_gb`.
+
+        Encoding a clip is far more expensive than encoding a still of the same size — the whole
+        17-frame group is live at once — and a mixed dataset lets someone pick 1 MP for their
+        photographs without knowing that no consumer card can cache a clip at it. Refusing the
+        run would be the wrong answer: the stills are fine, and the clips are still worth having
+        at a size that fits.
+
+        MEASURED on a 5090, fp32, encoding in 17-frame groups:
+
+            0.09 MP  5.6 GiB     0.26 MP  14.2 GiB     0.52 MP  28.0 GiB     0.66 MP  OOM
+
+        which is 0.9 + 52 x megapixels, within 0.3 GiB across that range, and flat in clip length
+        (124 frames costs 0.3 GiB more than 22). So the cap is a straight solve, with the same
+        1.5 GiB left for the allocator and the display that the training planner reserves.
+        """
+        budget = max(0.0, float(free_gb) - float(reserve_gb) - 0.9)
+        max_pixels = budget / 52.0 * 1e6
+        if width * height <= max_pixels or max_pixels < 32 * 32:
+            return int(width), int(height)
+        scale = (max_pixels / (width * height)) ** 0.5
+        w = max(32, int(width * scale) // 32 * 32)
+        h = max(32, int(height * scale) // 32 * 32)
+        return w, h
+
     def encode_clip(self, x):
         """A whole clip -> [B,24,T',H/16,W/16], encoded in the groups the model expects.
 

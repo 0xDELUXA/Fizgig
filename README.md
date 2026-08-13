@@ -222,6 +222,11 @@ The megapixel limits are **measured** on the caching pass; the length limits com
 swap planner and are **not yet confirmed by a real run** at the long end, where they'll be
 optimistic if anything.
 
+**Mixing stills and clips is handled for you.** If you set a megapixel target that suits your
+photographs but is too big to encode a clip at — 1 MP is beyond every consumer card for video —
+Fizgig caches the clips at the largest size your free VRAM can actually manage and says so, file
+by file, in the console. Your stills are untouched.
+
 **There's no size to pick.** Clips are saved at the resolution of whatever you cut, and Fizgig
 resizes them down to your Target Megapixels at training time — so cutting large keeps that choice
 open for every run afterwards, and nothing is ever scaled up.

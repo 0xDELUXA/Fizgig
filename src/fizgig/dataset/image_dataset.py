@@ -712,6 +712,36 @@ class ImageDataset(torch.utils.data.Dataset):
     def get_all_text_encoder_output_cache_files(self) -> list[str]:
         return glob.glob(os.path.join(glob.escape(self.cache_directory), f"*_{self.architecture}_te.safetensors"))
 
+    def _plan_clip_bucket(self, bucket_reso, image_key):
+        """Cap a clip's bucket to what the VAE can actually encode in the free VRAM.
+
+        Free VRAM is read ONCE and remembered. Reading it per clip would shrink every clip after
+        the first, since the encoder's own allocations are still resident by then — the plan has
+        to be made against the memory the pass starts with, not against what it has left.
+        """
+        if not hasattr(self, "_clip_free_gb"):
+            try:
+                import torch
+                self._clip_free_gb = (torch.cuda.mem_get_info()[0] / 2**30
+                                      if torch.cuda.is_available() else 0.0)
+            except Exception:
+                self._clip_free_gb = 0.0
+            self._clip_capped = set()
+        if not self._clip_free_gb:
+            return bucket_reso                       # CPU, or no way to ask — leave it alone
+
+        from fizgig.minimax.vae import MiniMaxH3VideoVAEEncoder
+        planned = MiniMaxH3VideoVAEEncoder.plan_clip_bucket(self._clip_free_gb, *bucket_reso)
+        if tuple(planned) != tuple(bucket_reso) and image_key not in self._clip_capped:
+            self._clip_capped.add(image_key)
+            logger.warning(
+                "[clip] %s: %dx%d needs more VRAM than the %.1f GB free can encode — caching it "
+                "at %dx%d instead. Stills in this dataset are unaffected. Lower Target "
+                "Megapixels, or close whatever else is on the GPU, to keep the full size.",
+                os.path.basename(str(image_key)), bucket_reso[0], bucket_reso[1],
+                self._clip_free_gb, planned[0], planned[1])
+        return planned
+
     def get_latent_cache_path(self, item_info: ItemInfo) -> str:
         w, h = item_info.original_size
         basename = os.path.splitext(os.path.basename(item_info.item_key))[0]
@@ -784,6 +814,13 @@ class ImageDataset(torch.utils.data.Dataset):
                 image: Image.Image = images[0]
                 image_size = image.size
                 bucket_reso = bucket_selector.get_bucket_resolution(image_size)
+                # A clip costs far more to ENCODE than a still of the same size — a whole
+                # 17-frame group is live in the VAE at once — so a mixed dataset lets someone
+                # pick a megapixel target that is fine for their photographs and impossible for
+                # their clips. Cap the clip rather than fail the run: the stills are unaffected,
+                # and a clip at a size that fits is worth more than a crash at one that does not.
+                if len(images) > 1:
+                    bucket_reso = self._plan_clip_bucket(bucket_reso, image_key)
                 resized = [resize_image_to_bucket(img, bucket_reso) for img in images]
 
                 resized_controls = None

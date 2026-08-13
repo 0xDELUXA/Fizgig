@@ -156,9 +156,12 @@ def _report_headroom(device, batch_size):
     RAM, so the pass does not fail, it crawls, with nothing on screen to explain why. This is the
     one place that can see it: free VRAM measured AFTER the encoder is resident.
 
-    The batch is the only lever left at this point, and it is a cheap one — a forward dequantizes
-    351 weights whatever the batch size, so 1 caption costs ~1.2 s against ~1.4 s for 16. Trading
-    a minute on a 40-image set against a pass that otherwise pages is worth it every time.
+    Thresholds are measured, not guessed (tests/diag_minimax_te_peak.py, nvfp4 encoder, 42-token
+    captions): resident 12.78 GB, and the forward peaks 1.64 GB above that at batch 1 rising to
+    only 1.87 GB at batch 16. The spike is the per-forward nvfp4 dequant of 351 weights, so it is
+    almost independent of the batch — dropping the batch buys ~0.2 GB, not gigabytes. Which makes
+    it a last-ditch lever rather than the fix, and worth pulling only inside that 1.9 GB band
+    where a fifth of a gigabyte decides whether the card pages.
     """
     if torch.device(device).type != "cuda" or not torch.cuda.is_available():
         return batch_size
@@ -169,19 +172,20 @@ def _report_headroom(device, batch_size):
     free_gb, resident_gb = free_b / (1024 ** 3), torch.cuda.memory_allocated(device) / (1024 ** 3)
     logger.info(f"[vram] text encoder resident {resident_gb:.1f} GB, "
                 f"{free_gb:.1f} GB of {total_b / (1024 ** 3):.1f} GB free")
-    if free_gb >= 2.0:
+    if free_gb >= 2.5:                      # clears the measured batch-16 spike with room over
         return batch_size
-    small = 1 if free_gb < 1.0 else 2
+    small = 1 if free_gb < 1.9 else 2
     if small < batch_size:
         logger.info(f"[vram] tight — encoding {small} caption(s) per forward instead of "
                     f"{batch_size}. Costs about a second per image, once.")
         batch_size = small
-    if free_gb < 1.0:
+    if free_gb < 1.9:                       # below the smallest forward this encoder can do
         logger.warning(
-            "[vram] only %.1f GB free with the encoder loaded. Windows pages instead of failing "
-            "here, so caching can appear frozen for a very long time rather than stopping with "
-            "an error. Close anything else using the GPU — ComfyUI, and browsers, which can hold "
-            "a couple of GB on hardware acceleration — then run this again.", free_gb)
+            "[vram] only %.1f GB free with the encoder loaded, and a single forward needs about "
+            "1.7 GB. Windows pages instead of failing here, so caching can appear frozen for a "
+            "very long time rather than stopping with an error. Close anything else using the "
+            "GPU — ComfyUI, and browsers, which can hold a couple of GB on hardware "
+            "acceleration — then run this again.", free_gb)
     return batch_size
 
 

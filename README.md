@@ -214,13 +214,13 @@ you cut anything:
 
 | Clip | 16 GB | 24 GB | 32 GB |
 |---|---|---|---|
-| 22 frames | up to 0.5 MP | up to 1 MP | up to 1 MP |
-| 39 frames | up to 0.25 MP | up to 0.5 MP | up to 1 MP |
-| 73 frames | — | up to 0.25 MP | up to 0.5 MP |
-| 124 frames | — | up to 0.25 MP | up to 0.25 MP |
+| up to 56 frames | up to 0.25 MP | up to 0.5 MP | up to 0.5 MP |
+| 73–90 frames | — | up to 0.25 MP | up to 0.5 MP |
+| 107–124 frames | — | up to 0.25 MP | up to 0.25 MP |
 
-Estimated from Fizgig's own swap planner and **not yet confirmed by a real run** at the longer
-lengths — where it's wrong it will be optimistic.
+The megapixel limits are **measured** on the caching pass; the length limits come from Fizgig's
+swap planner and are **not yet confirmed by a real run** at the long end, where they'll be
+optimistic if anything.
 
 **There's no size to pick.** Clips are saved at the resolution of whatever you cut, and Fizgig
 resizes them down to your Target Megapixels at training time — so cutting large keeps that choice

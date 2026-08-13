@@ -47,21 +47,32 @@ GRID_FRAMES = (5, 22, 39, 56, 73, 90, 107, 124)          # 17n+5, every length t
 LATENT_FRAMES = {f: 5 * n + 2 for n, f in enumerate(GRID_FRAMES)}   # what each costs in the DiT
 
 # What each length can be TRAINED at, by card: frames -> {free VRAM in GB: largest training
-# megapixels}. None means that card cannot place the run at all.
+# megapixels}. None means that card cannot do it at all.
 #
-# Generated from Fizgig's own MiniMax swap planner (trainer.plan_vram) rather than guessed, by
-# feeding a clip's token load in as the equivalent megapixel value — which is arithmetically what
-# it is. Frozen into a table because Gizmo must not import the trainer: that would pull in torch,
-# and a prep tool that takes ten seconds to open because it loaded CUDA is a bad tool.
+# Two ceilings, and the lower one wins.
 #
-# Treat it as a starting point, not a promise. The planner's activation term is LINEAR in tokens
-# while attention is quadratic, and it was anchored on stills of 256-1024 tokens — a 124-frame
-# clip is 30x beyond that. Where it is wrong it will be optimistic, so the long lengths want a
-# real run before anyone plans a dataset around them.
+# The TRAINING step comes from Fizgig's own swap planner (trainer.plan_vram) rather than from
+# guesswork, by feeding a clip's token load in as the equivalent megapixel value — which is
+# arithmetically what it is. Its activation term is linear in tokens while attention is
+# quadratic, and it was anchored on stills of 256-1024 tokens, so at the long lengths it is an
+# extrapolation and where it is wrong it will be optimistic. That is what sets the LENGTH limits
+# here, and the long ones still want a real run behind them.
+#
+# The CACHING pass is measured, on a 5090 with ~30 GiB free, encoding in 17-frame groups:
+#
+#     0.25 MP  ~14.2 GiB      0.5 MP  ~23.2 GiB      1.0 MP  out of memory
+#
+# Flat in clip length — 124 frames costs the same as 22 — because the groups bound it. That is
+# what sets the MEGAPIXEL limits: 1 MP is unreachable for clips of any length on a 32 GB card,
+# and 0.25 MP at ~14 GiB is already marginal on a 16 GB one. Caching is fp32 today; the file is
+# natively fp16, which measures 8.05 GiB and 0.09% different, so these could move.
+#
+# Frozen into a table because Gizmo must not import the trainer — that would pull torch in
+# behind it, and a prep tool that takes ten seconds to open because it loaded CUDA is a bad tool.
 CLIP_VRAM = {
-    5: {16: 1.0, 24: 1.0, 32: 1.0},
-    22: {16: 0.5, 24: 1.0, 32: 1.0},
-    39: {16: 0.25, 24: 0.5, 32: 1.0},
+    5: {16: 0.25, 24: 0.5, 32: 0.5},
+    22: {16: 0.25, 24: 0.5, 32: 0.5},
+    39: {16: 0.25, 24: 0.5, 32: 0.5},
     56: {16: 0.25, 24: 0.5, 32: 0.5},
     73: {16: None, 24: 0.25, 32: 0.5},
     90: {16: None, 24: 0.25, 32: 0.5},

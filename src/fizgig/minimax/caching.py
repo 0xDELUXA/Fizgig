@@ -184,7 +184,10 @@ def _encode_clip(vae, item: ItemInfo, audio_vae, device, dtype) -> None:
     n_frames = frames.shape[0]
     x = frames.permute(3, 0, 1, 2).unsqueeze(0).float() / 127.5 - 1.0   # (1, C, T, H, W)
     with torch.no_grad():
-        latent = vae.encode(x.to(device, dtype=dtype))[0]        # (24, T', H/16, W/16)
+        # encode_clip, not encode: the clip goes in as 17-frame groups, which is both what makes
+        # the latent frame count match the DiT's clock and what keeps peak VRAM off the clip's
+        # length. See MiniMaxH3VideoVAEEncoder.encode_clip.
+        latent = vae.encode_clip(x.to(device, dtype=dtype))[0]   # (24, T', H/16, W/16)
 
     audio_rows = None
     if audio_vae is not None:

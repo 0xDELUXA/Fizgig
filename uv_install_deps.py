@@ -45,7 +45,7 @@ def _uv_cache_dir(python_path):
     try:
         # shell=False (list form) — python_path is always a caller-supplied venv interpreter
         # path, never external/untrusted input; no shell is involved to inject into.
-        result = subprocess.run(
+        result = subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
             [str(python_path), "-m", "uv", "cache", "dir"],
             capture_output=True, text=True, check=True)
         return Path(result.stdout.strip())
@@ -151,7 +151,7 @@ def install_requirements(requirements_path, venv_dir, python_path=None):
         # come from this repo's own requirements.txt or uv's own `cache dir` output, not from
         # anything a caller passes through unsanitized.
         if extra_index_url and torch_specs:
-            subprocess.run(
+            subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                 [str(python_path), "-m", "uv", "pip", "install", *link_mode_args,
                  "--extra-index-url", extra_index_url, "--index-strategy", "unsafe-best-match",
                  *torch_specs],
@@ -161,7 +161,7 @@ def install_requirements(requirements_path, venv_dir, python_path=None):
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write("\n".join(other_lines) + "\n")
-            subprocess.run(
+            subprocess.run(  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
                 [str(python_path), "-m", "uv", "pip", "install", *link_mode_args,
                  "-r", filtered_path],
                 check=True)

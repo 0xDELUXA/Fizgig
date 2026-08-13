@@ -853,7 +853,13 @@ class ImageDataset(torch.utils.data.Dataset):
         for k in keys:
             if k.startswith("latent_") and not k.startswith("latent_control_"):
                 try:
-                    a, b = k[len("latent_"):].split("x")
+                    # `latent_{H}x{W}` for a still, `latent_{T}x{H}x{W}` for a video clip. Only
+                    # the spatial pair is compared, so take the LAST two — a clip cache is
+                    # resolution-checked exactly like a still. Reading the first two instead
+                    # would compare T against a height and quietly re-encode every clip, every
+                    # launch.
+                    dims = k[len("latent_"):].split("x")
+                    a, b = dims[-2], dims[-1]
                     return {int(a), int(b)} == expected
                 except Exception:
                     return None

@@ -26,10 +26,28 @@ logger = logging.getLogger(__name__)
 
 # --- cache writers -----------------------------------------------------------
 def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor) -> None:
-    """Save an H3 VAE latent (3-D: C, H, W) to the item's latent cache file."""
-    assert latent.dim() == 3, f"latent must be 3-D (C,H,W), got {tuple(latent.shape)}"
-    _, H, W = latent.shape
-    sd = {f"latent_{H}x{W}": latent.detach().cpu().contiguous()}
+    """Save an H3 VAE latent to the item's cache file.
+
+    Two shapes, two keys, and the still one is unchanged on purpose:
+
+      * a still  -> 3-D (C, H, W)     keyed `latent_{H}x{W}`
+      * a clip   -> 4-D (C, T, H, W)  keyed `latent_{T}x{H}x{W}`
+
+    A still written today is byte-identical to one written before clips existed, so every cache
+    already on disk stays valid and nobody re-caches a working dataset. Both keys start `latent_`,
+    which is all the shared collate looks at (image_dataset.py: `startswith("latent_")` ->
+    `latents`), and the trainer only adds a frame axis when one is missing — so a 4-D cache
+    arrives at the DiT as (1, 24, T, H, W) with no further work.
+    """
+    assert latent.dim() in (3, 4), \
+        f"latent must be 3-D (C,H,W) or 4-D (C,T,H,W), got {tuple(latent.shape)}"
+    if latent.dim() == 3:
+        _, H, W = latent.shape
+        key = f"latent_{H}x{W}"
+    else:
+        _, T, H, W = latent.shape
+        key = f"latent_{T}x{H}x{W}"
+    sd = {key: latent.detach().cpu().contiguous()}
     for key, value in sd.items():
         if torch.isnan(value).any():
             logger.warning(f"NaN in {key} for {item_info.item_key} - replaced with 0")

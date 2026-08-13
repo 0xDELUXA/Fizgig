@@ -169,14 +169,46 @@ def snap(value):
 
 
 def target_size(src_w, src_h, megapixels):
-    """Source aspect ratio at roughly `megapixels`, both sides snapped to /32.
+    """Best /32 size at roughly `megapixels` that keeps the source's shape.
 
-    Never larger than the source. Upscaling here would invent detail and then charge tokens for
-    it — a 640x480 clip blown up to 864x640 costs 1.8x the attention to train on exactly the same
-    information. So a small source simply comes out at its own size.
+    Both sides have to be multiples of 32 for H3, and flooring each one independently is the
+    obvious way to get there — but it BENDS THE PICTURE. 1920x1080 floored at 0.26 MP gives
+    672x352, which is 1.909 against a true 1.778: a 7.4% horizontal stretch, and a face stretched
+    7% trains as a face that is 7% too wide.
+
+    So the pair is searched for instead of computed: every /32 height near the target, each with
+    the /32 widths either side of the ideal, scored on aspect error first and area second. That
+    gets most sizes under 2%, and build_export_command turns what is left into a crop rather than
+    a stretch — losing a sliver of edge, which is honest, instead of reshaping everything in
+    frame, which is not.
+
+    Never larger than the source, on either axis. Upscaling would invent detail and then charge
+    tokens for it, so a small source simply comes out at its own size.
     """
-    scale = min(1.0, (megapixels * 1_000_000 / (src_w * src_h)) ** 0.5)
-    return snap(src_w * scale), snap(src_h * scale)
+    aspect = src_w / src_h
+    max_w, max_h = snap(src_w), snap(src_h)
+    # Clamped to what the source actually has. Without this, asking a 480x360 clip for 1 MP
+    # leaves every candidate hopelessly far from the target, the area term stops telling them
+    # apart, and the search hands back 384x288 — throwing away a third of the pixels that were
+    # there, to buy 2% of aspect. Asking for more than the source holds should mean "all of it".
+    want_area = min(megapixels * 1_000_000, max_w * max_h)
+
+    best = None
+    for h in range(SIZE_STEP, max_h + SIZE_STEP, SIZE_STEP):
+        ideal_w = h * aspect
+        for w in {snap(ideal_w), snap(ideal_w) + SIZE_STEP}:
+            if w < SIZE_STEP or w > max_w:
+                continue
+            err = abs((w / h) - aspect) / aspect
+            # Both matter, so both are in one cost rather than one outranking the other. Aspect
+            # alone would be a trap: 2560x1080 has exactly one /32 pair at its true 2.370, and
+            # it is 2048x864 — so asking for a small clip would hand back a 1.8 MP one. Weighted
+            # at 3x because the leftover aspect error is only ever a crop of that size, while
+            # missing the requested megapixels costs detail that cannot come back.
+            cost = abs(w * h - want_area) / want_area + 3.0 * err
+            if best is None or cost < best[0]:
+                best = (cost, (w, h))
+    return best[1] if best else (max_w, max_h)
 
 
 def tokens_for(width, height, frames):
@@ -210,7 +242,13 @@ def build_export_command(ffmpeg, src, dst, start_s, frames, width, height,
         vf = f"select='not(mod(n\\,{keep_every}))',setpts=N/({FPS}*TB)"
     else:
         vf = f"fps={FPS}"
-    vf += f",scale={width}:{height}:flags=lanczos,setsar=1"
+    # Cover, then crop — never stretch. force_original_aspect_ratio=increase scales the frame
+    # until it covers the target box with its shape intact, and the crop takes the middle. The
+    # target is chosen to sit within ~2% of the source aspect, so what the crop removes is a
+    # sliver of edge. Plain scale=W:H instead would reshape everything in frame to make the
+    # numbers fit, which is the one thing a training clip must not do.
+    vf += (f",scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos"
+           f",crop={width}:{height},setsar=1")
 
     cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
            "-ss", f"{max(0.0, start_s):.3f}", "-i", src,

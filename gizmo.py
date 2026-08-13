@@ -374,9 +374,44 @@ class Gizmo:
             pass
         s.configure("G.TCombobox", fieldbackground=COLORS["bg_hover"],
                     background=COLORS["bg_hover"], foreground=COLORS["text_primary"],
-                    arrowcolor=COLORS["text_secondary"], bordercolor=COLORS["border"])
+                    arrowcolor=COLORS["text_secondary"], bordercolor=COLORS["border"],
+                    font=(FONT_FAMILY, 10))
+        # configure() alone is not enough and the failure is invisible until you look: a READONLY
+        # combobox — which all of these are — draws its text as a selection, so it takes
+        # selectforeground on selectbackground, and clam's stock values for those are a light
+        # system pair. The result is white text on a white field.
+        s.map("G.TCombobox",
+              fieldbackground=[("disabled", COLORS["bg_surface"]),
+                               ("readonly", COLORS["bg_hover"]),
+                               ("!disabled", COLORS["bg_hover"])],
+              foreground=[("disabled", COLORS["text_muted"]),
+                          ("readonly", COLORS["text_primary"]),
+                          ("!disabled", COLORS["text_primary"])],
+              selectbackground=[("disabled", COLORS["bg_surface"]),
+                                ("readonly", COLORS["bg_hover"]),
+                                ("!disabled", COLORS["bg_hover"])],
+              selectforeground=[("disabled", COLORS["text_muted"]),
+                                ("readonly", COLORS["text_primary"]),
+                                ("!disabled", COLORS["text_primary"])],
+              arrowcolor=[("disabled", COLORS["text_muted"])],
+              bordercolor=[("focus", COLORS["accent"])])
+
+        # The list that drops DOWN is a plain Tk listbox built by Tcl, which ttk styling never
+        # reaches. Without this it opens white-on-white too, and only when clicked.
+        for option, value in (("background", COLORS["bg_surface"]),
+                              ("foreground", COLORS["text_primary"]),
+                              ("selectBackground", COLORS["accent"]),
+                              ("selectForeground", COLORS["text_primary"])):
+            self.root.option_add(f"*TCombobox*Listbox.{option}", value)
+
         s.configure("G.Horizontal.TScale", background=COLORS["bg_surface"],
                     troughcolor=COLORS["bg_deep"])
+        # The window's own scrollbar, which clam otherwise draws in stock light grey against
+        # every dark card.
+        s.configure("Vertical.TScrollbar", background=COLORS["bg_hover"],
+                    troughcolor=COLORS["bg_deep"], bordercolor=COLORS["bg_deep"],
+                    arrowcolor=COLORS["text_secondary"])
+        s.map("Vertical.TScrollbar", background=[("active", COLORS["accent"])])
 
     def _card(self, parent, title, description=None):
         outer = tk.Frame(parent, bg=COLORS["bg_surface"], highlightthickness=1,
@@ -435,7 +470,20 @@ class Gizmo:
                  font=(FONT_FAMILY, 11), bg=COLORS["bg_deep"],
                  fg=COLORS["text_secondary"]).pack(anchor="w")
 
-        # --- source ---------------------------------------------------------------------------
+        # Settings come BEFORE finding the moment, because the last-frame preview is only
+        # meaningful once the length and the motion are settled — scrub first and it shows the
+        # end of whatever length happened to be left over from the previous clip.
+        self._build_source_card(body)
+        self._build_settings_card(body)
+        self._build_scrub_card(body)
+        self._build_queue_card(body)
+
+        self._bind_keys()
+        self._set_enabled(False)
+        self._refresh_cost()
+        self._refresh_queue_box()
+
+    def _build_source_card(self, body):
         c = self._card(body, "1. Source video", "Any format, any frame rate, any size.")
         row = tk.Frame(c, bg=COLORS["bg_surface"])
         row.pack(fill=tk.X)
@@ -453,11 +501,11 @@ class Gizmo:
                 "What Gizmo read from the file. None of it has to be right — the whole point is "
                 "that Gizmo converts it. It is here so you can see what you are starting from.")
 
-        # --- scrub ----------------------------------------------------------------------------
-        c = self._card(body, "2. Find the moment",
-                       "The playhead is where the clip STARTS. Drag it, step with the arrow keys "
-                       "(Shift for ten at a time, Home for the beginning), or type an exact frame "
-                       "below.")
+    def _build_scrub_card(self, body):
+        c = self._card(body, "3. Find the moment",
+                       "The playhead is where the clip STARTS, and the last frame follows from "
+                       "the length you set above. Drag it, step with the arrow keys (Shift for "
+                       "ten at a time, Home for the beginning), or type an exact frame below.")
         shots = tk.Frame(c, bg=COLORS["bg_surface"])
         shots.pack()
         # Two frames, not one: choosing a clip means knowing what is in it, and the end frame is
@@ -533,8 +581,10 @@ class Gizmo:
                 "How much of the SOURCE this clip uses. Slow motion uses more of it than real "
                 "time does for the same number of output frames.")
 
-        # --- settings -------------------------------------------------------------------------
-        c = self._card(body, "3. Clip settings")
+    def _build_settings_card(self, body):
+        c = self._card(body, "2. Clip settings",
+                       "Set these first — the length decides where the clip ends, so the preview "
+                       "on the next card depends on them.")
         grid = tk.Frame(c, bg=COLORS["bg_surface"])
         grid.pack(fill=tk.X)
         grid.columnconfigure(1, weight=1)
@@ -669,7 +719,7 @@ class Gizmo:
                 "Attention scales with the square of this number, so a clip is dramatically more "
                 "expensive to train than a still — that is the whole reason clips are short.")
 
-        # --- queue ----------------------------------------------------------------------------
+    def _build_queue_card(self, body):
         c = self._card(body, "4. Mark it, then move on",
                        "Marking is fast and encoding is slow, so they are separate. Add every "
                        "section you want from this video, then export the lot in one go — and "
@@ -722,11 +772,6 @@ class Gizmo:
         self._button(qrow, "Clear queue", self.clear_queue, pad=10,
                      tip="Empty the waiting list. Nothing already exported is "
                          "touched.").pack(side=tk.LEFT, padx=(8, 0))
-
-        self._bind_keys()
-        self._set_enabled(False)
-        self._refresh_cost()
-        self._refresh_queue_box()
 
     # -- state ----------------------------------------------------------------------------------
     def _length_label(self, frames):

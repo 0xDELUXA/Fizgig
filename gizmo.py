@@ -50,6 +50,23 @@ AUDIO_SAMPLE_RATE = 32000
 AUDIO_CHANNELS = 2
 MUTE_SUFFIX = "_mute"
 
+# Crop shapes. H3 puts no constraint on aspect at all — its rotary position grid is normalised by
+# sqrt(h*w), so it is aspect-agnostic by construction, and the only hard rule is that both sides
+# are multiples of 32. These are here for CONSISTENCY, not legality: a dataset of thirty
+# hand-drawn near-rectangles trains a model on thirty slightly different framings, and locking the
+# drag to one shape costs nothing. Free stays the default.
+CROP_SHAPES = (
+    ("Free — drag any shape", None),
+    ("Match the source", "source"),
+    ("1:1 square", 1 / 1),
+    ("16:9 wide", 16 / 9),
+    ("9:16 vertical", 9 / 16),
+    ("4:3", 4 / 3),
+    ("3:4", 3 / 4),
+    ("4:5 portrait", 4 / 5),
+    ("21:9 ultrawide", 21 / 9),
+)
+
 # --- palette --------------------------------------------------------------------------------
 # A local copy of Fizgig's, not an import: gizmo.py must never load lora_trainer_gui.py.
 COLORS = {
@@ -743,6 +760,24 @@ class Gizmo:
         self.crop_clear_btn = self._button(croprow, "Reset", self.clear_crop, pad=10,
                                            tip="Go back to the whole frame.")
         self.crop_clear_btn.pack(side=tk.LEFT)
+
+        SHAPE_TIP = ("Lock the crop to a shape while you drag it.\n\n"
+                     "H3 does not care — any shape trains, as long as both sides land on a "
+                     "multiple of 32, which Gizmo handles. This is for consistency: thirty "
+                     "hand-drawn rectangles are thirty slightly different framings, and one "
+                     "shape across the set is usually what you meant.\n\n"
+                     "The grid is coarse, so the lock gets as close as multiples of 32 allow "
+                     "and tells you what it actually managed.")
+        tk.Label(croprow, text="Shape", font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"],
+                 fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
+        self.shape_var = tk.StringVar()
+        self.shape_box = ttk.Combobox(croprow, textvariable=self.shape_var, state="readonly",
+                                      style="G.TCombobox", width=22,
+                                      values=[name for name, _ in CROP_SHAPES])
+        self.shape_box.current(0)
+        self.shape_box.pack(side=tk.LEFT)
+        self.shape_box.bind("<<ComboboxSelected>>", lambda _e: self._on_shape_changed())
+        ToolTip(self.shape_box, SHAPE_TIP)
         self.crop_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                   wraplength=820, bg=COLORS["bg_surface"],
                                   fg=COLORS["text_explain"])
@@ -909,7 +944,7 @@ class Gizmo:
         for w in (self.add_btn, self.export_btn, self.scale, self.open_btn, self.pos_entry,
                   self.crop_clear_btn, *self._radios):
             w.configure(state=state)
-        for box in (self.len_box, self.size_box, self.motion_box):
+        for box in (self.len_box, self.size_box, self.motion_box, self.shape_box):
             box.configure(state="readonly" if on else tk.DISABLED)
         # Listening needs a track to listen to AND a way to play it. Both reasons are spelled out
         # in _fill_sound_note rather than left as a greyed button with no explanation.
@@ -1249,22 +1284,57 @@ class Gizmo:
             self.show_frame()
         self._describe_crop()
 
+    def _crop_aspect(self):
+        """The locked aspect, or None for free-form."""
+        i = self.shape_box.current()
+        value = CROP_SHAPES[i][1] if 0 <= i < len(CROP_SHAPES) else None
+        if value == "source" and self.info:
+            return self.info["display_width"] / self.info["height"]
+        return value if isinstance(value, float) else None
+
     def _snap_crop(self, a, b):
         """Two dragged corners -> an (x, y, w, h) box on the /32 grid, inside the frame.
 
         Snapped because H3 needs multiples of 32 and because a crop that is 31 pixels off the
         grid would otherwise be quietly rounded later, moving the framing away from what was
         drawn. Anything smaller than 32 in either direction is not a crop, it is a slip.
+
+        With a shape locked, the /32 pair nearest that ratio is searched for rather than computed:
+        the grid is coarse enough that dividing and rounding lands surprisingly far off — 16:9 at
+        a height of 352 rounds to 640x352, which is 1.82. Both sides move, so the result is the
+        closest the grid can actually get.
         """
         dw, dh = self.info["display_width"], self.info["height"]
+        max_w = int(dw // SIZE_STEP) * SIZE_STEP
+        max_h = int(dh // SIZE_STEP) * SIZE_STEP
         x0, x1 = sorted((max(0.0, min(a[0], dw)), max(0.0, min(b[0], dw))))
         y0, y1 = sorted((max(0.0, min(a[1], dh)), max(0.0, min(b[1], dh))))
         x = int(x0 // SIZE_STEP) * SIZE_STEP
         y = int(y0 // SIZE_STEP) * SIZE_STEP
         w = max(SIZE_STEP, int(round((x1 - x) / SIZE_STEP)) * SIZE_STEP)
         h = max(SIZE_STEP, int(round((y1 - y) / SIZE_STEP)) * SIZE_STEP)
-        w = min(w, int(dw // SIZE_STEP) * SIZE_STEP - x)
-        h = min(h, int(dh // SIZE_STEP) * SIZE_STEP - y)
+
+        aspect = self._crop_aspect()
+        if aspect:
+            # Fitted INSIDE what was dragged, so the rectangle never grows past the gesture, then
+            # scored on how close the grid can get. Ties go to the larger box.
+            span_w = min(w, max_w - x)
+            span_h = min(h, max_h - y)
+            best = None
+            for cw in range(SIZE_STEP, span_w + SIZE_STEP, SIZE_STEP):
+                for ch in {int(round(cw / aspect / SIZE_STEP)) * SIZE_STEP,
+                           int(round(cw / aspect / SIZE_STEP)) * SIZE_STEP + SIZE_STEP}:
+                    if ch < SIZE_STEP or ch > span_h:
+                        continue
+                    score = (round(abs((cw / ch) - aspect) / aspect, 4), -(cw * ch))
+                    if best is None or score < best[0]:
+                        best = (score, (cw, ch))
+            if best is None:
+                return None
+            w, h = best[1]
+
+        w = min(w, max_w - x)
+        h = min(h, max_h - y)
         if w < SIZE_STEP or h < SIZE_STEP:
             return None
         return (x, y, w, h)
@@ -1289,6 +1359,30 @@ class Gizmo:
                 canvas.create_rectangle(*box, fill="#000000", outline="", stipple="gray50",
                                         tags="crop")
             canvas.create_rectangle(*p0, *p1, outline=COLORS["accent"], width=2, tags="crop")
+
+    def _on_shape_changed(self):
+        """Re-fit an existing crop to the new shape, around the same centre — otherwise picking a
+        shape does nothing visible until the next drag, which reads as the control being broken."""
+        if not self.src:
+            return
+        if self.crop:
+            x, y, w, h = self.crop
+            cx, cy = x + w / 2, y + h / 2
+            refit = self._snap_crop((cx - w / 2, cy - h / 2), (cx + w / 2, cy + h / 2))
+            if refit:
+                # Re-centre: the snap anchors at the top-left corner, so a shape change would
+                # otherwise slide the framing down and right.
+                nx, ny, nw, nh = refit
+                nx = max(0, min(int((cx - nw / 2) // SIZE_STEP) * SIZE_STEP,
+                                int(self.info["display_width"] // SIZE_STEP) * SIZE_STEP - nw))
+                ny = max(0, min(int((cy - nh / 2) // SIZE_STEP) * SIZE_STEP,
+                                int(self.info["height"] // SIZE_STEP) * SIZE_STEP - nh))
+                self.crop = (nx, ny, nw, nh)
+            self._fill_sizes()
+            self._refresh_cost()
+            self._draw_crop_overlay()
+            self.show_frame()
+        self._describe_crop()
 
     def _on_crop_mode_changed(self):
         if not self.crop_var.get():
@@ -1319,6 +1413,14 @@ class Gizmo:
         x, y, w, h = self.crop
         share = (w * h) / (self.info["display_width"] * self.info["height"]) * 100
         text = f"Cropping to {w} x {h} at ({x}, {y}) — {share:.0f}% of the frame."
+        aspect = self._crop_aspect()
+        if aspect:
+            # What the lock actually managed, not what was asked for. The /32 grid cannot hit
+            # every ratio, and quietly reporting the requested one would be a small lie.
+            got = w / h
+            text += (f" Shape {got:.3f}"
+                     + ("" if abs(got - aspect) / aspect < 0.005
+                        else f" — the closest to {aspect:.3f} the 32-pixel grid allows"))
         tw, th = self._size()
         # Cropped below the output size means the clip is upscaled-in-effect: there is simply
         # less real detail behind the same number of pixels. Worth saying, not worth refusing.

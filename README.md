@@ -200,6 +200,12 @@ what you actually want learned, and one source can give you several clips, one p
 crop holds still for the clip, so glance at the last-frame preview — the rectangle is drawn on
 both, and a subject who walks out of it is obvious there and nowhere else.
 
+**The crop sets the clip's shape**, and H3 will train on any of them — square, vertical,
+ultrawide — as long as both sides land on a multiple of 32, which Gizmo takes care of. A **Shape**
+dropdown locks the drag to 1:1, 16:9, 9:16, 4:3, 4:5 and so on when you want a set that's
+consistently framed; leave it on *Free* to drag whatever suits each shot. Mixing shapes across one
+dataset is fine — training buckets by size already.
+
 **22 frames is the useful length**, and it costs about **7× what a still of the same size costs**
 — attention scales with the square of that, which is why 39 frames is the ceiling. Gizmo shows the
 number against each length before you save.

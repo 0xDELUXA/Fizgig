@@ -112,7 +112,7 @@ def probe_source(ffmpeg, path):
     out = _run([ffmpeg, "-hide_banner", "-i", path], text=True).stderr
     info = {"fps": None, "width": None, "height": None, "duration": None,
             "has_audio": False, "sample_rate": None, "channels": None, "vcodec": None,
-            "sar": 1.0, "display_width": None}
+            "sar": 1.0, "rotation": 0, "display_width": None, "display_height": None}
 
     m = re.search(r"Stream #\d+:\d+.*?: Video: (\w+).*?, (\d{2,5})x(\d{2,5})", out, re.S)
     if m:
@@ -124,6 +124,14 @@ def probe_source(ffmpeg, path):
     m = re.search(r"SAR (\d+):(\d+)", out)
     if m and int(m.group(2)):
         info["sar"] = int(m.group(1)) / int(m.group(2))
+    # Phones shot portrait for years by recording landscape frames and tagging them "rotate 90".
+    # ffmpeg turns them upright on decode, so the frame that arrives is portrait while the banner
+    # still reports the landscape dimensions it was STORED at. Take the banner at its word and
+    # every such clip is scaled into a landscape box — squashed. Newer files store the pixels the
+    # right way up, which is why only old ones misbehave.
+    m = re.search(r"rotation of (-?\d+(?:\.\d+)?) degrees", out)
+    if m:
+        info["rotation"] = int(round(float(m.group(1)))) % 360
     m = re.search(r"(\d+(?:\.\d+)?)\s+fps", out)
     if m:
         info["fps"] = float(m.group(1))
@@ -138,10 +146,15 @@ def probe_source(ffmpeg, path):
 
     if not info["width"] or not info["fps"]:
         raise ValueError(f"{os.path.basename(path)} has no video stream Gizmo can read.")
-    # The width the picture is MEANT to be seen at. Everything downstream — the preview, the
-    # target size, the export — works from this, so square-pixel footage (nearly all of it) is
-    # unaffected and anamorphic footage comes out the right shape instead of squashed.
-    info["display_width"] = max(2, int(round(info["width"] * info["sar"])))
+    # The size the picture is MEANT to be seen at, after the sample aspect ratio and after any
+    # rotation. Everything downstream — the preview, the target size, the crop, the export —
+    # works from these, so ordinary upright square-pixel footage is unaffected and the awkward
+    # cases come out the right shape instead of squashed.
+    dw = max(2, int(round(info["width"] * info["sar"])))
+    dh = info["height"]
+    if info["rotation"] in (90, 270):
+        dw, dh = dh, dw
+    info["display_width"], info["display_height"] = dw, dh
     return info
 
 
@@ -165,7 +178,7 @@ def grab_frame(ffmpeg, path, seconds, box=(PREVIEW_W, PREVIEW_H), src_size=None)
     """
     if src_size is None:
         info = probe_source(ffmpeg, path)
-        src_size = (info["display_width"], info["height"])
+        src_size = (info["display_width"], info["display_height"])
     w, h = fit_within(src_size[0], src_size[1], *box)
     p = _run([ffmpeg, "-hide_banner", "-loglevel", "error",
               "-ss", f"{max(0.0, seconds):.3f}", "-i", path,
@@ -1028,8 +1041,12 @@ class Gizmo:
             audio = f"{info['sample_rate']} Hz {layout}"
         else:
             audio = "no audio track"
-        facts = (f"{info['width']}x{info['height']}  ·  {info['fps']:g} fps  ·  "
+        # The size as it will be SEEN. A rotated or anamorphic file is stored at something else,
+        # and reporting the stored numbers here would contradict the picture right beside them.
+        facts = (f"{info['display_width']}x{info['display_height']}  ·  {info['fps']:g} fps  ·  "
                  f"{info['duration'] or 0:.1f} s  ·  {audio}")
+        if info["rotation"]:
+            facts += f"  ·  rotated {info['rotation']}° (stored {info['width']}x{info['height']})"
         # A source slower than 24 fps cannot be resampled up honestly: ffmpeg duplicates frames
         # to reach 24, and the model learns that nothing moves between them. Worth saying out
         # loud rather than silently producing it — animation at 12 fps is the usual case, and it
@@ -1061,7 +1078,7 @@ class Gizmo:
         if self.crop:
             w, h = self.crop[2], self.crop[3]
         else:
-            w, h = self.info["display_width"], self.info["height"]
+            w, h = self.info["display_width"], self.info["display_height"]
         # The chosen TIER survives a refill, not the pixel dimensions — someone who picked
         # "medium" once should not be bumped back to a default every time they redraw a crop.
         previous = re.search(r"\((\w[\w ]*),", self.size_var.get())
@@ -1203,7 +1220,7 @@ class Gizmo:
                          daemon=True).start()
 
     def _grab_worker(self, start_s, end_s):
-        size = (self.info["display_width"], self.info["height"])
+        size = (self.info["display_width"], self.info["display_height"])
         try:
             first = grab_frame(self.ffmpeg, self.src, start_s, src_size=size)
         except Exception:
@@ -1244,7 +1261,7 @@ class Gizmo:
             return None
         iw, ih, ox, oy = shown
         sx = (cx - ox) / iw * self.info["display_width"]
-        sy = (cy - oy) / ih * self.info["height"]
+        sy = (cy - oy) / ih * self.info["display_height"]
         return sx, sy
 
     def _source_to_canvas(self, canvas, sx, sy):
@@ -1253,7 +1270,7 @@ class Gizmo:
             return None
         iw, ih, ox, oy = shown
         return (ox + sx / self.info["display_width"] * iw,
-                oy + sy / self.info["height"] * ih)
+                oy + sy / self.info["display_height"] * ih)
 
     def _crop_press(self, event):
         if not self.src or not self.crop_var.get():
@@ -1289,7 +1306,7 @@ class Gizmo:
         i = self.shape_box.current()
         value = CROP_SHAPES[i][1] if 0 <= i < len(CROP_SHAPES) else None
         if value == "source" and self.info:
-            return self.info["display_width"] / self.info["height"]
+            return self.info["display_width"] / self.info["display_height"]
         return value if isinstance(value, float) else None
 
     def _snap_crop(self, a, b):
@@ -1304,7 +1321,7 @@ class Gizmo:
         a height of 352 rounds to 640x352, which is 1.82. Both sides move, so the result is the
         closest the grid can actually get.
         """
-        dw, dh = self.info["display_width"], self.info["height"]
+        dw, dh = self.info["display_width"], self.info["display_height"]
         max_w = int(dw // SIZE_STEP) * SIZE_STEP
         max_h = int(dh // SIZE_STEP) * SIZE_STEP
         x0, x1 = sorted((max(0.0, min(a[0], dw)), max(0.0, min(b[0], dw))))
@@ -1376,7 +1393,7 @@ class Gizmo:
                 nx = max(0, min(int((cx - nw / 2) // SIZE_STEP) * SIZE_STEP,
                                 int(self.info["display_width"] // SIZE_STEP) * SIZE_STEP - nw))
                 ny = max(0, min(int((cy - nh / 2) // SIZE_STEP) * SIZE_STEP,
-                                int(self.info["height"] // SIZE_STEP) * SIZE_STEP - nh))
+                                int(self.info["display_height"] // SIZE_STEP) * SIZE_STEP - nh))
                 self.crop = (nx, ny, nw, nh)
             self._fill_sizes()
             self._refresh_cost()
@@ -1411,7 +1428,7 @@ class Gizmo:
                 fg=COLORS["accent"])
             return
         x, y, w, h = self.crop
-        share = (w * h) / (self.info["display_width"] * self.info["height"]) * 100
+        share = (w * h) / (self.info["display_width"] * self.info["display_height"]) * 100
         text = f"Cropping to {w} x {h} at ({x}, {y}) — {share:.0f}% of the frame."
         aspect = self._crop_aspect()
         if aspect:

@@ -671,8 +671,12 @@ class ImageDataset(torch.utils.data.Dataset):
         if image_directory is None:
             raise ValueError("image_directory must be specified")
 
-        # Only MiniMax H3 can train on clips, so only its datasets glob for them.
+        # Only MiniMax H3 can train on clips, so only its datasets glob for them. Kept on the
+        # dataset as well as handed to the datasource, because prepare_for_training re-derives
+        # what counts as a training item when it cross-checks the cache — and if the two answers
+        # disagree, every clip's cache is discarded as an orphan and the run trains on nothing.
         _extra = VIDEO_EXTENSIONS if architecture == ARCHITECTURE_MINIMAX else ()
+        self.extra_extensions = _extra
         self.datasource = ImageDirectoryDatasource(image_directory, caption_extension,
                                                    control_directory, extra_extensions=_extra)
 
@@ -956,10 +960,15 @@ class ImageDataset(torch.utils.data.Dataset):
         # orphans. (Cache filenames are the image basename without extension.)
         valid_keys = None
         if self.image_directory and os.path.isdir(self.image_directory):
+            # The SAME extensions the datasource globbed with, video included. Images only would
+            # mean every clip's cache looks like an orphan of a deleted image: a folder of clips
+            # caches perfectly, then reports "ignored 17 stale cache file(s)" and trains on
+            # nothing. A caption .txt still cannot keep a deleted item alive, which is the point
+            # of listing extensions here rather than taking every stem in the folder.
             _exts = {e.lower() for e in IMAGE_EXTENSIONS}
+            _exts |= {e.lower() for e in getattr(self, "extra_extensions", ())}
             valid_keys = {os.path.splitext(f)[0] for f in os.listdir(self.image_directory)
-                          if os.path.splitext(f)[1].lower() in _exts}   # images only — a leftover
-            #                                       caption .txt must not keep a deleted image alive
+                          if os.path.splitext(f)[1].lower() in _exts}
         skipped_stale = 0
         skipped_wrong_reso = 0
 

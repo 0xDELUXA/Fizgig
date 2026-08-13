@@ -172,6 +172,17 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 The text encoder is loaded for the one-time caching pass then freed — it never shares VRAM with training.
 
+**Yes, you train on the pruned file.** It comes up a lot, because "pruned" means something else
+in LLM land — weights deleted to shrink a model, which costs quality. Here it doesn't delete
+trainable capacity. It swaps the AdaLN modulation MLP (around 40% of the 33B) for a curve table.
+That branch only ever sees the timestep, so nothing a LoRA learns lives there, and attention, MLP
+and the token refiner are untouched.
+
+Two reasons it's the better base rather than a compromise. The pruned int8 file is what ComfyUI
+runs, so you train against the weights you deploy on. And AdaLN drops from 2688 wide to 8, which
+turns it from an unusable LoRA target into a sane one — on the full bf16 file it is excluded
+entirely.
+
 ### The MiniMax Training tab, control by control
 
 Every control below also has a short hint in the app; this is the full version.

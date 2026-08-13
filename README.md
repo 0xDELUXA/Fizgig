@@ -130,7 +130,7 @@ You can also edit any caption yourself mid-run from the Problem Images window �
 
 ## MiniMax H3 — third model family
 
-Fizgig now trains LoRAs for **MiniMax H3**, MiniMax's open-weight ~33B video model — the biggest model Fizgig supports — from **ordinary still-image datasets**, on a single consumer GPU. It's a native port, and the output is a standard `.safetensors` that loads straight into ComfyUI's H3 workflows, including the pruned inference builds.
+Fizgig now trains LoRAs for **MiniMax H3**, MiniMax's open-weight ~33B video model — the biggest model Fizgig supports — from **ordinary still-image datasets** on a single consumer GPU, and now from **short video clips, with their sound** ([details ↓](#training-on-video-clips--and-on-their-sound)). It's a native port, and the output is a standard `.safetensors` that loads straight into ComfyUI's H3 workflows, including the pruned inference builds.
 
 **Training only, for now.** MiniMax H3 trains, previews and pauses/resumes like the other two
 families, but the workbench tabs — Repair Studio, LoRA the Explorer, LoRA Royale, Profiler and
@@ -162,13 +162,55 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 **Previews are 1024×1024 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch.
 
-**What it needs** — three files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card at the bottom):
+### Training on video clips — and on their sound
+
+H3 generates audio and video together, so a still-image dataset only ever teaches it a look. Short
+video clips teach it **motion**, and clips with sound teach it **a voice**. This is new and
+experimental, and clips cost far more per step than stills — start with a handful and see what you
+get before you cut fifty.
+
+**Drop `.mp4` clips into the training folder alongside your images.** Mixing stills and clips in
+one dataset is fine and needs no setting. Caption them exactly as you caption a photo — clips
+appear on the Captions tab like everything else, showing a frame from the middle.
+
+A clip has to be on spec, and Fizgig refuses one that isn't rather than quietly fixing it:
+
+| | Requirement |
+|---|---|
+| Container | `.mp4` |
+| Frame rate | exactly 24 fps — H3's own clock |
+| Frame count | 5, 22 or 39 frames |
+| Dimensions | multiples of 32 |
+| Audio | 32 kHz stereo, or no track at all |
+
+**Gizmo makes clips that hit it.** It ships with Fizgig — open it from the **Image Prep** tab, or
+double-click *Launch Gizmo (Video clip prep tool).bat*. Open any video, scrub to a moment, pick a
+length, save; it handles the frame rate, the frame count, the sizing and the audio. Six sections
+out of one source is six marks and six clicks. From high-frame-rate footage it can also keep more
+frames than real time gives, which plays back as slow motion — offered as a choice, never applied
+behind your back.
+
+**22 frames is the useful length**, and it costs about **7× what a still of the same size costs**
+— attention scales with the square of that, which is why 39 frames is the ceiling. Gizmo shows the
+number against each length before you save.
+
+**Don't want a clip's sound in the training?** Mute it. In Gizmo that's a per-clip toggle, and it
+adds `_mute` to the filename — so you can also do it later by renaming, and undo it the same way.
+A muted clip trains its video normally and its audio is ignored entirely. Clips with no audio
+track behave the same.
+
+**Sound needs one extra model file** — the audio VAE, ~605 MB, on its own row in Preferences. Set
+it and clips with sound train on that sound. Leave it blank and everything still works; clips just
+train silent. Stills never touch it.
+
+**What it needs** — four files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card at the bottom):
 
 | Model | Size | Notes |
 |---|---|---|
 | DiT — pruned int8 | ~21 GB | The training base. Use `minimax_h3_fl2va_pruned_int8_convrot.safetensors` — it's the file ComfyUI runs, so your LoRA trains against the weights it'll be deployed on, and it keeps its int8 weights rather than being re-quantized. The ~66 GB bf16 file also works (NF4 at load, ~11 GB resident) |
 | Qwen3-VL-32B text encoder | ~15.7 GB | The **nvfp4** file — the same one ComfyUI uses, so you may already have it. The bf16 file (~51.5 GB) also works; the *int8_convrot* variant is not supported |
 | Video VAE | ~4.9 GB | Used while caching your images, and to decode previews |
+| Audio VAE *(optional)* | ~605 MB | Only for training on the sound in video clips. Loaded while caching, and only when the folder contains clips. Leave blank and clips train silent |
 | DiT — reference *(optional)* | ~21 GB | Only for reference distillation. `minimax_h3_ref2va_pruned_int8_convrot.safetensors` — a different fine-tune, and the only H3 build that accepts reference images. You may already have it if you use ComfyUI's r2v workflow. **Download models for me** leaves it out unless you tick **Include the reference DiT** beside the button. Leave blank for ordinary training |
 
 The text encoder is loaded for the one-time caching pass then freed — it never shares VRAM with training.

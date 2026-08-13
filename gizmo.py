@@ -94,12 +94,19 @@ def probe_source(ffmpeg, path):
     imageio-ffmpeg does not bundle."""
     out = _run([ffmpeg, "-hide_banner", "-i", path], text=True).stderr
     info = {"fps": None, "width": None, "height": None, "duration": None,
-            "has_audio": False, "sample_rate": None, "channels": None, "vcodec": None}
+            "has_audio": False, "sample_rate": None, "channels": None, "vcodec": None,
+            "sar": 1.0, "display_width": None}
 
     m = re.search(r"Stream #\d+:\d+.*?: Video: (\w+).*?, (\d{2,5})x(\d{2,5})", out, re.S)
     if m:
         info["vcodec"] = m.group(1)
         info["width"], info["height"] = int(m.group(2)), int(m.group(3))
+    # Anamorphic sources store non-square pixels and carry the correction as a sample aspect
+    # ratio — 1440x1080 with SAR 4:3 is a 1920x1080 picture. Ignore it and everything from such
+    # a camera trains squashed, which looks like a bug in Gizmo rather than in the footage.
+    m = re.search(r"SAR (\d+):(\d+)", out)
+    if m and int(m.group(2)):
+        info["sar"] = int(m.group(1)) / int(m.group(2))
     m = re.search(r"(\d+(?:\.\d+)?)\s+fps", out)
     if m:
         info["fps"] = float(m.group(1))
@@ -114,29 +121,44 @@ def probe_source(ffmpeg, path):
 
     if not info["width"] or not info["fps"]:
         raise ValueError(f"{os.path.basename(path)} has no video stream Gizmo can read.")
+    # The width the picture is MEANT to be seen at. Everything downstream — the preview, the
+    # target size, the export — works from this, so square-pixel footage (nearly all of it) is
+    # unaffected and anamorphic footage comes out the right shape instead of squashed.
+    info["display_width"] = max(2, int(round(info["width"] * info["sar"])))
     return info
 
 
-def grab_frame(ffmpeg, path, seconds, box=(PREVIEW_W, PREVIEW_H)):
+def fit_within(src_w, src_h, box_w, box_h):
+    """Largest size with the source's shape that fits inside the box. At least 2x2."""
+    scale = min(box_w / src_w, box_h / src_h)
+    return max(2, int(round(src_w * scale))), max(2, int(round(src_h * scale)))
+
+
+def grab_frame(ffmpeg, path, seconds, box=(PREVIEW_W, PREVIEW_H), src_size=None):
     """One frame at `seconds`, scaled to fit `box`, as a PIL image.
 
     -ss BEFORE -i is the fast form, and has been frame-accurate since ffmpeg 2.1 (it seeks to the
     preceding keyframe and decodes forward). Scrubbing a long source with output-seek instead
     would decode everything up to the mark and take seconds per frame.
+
+    The output size is COMPUTED and passed to ffmpeg, never inferred from how many bytes came
+    back. Inferring it worked for 16:9 and quietly sheared everything else: raw RGB carries no
+    dimensions, and picking the first width that divides the byte count lands on 512x216 for a
+    4:3 source that is really 384x288 — same pixel count, wrong shape, a badly skewed picture.
     """
-    bw, bh = box
-    vf = f"scale={bw}:{bh}:force_original_aspect_ratio=decrease"
+    if src_size is None:
+        info = probe_source(ffmpeg, path)
+        src_size = (info["display_width"], info["height"])
+    w, h = fit_within(src_size[0], src_size[1], *box)
     p = _run([ffmpeg, "-hide_banner", "-loglevel", "error",
               "-ss", f"{max(0.0, seconds):.3f}", "-i", path,
-              "-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
-    if not p.stdout:
+              "-frames:v", "1", "-vf", f"scale={w}:{h},setsar=1",
+              "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
+    # Checked, not trusted: a mismatch means the filter did something other than what was asked,
+    # and building an image from the wrong shape is precisely the bug this replaced.
+    if not p.stdout or len(p.stdout) != w * h * 3:
         return None
-    # The scaler preserves aspect, so the real size has to be recovered from the byte count.
-    n = len(p.stdout) // 3
-    for w in range(bw, 0, -1):
-        if n % w == 0 and n // w <= bh:
-            return Image.frombytes("RGB", (w, n // w), p.stdout)
-    return None
+    return Image.frombytes("RGB", (w, h), p.stdout)
 
 
 # --- writing a clip ----------------------------------------------------------------------------
@@ -905,7 +927,8 @@ class Gizmo:
         self._refresh_planned_name()
 
     def _fill_sizes(self):
-        w, h = self.info["width"], self.info["height"]
+        # Display width, so an anamorphic source is offered the shape it is meant to be seen at.
+        w, h = self.info["display_width"], self.info["height"]
         # De-duplicated because target_size never upscales: for a 640x480 source all three
         # presets land on the same dimensions, and offering "small / medium / large" that are
         # secretly identical is worse than offering one.
@@ -1042,12 +1065,13 @@ class Gizmo:
                          daemon=True).start()
 
     def _grab_worker(self, start_s, end_s):
+        size = (self.info["display_width"], self.info["height"])
         try:
-            first = grab_frame(self.ffmpeg, self.src, start_s)
+            first = grab_frame(self.ffmpeg, self.src, start_s, src_size=size)
         except Exception:
             first = None
         try:
-            last = grab_frame(self.ffmpeg, self.src, end_s, box=(END_W, END_H))
+            last = grab_frame(self.ffmpeg, self.src, end_s, box=(END_W, END_H), src_size=size)
         except Exception:
             last = None
         self.root.after(0, self._show_images, first, last)

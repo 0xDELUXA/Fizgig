@@ -303,12 +303,19 @@ session picks up where you left off.
 
 ## Install
 
-Clone the repo (or download the ZIP via the green **Code** button and extract):
+Clone the repo:
 
 ```bash
 git clone https://github.com/shootthesound/Fizgig.git
 cd Fizgig
 ```
+
+**Clone it rather than downloading the ZIP.** `update_fizgig.bat` updates you by pulling the
+latest changes with git, and a ZIP arrives without the information git needs, so updating fails
+with `fatal: not a git repository`. If you have already installed from a ZIP, you don't have to
+start over — [issue #67](https://github.com/shootthesound/Fizgig/issues/67) has six commands that
+convert the folder you already have into a proper checkout, leaving your models, LoRAs, caches,
+presets and venv exactly where they are.
 
 **Windows (one-click)** — double-click `install_fizgig.bat`. It creates a venv, installs CUDA 12.8 PyTorch and all dependencies, pre-downloads the InsightFace models, and verifies CUDA is visible to PyTorch. Launch with `run_fizgig.bat`; update later with `update_fizgig.bat`.
 

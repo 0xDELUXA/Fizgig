@@ -572,6 +572,18 @@ class ImageDirectoryDatasource:
 
     def get_image_data(self, idx: int) -> Tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
         image_path = self.image_paths[idx]
+        if os.path.splitext(image_path)[1].lower() in {e.lower() for e in VIDEO_EXTENSIONS}:
+            # A clip arrives as its frames, which the resize step downstream already handles as a
+            # list. Imported lazily and only inside this branch: the dataset layer stays free of
+            # model imports at load time, and only MiniMax datasets ever glob a video in the
+            # first place.
+            from fizgig.minimax.clip import read_frames, validate
+            frames = read_frames(image_path)
+            validate(image_path, frames=len(frames))
+            imgs = [Image.fromarray(f) for f in frames]
+            _, caption = self.get_caption(idx)
+            return image_path, imgs, caption, None
+
         img = Image.open(image_path)
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGB")

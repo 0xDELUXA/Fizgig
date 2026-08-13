@@ -339,6 +339,34 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
             f"neither fits outright — 4-bit parks {n_swap} blocks against int8's {i_swap}")
 
 
+def _max_latent_frames(group) -> int:
+    """Longest clip in the dataset, in LATENT frames, read from the caches it already wrote.
+
+    Header-only: safetensors key names carry the shape, so this is a directory scan and no
+    tensor is read. A still's key is `latent_HxW` and contributes 1; a clip's is `latent_TxHxW`.
+    Returns 1 for a stills dataset, which leaves every existing plan exactly as it was.
+    """
+    from safetensors import safe_open
+    best = 1
+    seen = set()
+    for ds in getattr(group, "datasets", []):
+        cache_dir = getattr(ds, "cache_directory", None)
+        if not cache_dir or cache_dir in seen or not os.path.isdir(cache_dir):
+            continue
+        seen.add(cache_dir)
+        for name in os.listdir(cache_dir):
+            if not name.endswith(".safetensors"):
+                continue
+            try:
+                with safe_open(os.path.join(cache_dir, name), framework="pt") as f:
+                    for k in f.keys():
+                        if k.startswith("latent_") and k.count("x") == 2:
+                            best = max(best, int(k.split("_")[1].split("x")[0]))
+            except Exception:
+                continue                      # unreadable cache: the caching pass will say so
+    return best
+
+
 def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None,
               transient_gb: float = 0.0, adapter_gb: float = 0.0):
     """Pure planner: (blocks_to_swap, gradient_checkpointing) from free VRAM + token load.
@@ -1580,6 +1608,21 @@ def train_minimax(
         _mp = max(w * h / 1e6 for ds in group.datasets for (w, h) in ds.batch_manager.bucket_resos)
     except Exception:
         pass
+    # A CLIP costs its spatial size TIMES its latent frames, and the planner's activation term is
+    # linear in exactly that — so a clip dataset must be handed the product, not the bucket. The
+    # bucket alone makes a 124-frame run look like the still it is one frame of.
+    #
+    # Measured, 0.25 MP buckets, gradient checkpointing on: activations run 1.7 GiB at 22 frames
+    # to 9.2 at 124, dead linear. Left as the bucket size, a 32 GB card is told it can afford
+    # int8 (19.8 GiB resident), the 124-frame step then peaks at 28.9 of 31.8 and the allocator
+    # thrashes: 300 s a step against 17.7 s for the same step on NF4. Not an error — just a run
+    # that never finishes, for want of telling the planner what it was planning for.
+    _clip_t = _max_latent_frames(group)
+    if _clip_t > 1:
+        _mp *= _clip_t
+        logger.info(f"[vram] longest clip is {_clip_t} latent frames, so the step carries "
+                    f"{_clip_t}x the tokens of a still at this bucket — planning against an "
+                    f"effective {_mp:.2f} MP.")
     _ckpt_req = str(gradient_checkpointing).lower()
     _base_mode = (base_quant if base_quant != "auto"
                   else ("int8" if is_pruned_checkpoint(dit_path) else "nf4"))

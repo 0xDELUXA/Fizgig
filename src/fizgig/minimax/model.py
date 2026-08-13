@@ -612,6 +612,18 @@ class MiniMaxH3DiT(nn.Module):
             sigma_a = remap_sigma(sigma_v)
             t_audio = 1.0 - sigma_a
             if audio_rows is not None:
+                # Checked, because the sequence and its POSITION GRID are built from two
+                # different numbers: the rows come from the cache, the grid from n_audio_latents
+                # above. They agree only while the cache and this file agree about a clip's
+                # length, and that is exactly the sort of contract that drifts across files. A
+                # silent desync would train the audio stream against shifted positions.
+                _want = n_audio_latents * AUDIO_CHANNELS
+                if audio_rows.shape[0] != _want:
+                    raise ValueError(
+                        f"audio_rows has {audio_rows.shape[0]} rows but this {latent_t}-latent-"
+                        f"frame clip ({pixel_frames_for_latent(latent_t)} pixel frames) packs "
+                        f"{_want} — {n_audio_latents} latents x {AUDIO_CHANNELS} channels. The "
+                        f"cached audio does not match the cached video.")
                 _arows = audio_rows.to(device=device, dtype=torch.float32)
             else:
                 eps = audio_noise

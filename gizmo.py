@@ -369,32 +369,104 @@ def output_name(src_path, out_dir, muted, claimed=()):
     raise RuntimeError("1000 clips from one source — give the output folder a clean start.")
 
 
-def file_drop_available():
-    """Whether a video can be dropped ONTO the window. False, and here is why.
+def enable_file_drop(root, on_drop):
+    """Let a video be dragged onto the window. Returns True if it took.
 
-    Tk has no drag-and-drop. The tempting fix is to subclass the Windows window procedure with a
-    ctypes callback and catch WM_DROPFILES — no new dependency, about forty lines. It was written
-    and it crashes the interpreter, and not in a way any amount of care in the handler can fix:
+    Through the Windows shell API rather than by adding tkinterdnd2: a new dependency would mean
+    everyone re-running the installer for a convenience, and Gizmo's install story is that it
+    needs nothing Fizgig does not already have.
+
+    Tk has no drag-and-drop, so the window procedure is subclassed to catch WM_DROPFILES. THE
+    RULE THAT MAKES THIS SAFE: the procedure must not touch Tk. Not one call.
+
+    That rule was learned the hard way. The first version marshalled the path with root.after,
+    which is the ordinary way to get work back onto the GUI thread — and it killed the
+    interpreter outright on the first real drag:
 
         Fatal Python error: PyEval_RestoreThread: the function must be called with the GIL held
         ... the GIL is released (the current Python thread state is NULL)
 
-    Tk's mainloop releases the GIL and clears the thread state while it waits for events. A real
-    drop arrives exactly then, Windows dispatches straight into the ctypes callback re-entrantly
-    on that same thread, and Python 3.13 aborts before a single line of the handler runs. A
-    synthesised drop does NOT reproduce it, because SendMessage from inside root.update() arrives
-    while Python is already executing — which is why the first version passed its test and then
-    crashed on the first real drag.
+    Tk's mainloop sits inside Tcl with the GIL released. A drop arrives, Windows dispatches into
+    the window procedure, and root.after re-enters Tcl from underneath the loop already running
+    it. The ctypes callback was never the problem — one that only touches plain Python is fine,
+    which is what this does: append the path to a list, and let an ordinary Tk timer, running
+    where Tk expects to be running, pick it up.
 
-    Doing it properly needs tkdnd, the Tcl extension, which integrates with Tk's own event loop
-    instead of fighting it. It is not in the bundled Tcl (checked: 8.6.15 has no tkdnd) and would
-    arrive via tkinterdnd2 — a new dependency, which means everyone re-running the installer.
-
-    Until that is a decision someone has made, the file gets in by the two routes that cost
-    nothing and cannot crash: handed to Gizmo on the command line, which is what dropping a video
-    onto the launcher does and what Explorer's "Open with" does, or pasted as a path.
+    None of this reproduces with a synthesised drop sent from inside root.update(), because then
+    Python is already executing and Tcl is not mid-loop. It has to be POSTED and left to arrive
+    on an idle mainloop, exactly as Explorer's does.
     """
-    return False
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        root.update_idletasks()
+        # wm_frame is the REAL top-level window. winfo_id is Tk's child frame, which never
+        # receives WM_DROPFILES however willing it looks.
+        hwnd = int(root.wm_frame(), 16)
+        user32, shell32 = ctypes.windll.user32, ctypes.windll.shell32
+        WM_DROPFILES, GWLP_WNDPROC = 0x0233, -4
+
+        # Pointer-sized by hand: WPARAM and the handle SetWindowLongPtrW returns do not fit
+        # ctypes' default c_int, and the resulting OverflowError is raised inside the window
+        # procedure where nothing can catch it.
+        _64 = ctypes.sizeof(ctypes.c_void_p) == 8
+        LONG_PTR = ctypes.c_longlong if _64 else ctypes.c_long
+        UINT_PTR = ctypes.c_ulonglong if _64 else ctypes.c_ulong
+        WNDPROC = ctypes.WINFUNCTYPE(LONG_PTR, ctypes.c_void_p, ctypes.c_uint,
+                                     UINT_PTR, LONG_PTR)
+        for fn, args, res in (
+                (user32.CallWindowProcW,
+                 [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, UINT_PTR, LONG_PTR], LONG_PTR),
+                (user32.SetWindowLongPtrW,
+                 [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p], ctypes.c_void_p),
+                (user32.DefWindowProcW,
+                 [ctypes.c_void_p, ctypes.c_uint, UINT_PTR, LONG_PTR], LONG_PTR),
+                (shell32.DragQueryFileW,
+                 [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint], ctypes.c_uint),
+                (shell32.DragFinish, [ctypes.c_void_p], None)):
+            fn.argtypes, fn.restype = args, res
+
+        shell32.DragAcceptFiles(ctypes.c_void_p(hwnd), True)
+        inbox, old = [], [None]
+
+        def proc(h, msg, wparam, lparam):
+            # Plain Python only. No Tk, no Tcl, nothing that can raise if it can be helped — this
+            # runs on every message the window receives.
+            try:
+                if msg == WM_DROPFILES:
+                    try:
+                        buf = ctypes.create_unicode_buffer(1024)
+                        if shell32.DragQueryFileW(ctypes.c_void_p(wparam), 0, buf, 1024):
+                            inbox.append(buf.value)
+                    finally:
+                        shell32.DragFinish(ctypes.c_void_p(wparam))
+                    return 0
+                return user32.CallWindowProcW(old[0], h, msg, wparam, lparam)
+            except Exception:
+                try:
+                    return user32.DefWindowProcW(h, msg, wparam, lparam)
+                except Exception:
+                    return 0
+
+        cb = WNDPROC(proc)
+        old[0] = user32.SetWindowLongPtrW(ctypes.c_void_p(hwnd), GWLP_WNDPROC,
+                                          ctypes.cast(cb, ctypes.c_void_p))
+        if not old[0]:
+            return False
+        root._drop_callback = cb          # held, or it is collected and the window proc dangles
+
+        def drain():
+            while inbox:
+                on_drop(inbox.pop(0))
+            root.after(120, drain)
+
+        root.after(120, drain)
+        return True
+    except Exception:
+        return False
 
 
 def audio_playback_backend():
@@ -529,11 +601,10 @@ class Gizmo:
 
         self._style()
         self._build()
-        # Two ways in besides the Open button, neither costing a dependency nor able to crash:
-        # a path on the command line — which is what dropping a video onto the launcher does, and
-        # what Explorer's "Open with" does — or one pasted with Ctrl+V. See file_drop_available
-        # for why dropping onto the window itself is not among them.
-        self.can_drop = file_drop_available()
+        # Three ways in besides the Open button, none of them a dependency: drop a video on the
+        # window, hand Gizmo a path on the command line — which is what dropping one onto the
+        # launcher does, and what Explorer's "Open with" does — or paste a path with Ctrl+V.
+        self.can_drop = enable_file_drop(self.root, self.open_path)
         self.root.bind("<Control-v>", lambda _e: self.paste_path())
         if not self.ffmpeg:
             messagebox.showerror(
@@ -670,15 +741,14 @@ class Gizmo:
         self.src_label = tk.Label(row, text="No video open", font=(FONT_FAMILY, 10),
                                   bg=COLORS["bg_surface"], fg=COLORS["text_muted"])
         self.src_label.pack(side=tk.LEFT, padx=12)
-        self.drop_hint = tk.Label(row, text="…or drop a video on the launcher, or paste a path "
-                                            "with Ctrl+V",
+        self.drop_hint = tk.Label(row, text="…or just drag a video onto this window",
                                   font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"],
                                   fg=COLORS["text_muted"])
         self.drop_hint.pack(side=tk.RIGHT)
         ToolTip(self.drop_hint,
-                "Gizmo opens any video handed to it: drag one onto the Launch Gizmo shortcut, "
-                "right-click a video and Open with, or copy its path in Explorer and press "
-                "Ctrl+V here.")
+                "Drag a video from Explorer straight onto this window.\n\nGizmo also opens one "
+                "dragged onto the Launch Gizmo shortcut, one sent with right-click and Open "
+                "with, or a path pasted with Ctrl+V.")
         self.src_info = tk.Label(c, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                  bg=COLORS["bg_surface"], fg=COLORS["text_explain"])
         self.src_info.pack(anchor="w", pady=(8, 0))

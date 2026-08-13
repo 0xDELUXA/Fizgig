@@ -43,6 +43,16 @@
 
 > **Two model families, one workbench.** Everything here works with both **Flux 2 Klein 9B** and **Krea 2 (12.9B)** — Repair Studio, Explorer, Royale, Profiler, Extract, plus Context LoRA, Adaptive LR and Pause/Resume. [Krea 2 details ↓](#krea-2--second-model-family)
 
+> ### ⚠ Using a MiniMax H3 LoRA **without** the Turbo LoRA? Turn its strength down.
+> Fizgig trains H3 with most of the run at **low noise** — that's what gives these LoRAs their
+> likeness, and it's why they look so good in a 4-step Turbo workflow. Take Turbo out and run the
+> stock 20-step workflow at the same strength and they can go soft, drift, or distort.
+>
+> **Expect to want `0.3`–`0.5` there**, sometimes less — how far down depends on your dataset and
+> how long the run trained. Start low and work up, rather than starting at the `1.0` that looks
+> right with Turbo. A LoRA that seemed broken without Turbo usually isn't; it's just being applied
+> five times as often. [Why, and what to change if that isn't enough ↓](#minimax-h3--third-model-family)
+
 > **Two things worth reading about before you start.** The Krea 2 trainer **curates your dataset while it trains** — detecting problem images from their loss alone, throttling them, having the text encoder *look at* the stuck ones and rewrite their captions, and telling you the best epoch when the run plateaus. [Details ↓](#the-trainer-curates-your-dataset-while-it-trains-krea-2-experimental) And the **sample gallery is an instrument**, not a contact sheet: it scores every sample's likeness against your own photos live during training, with a Royale-style **Training Run Visualiser** to scrub and export the run. [Details ↓](#the-sample-gallery-is-an-instrument-both-families)
 
 ---
@@ -132,6 +142,41 @@ You can also edit any caption yourself mid-run from the Problem Images window �
 ## MiniMax H3 — third model family
 
 Fizgig now trains LoRAs for **MiniMax H3**, MiniMax's open-weight ~33B video model — the biggest model Fizgig supports — from **ordinary still-image datasets**, on a single consumer GPU. It's a native port, and the output is a standard `.safetensors` that loads straight into ComfyUI's H3 workflows, including the pruned inference builds.
+
+### ⚠ Without the Turbo LoRA, run these at lower strength
+
+**If your LoRA looks great with the Turbo LoRA loaded and disappointing without it, nothing is
+wrong with the LoRA.** Turn its strength down.
+
+Fizgig trains H3 with **60% of the run at low noise**, where MiniMax's own default is about 8%.
+That is deliberate and it is why these LoRAs hit likeness at all — low noise is where fine detail
+and identity are learned. The trade is that the adapter does comparatively little at the
+**high-noise** end, and high noise is where pose, framing and composition are decided.
+
+The two inference regimes then treat that very differently:
+
+| | Turbo, 4 steps | Stock, 20 steps |
+|---|---|---|
+| Times the LoRA is applied | 4 | **20** |
+| Time spent at high noise | little | **a lot** |
+| Structure held by | Turbo's own adapter | your LoRA, unassisted |
+
+So in the stock workflow the LoRA is applied five times as often, right through the phase it was
+trained least in. Softness, drift and distorted anatomy are the expected symptoms, not a sign the
+run went wrong.
+
+**What to do:**
+
+1. **Drop the strength to `0.3`–`0.5`** and work up from there. It can want to go lower still —
+   how far depends on the dataset and how long the run trained, so treat it as a dial to find
+   rather than a number to set. This alone usually settles it and costs you nothing.
+2. **Still distorted down at `0.3`?** Then it's the training distribution rather than the strength,
+   and the knob is **% of training in low noise** on the Training tab. Try **40–45%** for a LoRA
+   you intend to run at 20 steps, which gives it more of the high-noise end to learn from.
+
+Worth deciding which regime you actually care about. If you and the people using your LoRAs render
+with Turbo — as most H3 workflows do — then a LoRA tuned for that is not a compromise, and the
+defaults are already pointed the right way.
 
 **Training only, for now.** MiniMax H3 trains, previews and pauses/resumes like the other two
 families, but the workbench tabs — Repair Studio, LoRA the Explorer, LoRA Royale, Profiler and

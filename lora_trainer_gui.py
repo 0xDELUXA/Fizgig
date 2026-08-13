@@ -8035,6 +8035,27 @@ class LoRATrainerGUI:
             self.image_folder_var.set(folder)
             self.refresh_caption_images()
 
+    # Video clips are training items only for MiniMax H3, and only there does the dataset glob
+    # pick them up — so only there do they need captions.
+    TRAINING_VIDEO_EXTENSIONS = {'.mp4'}
+
+    def _open_training_frame(self, path):
+        """A PIL image for any training item. A video clip gives up its middle frame.
+
+        Clips are training items like every other, so they need a caption, a thumbnail and a face
+        score like every other — and the middle frame is the fairest single representative of
+        one. There is deliberately NO still written beside a clip on disk to serve this: the
+        latent cache keys on the filename stem with the extension stripped, so a sidecar
+        walk_03.png would land on walk_03.mp4's own cache file and one would silently overwrite
+        the other.
+        """
+        from PIL import Image
+        if os.path.splitext(path)[1].lower() not in self.TRAINING_VIDEO_EXTENSIONS:
+            return Image.open(path)
+        from fizgig.minimax.clip import read_frames
+        frames = read_frames(path)
+        return Image.fromarray(frames[len(frames) // 2])
+
     def get_caption_image_files(self):
         """Get list of image files in caption folder"""
         folder = self.image_folder_var.get()
@@ -8042,6 +8063,8 @@ class LoRATrainerGUI:
             return []
 
         image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+        if self._is_minimax_arch():
+            image_extensions = image_extensions | self.TRAINING_VIDEO_EXTENSIONS
         images = []
 
         for filename in os.listdir(folder):
@@ -8105,7 +8128,7 @@ class LoRATrainerGUI:
         # Create thumbnail (original resolution captured before thumbnail() shrinks it)
         img_res = None
         try:
-            with Image.open(img_path) as img:
+            with self._open_training_frame(img_path) as img:
                 img_res = img.size
                 img.thumbnail((150, 150), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
@@ -8224,7 +8247,7 @@ class LoRATrainerGUI:
                          + (f"   ({files.index(os.path.basename(path)) + 1} / {len(files)})"
                             if os.path.basename(path) in files else ""))
             try:
-                with Image.open(path) as img:
+                with self._open_training_frame(path) as img:
                     _w, _h = img.size
                     img.thumbnail((300, 300), Image.LANCZOS)
                     photo = ImageTk.PhotoImage(img)
@@ -8844,10 +8867,9 @@ class LoRATrainerGUI:
                 return None
 
         try:
-            from PIL import Image
             import torch
 
-            image = Image.open(img_path).convert("RGB")
+            image = self._open_training_frame(img_path).convert("RGB")
             task = self.caption_task_var.get()
             max_tokens = int(self.caption_max_tokens_var.get())
 
@@ -8929,7 +8951,8 @@ class LoRATrainerGUI:
                 max_tokens = int(self.caption_max_tokens_var.get())
             except (ValueError, tk.TclError):
                 max_tokens = 120
-            return generate_caption(self.qwen_captioner, img_path,
+            # The frame, not the path: a MiniMax clip has no still on disk to hand over.
+            return generate_caption(self.qwen_captioner, self._open_training_frame(img_path),
                                     max_new_tokens=max_tokens,
                                     instruction=self._resolve_caption_instruction())
         except Exception as e:
@@ -9287,8 +9310,11 @@ class LoRATrainerGUI:
             messagebox.showerror("Error", "Please enter a trigger word in the Trigger Word box first.")
             return
 
-        # Supported image extensions
+        # Supported image extensions — plus video clips under MiniMax H3, where they are
+        # training items and need a .txt exactly like a still does.
         image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+        if self._is_minimax_arch():
+            image_extensions = image_extensions | self.TRAINING_VIDEO_EXTENSIONS
 
         # Clear log
         self.caption_log.configure(state="normal")

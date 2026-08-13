@@ -43,6 +43,8 @@ def _uv_cache_dir(python_path):
     """Ask uv for its actual cache directory (respects UV_CACHE_DIR/XDG overrides and any
     project config) rather than guessing at its platform defaults ourselves."""
     try:
+        # shell=False (list form) — python_path is always a caller-supplied venv interpreter
+        # path, never external/untrusted input; no shell is involved to inject into.
         result = subprocess.run(
             [str(python_path), "-m", "uv", "cache", "dir"],
             capture_output=True, text=True, check=True)
@@ -55,8 +57,15 @@ def _same_volume(path_a: Path, path_b: Path):
     """True/False once both sides can be resolved to a real device; None if that can't be
     determined — callers treat None as 'don't know, let uv decide for itself'."""
     if os.name == "nt":
-        da = os.path.splitdrive(str(path_a))[0].lower()
-        db = os.path.splitdrive(str(path_b))[0].lower()
+        # normpath first so two spellings of the same path (trailing slash, mixed \\ and /,
+        # case) still compare equal — splitdrive is a plain string op with no normalization
+        # of its own. This does NOT unify a mapped drive letter with a UNC path pointing at
+        # the same share (Z:\ vs \\server\share\ for the same target reads as "different" and
+        # just costs a --link-mode copy we didn't strictly need, never a wrong answer) — that
+        # needs an actual volume-identity API this module doesn't otherwise depend on, and the
+        # failure mode is "unnecessarily cautious," not silently incorrect.
+        da = os.path.splitdrive(os.path.normpath(str(path_a)))[0].lower()
+        db = os.path.splitdrive(os.path.normpath(str(path_b)))[0].lower()
         return (da == db) if (da and db) else None
 
     def _existing_ancestor_dev(p: Path):
@@ -101,6 +110,17 @@ def _parse_requirements(requirements_path):
         for raw in f:
             code = raw.split("#", 1)[0].strip()
             if code.startswith("--extra-index-url"):
+                if extra_index_url is not None:
+                    # Silently keeping only the last one (or only the first) would drop an
+                    # index some other package actually needs, with no error to point at why —
+                    # this function only knows how to scope ONE extra index to the torch call
+                    # and strip it everywhere else, so a second one has to be a loud failure,
+                    # not a silent one, until this parsing is generalized to handle it.
+                    raise ValueError(
+                        f"{requirements_path} declares more than one --extra-index-url — "
+                        "uv_install_deps.py only knows how to scope a single extra index to "
+                        "the torch/torchvision install; update _parse_requirements to handle "
+                        "multiple indexes before adding a second one.")
                 parts = code.split(None, 1)
                 if len(parts) == 2:
                     extra_index_url = parts[1]

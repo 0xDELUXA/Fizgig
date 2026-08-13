@@ -52,6 +52,12 @@ if find_spec("pillow_jxl") is not None:
     import pillow_jxl  # noqa: F401
     IMAGE_EXTENSIONS.extend([".jxl", ".JXL"])
 
+# Video clips, MiniMax H3 only — passed in per-dataset rather than added to IMAGE_EXTENSIONS, so
+# a stray .mp4 in a Klein or Krea 2 folder is still ignored rather than handed to PIL. Declared
+# here rather than imported from fizgig.minimax so the dataset layer keeps knowing nothing about
+# any model.
+VIDEO_EXTENSIONS = (".mp4", ".MP4")
+
 RESOLUTION_STEPS = 16  # Klein 9B resolution step
 
 # Per-architecture bucket grid. A bucket edge must be divisible by (VAE spatial factor x DiT
@@ -96,10 +102,16 @@ def str_to_dtype(s: Optional[str], default_dtype: Optional[torch.dtype] = None) 
     raise ValueError(f"Unsupported dtype string: {s}")
 
 
-def glob_images(directory: str, base: str = "*", caption_extension: Optional[str] = None) -> list[str]:
-    """Glob image files in *directory*, optionally filtering to those with captions."""
+def glob_images(directory: str, base: str = "*", caption_extension: Optional[str] = None,
+                extra_extensions: tuple = ()) -> list[str]:
+    """Glob image files in *directory*, optionally filtering to those with captions.
+
+    extra_extensions adds formats this dataset accepts beyond images — VIDEO_EXTENSIONS for
+    MiniMax H3, empty for everyone else. Opt-in per dataset so a stray .mp4 in a Klein folder is
+    still skipped rather than opened as an image.
+    """
     img_paths: list[str] = []
-    for ext in IMAGE_EXTENSIONS:
+    for ext in list(IMAGE_EXTENSIONS) + list(extra_extensions):
         if base == "*":
             img_paths.extend(glob.glob(os.path.join(glob.escape(directory), base + ext)))
         else:
@@ -494,17 +506,26 @@ class ImageDirectoryDatasource:
         image_directory: str,
         caption_extension: Optional[str] = None,
         control_directory: Optional[str] = None,
+        extra_extensions: tuple = (),
     ):
         self.image_directory = image_directory
         self.caption_extension = caption_extension
         self.control_directory = control_directory
+        self.extra_extensions = tuple(extra_extensions)
         self.caption_only = False
         self.has_control = False
         self._current_idx = 0
 
         logger.info(f"glob images in {self.image_directory}")
-        self.image_paths = glob_images(self.image_directory, caption_extension=self.caption_extension)
-        logger.info(f"found {len(self.image_paths)} images")
+        self.image_paths = glob_images(self.image_directory,
+                                       caption_extension=self.caption_extension,
+                                       extra_extensions=self.extra_extensions)
+        _clips = sum(1 for p in self.image_paths
+                     if os.path.splitext(p)[1].lower() in {e.lower() for e in VIDEO_EXTENSIONS})
+        if _clips:
+            logger.info(f"found {len(self.image_paths) - _clips} images and {_clips} clip(s)")
+        else:
+            logger.info(f"found {len(self.image_paths)} images")
 
         # Optional control images
         if self.control_directory is not None:
@@ -638,7 +659,10 @@ class ImageDataset(torch.utils.data.Dataset):
         if image_directory is None:
             raise ValueError("image_directory must be specified")
 
-        self.datasource = ImageDirectoryDatasource(image_directory, caption_extension, control_directory)
+        # Only MiniMax H3 can train on clips, so only its datasets glob for them.
+        _extra = VIDEO_EXTENSIONS if architecture == ARCHITECTURE_MINIMAX else ()
+        self.datasource = ImageDirectoryDatasource(image_directory, caption_extension,
+                                                   control_directory, extra_extensions=_extra)
 
         if self.cache_directory is None:
             self.cache_directory = self.image_directory

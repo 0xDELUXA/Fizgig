@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 
 
 # --- cache writers -----------------------------------------------------------
-def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor) -> None:
-    """Save an H3 VAE latent to the item's cache file.
+def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor,
+                              audio_latent: torch.Tensor = None) -> None:
+    """Save an H3 VAE latent to the item's cache file, optionally with the clip's audio.
 
     Two shapes, two keys, and the still one is unchanged on purpose:
 
@@ -38,6 +39,15 @@ def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor) -> None
     which is all the shared collate looks at (image_dataset.py: `startswith("latent_")` ->
     `latents`), and the trainer only adds a frame axis when one is missing — so a 4-D cache
     arrives at the DiT as (1, 24, T, H, W) with no further work.
+
+    audio_latent is stored ALREADY PACKED into DiT rows — (2*T_audio, 32), channel-major — rather
+    than in the VAE's own (32, 2, T) layout. Packing at write time means the ordering is decided
+    once, next to the encoder that produced it, instead of being re-derived on every load where
+    getting it backwards would train against scrambled targets and raise nothing.
+
+    Absent audio is absent, not zeros: an item with no `audio_latent` key contributes no audio
+    loss, which is what a muted clip and every still are meant to do. A silence TARGET would
+    teach the model that this footage sounds like nothing.
     """
     assert latent.dim() in (3, 4), \
         f"latent must be 3-D (C,H,W) or 4-D (C,T,H,W), got {tuple(latent.shape)}"
@@ -48,6 +58,11 @@ def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor) -> None
         _, T, H, W = latent.shape
         key = f"latent_{T}x{H}x{W}"
     sd = {key: latent.detach().cpu().contiguous()}
+    if audio_latent is not None:
+        assert audio_latent.dim() == 2 and audio_latent.shape[1] == 32, (
+            f"audio_latent must be packed rows (2*T, 32), got {tuple(audio_latent.shape)} — "
+            f"use audio_vae.pack_audio() on the encoder's (B, 32, 2, T) output")
+        sd["audio_latent"] = audio_latent.detach().cpu().contiguous()
     for key, value in sd.items():
         if torch.isnan(value).any():
             logger.warning(f"NaN in {key} for {item_info.item_key} - replaced with 0")

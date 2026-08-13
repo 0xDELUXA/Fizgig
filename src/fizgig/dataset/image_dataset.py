@@ -445,8 +445,12 @@ class BucketBatchManager:
                     content_key = "latents"
                 elif key == "text_embed":
                     content_key = "ctx_vec"
-                elif key in ("ref_hidden_states", "ref_token_tags", "ref_latent"):
-                    content_key = key          # H3 distillation, passed through verbatim
+                elif key in ("ref_hidden_states", "ref_token_tags", "ref_latent",
+                             "audio_latent"):
+                    # H3: distillation refs and the clip's packed audio rows, verbatim. Named
+                    # explicitly because the fallback below would rsplit `audio_latent` into
+                    # `audio` and the trainer would never find it.
+                    content_key = key
                 elif key in ("hidden_states", "attention_mask"):
                     # Krea 2 text cache: multi-layer Qwen3-VL stack + validity mask
                     content_key = key

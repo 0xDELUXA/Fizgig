@@ -741,6 +741,10 @@ class Gizmo:
                     troughcolor=COLORS["bg_deep"], bordercolor=COLORS["bg_deep"],
                     arrowcolor=COLORS["text_secondary"])
         s.map("Vertical.TScrollbar", background=[("active", COLORS["accent"])])
+        s.configure("Horizontal.TScrollbar", background=COLORS["bg_hover"],
+                    troughcolor=COLORS["bg_deep"], bordercolor=COLORS["bg_deep"],
+                    arrowcolor=COLORS["text_secondary"])
+        s.map("Horizontal.TScrollbar", background=[("active", COLORS["accent"])])
 
         # The mode tabs. Clam's stock notebook is a light strip on our dark ground; restyle it
         # to read as part of the app rather than a window inside a window.
@@ -2024,6 +2028,17 @@ class Gizmo:
         self.audio_canvas.bind("<B1-Motion>", self._audio_drag)
         self.audio_canvas.bind("<ButtonRelease-1>", self._audio_release)
         self.audio_canvas.bind("<Motion>", self._audio_hover)
+        # Shift+wheel pans a zoomed view sideways (plain wheel zooms).
+        self.audio_canvas.bind(
+            "<Shift-MouseWheel>",
+            lambda e: (self._audio_pan(-0.15 if e.delta > 0 else 0.15), "break")[1])
+        # The nav bar under the waveform: where the zoomed window sits in the whole recording,
+        # and the handle to slide it. Full-width (and inert) when not zoomed.
+        self.audio_scroll = ttk.Scrollbar(c, orient=tk.HORIZONTAL, command=self._audio_xview)
+        self.audio_scroll.pack(fill=tk.X, pady=(2, 0))
+        ToolTip(self.audio_scroll,
+                "Where the zoomed view sits in the whole recording — drag to scroll along it. "
+                "Shift+wheel over the waveform pans too; plain wheel zooms.")
         # Wheel over the waveform zooms it, anchored on the mouse — the sound you are pointing
         # at stays under the pointer, map-style. Returning "break" keeps the page from
         # scrolling; everywhere else the wheel still scrolls the window.
@@ -2363,6 +2378,28 @@ class Gizmo:
         self._audio_edge = None
         self._audio_seek(self.audio_pos)      # one follow-check now the drag is over
 
+    def _audio_pan(self, frac):
+        """Slide a zoomed view sideways by `frac` of its own width. No-op unzoomed."""
+        if self.audio_view is None:
+            return
+        v0, vd = self.audio_view
+        self.audio_view = (max(0.0, min(v0 + frac * vd, self.audio_dur - vd)), vd)
+        self._audio_refresh()
+
+    def _audio_xview(self, *args):
+        """The nav bar's command: moveto from a drag, scroll from its arrows/trough."""
+        if self.audio_view is None or not self.audio_dur:
+            return
+        v0, vd = self.audio_view
+        if args and args[0] == "moveto":
+            n0 = float(args[1]) * self.audio_dur
+        elif args and args[0] == "scroll":
+            n0 = v0 + int(args[1]) * vd * (0.1 if args[2] == "units" else 0.9)
+        else:
+            return
+        self.audio_view = (max(0.0, min(n0, self.audio_dur - vd)), vd)
+        self._audio_refresh()
+
     def _audio_hover(self, event):
         """A resize cursor over the span's edges, so the grips announce themselves."""
         if getattr(self, "_audio_dragging", False):
@@ -2442,6 +2479,14 @@ class Gizmo:
                      f"of {self.audio_dur:.1f} s{zoomed}")
         else:
             self.audio_pos_label.configure(text="")
+        # The nav bar mirrors the view: thumb position and size are the window's place in the
+        # whole recording. Unzoomed it fills the trough and there is nothing to drag.
+        if hasattr(self, "audio_scroll"):
+            if self.audio_dur:
+                self.audio_scroll.set(v0 / max(self.audio_dur, 1e-9),
+                                      (v0 + vd) / max(self.audio_dur, 1e-9))
+            else:
+                self.audio_scroll.set(0.0, 1.0)
         self._audio_refresh_planned_name()
 
     # -- audio: playback ----------------------------------------------------------------------------

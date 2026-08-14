@@ -1580,6 +1580,7 @@ class LoRATrainerGUI:
         # so a folder change on the Start tab must refresh it. Guarded: fires before the
         # Image Prep tab exists during startup, and _update_prep_note no-ops then.
         self.image_folder_var.trace_add("write", self._update_prep_note)
+        self.image_folder_var.trace_add("write", self._refresh_audio_only_ui)
         # Auto-save the dataset TOML on every relevant change (no Save button needed)
         def _auto_save_ds(*_a):
             if hasattr(self, "auto_save_dataset_config_silent"):
@@ -4010,9 +4011,14 @@ class LoRATrainerGUI:
         ttk.Label(training_content, text="Target Megapixels:").grid(row=16, column=0, sticky=tk.W, padx=5, pady=(8, 2))
         mp_frame = ttk.Frame(training_content)
         mp_frame.grid(row=16, column=1, sticky=tk.W, padx=5, pady=(8, 2))
-        ttk.Combobox(mp_frame, textvariable=self.dataset_megapixels_var,
-                     values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0", "2.4", "3.0", "4.2"],
-                     width=8).pack(side=tk.LEFT, padx=(0, 10))
+        self._mp_combo = ttk.Combobox(
+            mp_frame, textvariable=self.dataset_megapixels_var,
+            values=["0.25", "0.5", "0.75", "1.0", "1.5", "2.0", "2.4", "3.0", "4.2"], width=8)
+        self._mp_combo.pack(side=tk.LEFT, padx=(0, 10))
+        # Shown (and the combo greyed) when the training folder is voice recordings only —
+        # there are no pixels for this number to size. Managed by _refresh_audio_only_ui.
+        self._mp_audio_note = ttk.Label(mp_frame, text="— audio-only dataset: nothing to size",
+                                        foreground="#F59E0B", font=(FONT_FAMILY, 9))
         ttk.Label(mp_frame,
                   text="MP  (0.25 ≈ 512², 1.0 ≈ 1024², 2.4 ≈ 1536², 4.2 ≈ 2048²)   "
                        "example: 512² = 512×512 pixels, or any other width × height with a similar pixel area",
@@ -8221,6 +8227,51 @@ class LoRATrainerGUI:
         return sum(1 for f in os.listdir(folder)
                    if os.path.splitext(f)[1].lower() in self.TRAINING_AUDIO_EXTENSIONS)
 
+    def _refresh_audio_only_ui(self, *_a):
+        """Grey the image-shaped training controls when the dataset is voice recordings only.
+
+        Only what is STRUCTURALLY meaningless goes grey: Target Megapixels (no pixels to
+        size) and reference distillation (the teacher pairs photographs — with none, there is
+        nothing to learn identity from). Schedule and LR controls stay live: the audio stream
+        trains on the noise schedule like everything else. Disabled, not hidden — the user
+        should see the controls exist and read why they are off.
+        """
+        audio_only = self._training_folder_audio_only()
+        state = "disabled" if audio_only else "normal"
+        try:
+            if hasattr(self, "_mp_combo"):
+                self._mp_combo.configure(state=state)
+                if audio_only:
+                    self._mp_audio_note.pack(side=tk.LEFT, padx=(8, 0))
+                else:
+                    self._mp_audio_note.pack_forget()
+            if hasattr(self, "_minimax_distill_frame"):
+                for w in self._minimax_distill_frame.winfo_children():
+                    try:
+                        w.configure(state=state)
+                    except tk.TclError:
+                        pass
+                if audio_only and self.minimax_distill_var.get():
+                    self.minimax_distill_var.set(False)
+        except tk.TclError:
+            pass
+
+    def _training_folder_audio_only(self):
+        """True when the training folder holds voice recordings and nothing visual — the state
+        in which image-shaped controls (sizing, bucketing, face teachers) mean nothing."""
+        folder = self.image_folder_var.get().strip() if hasattr(self, "image_folder_var") else ""
+        if not folder or not os.path.isdir(folder) or not self._is_minimax_arch():
+            return False
+        if not self._count_training_audio_files():
+            return False
+        try:
+            from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
+            visual = {e.lower() for e in IMAGE_EXTENSIONS} | {".mp4"}
+            return not any(os.path.splitext(f)[1].lower() in visual
+                           for f in os.listdir(folder))
+        except OSError:
+            return False
+
     def get_caption_image_files(self):
         """Get list of image files in caption folder"""
         folder = self.image_folder_var.get()
@@ -10075,6 +10126,11 @@ class LoRATrainerGUI:
             pass
         try:
             self._save_last_used_paths()
+        except Exception:
+            pass
+        # Audio-only greying depends on BOTH the folder and the family — re-check on a switch.
+        try:
+            self._refresh_audio_only_ui()
         except Exception:
             pass
 
@@ -12165,6 +12221,14 @@ class LoRATrainerGUI:
         output folder entirely and taught users the wrong answer to 'does this touch my
         folder?'."""
         if not hasattr(self, '_prep_note_var'):
+            return
+        # A voice folder has nothing for this tab to do — resize, crop and face detection are
+        # image operations. Say so instead of promising to process "your 0 images".
+        if self._training_folder_audio_only():
+            self._prep_note_var.set(
+                "🎙 Audio-only training set — this tab prepares images, and voice recordings "
+                "need none of it. Segments are cut, captioned and sized in Gizmo's audio tab; "
+                "your files here are already ready to train.")
             return
         mode = self.prep_mode_var.get()
         replace = self.delete_originals_var.get()

@@ -6367,6 +6367,38 @@ class LoRATrainerGUI:
             font=(FONT_FAMILY, 9), fg="#F59E0B", bg=COLORS["bg_surface"],
             justify=tk.LEFT, wraplength=700)
 
+        # Per-category retirement — MIXED datasets only (managed by _refresh_audio_only_ui).
+        # Visuals and voice never converge together (voice ~10 epochs at Likeness, faces 40+),
+        # so each can retire at its own epoch. "Anchor" keeps the finished category training at
+        # a REAL 10% LR (it multiplies the optimizer's lr — a loss multiplier would be an Adam
+        # no-op) as a drift guard, with its epoch ledger staying live as the drift alarm;
+        # "stop" skips its steps outright for faster epochs.
+        self._mixed_stop_label = ttk.Label(parent, text="Finish categories separately:")
+        self._mixed_stop_frame = ttk.Frame(parent)
+        _msf = self._mixed_stop_frame
+        _RETIRE_MODES = ["anchor at 10% LR (recommended)", "stop completely (faster)"]
+        for _lbl, _ekey, _mkey in (("photos & clips after epoch", "MIXED_VISUAL_STOP_EPOCH",
+                                    "MIXED_VISUAL_STOP_MODE"),
+                                   ("voice after epoch", "MIXED_AUDIO_STOP_EPOCH",
+                                    "MIXED_AUDIO_STOP_MODE")):
+            ttk.Label(_msf, text=_lbl).pack(side=tk.LEFT, padx=(0 if _ekey.startswith(
+                "MIXED_V") else 14, 4))
+            self.entries[_ekey] = ttk.Entry(_msf, width=5)
+            self.entries[_ekey].insert(0, str(self.settings.get(_ekey, "")))
+            self.entries[_ekey].pack(side=tk.LEFT, padx=(0, 4))
+            self.entries[_mkey] = ttk.Combobox(_msf, values=_RETIRE_MODES, width=26,
+                                               state="readonly")
+            self.entries[_mkey].set(str(self.settings.get(_mkey, "")) or _RETIRE_MODES[0])
+            self.entries[_mkey].pack(side=tk.LEFT)
+        self._mixed_stop_hint = tk.Label(
+            parent, text="Blank = train to the end. Anchor keeps the finished category at a "
+                         "true 10% learning rate — it holds quality against drift from the "
+                         "still-training category, and its epoch report stays live so drift "
+                         "would show as its loss creeping up. Stop skips its steps entirely: "
+                         "epochs get faster, but that category goes unwatched.",
+            font=(FONT_FAMILY, 8, "italic"), fg="#95A5A6", bg=COLORS["bg_surface"],
+            justify=tk.LEFT, wraplength=720)
+
         # The raw share, revealed only under Custom — the named options are the point.
         self._minimax_shift_label = ttk.Label(parent, text="Clean-end share:")
         self._minimax_shift_label.grid(row=22, column=0, sticky=tk.W, padx=5, pady=2)
@@ -8268,9 +8300,9 @@ class LoRATrainerGUI:
             # The voice-structure hint: ANY audio in the dataset (mixed counts too — its voice
             # steps benefit the same), family is MiniMax, and the structure is not already
             # Likeness. A/B tested: voices train much faster there than at Model default.
+            _has_audio = self._is_minimax_arch() and self._count_training_audio_files() > 0
             if hasattr(self, "_minimax_structure_voice_note"):
-                _wants_note = (self._is_minimax_arch()
-                               and self._count_training_audio_files() > 0
+                _wants_note = (_has_audio
                                and not str(self.minimax_structure_var.get()).startswith(
                                    "Likeness"))
                 if _wants_note:
@@ -8278,6 +8310,21 @@ class LoRATrainerGUI:
                         row=25, column=0, columnspan=3, sticky=tk.W, padx=(12, 5), pady=(0, 4))
                 else:
                     self._minimax_structure_voice_note.grid_remove()
+            # Per-category retirement rows: only when the dataset is genuinely MIXED — with
+            # one category there is nothing to finish separately.
+            if hasattr(self, "_mixed_stop_label"):
+                _mixed = _has_audio and not audio_only
+                if _mixed:
+                    self._mixed_stop_label.grid(row=26, column=0, sticky=tk.W, padx=5,
+                                                pady=(8, 2))
+                    self._mixed_stop_frame.grid(row=26, column=1, columnspan=2, sticky=tk.W,
+                                                padx=5, pady=(8, 2))
+                    self._mixed_stop_hint.grid(row=27, column=0, columnspan=3, sticky=tk.W,
+                                               padx=(12, 5), pady=(0, 4))
+                else:
+                    self._mixed_stop_label.grid_remove()
+                    self._mixed_stop_frame.grid_remove()
+                    self._mixed_stop_hint.grid_remove()
         except tk.TclError:
             pass
 
@@ -22688,6 +22735,13 @@ class LoRATrainerGUI:
             save_epochs = int(self.entries["SAVE_EVERY_N_EPOCHS"].get())
             if save_epochs <= 0:
                 errors.append("Save every N epochs must be a positive integer")
+            # Per-category retirement epochs: blank = never, else a positive whole number.
+            for _rk, _rlabel in (("MIXED_VISUAL_STOP_EPOCH", "photos & clips"),
+                                 ("MIXED_AUDIO_STOP_EPOCH", "voice")):
+                _rv = str(self.entries.get(_rk).get() if self.entries.get(_rk) else "").strip()
+                if _rv and (not _rv.isdigit() or int(_rv) <= 0):
+                    errors.append(f"'Finish {_rlabel} after epoch' must be blank or a "
+                                  f"positive whole number, not {_rv!r}")
         except ValueError:
             errors.append("Save every N epochs must be a valid integer")
 
@@ -22992,6 +23046,16 @@ class LoRATrainerGUI:
             "MINIMAX_LOWNOISE_PCT": str(self.entries["MINIMAX_LOWNOISE_PCT"].get() or "").strip(),
             "MINIMAX_HIGHNOISE_LR_PCT": str(
                 self.entries["MINIMAX_HIGHNOISE_LR_PCT"].get() or "").strip(),
+            # The hand-curated dict trap (5f20ba2): a control missing HERE silently never
+            # reaches the trainer, however correct the widgets and the command builder are.
+            "MIXED_VISUAL_STOP_EPOCH": str(
+                self.entries["MIXED_VISUAL_STOP_EPOCH"].get() or "").strip(),
+            "MIXED_VISUAL_STOP_MODE": str(
+                self.entries["MIXED_VISUAL_STOP_MODE"].get() or "").strip(),
+            "MIXED_AUDIO_STOP_EPOCH": str(
+                self.entries["MIXED_AUDIO_STOP_EPOCH"].get() or "").strip(),
+            "MIXED_AUDIO_STOP_MODE": str(
+                self.entries["MIXED_AUDIO_STOP_MODE"].get() or "").strip(),
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
@@ -24045,6 +24109,19 @@ class LoRATrainerGUI:
         _hl = minimax_highnoise_lr(self.settings.get("MINIMAX_HIGHNOISE_LR_PCT"))
         if _hl is not None and abs(_hl - 1.0) > 1e-9:
             cmd += ["--highnoise_lr_scale", f"{_hl:g}"]
+        # Per-category retirement (mixed visual+voice datasets). Sent only when an epoch is
+        # set: the flag's presence means the run used the feature.
+        for _key_e, _key_m, _flag in (
+                ("MIXED_VISUAL_STOP_EPOCH", "MIXED_VISUAL_STOP_MODE", "visual"),
+                ("MIXED_AUDIO_STOP_EPOCH", "MIXED_AUDIO_STOP_MODE", "audio")):
+            try:
+                _n = int(str(self.settings.get(_key_e, "") or "").strip() or 0)
+            except ValueError:
+                _n = 0
+            if _n > 0:
+                _mode = "stop" if "stop" in str(self.settings.get(_key_m, "")).lower() \
+                    else "anchor"
+                cmd += [f"--{_flag}_stop_epoch", str(_n), f"--{_flag}_stop_mode", _mode]
         # Blocks to Train — only sent when it's a real range; "all" is the trainer's own default,
         # and not sending it keeps the flag's presence meaning "this run was a block experiment".
         _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))

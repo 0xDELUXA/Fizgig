@@ -77,6 +77,18 @@ def setup_parser() -> argparse.ArgumentParser:
                         "only ~4%% of the packed sequence, so parity may be too quiet to teach "
                         "anything — raise it if the per-epoch [audio] line shows sound winning "
                         "a negligible share of the loss. Ignored by stills and muted clips.")
+    p.add_argument("--visual_stop_epoch", type=int, default=0,
+                   help="Mixed datasets: retire photos & clips after this epoch (0 = never). "
+                        "See --visual_stop_mode for what retirement means.")
+    p.add_argument("--visual_stop_mode", choices=["anchor", "stop"], default="anchor",
+                   help="anchor = the retired category keeps training at 10%% LR (holds its "
+                        "quality against drift on the shared adapters, and its epoch ledger "
+                        "stays live as the drift alarm); stop = skipped outright (faster "
+                        "epochs, blind).")
+    p.add_argument("--audio_stop_epoch", type=int, default=0,
+                   help="Mixed datasets: retire voice recordings after this epoch (0 = never).")
+    p.add_argument("--audio_stop_mode", choices=["anchor", "stop"], default="anchor",
+                   help="As --visual_stop_mode, for the voice recordings.")
     p.add_argument("--include_patterns", nargs="*", default=None,
                    help="Regex module filters (Model Area to Train). Default: all transformer blocks.")
     p.add_argument("--distill", action="store_true",
@@ -233,6 +245,10 @@ def main():
         optimizer_args=args.optimizer_args,
         caption_dropout=args.caption_dropout,
         audio_weight=args.audio_weight,
+        visual_stop_epoch=args.visual_stop_epoch,
+        visual_stop_mode=args.visual_stop_mode,
+        audio_stop_epoch=args.audio_stop_epoch,
+        audio_stop_mode=args.audio_stop_mode,
         base_quant=args.base_quant,
         include_patterns=args.include_patterns,
         train_blocks=args.train_blocks,

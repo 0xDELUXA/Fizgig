@@ -39,6 +39,10 @@ VIDEO_SIGMA_SHIFT_TRAIN = 12.0     # H3's video shift — also the reference TRA
 # two must move together if either ever moves.
 MINIMAX_LOWNOISE_SIGMA = 0.5
 
+# What a RETIRED category trains at in anchor mode — the Krea per-image ladder's tested floor.
+# One constant, not a knob: "anchor" is legible, "0.085 vs 0.12" is not.
+ANCHOR_LR_SCALE = 0.1
+
 # Identity-first phase 1 trains at this fraction of the Learning Rate box (Peter, 11 Aug). Phase
 # 1 places the identity on a near-zero adapter, where a full-size Adam stride does the most
 # damage and the least good; phase 2 then gets the full rate from a sensible starting point.
@@ -1550,6 +1554,15 @@ def train_minimax(
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
     highnoise_lr_scale: float = 1.0,  # LR multiplier for steps above sigma 0.5; 1.0 = unchanged
+    # Mixed visual+voice datasets: each category can retire at its own epoch, because the two
+    # never converge together (voice ~10 epochs at Likeness, faces ~40+). "anchor" keeps the
+    # retired category training at ANCHOR_LR_SCALE — rehearsal against drift on the shared
+    # adapters, and its epoch ledger stays live as the drift alarm; "stop" skips its steps
+    # entirely (faster epochs, blind). 0 = never retire.
+    visual_stop_epoch: int = 0,
+    visual_stop_mode: str = "anchor",
+    audio_stop_epoch: int = 0,
+    audio_stop_mode: str = "anchor",
     blocks_to_swap="auto",           # "auto" | int — park the last N blocks on CPU between uses
     gradient_checkpointing="auto",   # "auto" | "on" | "off" — forced on when swap > 0
     adaptive_lr: bool = False,
@@ -2111,7 +2124,27 @@ def train_minimax(
         logger.info(f"[lr] steps above sigma {MINIMAX_LOWNOISE_SIGMA:g} train at "
                     f"{_hn_scale * 100:.0f}% of the learning rate.")
 
-    if warmup_steps > 0 or ramp is not None or _p1_epochs or _hn_active:
+    # Per-category retirement (mixed visual+voice datasets). The anchor multiplies
+    # param_group["lr"] through the same composed product as everything else — NEVER the loss:
+    # Adam's update is m/(sqrt(v)+eps), invariant to a constant on the gradient, so a loss
+    # multiplier reads as a working throttle and changes almost nothing (measured in
+    # tests/test_minimax_highnoise_lr.py; realized travel is the only honest check).
+    _vis_stop = max(0, int(visual_stop_epoch or 0))
+    _aud_stop = max(0, int(audio_stop_epoch or 0))
+    _cat_acc = []                        # this window's per-category multipliers
+    _retire_active = bool(_vis_stop or _aud_stop)
+    if _vis_stop:
+        logger.info(f"[retire] photos & clips after epoch {_vis_stop}: "
+                    + (f"anchored at {ANCHOR_LR_SCALE * 100:.0f}% LR (drift guard, ledger "
+                       f"stays live)" if visual_stop_mode == "anchor" else
+                       "stopped entirely (faster epochs)"))
+    if _aud_stop:
+        logger.info(f"[retire] voice recordings after epoch {_aud_stop}: "
+                    + (f"anchored at {ANCHOR_LR_SCALE * 100:.0f}% LR (drift guard, ledger "
+                       f"stays live)" if audio_stop_mode == "anchor" else
+                       "stopped entirely (faster epochs)"))
+
+    if warmup_steps > 0 or ramp is not None or _p1_epochs or _hn_active or _retire_active:
         # Stashed AFTER the resume block: optimizer.load_state_dict replaces the param-group
         # dicts, so a stash made earlier would not survive a resume. Derived from the CONFIGURED
         # rate (x the group's depth-split scale), not the group's current lr, which a resumed
@@ -2186,6 +2219,8 @@ def train_minimax(
                 for d in group.datasets),
             "ss_max_grad_norm": f"{max_grad_norm:g}",
             "ss_audio_only_items": str(_n_voice),
+            "ss_visual_stop": (f"{_vis_stop}:{visual_stop_mode}" if _vis_stop else "off"),
+            "ss_audio_stop": (f"{_aud_stop}:{audio_stop_mode}" if _aud_stop else "off"),
             "ss_bucket_resolutions": ",".join(_res),
             "ss_gradient_checkpointing": "1" if use_ckpt else "0",
             "ss_blocks_swapped": str(n_swap),
@@ -2520,6 +2555,49 @@ def train_minimax(
     _audio_parts = {}
     _audio_acc = [0.0, 0.0, 0]          # video sum, audio sum, count — clips with sound
     _voice_acc = [0.0, 0]               # audio sum, count — audio-only voice items
+
+    _pending = [0]                       # backwards accumulated since the last optimizer step
+
+    def _boundary_step():
+        """The optimizer step at a window boundary — shared by live iterations and by the
+        stopped-category skip path (whose iterations can land ON a boundary with earlier
+        grads still pending). Guarded: a window of nothing steps nothing.
+
+        Warmup, the ramp, the identity-first phase scale, the noise-band multiplier and the
+        retirement anchor all COMPOSE into param_group["lr"] — never the loss: Adam's update
+        is m/(sqrt(v)+eps), invariant to a constant on the gradient, so a loss multiplier
+        reads as a working throttle and changes almost nothing. Both window multipliers are
+        the MEAN over the window, not the last draw — taking the last would make the setting
+        depend on the order batches happened to arrive in.
+        """
+        if not _pending[0]:
+            return
+        if max_grad_norm and max_grad_norm > 0:
+            torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+        _bm = (sum(_band_acc) / len(_band_acc)) if _band_acc else 1.0
+        _band_acc.clear()
+        _cm = (sum(_cat_acc) / len(_cat_acc)) if _cat_acc else 1.0
+        _cat_acc.clear()
+        # `or _hn_active or _retire_active` is not decoration: warmup is retired for this
+        # family and the ramp is OFF in the Fast preset, so without them this block never
+        # runs for the preset most people use and the settings would silently do nothing.
+        if warmup_steps or ramp is not None or _p1_epochs or _hn_active or _retire_active:
+            _wf = (min(1.0, (global_step + 1) / warmup_steps) if warmup_steps else 1.0)
+            _rm = ramp.mult if ramp is not None else 1.0
+            for _g in optimizer.param_groups:
+                _g["lr"] = _g["_warmup_base_lr"] * _wf * _rm * _phase_lr * _bm * _cm
+        if limiter is not None:
+            limiter.pre_step()           # snapshot BEFORE the optimizer moves anything
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+        if limiter is not None:
+            limiter.step()
+        if ramp is not None:
+            ramp.step()                  # post-clip weights; sets the multiplier for NEXT step
+        if ema is not None:
+            ema.update()                 # after the clip, so the shadow tracks clipped weights
+        _pending[0] = 0
+
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         network.train()
@@ -2546,6 +2624,20 @@ def train_minimax(
             if uncond_text is not None and random.random() < caption_dropout:
                 text = uncond_text.to(device, dtype)               # caption dropout step
             _is_voice = bool(batch.get("audio_only") is not None and batch["audio_only"].any())
+            # Per-category retirement: past its stop epoch a category is either ANCHORED
+            # (trains on at ANCHOR_LR_SCALE — rehearsal against drift on the shared adapters,
+            # ledger stays live) or STOPPED (skipped outright — faster epochs, blind).
+            _retired = ((not _is_voice and _vis_stop and (epoch + 1) > _vis_stop)
+                        or (_is_voice and _aud_stop and (epoch + 1) > _aud_stop))
+            _ret_mode = audio_stop_mode if _is_voice else visual_stop_mode
+            if _retired and _ret_mode != "anchor":
+                # No forward, no loss, no record — but a boundary landing here still owes any
+                # pending grads from the window's live iterations their step.
+                if (i + 1) % _accum_n == 0 or (i + 1) >= steps_per_epoch:
+                    _boundary_step()
+                global_step += 1
+                progress_bar.update(1)
+                continue
             if (distill and (_teacher_phase or not _p1_epochs) and "ref_hidden_states" in batch
                     and not _is_voice):
                 # `not _is_voice`: compute_distill_loss packs still-sized audio noise (4 rows)
@@ -2598,44 +2690,18 @@ def train_minimax(
                 # (shift 3), which the video-sigma classification does not describe.
                 _band_acc.append(1.0 if _is_voice else
                                  (_hn_scale if _step_sigma >= MINIMAX_LOWNOISE_SIGMA else 1.0))
+            # An anchored retired step trains at the anchor scale; everything else at 1.0.
+            # Appended for EVERY executed backward (distill path included — a retired visual
+            # category's distillation steps anchor exactly like its plain ones).
+            _cat_acc.append(ANCHOR_LR_SCALE if _retired else 1.0)
             # Divide so the accumulated gradient is the MEAN over the window, not the sum —
             # otherwise the effective LR scales with the accumulation count.
             (loss / _accum_n if _accum_n > 1 else loss).backward()
+            _pending[0] += 1
             # Step on the window boundary, and always on the last batch of the epoch so a
             # partial tail window is never silently discarded.
             if (i + 1) % _accum_n == 0 or (i + 1) >= steps_per_epoch:
-                if max_grad_norm and max_grad_norm > 0:
-                    torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
-                # The MEAN over the accumulation window, not the last draw: one optimizer step
-                # can cover several sigmas, and taking the last would make the setting depend on
-                # the order batches happened to arrive in.
-                _bm = (sum(_band_acc) / len(_band_acc)) if _band_acc else 1.0
-                _band_acc.clear()
-                if warmup_steps or ramp is not None or _p1_epochs or _hn_active:
-                    # Warmup, the ramp, the identity-first phase scale and the noise-band
-                    # multiplier all COMPOSE: warmup covers the first steps (where the adapter is
-                    # near zero and the ramp's ratio is undefined), the ramp takes over from
-                    # there, phase 1 runs the whole thing at a third of the box, and the band
-                    # multiplier damps whichever steps landed in the noisy half. The product is
-                    # the LR.
-                    #
-                    # `or _hn_active` is not decoration. Warmup is retired for this family and the
-                    # ramp is OFF in the Fast preset, so without it this block never runs for the
-                    # preset most people use and the setting would silently do nothing.
-                    _wf = (min(1.0, (global_step + 1) / warmup_steps) if warmup_steps else 1.0)
-                    _rm = ramp.mult if ramp is not None else 1.0
-                    for _g in optimizer.param_groups:
-                        _g["lr"] = _g["_warmup_base_lr"] * _wf * _rm * _phase_lr * _bm
-                if limiter is not None:
-                    limiter.pre_step()   # snapshot BEFORE the optimizer moves anything
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                if limiter is not None:
-                    limiter.step()
-                if ramp is not None:
-                    ramp.step()          # post-clip weights; sets the multiplier for NEXT step
-                if ema is not None:
-                    ema.update()         # after the clip, so the shadow tracks clipped weights
+                _boundary_step()
             global_step += 1
             loss_recorder.add(epoch=epoch, step=i, loss=loss.item())
             progress_bar.set_postfix(avr_loss=f"{loss_recorder.moving_average:.4f}", refresh=False)

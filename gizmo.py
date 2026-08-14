@@ -855,6 +855,19 @@ class Gizmo:
                          ("Listbox", "<ButtonRelease-1>"),
                          ("TScale", "<ButtonRelease-1>")):
             self.root.bind_class(cls, seq, lambda _e: self.root.focus_set(), add="+")
+
+        # The other half: a text field RELEASES focus when you click away from it. A canvas or
+        # label never takes focus, so without this, typing a trigger word then clicking the
+        # waveform left the entry focused — and space typed into it (well, was shielded into
+        # doing nothing) instead of driving the transport.
+        def _click_anywhere(e):
+            try:
+                cls = e.widget.winfo_class()
+            except Exception:
+                return
+            if cls not in ("Entry", "TEntry", "Text", "Listbox", "TCombobox"):
+                self.root.focus_set()
+        self.root.bind_all("<Button-1>", _click_anywhere, add="+")
         self.root.focus_set()
 
     def _build_source_card(self, body):

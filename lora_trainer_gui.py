@@ -5467,6 +5467,13 @@ class LoRATrainerGUI:
 
     def _queue_current_run(self):
         """Snapshot the current config to the end of the queue (Start pressed mid-run)."""
+        # Queueing skips validate_inputs entirely (Start returns above), so without this a bad
+        # name is written into the queue file, compared dirty by the clash check below, and only
+        # rejected an hour later when the queue tries to launch it — modal, unattended, held.
+        _name, _name_error = self._tidy_lora_name()
+        if _name_error:
+            messagebox.showwarning("Check the LoRA name", _name_error)
+            return
         item = self._queue_snapshot()
         if not item["image_folder"]:
             messagebox.showwarning(
@@ -22136,6 +22143,34 @@ class LoRATrainerGUI:
             self.entries[setting_name].delete(0, tk.END)
             self.entries[setting_name].insert(0, self.settings[setting_name])
 
+    def _tidy_lora_name(self):
+        """Clean the LoRA Name field in place. Returns (name, error or None).
+
+        The name becomes a filename, but not until the FIRST CHECKPOINT SAVE — an epoch in. A
+        stray character (a newline off a paste is the common one) trained for sixteen minutes
+        and then died inside safetensors with a bare OS error that named neither the setting nor
+        the character; and since the LoRA is written before the state dir, there was nothing left
+        to resume from (#70).
+
+        What has one obvious intent is fixed silently — surrounding whitespace, control
+        characters, trailing dots Windows discards anyway — and WRITTEN BACK to the widget, so
+        the field, the preset that gets persisted, the queue entry and --output_name cannot
+        disagree about what this run is called. Everything else is refused by name.
+        """
+        entry = self.entries.get("LORA_NAME")
+        raw = entry.get() if entry is not None else ""
+        name = "".join(c for c in raw if c >= " ").strip().rstrip(".").strip()
+        if entry is not None and name != raw:
+            entry.delete(0, tk.END)
+            entry.insert(0, name)
+        if not name:
+            return name, "LoRA name cannot be empty"
+        bad = next((c for c in name if c in '<>:"|?*/\\'), None)
+        if bad is not None:
+            return name, (f"LoRA name cannot contain '{bad}' — it becomes a filename. "
+                          f"Use letters, numbers, spaces, - _ or .")
+        return name, None
+
     def validate_inputs(self):
         """Validate all inputs before starting training"""
         errors = []
@@ -22389,10 +22424,9 @@ class LoRATrainerGUI:
         except ValueError:
             errors.append("Blocks swap must be a valid integer")
 
-        # Check LoRA name is not empty
-        lora_name = self.entries["LORA_NAME"].get()
-        if not lora_name or not lora_name.strip():
-            errors.append("LoRA name cannot be empty")
+        _name, _name_error = self._tidy_lora_name()
+        if _name_error:
+            errors.append(_name_error)
 
         # Check output directory
         output_dir = self.entries["LORA_OUTPUT_DIR"].get()

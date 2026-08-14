@@ -1495,7 +1495,7 @@ def train_minimax(
                                        generate_dataset_group_by_blueprint, load_user_config)
     from fizgig.networks.lora import create_network
     from fizgig.training.optimizers import create_optimizer
-    from fizgig.training.train_utils import LossRecorder
+    from fizgig.training.train_utils import LossRecorder, validate_output_name
     from fizgig.training.metadata import build_metadata, resolve_title, ARCHITECTURE_MINIMAX
     from fizgig.minimax.loader import load_minimax_h3_dit
     from tqdm import tqdm
@@ -1508,6 +1508,7 @@ def train_minimax(
     # waits until the model is up (that is when the real block count is known).
     if train_blocks:
         parse_block_spec(train_blocks)
+    validate_output_name(output_name)          # same reason, one epoch later otherwise (#70)
 
     # ---- dataset (built from the caches the two cache scripts wrote) ----
     shared_epoch = Value("i", 0)

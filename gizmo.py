@@ -769,10 +769,20 @@ class Gizmo:
         return body
 
     def _button(self, parent, text, command, kind="normal", tip=None, pad=14):
-        bg = {"normal": COLORS["bg_hover"], "accent": COLORS["accent"]}[kind]
-        fg = COLORS["text_primary"]
-        b = tk.Button(parent, text=text, command=command, bg=bg, fg=fg,
-                      activebackground=COLORS["accent_hover"], activeforeground=fg,
+        # takefocus=0 plus a refocus after every click: a button that keeps keyboard focus
+        # eats the space bar (Tk's Button class binding fires before any root handler can),
+        # and the space bar's job in this tool is the transport, not re-pressing Open.
+        def _run_and_refocus():
+            command()
+            try:
+                self.root.focus_set()
+            except tk.TclError:
+                pass
+        b = tk.Button(parent, text=text, command=_run_and_refocus,
+                      bg={"normal": COLORS["bg_hover"], "accent": COLORS["accent"]}[kind],
+                      fg=COLORS["text_primary"], takefocus=0,
+                      activebackground=COLORS["accent_hover"],
+                      activeforeground=COLORS["text_primary"],
                       font=(FONT_FAMILY, 10, "bold" if kind == "accent" else "normal"),
                       relief=tk.FLAT, bd=0, padx=pad, pady=7, cursor="hand2")
         if tip:
@@ -836,6 +846,16 @@ class Gizmo:
         self._set_enabled(False)
         self._refresh_cost()
         self._refresh_queue_box()
+
+        # Nothing HOLDS keyboard focus in this tool. A combobox, listbox or slider that kept
+        # it after a click would eat the transport keys (space/J/K/L, arrows) exactly the way
+        # a focused button ate space — so each hands focus back to the window once used.
+        # Class-wide: covers both tabs and anything added later.
+        for cls, seq in (("TCombobox", "<<ComboboxSelected>>"),
+                         ("Listbox", "<ButtonRelease-1>"),
+                         ("TScale", "<ButtonRelease-1>")):
+            self.root.bind_class(cls, seq, lambda _e: self.root.focus_set(), add="+")
+        self.root.focus_set()
 
     def _build_source_card(self, body):
         c = self._card(body, "1. Source video", "Any format, any frame rate, any size.")
@@ -1291,9 +1311,11 @@ class Gizmo:
                               ("<k>", self._audio_pause, self._video_pause),
                               ("<l>", lambda: self._audio_shuttle(1), _video_l)):
             def _troute(_e, af=afn, vf=vfn):
+                # Text fields are shielded by bindtags and never reach here; this guard is the
+                # belt-and-braces for a future unshielded one. Buttons no longer take focus at
+                # all (see _button), so the transport keys always work.
                 focus = self.root.focus_get()
-                if focus is not None and focus.winfo_class() in (
-                        "Button", "TButton", "Listbox", "TCombobox"):
+                if focus is not None and focus.winfo_class() in ("Entry", "TEntry", "Text"):
                     return None
                 (af if self._audio_tab_active() else vf)()
                 return "break"

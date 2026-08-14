@@ -58,6 +58,22 @@ if find_spec("pillow_jxl") is not None:
 # any model.
 VIDEO_EXTENSIONS = (".mp4", ".MP4")
 
+# Audio-only voice items, MiniMax H3 only — same opt-in mechanism as clips. An audio item trains
+# the audio stream against a tiny placeholder video latent; the dataset layer only needs to know
+# these files exist and that they never enter the resolution bucketing (see AUDIO_SENTINEL_RESO).
+AUDIO_EXTENSIONS = (".wav", ".WAV", ".mp3", ".MP3", ".flac", ".FLAC", ".m4a", ".M4A")
+
+# The fixed pseudo-resolution every audio item carries. It is a real 128x128 (the placeholder
+# latent is (24, T, 8, 8) at the 16x spatial factor), but audio items are PINNED here rather than
+# routed through the bucket selector: with upscaling on, 128px would bucket to ~target-MP and the
+# reso re-check would then drop every audio item as stale. Pinning also keeps 128-px stills from
+# sharing a batch with audio items.
+AUDIO_SENTINEL_RESO = (128, 128)
+
+
+def is_audio_path(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in {e.lower() for e in AUDIO_EXTENSIONS}
+
 RESOLUTION_STEPS = 16  # Klein 9B resolution step
 
 # Per-architecture bucket grid. A bucket edge must be divisible by (VAE spatial factor x DiT
@@ -377,7 +393,9 @@ class BucketBatchManager:
     ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
-        self.bucket_resos = sorted(self.buckets.keys())
+        # Keys are (w, h) tuples — except the audio sentinel ("audio", w, h), which a plain
+        # sort would crash on (str vs int). Stringify per element; the order is only cosmetic.
+        self.bucket_resos = sorted(self.buckets.keys(), key=lambda k: tuple(str(x) for x in k))
         self.num_timestep_buckets = num_timestep_buckets
         self.timestep_pool: Optional[list[list[float]]] = None
 
@@ -458,10 +476,12 @@ class BucketBatchManager:
                 elif key == "text_embed":
                     content_key = "ctx_vec"
                 elif key in ("ref_hidden_states", "ref_token_tags", "ref_latent",
-                             "audio_latent"):
-                    # H3: distillation refs and the clip's packed audio rows, verbatim. Named
-                    # explicitly because the fallback below would rsplit `audio_latent` into
-                    # `audio` and the trainer would never find it.
+                             "audio_latent", "audio_only"):
+                    # H3: distillation refs, the clip's packed audio rows, and the audio-only
+                    # flag, verbatim. Named explicitly because the fallback below would rsplit
+                    # `audio_latent` AND `audio_only` into `audio` — and an unfound audio_only
+                    # flag doesn't crash, it silently trains the video head against the zeros
+                    # placeholder. The worst kind of miss.
                     content_key = key
                 elif key in ("hidden_states", "attention_mask"):
                     # Krea 2 text cache: multi-layer Qwen3-VL stack + validity mask
@@ -522,10 +542,41 @@ class ImageDirectoryDatasource:
                                        extra_extensions=self.extra_extensions)
         _clips = sum(1 for p in self.image_paths
                      if os.path.splitext(p)[1].lower() in {e.lower() for e in VIDEO_EXTENSIONS})
-        if _clips:
-            logger.info(f"found {len(self.image_paths) - _clips} images and {_clips} clip(s)")
+        _audio = sum(1 for p in self.image_paths if is_audio_path(p))
+        if _clips or _audio:
+            logger.info(f"found {len(self.image_paths) - _clips - _audio} images, "
+                        f"{_clips} clip(s) and {_audio} audio file(s)")
         else:
             logger.info(f"found {len(self.image_paths)} images")
+
+        # Two items sharing a stem (`voice.wav` beside `voice.mp4`) share a TEXT cache file —
+        # its name carries no size token — so both would train with whichever caption was
+        # encoded last, silently. Refuse up front, naming the pair.
+        _by_stem: dict[str, str] = {}
+        for p in self.image_paths:
+            stem = os.path.splitext(os.path.basename(p))[0]
+            if stem in _by_stem:
+                raise ValueError(
+                    f"'{os.path.basename(_by_stem[stem])}' and '{os.path.basename(p)}' share the "
+                    f"name '{stem}' — their caches would collide and one caption would silently "
+                    f"win. Rename one of them.")
+            _by_stem[stem] = p
+
+        # An audio file without a caption .txt is silently dropped by the caption filter above —
+        # reasonable for a stray photo, baffling for the voice recording someone deliberately
+        # added. Say so once, with the fix.
+        if self.caption_extension and os.path.isdir(self.image_directory or ""):
+            _globbed = {os.path.basename(p) for p in self.image_paths}
+            _accepted = {e.lower() for e in self.extra_extensions}
+            _dropped = [f for f in os.listdir(self.image_directory)
+                        if is_audio_path(f) and f not in _globbed
+                        and os.path.splitext(f)[1].lower() in _accepted]
+            if _dropped:
+                logger.warning(
+                    f"[dataset] {len(_dropped)} audio file(s) have no caption "
+                    f"{self.caption_extension} and will NOT train: {', '.join(_dropped[:5])}"
+                    f"{'…' if len(_dropped) > 5 else ''}. Gizmo's audio tab writes captions "
+                    f"as it exports segments.")
 
         # Optional control images
         if self.control_directory is not None:
@@ -572,6 +623,14 @@ class ImageDirectoryDatasource:
 
     def get_image_data(self, idx: int) -> Tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
         image_path = self.image_paths[idx]
+        if is_audio_path(image_path):
+            # An audio item's "image" is a fixed placeholder — the caching layer writes a zeros
+            # video latent and the trainer zeroes the video loss, so these pixels are never
+            # encoded or trained on. The placeholder exists so the item flows through the same
+            # size/bucket bookkeeping as everything else (pinned to AUDIO_SENTINEL_RESO, never
+            # the bucket selector). The audio itself is decoded at cache time, not here.
+            _, caption = self.get_caption(idx)
+            return image_path, [Image.new("RGB", AUDIO_SENTINEL_RESO)], caption, None
         if os.path.splitext(image_path)[1].lower() in {e.lower() for e in VIDEO_EXTENSIONS}:
             # A clip arrives as its frames, which the resize step downstream already handles as a
             # list. Imported lazily and only inside this branch: the dataset layer stays free of
@@ -671,11 +730,12 @@ class ImageDataset(torch.utils.data.Dataset):
         if image_directory is None:
             raise ValueError("image_directory must be specified")
 
-        # Only MiniMax H3 can train on clips, so only its datasets glob for them. Kept on the
-        # dataset as well as handed to the datasource, because prepare_for_training re-derives
-        # what counts as a training item when it cross-checks the cache — and if the two answers
-        # disagree, every clip's cache is discarded as an orphan and the run trains on nothing.
-        _extra = VIDEO_EXTENSIONS if architecture == ARCHITECTURE_MINIMAX else ()
+        # Only MiniMax H3 can train on clips and voice recordings, so only its datasets glob for
+        # them. Kept on the dataset as well as handed to the datasource, because
+        # prepare_for_training re-derives what counts as a training item when it cross-checks
+        # the cache — and if the two answers disagree, every clip's cache is discarded as an
+        # orphan and the run trains on nothing.
+        _extra = VIDEO_EXTENSIONS + AUDIO_EXTENSIONS if architecture == ARCHITECTURE_MINIMAX else ()
         self.extra_extensions = _extra
         self.datasource = ImageDirectoryDatasource(image_directory, caption_extension,
                                                    control_directory, extra_extensions=_extra)
@@ -791,12 +851,16 @@ class ImageDataset(torch.utils.data.Dataset):
                     item_info.latent_cache_path = self.get_latent_cache_path(item_info)
                     item_info.text_encoder_output_cache_path = self.get_text_encoder_output_cache_path(item_info)
 
-                    bkey: Tuple[int, ...] = bucket_reso
+                    bkey: Tuple = bucket_reso
                     if controls is not None:
                         item_info.control_content = controls
                         # Different control sizes go into different batches
                         extra = tuple(s for ctrl in controls for s in ctrl.shape[:2])
                         bkey = bucket_reso + extra
+                    if is_audio_path(str(item_key)):
+                        # A 128px STILL legitimately buckets to (128,128) too — the marker keeps
+                        # audio items out of its batch (the encoder takes different paths).
+                        bkey = ("audio",) + bucket_reso
 
                     batches.setdefault(bkey, []).append(item_info)
                     futures.remove(future)
@@ -817,6 +881,13 @@ class ImageDataset(torch.utils.data.Dataset):
                 image_key, images, caption, controls = op()
                 image: Image.Image = images[0]
                 image_size = image.size
+                if is_audio_path(image_key):
+                    # Never through the bucket selector: with upscaling on, the 128px
+                    # placeholder would bucket to ~target-MP, and prepare_for_training's reso
+                    # re-check would then drop every audio item as stale (and --skip_existing
+                    # would re-encode them every launch). The placeholder is already at
+                    # AUDIO_SENTINEL_RESO — no resize, just the ndarray the aggregator expects.
+                    return image_size, image_key, [np.asarray(img) for img in images], caption, None
                 bucket_reso = bucket_selector.get_bucket_resolution(image_size)
                 # A clip costs far more to ENCODE than a still of the same size — a whole
                 # 17-frame group is live in the VAE at once — so a mixed dataset lets someone
@@ -969,10 +1040,16 @@ class ImageDataset(torch.utils.data.Dataset):
             _exts |= {e.lower() for e in getattr(self, "extra_extensions", ())}
             valid_keys = {os.path.splitext(f)[0] for f in os.listdir(self.image_directory)
                           if os.path.splitext(f)[1].lower() in _exts}
+        # The stems that are audio files. Cache filenames strip the extension, so the folder
+        # listing is the only place an item's audio-ness can still be seen at this point.
+        audio_keys = set()
+        if self.image_directory and os.path.isdir(self.image_directory):
+            audio_keys = {os.path.splitext(f)[0] for f in os.listdir(self.image_directory)
+                          if is_audio_path(f)}
         skipped_stale = 0
         skipped_wrong_reso = 0
 
-        bucketed: dict[Tuple[int, int], list[ItemInfo]] = {}
+        bucketed: dict[Tuple, list[ItemInfo]] = {}   # (w, h), or ("audio", w, h) for voice items
         for cache_file in latent_cache_files:
             tokens = os.path.basename(cache_file).split("_")
             # Filename: {basename}_{W:04d}x{H:04d}_{arch}.safetensors
@@ -989,20 +1066,31 @@ class ImageDataset(torch.utils.data.Dataset):
                 logger.warning(f"Text encoder cache not found: {te_cache}")
                 continue
 
-            bucket_reso = bucket_selector.get_bucket_resolution(image_size)
-            # A cache written at a different Target Megapixels has the SAME filename (it encodes
-            # the original size, not the bucket) — training on it would silently run at the old
-            # resolution. Skip it and tell the user to re-run cache preparation.
-            if self.latent_cache_matches_reso(cache_file, bucket_reso, self.architecture) is False:
-                skipped_wrong_reso += 1
-                continue
+            if item_key in audio_keys:
+                # Audio items are pinned, never bucketed: the selector would upscale their
+                # 128px placeholder to ~target-MP and the reso check below would drop them all
+                # as stale. The Target Megapixels setting genuinely does not apply to a voice —
+                # there is nothing to render — so the check is skipped, not fudged. The marker
+                # in the bucket key keeps them out of any real 128px bucket: their latents are
+                # (24, T, 8, 8) against a still's (24, 8, 8) and cannot stack together.
+                bucket_reso = AUDIO_SENTINEL_RESO
+                bucket_key: Tuple = ("audio",) + AUDIO_SENTINEL_RESO
+            else:
+                bucket_reso = bucket_selector.get_bucket_resolution(image_size)
+                # A cache written at a different Target Megapixels has the SAME filename (it
+                # encodes the original size, not the bucket) — training on it would silently run
+                # at the old resolution. Skip it and tell the user to re-run cache preparation.
+                if self.latent_cache_matches_reso(cache_file, bucket_reso, self.architecture) is False:
+                    skipped_wrong_reso += 1
+                    continue
+                bucket_key = bucket_reso
             item_info = ItemInfo(item_key, "", image_size, bucket_reso, latent_cache_path=cache_file)
             item_info.text_encoder_output_cache_path = te_cache
 
-            bucket = bucketed.get(bucket_reso, [])
+            bucket = bucketed.get(bucket_key, [])
             for _ in range(self.num_repeats):
                 bucket.append(item_info)
-            bucketed[bucket_reso] = bucket
+            bucketed[bucket_key] = bucket
 
         if skipped_stale:
             logger.warning(

@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 # --- cache writers -----------------------------------------------------------
 def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor,
-                              audio_latent: torch.Tensor = None) -> None:
+                              audio_latent: torch.Tensor = None,
+                              audio_only: bool = False) -> None:
     """Save an H3 VAE latent to the item's cache file, optionally with the clip's audio.
 
     Two shapes, two keys, and the still one is unchanged on purpose:
@@ -49,6 +50,10 @@ def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor,
     Absent audio is absent, not zeros: an item with no `audio_latent` key contributes no audio
     loss, which is what a muted clip and every still are meant to do. A silence TARGET would
     teach the model that this footage sounds like nothing.
+
+    audio_only marks a VOICE item — its video latent is a zeros placeholder and the trainer
+    zeroes the video loss for it. Stored as a cache key (not metadata) because keys are what
+    the collate forwards into the batch; the flag rides beside the tensors it governs.
     """
     assert latent.dim() in (3, 4), \
         f"latent must be 3-D (C,H,W) or 4-D (C,T,H,W), got {tuple(latent.shape)}"
@@ -64,8 +69,11 @@ def save_latent_cache_minimax(item_info: ItemInfo, latent: torch.Tensor,
             f"audio_latent must be packed rows (2*T, 32), got {tuple(audio_latent.shape)} — "
             f"use audio_vae.pack_audio() on the encoder's (B, 32, 2, T) output")
         sd["audio_latent"] = audio_latent.detach().cpu().contiguous()
+    if audio_only:
+        assert audio_latent is not None, "an audio-only item with no audio rows trains nothing"
+        sd["audio_only"] = torch.tensor(True)
     for key, value in sd.items():
-        if torch.isnan(value).any():
+        if value.is_floating_point() and torch.isnan(value).any():
             logger.warning(f"NaN in {key} for {item_info.item_key} - replaced with 0")
             value[torch.isnan(value)] = 0
     metadata = {
@@ -229,6 +237,51 @@ def _encode_clip(vae, item: ItemInfo, audio_vae, device, dtype) -> None:
     save_latent_cache_minimax(item, latent.cpu(), audio_latent=audio_rows)
 
 
+# --- audio-only voice items --------------------------------------------------
+def _is_audio(item: ItemInfo) -> bool:
+    """Extension only — a voice item's content is a placeholder image the aggregator has
+    already collapsed to a bare ndarray, so content shape can't distinguish it from a still."""
+    from fizgig.minimax.audio import is_audio
+    return is_audio(str(item.item_key))
+
+
+def _encode_audio_item(item: ItemInfo, audio_vae) -> None:
+    """One voice recording -> one cache file: a zeros video placeholder and the real audio rows.
+
+    The zeros latent is not laziness — it is the dataset-mean in normalized latent space, and
+    the trainer zeroes the video loss for these items, so its only jobs are sizing the packed
+    sequence (latent_t drives the audio row count) and giving the audio rows something to
+    attend across. The audio is the training item.
+    """
+    from fizgig.minimax.audio import grid_frames_for_samples, read_audio_file, trim_to_grid
+    from fizgig.minimax.audio_vae import pack_audio
+    from fizgig.minimax.model import audio_latents_for_frames, latent_frames_for_pixels
+
+    path = str(item.item_key)
+    wav = read_audio_file(path)                                   # (2, L) or AudioRejected
+    frames = grid_frames_for_samples(wav.shape[1], os.path.basename(path))
+    wav = trim_to_grid(wav, frames)                               # hop-exact sample count
+
+    a_dev = next(audio_vae.parameters()).device
+    a_dt = next(audio_vae.parameters()).dtype
+    with torch.no_grad():
+        z = audio_vae.encode(torch.from_numpy(wav).unsqueeze(0).to(a_dev, dtype=a_dt))
+    audio_rows = pack_audio(z).float().cpu()
+
+    want = audio_latents_for_frames(frames)
+    got = audio_rows.shape[0] // 2
+    if got != want:
+        raise ValueError(
+            f"{os.path.basename(path)}: audio encoded to {got} latents but the model wants "
+            f"{want} — the hop-exact trim should make this impossible; please report it.")
+
+    latent_t = latent_frames_for_pixels(frames)
+    placeholder = torch.zeros(24, latent_t, item.bucket_size[1] // 16, item.bucket_size[0] // 16)
+    logger.info("latent cache: %s -> audio %s + placeholder %s (video loss will be zeroed)",
+                item.item_key, tuple(audio_rows.shape), tuple(placeholder.shape))
+    save_latent_cache_minimax(item, placeholder, audio_latent=audio_rows, audio_only=True)
+
+
 # --- batch encoders (called by the cache scripts) ----------------------------
 def encode_and_save_latents(vae, batch: List[ItemInfo], audio_vae=None) -> None:
     """Encode a batch through the H3 video VAE and save each 24-ch latent.
@@ -241,6 +294,20 @@ def encode_and_save_latents(vae, batch: List[ItemInfo], audio_vae=None) -> None:
     audio_vae=None means clips still train, silently: video learns, the audio rows stay silence.
     That is the intended behaviour when the user has not downloaded the audio VAE.
     """
+    audio_items = [it for it in batch if _is_audio(it)]
+    if audio_items:
+        if len(batch) != len(audio_items):
+            raise ValueError("a batch mixes voice recordings with other items — set Batch "
+                             "Size to 1")
+        if audio_vae is None:
+            raise ValueError(
+                "this dataset contains voice recordings but no audio VAE is configured — set "
+                "the Audio VAE path in Preferences (Model Paths, MiniMax H3), or remove the "
+                "audio files.")
+        for item in audio_items:
+            _encode_audio_item(item, audio_vae)
+        return
+
     device = next(vae.parameters()).device
     dtype = next(vae.parameters()).dtype
 

@@ -35,9 +35,10 @@ def setup_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vae", type=str, required=True, help="Path to the H3 video VAE (minimax_h3_video_vae.safetensors)")
     parser.add_argument("--audio_vae", type=str, default=None,
                         help="Path to the H3 audio VAE (minimax_h3_audio_vae_fp32.safetensors). "
-                             "Only used by video clips, and only when they have sound: with it, "
-                             "a clip's audio becomes a real training target instead of silence. "
-                             "Leave unset and clips train video only.")
+                             "Used by video clips with sound (their audio becomes a real "
+                             "training target instead of silence; unset, clips train video "
+                             "only) and REQUIRED by voice recordings (.wav/.mp3/.flac/.m4a), "
+                             "which are nothing but their audio.")
     parser.add_argument("--device", type=str, default=None, help="Device (default: cuda if available)")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size for encoding")
     parser.add_argument("--num_workers", type=int, default=None, help="Number of workers")
@@ -62,12 +63,22 @@ def main():
         vae.load_state_dict({k: f.get_tensor(k) for k in f.keys()}, strict=False)  # decoder keys ignored
     vae = vae.to(device, torch.float32).eval()
 
-    # Loaded only when clips are actually present: it is a 605 MB model that a stills dataset has
-    # no use for, and the flag is optional so an existing command line keeps working unchanged.
+    # Loaded only when clips or voice recordings are actually present: it is a 605 MB model that
+    # a stills dataset has no use for, and the flag is optional so an existing command line keeps
+    # working unchanged.
+    from fizgig.minimax.audio import is_audio
     audio_vae = None
-    _has_clips = any(is_video(p) for ds in datasets
-                     for p in getattr(getattr(ds, "datasource", None), "image_paths", []) or [])
-    if _has_clips and args.audio_vae:
+    _paths = [p for ds in datasets
+              for p in getattr(getattr(ds, "datasource", None), "image_paths", []) or []]
+    _has_clips = any(is_video(p) for p in _paths)
+    _has_audio = any(is_audio(p) for p in _paths)
+    if _has_audio and not args.audio_vae:
+        # Clips degrade gracefully without the audio VAE (their video still trains); a voice
+        # recording IS its audio, so silence here would cache a placeholder that trains nothing.
+        raise ValueError(
+            "this dataset contains voice recordings but no audio VAE is configured — set the "
+            "Audio VAE path in Preferences (Model Paths, MiniMax H3), or remove the audio files.")
+    if (_has_clips or _has_audio) and args.audio_vae:
         from fizgig.minimax.audio_vae import load_minimax_h3_audio_vae
         logger.info(f"Loading H3 audio VAE from {args.audio_vae}")
         audio_vae = load_minimax_h3_audio_vae(args.audio_vae, device=device, dtype=torch.float32)

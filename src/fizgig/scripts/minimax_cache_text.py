@@ -8,6 +8,20 @@ import logging
 import os
 import sys
 
+# Anti-fragmentation, set BEFORE torch imports (the allocator reads it at CUDA init). The
+# nvfp4 TE re-dequantizes every Linear per forward — 64 layers allocating and freeing ~0.5 GB
+# each carves the reserved pool up MID-forward, and on a 16 GB budget the pass dies with
+# ~1 GB reserved-but-unallocated and no contiguous piece left (surfaced by the 16 GB
+# simulator; a real card limps through it on WDDM paging instead — issue #71). Windows has no
+# expandable_segments (the warnings all over these logs), so the working lever is
+# max_split_size_mb: big segments never get split, so the dequant-sized blocks free and
+# reuse whole. Overrides the GUI's expandable setting on nt, where it is a no-op anyway.
+if os.name == "nt":
+    # Both spellings: torch 2.10 renamed the variable to PYTORCH_ALLOC_CONF (its own OOM
+    # message uses the new name); the legacy one keeps older venvs covered.
+    os.environ["PYTORCH_ALLOC_CONF"] = "max_split_size_mb:256"
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:256"
+
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))

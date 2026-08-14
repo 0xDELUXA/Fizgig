@@ -2782,13 +2782,12 @@ class Gizmo:
             self.audio_status.configure(text="Whisper heard no words in that segment",
                                         fg=COLORS["text_secondary"])
             return
-        current = self.audio_caption.get("1.0", tk.END).strip()
-        # Replace an earlier transcript rather than stacking them — re-transcribing after
-        # moving the segment is the normal flow.
-        current = re.sub(r'\s*saying\s+"[^"]*"\s*$', "", current)
-        joined = (current + " " if current else "") + f'saying "{text}"'
+        # The box is CLEARED first, always — the transcript describes this segment and this
+        # segment only, and anything left over from the previous one (its description, its
+        # words) would silently ride along into the caption. Type the voice description in
+        # front of the transcript after it lands.
         self.audio_caption.delete("1.0", tk.END)
-        self.audio_caption.insert("1.0", joined)
+        self.audio_caption.insert("1.0", f'saying "{text}"')
 
     # -- audio: queue + export ----------------------------------------------------------------------
     def _audio_caption_text(self):

@@ -221,6 +221,8 @@ _ACT_GB_NOCKPT = 5.5         # step overhead at 0.25 MP batch 1, no checkpointin
 # for a 1 MP run that actually peaks at 24.6 GB, costing ~4x the step time for nothing.
 _ACT_GB_CKPT = 0.5           # step overhead at 0.25 MP batch 1, checkpointed (measured 0.19)
 _SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active (measured 7.4 @ n=16)
+# H2D-only streaming (#73) keeps ring_size blocks resident at once (~0.8 GB at ring 2) —
+# inside this transient budget. Re-measure only if diag_h2d_speedup shows the peak moving.
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
 # Skipping checkpointing has to EARN it. Measured on H3, recompute costs ~0.1 s/step and saves
 # ~5 GB — so choosing "no checkpointing" on a thin margin trades five gigabytes of headroom for
@@ -1801,9 +1803,20 @@ def train_minimax(
                               adaln_fp32=not train_adaln)
     dit.requires_grad_(False)                                   # frozen base (QLoRA-style)
     if n_swap > 0:
-        n_swap = dit.enable_block_swap(n_swap)                  # sets the JIT-move boundary
-        logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "
-                    f"(~{n_swap * 0.34:.1f} GB VRAM freed, packed NF4 in RAM)")
+        # int8 bases stream H2D-only (#73, @rintic-13): the base is frozen, so the classic
+        # swap's writeback half was always waste — a ring buffer + copy stream prefetches
+        # each block while the previous computes. NF4 keeps the classic parking (the
+        # offloader is ConvRot-specific). The later preview-restore calls re-enter
+        # enable_block_swap bare and inherit this mode.
+        _use_h2d = (_base_mode == "int8")
+        n_swap = dit.enable_block_swap(n_swap, h2d_only=_use_h2d, ring_size=2)
+        if _use_h2d:
+            logger.info(f"[vram] block swap active: last {n_swap} blocks streamed H2D-only "
+                        f"(int8, ring 2, ~{n_swap * 0.39:.1f} GB pinned in RAM) — no "
+                        f"writeback, prefetch overlaps compute")
+        else:
+            logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "
+                        f"(~{n_swap * 0.34:.1f} GB VRAM freed, packed NF4 in RAM)")
     if use_ckpt:
         dit.enable_gradient_checkpointing()
         logger.info("[vram] gradient checkpointing ON")

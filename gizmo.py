@@ -632,7 +632,7 @@ class ToolTip:
 class Gizmo:
     def __init__(self, root):
         self.root = root
-        root.title("Gizmo — video clip prep for Fizgig")
+        root.title("Gizmo — clip and voice prep for Fizgig")
         root.configure(bg=COLORS["bg_deep"])
         # Wide enough that the vertical scrollbar never eats into the content (which measures
         # ~985 px), tall enough for two cards at a time. The rest scrolls.

@@ -11895,20 +11895,23 @@ class LoRATrainerGUI:
             row=1, column=1, sticky=tk.W, pady=(0, 4)
         )
 
-        # Working from video — sits ABOVE the prep steps because clips are cut first, and the
-        # clips then land in the same training folder as everything else. Shown to everyone
-        # rather than only under MiniMax: the person who needs it is the one who has not chosen
-        # a model yet and is looking at an hour of footage wondering where to start.
+        # Working from video or audio — sits ABOVE the prep steps because clips and voice
+        # segments are cut first, and both then land in the same training folder as everything
+        # else. Shown to everyone rather than only under MiniMax: the person who needs it is
+        # the one who has not chosen a model yet, looking at an hour of footage or a voice
+        # memo, wondering where to start.
         gizmo_card = self._start_section_card(
-            outer, "Working from video?",
-            "Gizmo cuts training clips from your footage — scrub to a moment, pick a length, "
-            "save. It handles the frame rate, the frame count, the sizing and the audio, so the "
-            "clips come out on spec. Video training is MiniMax H3 only; still images need none "
-            "of this.",
+            outer, "Working from video or audio?",
+            "Gizmo cuts training clips AND voice segments. Video: scrub to a moment, pick a "
+            "length, save — frame rate, frame count, sizing and sound all come out on spec. "
+            "Audio: open a recording (or a video, for just its sound), scrub the waveform, "
+            "caption the voice — with optional Whisper transcription — and export ready "
+            "training segments. Video and voice training are MiniMax H3 only; still images "
+            "need none of this.",
         )
         _gz_row = tk.Frame(gizmo_card, bg=COLORS["bg_surface"])
         _gz_row.pack(anchor=tk.W)
-        tk.Button(_gz_row, text="🎬  Open Gizmo", command=self._launch_gizmo,
+        tk.Button(_gz_row, text="🎬🎙  Open Gizmo", command=self._launch_gizmo,
                   bg=COLORS["accent"], fg=COLORS["text_primary"],
                   activebackground=COLORS["accent_hover"],
                   activeforeground=COLORS["text_primary"], font=(FONT_FAMILY, 10, "bold"),
@@ -12771,7 +12774,7 @@ class LoRATrainerGUI:
     IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
 
     def _launch_gizmo(self):
-        """Open Gizmo, the clip prep tool, as its own process.
+        """Open Gizmo, the clip and voice prep tool, as its own process.
 
         On a pod this button is the ONLY route — there is no desktop icon and a .bat is useless
         on Linux. It works because the container runs openbox and DISPLAY=:1 is set in the image,

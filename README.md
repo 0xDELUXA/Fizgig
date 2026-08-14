@@ -254,6 +254,17 @@ trains on, or it's refused with a message saying which lengths those are:
 | Caption | a `.txt` beside the file, or it silently won't train |
 | Audio VAE | required — the ~605 MB Preferences row |
 
+**Or record the dataset right inside Gizmo.** The Voice tab's **🎙 Record** button opens a
+push-to-record window: Gizmo prompts a sentence to read (pangrams, classic lines, deliberately
+ridiculous ones that make you smile — a smile audibly changes a voice — and darker lines for
+range, rotating tone take by take, sized to your segment length), you **hold the button or the
+space bar while you speak and release when done** — the mic is already rolling, so nothing
+clips, and the silence either side is trimmed to a quarter-second. Each take drops straight
+into the editor **with its caption already written** (the prompted sentence *is* the
+transcript — no Whisper needed), ready to Ctrl+S. A usable voice dataset takes about ten
+minutes and zero source files. Pick your microphone (and a default Whisper language) in
+Gizmo's **⚙ settings**.
+
 **Gizmo's Voice / audio tab cuts them for you** — that's the whole point of the strict rule.
 Open a recording (or a **video**, to use just its audio track — you scrub the waveform, nothing
 is shown), click where a segment starts, pick a length, caption it, queue it, export the lot.

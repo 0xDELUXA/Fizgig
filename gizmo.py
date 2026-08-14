@@ -229,61 +229,152 @@ def slice_take(raw_path, press_s, release_s, out_wav, ffmpeg):
     return len(chunk) / CAPTURE_BPS
 
 
-# Prompted sentences: the classic Harvard/IEEE list — public domain, phonetically balanced,
-# written for exactly this job. Grouped only by length at pick time (~2.6 words a second).
-HARVARD_SENTENCES = [
-    "The birch canoe slid on the smooth planks.",
-    "Glue the sheet to the dark blue background.",
-    "It's easy to tell the depth of a well.",
-    "These days a chicken leg is a rare dish.",
-    "Rice is often served in round bowls.",
-    "The juice of lemons makes fine punch.",
-    "The box was thrown beside the parked truck.",
-    "The hogs were fed chopped corn and garbage.",
-    "Four hours of steady work faced us.",
-    "A large size in stockings is hard to sell.",
-    "The boy was there when the sun rose.",
-    "A rod is used to catch pink salmon.",
-    "The source of the huge river is the clear spring.",
-    "Kick the ball straight and follow through.",
-    "Help the woman get back to her feet.",
-    "A pot of tea helps to pass the evening.",
-    "Smoky fires lack flame and heat.",
-    "The soft cushion broke the man's fall.",
-    "The salt breeze came across from the sea.",
-    "The girl at the booth sold fifty bonds.",
-    "The small pup gnawed a hole in the sock.",
-    "The fish twisted and turned on the bent hook.",
-    "Press the pants and sew a button on the vest.",
-    "The swan dive was far short of perfect.",
-    "The beauty of the view stunned the young boy.",
-    "Two blue fish swam in the tank.",
-    "Her purse was full of useless trash.",
-    "The colt reared and threw the tall rider.",
-    "It snowed, rained, and hailed the same morning.",
-    "Read verse out loud for pleasure.",
-    "Hoist the load to your left shoulder.",
-    "Take the winding path to reach the lake.",
-    "Note closely the size of the gas tank.",
-    "Wipe the grease off his dirty face.",
-    "Mend the coat before you go out.",
-    "The wrist was badly strained and hung limp.",
-    "The stray cat gave birth to kittens.",
-    "The young girl gave no clear response.",
-    "The meal was cooked before the bell rang.",
-    "What joy there is in living.",
-    # Short interjections for the sub-second slots — Harvard sentences bottom out at six
-    # words, and a 0.9 s take holds two or three. Interjections are real voice data too:
-    # exclamations carry pitch range a read sentence never shows.
-    "Oh, really?",
-    "Not today.",
-    "Here we go.",
-    "That's enough.",
-    "Come on, then.",
-    "Well, look at that.",
-    "Right, let's begin.",
-    "No, thank you.",
-]
+# Prompted sentences, in CATEGORIES — each spanning short interjections to lines that fill
+# the 5.2 s slot, because a voice dataset wants range on two axes at once: length (phrasing)
+# and tone (delivery). The picker rotates categories so consecutive takes change flavour.
+#
+# plain    — Harvard/IEEE sentences (public domain, phonetically balanced) + everyday lines
+# pangrams — every letter in one breath; the densest phonetic coverage per second
+# literary — public-domain lines with drama in them; a LINE invites a performance
+# silly    — deliberately ridiculous: a genuine smile raises the formants, and you cannot
+#            fake that on request the way you can fake "cheerfully"
+# dark     — a low, tight tone the smiley ones never reach (gothic classics + originals)
+SENTENCE_CATEGORIES = {
+    "plain": [
+        "Here we go.",
+        "Not today.",
+        "No, thank you.",
+        "Right, let's begin.",
+        "That's enough.",
+        "The birch canoe slid on the smooth planks.",
+        "Glue the sheet to the dark blue background.",
+        "It's easy to tell the depth of a well.",
+        "These days a chicken leg is a rare dish.",
+        "Rice is often served in round bowls.",
+        "The juice of lemons makes fine punch.",
+        "The box was thrown beside the parked truck.",
+        "Four hours of steady work faced us.",
+        "A large size in stockings is hard to sell.",
+        "The boy was there when the sun rose.",
+        "A rod is used to catch pink salmon.",
+        "The source of the huge river is the clear spring.",
+        "Kick the ball straight and follow through.",
+        "Help the woman get back to her feet.",
+        "A pot of tea helps to pass the evening.",
+        "Smoky fires lack flame and heat.",
+        "The soft cushion broke the man's fall.",
+        "The salt breeze came across from the sea.",
+        "The girl at the booth sold fifty bonds.",
+        "The small pup gnawed a hole in the sock.",
+        "The fish twisted and turned on the bent hook.",
+        "Press the pants and sew a button on the vest.",
+        "The swan dive was far short of perfect.",
+        "The beauty of the view stunned the young boy.",
+        "Two blue fish swam in the tank.",
+        "Her purse was full of useless trash.",
+        "The colt reared and threw the tall rider.",
+        "It snowed, rained, and hailed the same morning.",
+        "Read verse out loud for pleasure.",
+        "Hoist the load to your left shoulder.",
+        "Take the winding path to reach the lake.",
+        "Note closely the size of the gas tank.",
+        "Wipe the grease off his dirty face.",
+        "Mend the coat before you go out.",
+        "The wrist was badly strained and hung limp.",
+        "The stray cat gave birth to kittens.",
+        "The young girl gave no clear response.",
+        "The meal was cooked before the bell rang.",
+        "What joy there is in living.",
+        "The old clock in the hallway has kept perfect time for ninety years.",
+        "Every window in the street went dark at exactly the same moment.",
+        "Fold the map along the river and the two towns touch.",
+        "Nobody remembers who planted the orchard, but everyone eats the apples.",
+        "The kettle sang, the rain kept its steady rhythm, and nobody felt like moving at all.",
+        "By the time the bus finally arrived, all three of us had completely forgotten where we were going.",
+        "The lighthouse keeper writes one letter every winter and never says who it is for.",
+        "The last train of the night carries more stories than passengers, and it keeps them all.",
+        "When the tide goes out past the third rock, the whole bay smells of salt and iron.",
+        "The valley keeps its snow until April, then lets the river have all of it at once.",
+        "String the lights from the pier to the boathouse and the whole harbour becomes a stage.",
+        "Read the letter slowly, because the second page changes what the first page means.",
+        "The tide rolled the little boat gently against the jetty while the gulls argued over the nets.",
+        "She counted the coins twice, smiled at the total, and slid them slowly back across the counter.",
+        "The wide road shimmered in the summer heat, and the dusty travellers walked on without a word.",
+        "It rained through the festival, and somehow that is the year everyone remembers best.",
+    ],
+    "pangrams": [
+        "The quick brown fox jumps over the lazy dog.",
+        "Pack my box with five dozen liquor jugs.",
+        "How vexingly quick daft zebras jump.",
+        "The five boxing wizards jump quickly.",
+        "Sphinx of black quartz, judge my vow.",
+        "Jackdaws love my big sphinx of quartz.",
+        "Bright vixens jump; dozy fowl quack.",
+        "Amazingly few discotheques provide jukeboxes.",
+        "The quick brown fox jumps over the lazy dog while the five boxing wizards watch.",
+    ],
+    "literary": [
+        "Call me Ishmael.",
+        "What light through yonder window breaks.",
+        "Now is the winter of our discontent.",
+        "Once more unto the breach, dear friends, once more.",
+        "All the world's a stage, and all the men and women merely players.",
+        "The clock struck thirteen as he walked out into the cold.",
+        "It was the best of times, it was the worst of times, it was the age of wisdom.",
+        "Once upon a midnight dreary, while I pondered, weak and weary, over many a curious volume.",
+        "It is a truth universally acknowledged, that a single man in possession of a good fortune must be in want of a wife.",
+    ],
+    "silly": [
+        "Not the llama again.",
+        "More soup, vicar?",
+        "The parrot disapproves.",
+        "Oh, really?",
+        "Come on, then.",
+        "Well, look at that.",
+        "The committee has voted, and the office llama stays.",
+        "My grandmother arm-wrestled the postman for the last biscuit.",
+        "Please stop teaching the parrot to impersonate my dentist.",
+        "The wizard filed a noise complaint against the volcano.",
+        "Somebody has buttered the entire staircase again.",
+        "Our new intern is a heron, and honestly, he's doing fine.",
+        "The moon rang twice and hung up before I could answer.",
+        "I have strong opinions about the municipal soup fountain.",
+        "The baker swears the missing bread was taken by a very polite ghost.",
+        "The cat has decided that the piano belongs to her, and negotiations have failed.",
+        "After a long and frankly emotional meeting, the committee has voted, and the office llama stays.",
+        "The magician retired quietly to the seaside, but the rabbits kept arriving for years.",
+        "Our neighbour has taught his pigeons to queue, and frankly the town is better for it.",
+        "The orchestra tuned for so long that the audience began to applaud the tuning itself.",
+        "A good soup takes patience, a heavy pot, and at least one opinionated grandmother.",
+        "Paint dries, concrete sets, and yet the committee meeting simply goes on and on.",
+        "The recipe has been in the family so long that nobody dares to actually read it.",
+    ],
+    "dark": [
+        "Don't turn around.",
+        "Not yet.",
+        "It sees you.",
+        "Stay very still.",
+        "It was the beating of his hideous heart.",
+        "The children of the night, what music they make.",
+        "You are my creator, but I am your master.",
+        "The house counts its guests at midnight, and the number is never right.",
+        "Do not answer the knocking, whatever voice it uses.",
+        "Deep into that darkness peering, long I stood there, wondering, fearing.",
+        "The lights went out one floor at a time, and then the footsteps started.",
+        "Something has been wearing his face all week, and it is getting better at it.",
+        "Bring the lantern closer, because something moved at the edge of the field.",
+        "Under the floorboards of the old schoolhouse, someone had hidden a jar of perfectly ordinary buttons.",
+        "He whistled the same four notes at every doorway, and every door opened but one.",
+        "The museum's quietest room holds a single chair, and the chair is always slightly warm.",
+        "Every photograph in the album is smiling, except the one that was taken last.",
+        "If you hear my voice on the stairs tonight, do not open the door, and do not answer it.",
+        "Somewhere between the second lighthouse and the harbour wall, the fog swallowed the ferry whole.",
+        "Nothing in the attic has moved for thirty years, which is strange, because something breathes up there.",
+    ],
+}
+
+# The flat pool, for anything that just wants sentences.
+HARVARD_SENTENCES = [s for _cat in SENTENCE_CATEGORIES.values() for s in _cat]
 
 # Delivery prompts — an emotional-range axis for the dataset, and an honest caption clause.
 DELIVERY_PROMPTS = {
@@ -299,18 +390,57 @@ DELIVERY_PROMPTS = {
 WORDS_PER_SECOND = 2.6
 
 
-def pick_sentence(frames, rng=None):
-    """A sentence sized to the segment slot: word count within +-40% of what the slot's
-    seconds hold at a natural reading pace. Every slot matches SOMETHING (the pool spans
-    5..12 words and the slots want 2..14) — worst case the nearest-length sentence wins."""
-    import random as _random
-    rng = rng or _random
+def _sentences_in_band(sentences, frames):
+    """The category's sentences whose word count fits the slot: within +-40% of what the
+    slot's seconds hold at a natural reading pace (floor of 2 words either way)."""
     secs = hop_exact_samples(frames) / AUDIO_SAMPLE_RATE
     want = secs * WORDS_PER_SECOND
-    scored = sorted(HARVARD_SENTENCES,
-                    key=lambda s: abs(len(s.split()) - want))
-    band = [s for s in scored if abs(len(s.split()) - want) <= max(2, want * 0.4)]
-    return rng.choice(band or scored[:5])
+    tol = max(2, want * 0.4)
+    return [s for s in sentences if abs(len(s.split()) - want) <= tol]
+
+
+class SentencePicker:
+    """Rotates CATEGORIES take-to-take (Peter): a plain line, then a pangram, then something
+    dark — tone variety arrives on its own instead of by chance. A category with nothing in
+    the slot's length band (pangrams at the 0.9 s slot) is skipped, not forced; within a
+    category the pick is random and avoids the immediately previous sentence."""
+
+    def __init__(self, rng=None):
+        import random as _random
+        self.rng = rng or _random
+        self._order = list(SENTENCE_CATEGORIES)
+        self._i = 0
+        self._last = None
+
+    def pick(self, frames):
+        for _ in range(len(self._order)):
+            cat = self._order[self._i % len(self._order)]
+            self._i += 1
+            band = _sentences_in_band(SENTENCE_CATEGORIES[cat], frames)
+            if band:
+                choices = [s for s in band if s != self._last] or band
+                self._last = self.rng.choice(choices)
+                return self._last
+        # no category fits (cannot happen with the shipped pool; belt for a pruned one):
+        # nearest length overall
+        secs = hop_exact_samples(frames) / AUDIO_SAMPLE_RATE
+        want = secs * WORDS_PER_SECOND
+        self._last = min(HARVARD_SENTENCES, key=lambda s: abs(len(s.split()) - want))
+        return self._last
+
+
+_DEFAULT_PICKER = None
+
+
+def pick_sentence(frames, rng=None):
+    """Module-level convenience over one shared rotating picker (a private rng gets its own,
+    so tests stay deterministic)."""
+    global _DEFAULT_PICKER
+    if rng is not None:
+        return SentencePicker(rng).pick(frames)
+    if _DEFAULT_PICKER is None:
+        _DEFAULT_PICKER = SentencePicker()
+    return _DEFAULT_PICKER.pick(frames)
 
 
 # --- persisted settings (mic + default whisper language) ----------------------------------------
@@ -339,6 +469,11 @@ def save_settings(settings):
                       f, indent=2)
     except OSError:
         pass                                   # a read-only install keeps working unsaved
+
+
+WHISPER_LANGUAGES = ["Auto detect", "English", "French", "German", "Spanish", "Italian",
+                     "Portuguese", "Dutch", "Polish", "Welsh", "Russian", "Ukrainian",
+                     "Japanese", "Chinese", "Korean", "Arabic", "Hindi"]
 
 
 def voice_output_name(src_path, out_dir, claimed=()):
@@ -872,6 +1007,8 @@ class Gizmo:
         root.minsize(1010, 620)
 
         self.ffmpeg = find_ffmpeg()
+        self.settings = load_settings()
+        self._recorder = None
         self.src = None
         self.info = None
         self.frame_pos = 0            # in SOURCE frames
@@ -1044,10 +1181,14 @@ class Gizmo:
         canvas.bind("<Configure>",
                     lambda e: canvas.itemconfigure(self._scroll_window, width=e.width))
         self.root.bind_all("<MouseWheel>",
-                           lambda e: canvas.yview_scroll(int(-e.delta / 120), "units"))
+                           lambda e: (canvas.yview_scroll(int(-e.delta / 120), "units")
+                                      if e.widget.winfo_toplevel() is self.root else None))
 
         head = tk.Frame(body, bg=COLORS["bg_deep"])
         head.pack(fill=tk.X, padx=16, pady=(14, 10))
+        self._button(head, "⚙", self.open_settings, pad=10,
+                     tip="Settings — microphone for the recorder, default Whisper language. "
+                         "Saved beside gizmo.py, kept between sessions.").pack(side=tk.RIGHT)
         tk.Label(head, text="Gizmo", font=(FONT_FAMILY, 22, "bold"),
                  bg=COLORS["bg_deep"], fg=COLORS["text_primary"]).pack(anchor="w")
         tk.Label(head, text="Cut training clips and voice segments Fizgig will accept — on the "
@@ -1098,6 +1239,10 @@ class Gizmo:
         # doing nothing) instead of driving the transport.
         def _click_anywhere(e):
             try:
+                # Main window only: bind_all reaches every toplevel, and yanking focus out of
+                # the recorder popup would drop a push-to-record hold mid-take.
+                if e.widget.winfo_toplevel() is not self.root:
+                    return
                 cls = e.widget.winfo_class()
             except Exception:
                 return
@@ -2170,6 +2315,11 @@ class Gizmo:
                      tip="Open a recording — or a video whose SOUND you want.\n\nAny format or "
                          "sample rate; Gizmo converts on export. The original is never "
                          "modified.").pack(side=tk.LEFT)
+        self._button(row, "🎙 Record…", self.open_recorder,
+                     tip="Record a voice dataset right here — no files needed. Gizmo prompts "
+                         "sentences to read (hold to record, release when done), writes the "
+                         "caption for you, and each take drops straight into the editor "
+                         "ready to queue.").pack(side=tk.LEFT, padx=(8, 0))
         self.audio_src_label = tk.Label(row, text="No recording open", font=(FONT_FAMILY, 10),
                                         bg=COLORS["bg_surface"], fg=COLORS["text_muted"])
         self.audio_src_label.pack(side=tk.LEFT, padx=12)
@@ -2202,13 +2352,12 @@ class Gizmo:
                 "saying \"…\". The description half stays yours — no model can hear that a "
                 "voice is warm.")
         self.audio_whisper_btn.pack(side=tk.RIGHT)
-        self.audio_lang_var = tk.StringVar(value="Auto detect")
+        _default_lang = self.settings.get("whisper_language", "Auto detect")
+        self.audio_lang_var = tk.StringVar(
+            value=_default_lang if _default_lang in WHISPER_LANGUAGES else "Auto detect")
         _lang = ttk.Combobox(trow, textvariable=self.audio_lang_var, width=11,
                              state="readonly", style="G.TCombobox",
-                             values=["Auto detect", "English", "French", "German", "Spanish",
-                                     "Italian", "Portuguese", "Dutch", "Polish", "Welsh",
-                                     "Russian", "Ukrainian", "Japanese", "Chinese", "Korean",
-                                     "Arabic", "Hindi"])
+                             values=WHISPER_LANGUAGES)
         _lang.pack(side=tk.RIGHT, padx=(0, 8))
         ToolTip(_lang, "The language Whisper listens FOR. Auto detect usually works, but a "
                        "short segment can fool it — it once heard Welsh in English and looped. "
@@ -3181,6 +3330,80 @@ class Gizmo:
                   self.audio_export_btn, self.audio_whisper_btn):
             w.configure(state=state)
 
+    # -- the voice recorder window ------------------------------------------------------------------
+    def open_recorder(self):
+        """The push-to-record window. One per session — a second click raises the first."""
+        if getattr(self, "_recorder", None) is not None and self._recorder.alive():
+            self._recorder.win.lift()
+            return
+        self.notebook.select(self._audio_tab)
+        self._recorder = GizmoRecorder(self)
+
+    def open_settings(self):
+        """The ⚙ popup: microphone + default Whisper language, persisted beside gizmo.py."""
+        win = tk.Toplevel(self.root)
+        win.title("Gizmo — settings")
+        win.configure(bg=COLORS["bg_deep"], padx=18, pady=16)
+        win.transient(self.root)
+        win.resizable(False, False)
+
+        tk.Label(win, text="Microphone", font=(FONT_FAMILY, 10, "bold"),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_primary"]).grid(
+            row=0, column=0, sticky=tk.W, pady=(0, 2))
+        mic_var = tk.StringVar(value=self.settings.get("microphone", ""))
+        mic_combo = ttk.Combobox(win, textvariable=mic_var, width=42, style="G.TCombobox")
+        mic_combo.grid(row=1, column=0, sticky=tk.W)
+        ToolTip(mic_combo, "The input device the recorder captures from. Scan lists what "
+                           "this machine offers; on Linux, 'default' follows the system mic.")
+
+        def scan():
+            scan_btn.configure(state=tk.DISABLED, text="scanning…")
+
+            def worker():
+                devices = list_capture_devices(self.ffmpeg)
+
+                def done():
+                    scan_btn.configure(state=tk.NORMAL, text="Scan")
+                    mic_combo.configure(values=devices or ["default"])
+                    if devices and not mic_var.get():
+                        mic_var.set(devices[0])
+                    if not devices:
+                        tk.Label(win, text="No microphone found on this machine.",
+                                 font=(FONT_FAMILY, 9), bg=COLORS["bg_deep"],
+                                 fg=COLORS["warning"]).grid(row=2, column=0, sticky=tk.W)
+                self.root.after(0, done)
+            threading.Thread(target=worker, daemon=True).start()
+
+        scan_btn = self._button(win, "Scan", scan, pad=10, tip="Look for microphones again.")
+        scan_btn.grid(row=1, column=1, padx=(8, 0))
+
+        tk.Label(win, text="Whisper language", font=(FONT_FAMILY, 10, "bold"),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_primary"]).grid(
+            row=3, column=0, sticky=tk.W, pady=(12, 2))
+        lang_var = tk.StringVar(value=self.settings.get("whisper_language", "Auto detect"))
+        lang_combo = ttk.Combobox(win, textvariable=lang_var, width=42, state="readonly",
+                                  style="G.TCombobox", values=WHISPER_LANGUAGES)
+        lang_combo.grid(row=4, column=0, sticky=tk.W)
+        ToolTip(lang_combo, "The default for the Transcribe dropdown. Pick your language "
+                            "once and Whisper stops guessing (a wrong guess on a short "
+                            "segment is what makes it hallucinate).")
+
+        def save():
+            self.settings["microphone"] = mic_var.get().strip()
+            self.settings["whisper_language"] = lang_var.get()
+            save_settings(self.settings)
+            if hasattr(self, "audio_lang_var"):
+                self.audio_lang_var.set(lang_var.get())
+            win.destroy()
+
+        row = tk.Frame(win, bg=COLORS["bg_deep"])
+        row.grid(row=5, column=0, columnspan=2, sticky=tk.E, pady=(16, 0))
+        self._button(row, "Save", save, "accent", pad=12,
+                     tip="Keep these — they persist in gizmo_settings.json.").pack(side=tk.LEFT)
+        self._button(row, "Cancel", win.destroy, pad=12,
+                     tip="Close without changing anything.").pack(side=tk.LEFT, padx=(8, 0))
+        scan()
+
     # -- cost -------------------------------------------------------------------------------------
     def _refresh_length_note(self):
         """What this length can be trained at, per card. The number people actually need is not
@@ -3440,6 +3663,306 @@ class Gizmo:
             self.status.configure(text=f"{ok} clip{'' if ok == 1 else 's'} written",
                                   fg=COLORS["success"])
         self._refresh_planned_name()
+
+
+class GizmoRecorder:
+    """The push-to-record window.
+
+    The mic rolls CONTINUOUSLY while this window is open (one ffmpeg writing raw PCM);
+    holding the button — or space — only marks timestamps, and the take is sliced out
+    afterwards with cushions either side. That is what makes push-to-record clip nothing:
+    the capture was already running when the thumb landed.
+    """
+
+    LEVEL_POLL_MS = 100
+
+    def __init__(self, app):
+        self.app = app
+        self.proc = None
+        self.raw = os.path.join(tempfile.gettempdir(), "gizmo_capture.raw")
+        self.takes_dir = os.path.join(tempfile.gettempdir(), "gizmo_takes")
+        os.makedirs(self.takes_dir, exist_ok=True)
+        self.t0 = None                # monotonic when the capture actually started writing
+        self.press_t = None
+        self.takes = []               # {path, dur, sentence, delivery}
+        self._space_release_job = None
+        self._closed = False
+
+        win = self.win = tk.Toplevel(app.root)
+        win.title("Gizmo — record a voice")
+        win.configure(bg=COLORS["bg_deep"], padx=20, pady=16)
+        win.geometry("+%d+%d" % (app.root.winfo_rootx() + 80, app.root.winfo_rooty() + 120))
+        win.protocol("WM_DELETE_WINDOW", self.close)
+
+        # 1. the sentence to read
+        tk.Label(win, text="Read this:", font=(FONT_FAMILY, 10),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_secondary"]).pack(anchor=tk.W)
+        self.sentence_var = tk.StringVar()
+        tk.Label(win, textvariable=self.sentence_var, font=(FONT_FAMILY, 15, "bold"),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_primary"], wraplength=520,
+                 justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 8))
+        srow = tk.Frame(win, bg=COLORS["bg_deep"])
+        srow.pack(fill=tk.X)
+        app._button(srow, "🎲 New sentence", self.new_sentence, pad=10,
+                    tip="Another prompt, sized to the segment length picked on the main "
+                        "window. Pangrams and Harvard sentences — phonetically dense on "
+                        "purpose.").pack(side=tk.LEFT)
+        tk.Label(srow, text="delivery:", font=(FONT_FAMILY, 9),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_secondary"]).pack(side=tk.LEFT,
+                                                                        padx=(14, 4))
+        self.delivery_var = tk.StringVar(value="plain")
+        dcombo = ttk.Combobox(srow, textvariable=self.delivery_var, width=13,
+                              state="readonly", style="G.TCombobox",
+                              values=list(DELIVERY_PROMPTS))
+        dcombo.pack(side=tk.LEFT)
+        ToolTip(dcombo, "Say it that way, and the caption records it honestly — emotional "
+                        "range across takes is dataset variety a voice LoRA wants.")
+
+        # 2. the hold button. Press/release bindings, NOT command — and NOT app._button,
+        # whose focus-return wrapper would fight the hold.
+        self.rec_btn = tk.Button(win, text="🎙  HOLD to record  (or hold space)",
+                                 font=(FONT_FAMILY, 13, "bold"), bg=COLORS["bg_hover"],
+                                 fg=COLORS["text_primary"], activebackground="#B91C1C",
+                                 activeforeground=COLORS["text_primary"], relief=tk.FLAT,
+                                 bd=0, padx=24, pady=16, cursor="hand2", takefocus=0)
+        self.rec_btn.pack(fill=tk.X, pady=(12, 6))
+        ToolTip(self.rec_btn,
+                "Hold while you speak, release when the sentence ends — a quarter-second "
+                "either side is kept for you, so don't rush the press. If a Windows "
+                "accessibility prompt ever interrupts a take (Sticky/Filter Keys), hold with "
+                "the mouse instead, or turn those off in Windows Settings → Accessibility → "
+                "Keyboard.")
+        self.rec_btn.bind("<ButtonPress-1>", self._press)
+        self.rec_btn.bind("<ButtonRelease-1>", self._release)
+        win.bind("<KeyPress-space>", self._space_press)
+        win.bind("<KeyRelease-space>", self._space_release)
+
+        # 3. level + elapsed
+        lrow = tk.Frame(win, bg=COLORS["bg_deep"])
+        lrow.pack(fill=tk.X)
+        self.level = tk.Canvas(lrow, width=380, height=12, bg=COLORS["bg_surface"],
+                               highlightthickness=1, highlightbackground=COLORS["border"])
+        self.level.pack(side=tk.LEFT)
+        ToolTip(self.level, "Live input level — talk and it should move. Flat while you "
+                            "speak means the wrong microphone: pick another in ⚙ settings.")
+        self.status = tk.Label(lrow, text="starting the microphone…", font=(FONT_FAMILY, 10),
+                               bg=COLORS["bg_deep"], fg=COLORS["text_secondary"])
+        self.status.pack(side=tk.LEFT, padx=10)
+
+        # 4. takes
+        tk.Label(win, text="Takes (double-click to load one into the editor):",
+                 font=(FONT_FAMILY, 9), bg=COLORS["bg_deep"],
+                 fg=COLORS["text_secondary"]).pack(anchor=tk.W, pady=(10, 2))
+        self.takes_box = tk.Listbox(win, height=5, width=64, bg=COLORS["bg_surface"],
+                                    fg=COLORS["text_primary"], font=("Consolas", 9),
+                                    relief=tk.FLAT, highlightthickness=1,
+                                    highlightbackground=COLORS["border"],
+                                    selectbackground=COLORS["accent"])
+        self.takes_box.pack(fill=tk.X)
+        self.takes_box.bind("<Double-Button-1>", lambda _e: self.use_selected())
+        ToolTip(self.takes_box, "Every release lands here. The newest take loads into the "
+                                "editor automatically, caption written for you — listen, "
+                                "Ctrl+S to queue, come back and hold for the next one.")
+
+        self.new_sentence()
+        self._start_capture()
+
+    def alive(self):
+        try:
+            return not self._closed and self.win.winfo_exists()
+        except tk.TclError:
+            return False
+
+    # -- capture lifecycle -------------------------------------------------------------------
+    def _start_capture(self):
+        device = self.app.settings.get("microphone", "")
+        if os.name == "nt" and not device:
+            devices = list_capture_devices(self.app.ffmpeg)
+            if devices:
+                device = devices[0]
+                self.app.settings["microphone"] = device
+                save_settings(self.app.settings)
+        cmd = build_capture_command(self.app.ffmpeg, device, self.raw)
+        if cmd is None:
+            self.rec_btn.configure(state=tk.DISABLED)
+            self.status.configure(text="no microphone available on this machine",
+                                  fg=COLORS["warning"])
+            return
+        try:
+            os.path.exists(self.raw) and os.remove(self.raw)
+        except OSError:
+            pass
+        try:
+            self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                         stderr=subprocess.PIPE, creationflags=_NO_WINDOW)
+        except Exception as exc:
+            self.status.configure(text=f"could not start capture: {exc}", fg=COLORS["error"])
+            return
+        self._await_first_bytes()
+
+    def _await_first_bytes(self):
+        """The clock starts when ffmpeg actually WRITES, not when it was launched — the
+        device takes a few hundred ms to open, and stamping early would shift every take."""
+        if not self.alive():
+            return
+        if self.proc.poll() is not None:
+            err = (self.proc.stderr.read() or b"").decode("utf-8", "replace")[-200:]
+            self.status.configure(text=f"microphone failed: {err or 'unknown'}",
+                                  fg=COLORS["error"])
+            self.rec_btn.configure(state=tk.DISABLED)
+            return
+        try:
+            if os.path.getsize(self.raw) > 0:
+                import time as _time
+                self.t0 = _time.monotonic()
+                self.status.configure(text="mic is live — hold and speak",
+                                      fg=COLORS["success"])
+                self._level_tick()
+                return
+        except OSError:
+            pass
+        self.win.after(50, self._await_first_bytes)
+
+    def _now(self):
+        import time as _time
+        return _time.monotonic() - self.t0
+
+    def _level_tick(self):
+        if not self.alive() or self.t0 is None:
+            return
+        try:
+            size = os.path.getsize(self.raw)
+            window = int(0.1 * CAPTURE_BPS) // 4 * 4
+            with open(self.raw, "rb") as f:
+                f.seek(max(0, size - window))
+                chunk = f.read(window)
+            peak = 0
+            for i in range(0, len(chunk) - 1, 2):
+                v = int.from_bytes(chunk[i:i + 2], "little", signed=True)
+                peak = max(peak, abs(v))
+        except OSError:
+            peak = 0
+        self.level.delete("all")
+        frac = min(1.0, peak / 28000)
+        colour = COLORS["success"] if frac < 0.85 else COLORS["warning"]
+        self.level.create_rectangle(0, 0, 380 * frac, 12, fill=colour, outline="")
+        if self.press_t is not None:
+            self.status.configure(text=f"recording…  {self._now() - self.press_t:.1f} s",
+                                  fg="#EF4444")
+        self.win.after(self.LEVEL_POLL_MS, self._level_tick)
+
+    # -- push-to-record ----------------------------------------------------------------------
+    def _press(self, _e=None):
+        if self.t0 is None or self.press_t is not None:
+            return
+        self.press_t = self._now()
+        self.rec_btn.configure(bg="#B91C1C", text="●  recording — release when done")
+
+    def _release(self, _e=None):
+        if self.press_t is None:
+            return
+        press, self.press_t = self.press_t, None
+        release = self._now()
+        self.rec_btn.configure(bg=COLORS["bg_hover"],
+                               text="🎙  HOLD to record  (or hold space)")
+        sentence, delivery = self.sentence_var.get(), self.delivery_var.get()
+
+        def worker():
+            path = os.path.join(self.takes_dir, f"take_{len(self.takes) + 1:03d}.wav")
+            try:
+                dur = slice_take(self.raw, press, release, path, self.app.ffmpeg)
+            except Exception as exc:
+                self.app.root.after(0, lambda: self.status.configure(
+                    text=f"take failed: {exc}", fg=COLORS["error"]))
+                return
+            self.app.root.after(0, self._take_done, path, dur, sentence, delivery)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _take_done(self, path, dur, sentence, delivery):
+        if not self.alive():
+            return
+        min_dur = hop_exact_samples(AUDIO_GRID_FRAMES[0]) / AUDIO_SAMPLE_RATE
+        if dur < min_dur:
+            self.status.configure(
+                text=f"too short ({dur:.2f} s) — the smallest slot is {min_dur:.1f} s",
+                fg=COLORS["warning"])
+            return
+        self.takes.append({"path": path, "dur": dur, "sentence": sentence,
+                           "delivery": delivery})
+        label = sentence if len(sentence) <= 40 else sentence[:39] + "…"
+        self.takes_box.insert(tk.END, f"{dur:4.1f}s  {label}")
+        self.takes_box.see(tk.END)
+        self.status.configure(text=f"take {len(self.takes)} — loaded into the editor",
+                              fg=COLORS["success"])
+        self.use_take(len(self.takes) - 1)
+        self.new_sentence()
+
+    # -- space as the hold key (with auto-repeat filtering) ----------------------------------
+    def _space_press(self, _e):
+        # Auto-repeat delivers release+press pairs back to back; a REAL press has no pending
+        # ghost release to cancel.
+        if self._space_release_job is not None:
+            self.win.after_cancel(self._space_release_job)
+            self._space_release_job = None
+            return "break"
+        self._press()
+        return "break"
+
+    def _space_release(self, _e):
+        self._space_release_job = self.win.after(60, self._space_release_real)
+        return "break"
+
+    def _space_release_real(self):
+        self._space_release_job = None
+        self._release()
+
+    # -- takes -> the editor -----------------------------------------------------------------
+    def use_selected(self):
+        sel = self.takes_box.curselection()
+        if sel:
+            self.use_take(sel[0])
+
+    def use_take(self, idx):
+        t = self.takes[idx]
+        app = self.app
+        try:
+            app.load_audio(t["path"])
+        except Exception as exc:
+            self.status.configure(text=str(exc), fg=COLORS["error"])
+            return
+        fit = max((f for f in AUDIO_GRID_FRAMES
+                   if hop_exact_samples(f) / AUDIO_SAMPLE_RATE <= t["dur"]), default=None)
+        if fit:
+            app.audio_frames_var.set(fit)
+        adverb = DELIVERY_PROMPTS.get(t["delivery"], "")
+        caption = (f'saying {adverb} "{t["sentence"]}"' if adverb
+                   else f'saying "{t["sentence"]}"')
+        app.audio_caption.delete("1.0", tk.END)
+        app.audio_caption.insert("1.0", caption)
+        app._audio_seek(0.0)
+
+    def new_sentence(self):
+        try:
+            frames = self.app.audio_frames_var.get()
+        except Exception:
+            frames = 124
+        self.sentence_var.set(pick_sentence(frames))
+
+    def close(self):
+        self._closed = True
+        if self.proc is not None and self.proc.poll() is None:
+            try:
+                self.proc.terminate()          # raw output: nothing to finalise, safe to kill
+            except Exception:
+                pass
+        try:
+            os.path.exists(self.raw) and os.remove(self.raw)
+        except OSError:
+            pass                               # ffmpeg may still hold it for an instant
+        try:
+            self.win.destroy()
+        except tk.TclError:
+            pass
 
 
 def main():

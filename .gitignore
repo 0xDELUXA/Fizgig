@@ -81,3 +81,4 @@ launch_error.log
 # Internal-only: debugging test harnesses + template setup notes (local, never public)
 tests/
 docs/RUNPOD_TEMPLATE.md
+gizmo_settings.json

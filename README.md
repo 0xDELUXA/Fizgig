@@ -238,14 +238,48 @@ track behave the same.
 it and clips with sound train on that sound. Leave it blank and everything still works; clips just
 train silent. Stills never touch it.
 
-**What it needs** — four files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card at the bottom):
+### Training on a voice alone
+
+A voice recording can train on its own — no footage at all. Drop **`.wav` / `.mp3` / `.flac` /
+`.m4a`** files into the training folder, by themselves or mixed with stills and clips, and each
+one becomes a training item that teaches H3 the voice. Sample rate and channels don't matter
+(they're converted); **duration is the strict part** — a file must be one of the lengths H3
+trains on, or it's refused with a message saying which lengths those are:
+
+| | Requirement |
+|---|---|
+| Formats | `.wav` `.mp3` `.flac` `.m4a` — any rate or channel count |
+| Duration | exactly 0.917, 1.625, 2.333, 3.042, 3.750, 4.458 or 5.167 s (±25 ms) |
+| Content | actual sound — digital silence is refused |
+| Caption | a `.txt` beside the file, or it silently won't train |
+| Audio VAE | required — the ~605 MB Preferences row |
+
+**Gizmo's Voice / audio tab cuts them for you** — that's the whole point of the strict rule.
+Open a recording (or a **video**, to use just its audio track — you scrub the waveform, nothing
+is shown), click where a segment starts, pick a length, caption it, queue it, export the lot.
+Segments come out sample-exact with their caption `.txt` beside them, so a minutes-long
+interview becomes a folder of ready training items in a couple of passes.
+
+**Caption the voice, not a picture.** The caption is what the voice gets bound to, so describe
+only the sound — *"a man speaking calmly, low pitch, unhurried"* — and make no visual claims,
+because there is nothing for them to be true of. A **trigger word** field leads every caption.
+The **Transcribe** button (Whisper, a one-time ~150 MB download) appends the spoken words as
+`saying "…"`, which helps the voice bind to speech. Voice captions live in Gizmo — the Captions
+tab shows a note instead of listing audio files, since describing a voice means hearing it.
+
+**The 5.2 s ceiling is per item, not per voice.** H3 packs at most 5.167 s of audio into one
+training item, so a long recording is cut into segments — variety across segments (different
+sentences, different moods) is exactly what you'd want anyway. There is no mute for audio
+files: a muted voice recording would be a training item with nothing in it.
+
+**What it needs** — four files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card):
 
 | Model | Size | Notes |
 |---|---|---|
 | DiT — pruned int8 | ~21 GB | The training base. Use `minimax_h3_fl2va_pruned_int8_convrot.safetensors` — it's the file ComfyUI runs, so your LoRA trains against the weights it'll be deployed on, and it keeps its int8 weights rather than being re-quantized. The ~66 GB bf16 file also works (NF4 at load, ~11 GB resident) |
 | Qwen3-VL-32B text encoder | ~15.7 GB | The **nvfp4** file — the same one ComfyUI uses, so you may already have it. The bf16 file (~51.5 GB) also works; the *int8_convrot* variant is not supported |
 | Video VAE | ~4.9 GB | Used while caching your images, and to decode previews |
-| Audio VAE *(optional)* | ~605 MB | Only for training on the sound in video clips. Loaded while caching, and only when the folder contains clips. Leave blank and clips train silent |
+| Audio VAE *(optional)* | ~605 MB | For training on sound: optional for video clips (blank = clips train silent), **required** the moment the folder contains voice recordings. Loaded only while caching |
 | DiT — reference *(optional)* | ~21 GB | Only for reference distillation. `minimax_h3_ref2va_pruned_int8_convrot.safetensors` — a different fine-tune, and the only H3 build that accepts reference images. You may already have it if you use ComfyUI's r2v workflow. **Download models for me** leaves it out unless you tick **Include the reference DiT** beside the button. Leave blank for ordinary training |
 
 The text encoder is loaded for the one-time caching pass then freed — it never shares VRAM with training.

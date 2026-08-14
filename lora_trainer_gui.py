@@ -15734,6 +15734,53 @@ class LoRATrainerGUI:
 
     # region Preferences Tab
 
+    # The paths a family cannot train without. The optional rows (reference DiT, audio VAE,
+    # Turbo LoRA) neither hold a section open nor count against its badge — a family whose only
+    # gaps are optional is configured.
+    _PREFS_FAMILY_KEYS = {
+        "klein": ("base_dit", "distilled_dit", "vae", "text_encoder"),
+        "krea2": ("krea2_raw_dit", "krea2_turbo_dit", "krea2_vae", "krea2_text_encoder"),
+        "minimax": ("minimax_dit", "minimax_text_encoder", "minimax_vae"),
+    }
+
+    def _prefs_family_section(self, parent, family, title, description):
+        """A collapsible model-path section for one model family on the Preferences tab.
+
+        Starts collapsed only when the family's required paths are all filled: a new user sent
+        here by the Start tab's setup prompt lands on the sections they still need already open,
+        while a configured machine shows three closed headers instead of a wall of path rows.
+        The header badge keeps a collapsed section honest — you can see whether a family needs
+        attention without opening it. Returns (content_frame, first_free_grid_row).
+        """
+        keys = self._PREFS_FAMILY_KEYS[family]
+
+        def _missing():
+            return sum(1 for k in keys if not str(self.prefs_vars[k].get() or "").strip())
+
+        section = CollapsibleFrame(parent, title, default_expanded=_missing() > 0)
+        section.pack(fill=tk.X, padx=36, pady=(0, 16))
+        content = section.get_content_frame()
+        content.columnconfigure(1, weight=1)
+        tk.Label(content, text=description, font=(FONT_FAMILY, 10),
+                 fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+                 wraplength=760, justify=tk.LEFT
+                 ).grid(row=0, column=0, columnspan=3, sticky=tk.W, pady=(4, 10))
+
+        def _refresh_badge(*_a):
+            n = _missing()
+            try:
+                section.badge.config(
+                    text="✓ configured" if n == 0
+                    else f"{n} path{'s' if n != 1 else ''} needed",
+                    fg=COLORS["text_secondary"] if n == 0 else COLORS["warning"])
+            except tk.TclError:
+                pass
+
+        _refresh_badge()
+        for k in keys:
+            self.prefs_vars[k].trace_add("write", _refresh_badge)
+        return content, 1
+
     def create_prefs_tab(self):
         """Create the Preferences tab (Start-tab styled)."""
         scrollable_frame, _ = self.create_scrollable_frame(self.prefs_tab)
@@ -15748,14 +15795,14 @@ class LoRATrainerGUI:
             "and persist to prefs.json.",
         )
 
-        # Card 1: Model Paths
-        models_card = self._start_section_card(
-            outer, "Model Paths (Klein 9B)",
+        # The three model-family sections are collapsible, and smart about it: a family with a
+        # required path still blank starts open, a configured one starts closed. Click the
+        # header to toggle; the badge says which state you're in without opening anything.
+        models_card, next_row = self._prefs_family_section(
+            outer, "klein", "Model Paths (Klein 9B)",
             "Absolute paths to the four model files. Each row has a Download link that opens the HuggingFace page "
             "in your browser.",
         )
-        models_card.columnconfigure(1, weight=1)
-        next_row = 0
         next_row = self._add_pref_row(
             models_card, next_row, "Base DiT:", "base_dit",
             "Klein 9B Base model (for training & precise profiling). "
@@ -15810,15 +15857,13 @@ class LoRATrainerGUI:
             "Fizgig asks for it and tells you which pages to accept the licence on.")
         next_row += 1
 
-        # Card 1b: Krea 2 model paths
-        krea_card = self._start_section_card(
-            outer, "Model Paths (Krea 2)",
+        # Krea 2 model paths
+        krea_card, kr = self._prefs_family_section(
+            outer, "krea2", "Model Paths (Krea 2)",
             "Krea 2 LoRA training + inference. Train on RAW; previews and inference use the pre-quant fp8 Turbo "
             "(8-step, CFG-free). The text encoder can be either Qwen3-VL-4B file — bf16, or the smaller "
             "fp8_scaled (~3.6 GB less VRAM; its vision tower is bf16 either way).",
         )
-        krea_card.columnconfigure(1, weight=1)
-        kr = 0
         kr = self._add_pref_row(
             krea_card, kr, "RAW DiT:", "krea2_raw_dit",
             "Krea 2 RAW (undistilled 12.9B base) — the training model (krea2_raw_bf16.safetensors)",
@@ -15877,6 +15922,84 @@ class LoRATrainerGUI:
             font=(FONT_FAMILY, 9), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             wraplength=760, justify=tk.LEFT)
         _offline_tip.grid(row=kr + 2, column=0, columnspan=3, sticky=tk.W, pady=(12, 2))
+
+        # MiniMax H3 model paths — third family, beside the other two now that clip+audio
+        # training has outgrown its bottom-of-the-page beginnings.
+        mm_card, mr = self._prefs_family_section(
+            outer, "minimax", "Model Paths (MiniMax H3 — experimental)",
+            "Image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the pruned int8 DiT "
+            "— the same file ComfyUI runs — quantized to NF4 at load, so the resident base is "
+            "~11 GB. The Qwen3-VL-32B text encoder and the video VAE are only needed for the "
+            "one-time caching pass; the compact nvfp4 TE is recommended. Trains on stills, or on "
+            "short video clips — and with the audio VAE set, on their sound too.",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "DiT:", "minimax_dit",
+            "MiniMax H3 DiT — the training base. Use the PRUNED int8 file "
+            "(minimax_h3_fl2va_pruned_int8_convrot.safetensors, ~21 GB): it is the one ComfyUI "
+            "runs, so your LoRA trains against the weights it will be deployed on, and its "
+            "curve-table AdaLN is a target a LoRA can actually use. The ~66 GB bf16 file also "
+            "works. The pruned file KEEPS its int8 weights (~21 GB on the GPU, what the reference "
+            "trainer does); the bf16 file is quantized to NF4 at load (~11 GB, a little lossier).",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+            download_note="~21GB — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors (fl2va is the trainable variant; the 66GB bf16 file works too)",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "DiT (reference):", "minimax_ref_dit",
+            "OPTIONAL — only for reference distillation ('Learn identity from' on the Training "
+            "tab). This is the ref2va model, a DIFFERENT fine-tune from the fl2va one above and "
+            "not just another quantization of it: it is what ComfyUI's Reference-to-Video "
+            "workflow loads, and the only H3 build that accepts reference images. A LoRA "
+            "distilled this way is trained on it and runs on it. Leave blank for ordinary "
+            "training.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
+            download_note="~21GB — Comfy-Org/MiniMax-H3 -> diffusion_models/"
+                          "minimax_h3_ref2va_pruned_int8_convrot.safetensors (the pruned int8 "
+                          "build, same shape as the fl2va one above; you may already have it if "
+                          "you use the r2v workflow)",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
+            "Qwen3-VL-32B text encoder — nvfp4 (the compact ComfyUI file) or bf16 both work; the "
+            "loader detects which you gave it. The nvfp4 file keeps its packed weights (~15.7 GB "
+            "on the GPU); bf16 is NF4-quantized at load (~14 GB). Used only while caching caption "
+            "embeddings, then offloaded before training. (The int8_convrot TE "
+            "variant is NOT supported — its rotated weights can't be dequantized here.)",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+            download_label="Download nvfp4 (recommended)",
+            download_note="~15.7GB nvfp4-awq — the same TE ComfyUI uses, so you may already have it; "
+                          "identical conditioning to bf16 (validated), just a slower one-off load",
+            download_url2="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
+            download_label2="bf16",
+            download_note2="~51.5GB bf16 — the full-precision original; loads faster, 3.3x the disk",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "Video VAE:", "minimax_vae",
+            "The H3 video VAE — encodes each training image to a 24-channel latent (used only "
+            "during caching).",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors",
+            download_note="~4.9GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_fp16.safetensors",
+        )
+        mr = self._add_pref_row(
+            mm_card, mr, "Audio VAE:", "minimax_audio_vae",
+            "OPTIONAL — set this to train on the sound in your video clips. H3 generates audio and "
+            "video together, so a clip with sound can teach it a voice, and nothing else can. "
+            "Used only during caching, and only by clips: a folder of stills never loads it, and "
+            "neither does a clip you muted (a _mute on the filename trains that clip's video and "
+            "ignores its sound). Leave blank and clips train silent, exactly as they did before.",
+            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_audio_vae_fp32.safetensors",
+            download_note="~605MB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_audio_vae_fp32.safetensors",
+        )
+        self._add_fetch_models_row(
+            mm_card, mr, "minimax",
+            "Fetches the DiT, text encoder and both VAEs above, plus the Krea 2 Qwen3-VL captioning "
+            "text encoder (~47 GB all in), and fills in these paths for you — plus the small "
+            "helper models (Florence-2 captioner, face model for the Look "
+            "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
+            "download later. No HuggingFace account needed — none of these are gated. The "
+            "reference DiT is left out unless you tick it above: another 21 GB, and it is only "
+            "used by identity mode.",
+            optional_label="Include the reference DiT (+21 GB)")
 
         # Card 1b: which GPU. Only when the machine actually has more than one - a chooser with a
         # single entry is noise, and the whole feature is a no-op there.
@@ -15998,86 +16121,6 @@ class LoRATrainerGUI:
 
         self._add_runpod_card(outer)
 
-        # Card (bottom): MiniMax H3 model paths — experimental third family, kept at the very
-        # bottom under everything else since it's barebones image-only LoRA training (no samples,
-        # no inference). The DiT is the training base; it's NF4-quantized at load either way.
-        mm_card = self._start_section_card(
-            outer, "Model Paths (MiniMax H3 — experimental)",
-            "Image-only LoRA training for MiniMax's ~33B H3 omni DiT. Train on the pruned int8 DiT "
-            "— the same file ComfyUI runs — quantized to NF4 at load, so the resident base is "
-            "~11 GB. The Qwen3-VL-32B text encoder and the video VAE are only needed for the "
-            "one-time caching pass; the compact nvfp4 TE is recommended. Trains on stills, or on "
-            "short video clips — and with the audio VAE set, on their sound too.",
-        )
-        mm_card.columnconfigure(1, weight=1)
-        mr = 0
-        mr = self._add_pref_row(
-            mm_card, mr, "DiT:", "minimax_dit",
-            "MiniMax H3 DiT — the training base. Use the PRUNED int8 file "
-            "(minimax_h3_fl2va_pruned_int8_convrot.safetensors, ~21 GB): it is the one ComfyUI "
-            "runs, so your LoRA trains against the weights it will be deployed on, and its "
-            "curve-table AdaLN is a target a LoRA can actually use. The ~66 GB bf16 file also "
-            "works. The pruned file KEEPS its int8 weights (~21 GB on the GPU, what the reference "
-            "trainer does); the bf16 file is quantized to NF4 at load (~11 GB, a little lossier).",
-            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors",
-            download_note="~21GB — Comfy-Org/MiniMax-H3 → diffusion_models/minimax_h3_fl2va_pruned_int8_convrot.safetensors (fl2va is the trainable variant; the 66GB bf16 file works too)",
-        )
-        mr = self._add_pref_row(
-            mm_card, mr, "DiT (reference):", "minimax_ref_dit",
-            "OPTIONAL — only for reference distillation ('Learn identity from' on the Training "
-            "tab). This is the ref2va model, a DIFFERENT fine-tune from the fl2va one above and "
-            "not just another quantization of it: it is what ComfyUI's Reference-to-Video "
-            "workflow loads, and the only H3 build that accepts reference images. A LoRA "
-            "distilled this way is trained on it and runs on it. Leave blank for ordinary "
-            "training.",
-            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/diffusion_models/minimax_h3_ref2va_pruned_int8_convrot.safetensors",
-            download_note="~21GB — Comfy-Org/MiniMax-H3 -> diffusion_models/"
-                          "minimax_h3_ref2va_pruned_int8_convrot.safetensors (the pruned int8 "
-                          "build, same shape as the fl2va one above; you may already have it if "
-                          "you use the r2v workflow)",
-        )
-        mr = self._add_pref_row(
-            mm_card, mr, "Qwen3-VL-32B TE:", "minimax_text_encoder",
-            "Qwen3-VL-32B text encoder — nvfp4 (the compact ComfyUI file) or bf16 both work; the "
-            "loader detects which you gave it. The nvfp4 file keeps its packed weights (~15.7 GB "
-            "on the GPU); bf16 is NF4-quantized at load (~14 GB). Used only while caching caption "
-            "embeddings, then offloaded before training. (The int8_convrot TE "
-            "variant is NOT supported — its rotated weights can't be dequantized here.)",
-            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
-            download_label="Download nvfp4 (recommended)",
-            download_note="~15.7GB nvfp4-awq — the same TE ComfyUI uses, so you may already have it; "
-                          "identical conditioning to bf16 (validated), just a slower one-off load",
-            download_url2="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/text_encoders/qwen3vl_32b_minimax_h3_bf16.safetensors",
-            download_label2="bf16",
-            download_note2="~51.5GB bf16 — the full-precision original; loads faster, 3.3x the disk",
-        )
-        mr = self._add_pref_row(
-            mm_card, mr, "Video VAE:", "minimax_vae",
-            "The H3 video VAE — encodes each training image to a 24-channel latent (used only "
-            "during caching).",
-            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_video_vae_fp16.safetensors",
-            download_note="~4.9GB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_video_vae_fp16.safetensors",
-        )
-        mr = self._add_pref_row(
-            mm_card, mr, "Audio VAE:", "minimax_audio_vae",
-            "OPTIONAL — set this to train on the sound in your video clips. H3 generates audio and "
-            "video together, so a clip with sound can teach it a voice, and nothing else can. "
-            "Used only during caching, and only by clips: a folder of stills never loads it, and "
-            "neither does a clip you muted (a _mute on the filename trains that clip's video and "
-            "ignores its sound). Leave blank and clips train silent, exactly as they did before.",
-            download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_audio_vae_fp32.safetensors",
-            download_note="~605MB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_audio_vae_fp32.safetensors",
-        )
-        self._add_fetch_models_row(
-            mm_card, mr, "minimax",
-            "Fetches the DiT, text encoder and both VAEs above, plus the Krea 2 Qwen3-VL captioning "
-            "text encoder (~47 GB all in), and fills in these paths for you — plus the small "
-            "helper models (Florence-2 captioner, face model for the Look "
-            "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
-            "download later. No HuggingFace account needed — none of these are gated. The "
-            "reference DiT is left out unless you tick it above: another 21 GB, and it is only "
-            "used by identity mode.",
-            optional_label="Include the reference DiT (+21 GB)")
 
         # Card 4: Actions
         actions_card = self._start_section_card(outer, "Actions", None)

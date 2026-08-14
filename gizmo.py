@@ -549,6 +549,26 @@ def _stop_wav():
         winsound.PlaySound(None, winsound.SND_PURGE)
 
 
+def set_live_volume(pct):
+    """Listening volume that takes effect MID-PLAY, no restart.
+
+    winsound has no volume of its own, but it plays through the process's wave-out session, and
+    winmm's waveOutSetVolume moves that session live — so the slider works while a preview is
+    playing instead of demanding a stop-and-start. Per-process: the system volume and every
+    other app are untouched, and nothing here ever reaches a saved file.
+
+    Returns True when the live path took effect; False means the caller should fall back to
+    baking the gain into the preview file (the non-Windows external-player path)."""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        v = max(0, min(0xFFFF, int(0xFFFF * float(pct) / 100.0)))
+        return ctypes.windll.winmm.waveOutSetVolume(0, v | (v << 16)) == 0
+    except Exception:
+        return False
+
+
 def count_frames(ffmpeg, path):
     """Decoded frame count. The container banner cannot be trusted for this (duration x fps
     rounds), and it is the one value Fizgig refuses a clip over, so it is checked for real."""
@@ -1077,11 +1097,13 @@ class Gizmo:
                  fg=COLORS["text_muted"]).pack(side=tk.LEFT, padx=(14, 6))
         self.volume_var = tk.DoubleVar(value=70)
         self.volume_scale = ttk.Scale(listen, from_=0, to=100, orient=tk.HORIZONTAL, length=150,
-                                      variable=self.volume_var, style="G.Horizontal.TScale")
+                                      variable=self.volume_var, style="G.Horizontal.TScale",
+                                      command=lambda v: set_live_volume(v))
         self.volume_scale.pack(side=tk.LEFT)
         ToolTip(self.volume_scale,
-                "Listening volume only. The saved clip's audio is never touched — a quiet source "
-                "stays quiet, and H3 sees exactly what your camera recorded.")
+                "Listening volume only — moves live while the sound plays. The saved clip's "
+                "audio is never touched — a quiet source stays quiet, and H3 sees exactly what "
+                "your camera recorded.")
 
         self.sound_note = tk.Label(grid, text="", font=(FONT_FAMILY, 9), justify=tk.LEFT,
                                    wraplength=820, bg=COLORS["bg_surface"],
@@ -1291,18 +1313,21 @@ class Gizmo:
         if not path or not os.path.isfile(path):
             messagebox.showwarning("Gizmo", f"Not a file:\n{path}")
             return
-        if is_audio_file(path):
-            self.notebook.select(self._audio_tab)
-            try:
-                self.load_audio(path)
-            except Exception as exc:
-                messagebox.showerror("Gizmo — cannot read that audio", str(exc))
-            return
         if os.path.splitext(path)[1].lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             messagebox.showinfo(
                 "Gizmo — that is a still",
                 "Gizmo cuts clips out of video. Still images go straight into your training "
                 "folder and are prepared on Fizgig's Image Prep tab.")
+            return
+        # An audio file goes to the Voice tab wherever you are. A VIDEO follows the tab you are
+        # on: dropped while the Voice tab is up, it is an audio source (you asked for its sound
+        # by being here) — anywhere else it opens as footage, as before.
+        if is_audio_file(path) or self._audio_tab_active():
+            self.notebook.select(self._audio_tab)
+            try:
+                self.load_audio(path)
+            except Exception as exc:
+                messagebox.showerror("Gizmo — cannot read that audio", str(exc))
             return
         try:
             self.load_video(path)
@@ -1730,7 +1755,10 @@ class Gizmo:
         # Real time: the audio you would get. Slow motion: the source audio under the section,
         # which is what you are judging — the saved clip's audio comes from the same span.
         span = self._frames() * k / fps if k else self._frames() / FPS
-        gain = max(0.0, float(self.volume_var.get())) / 100.0
+        # Live volume when the backend allows it — the slider then works MID-play; otherwise
+        # the gain is baked into the preview file as before.
+        gain = 1.0 if set_live_volume(self.volume_var.get()) \
+            else max(0.0, float(self.volume_var.get())) / 100.0
         self.play_btn.configure(text="■  Stop")
         self._playing = True
         threading.Thread(target=self._play_worker, args=(start, span, gain), daemon=True).start()
@@ -1875,11 +1903,13 @@ class Gizmo:
                                                "span, nothing more.  (volume is listening "
                                                "only, never saved)")
         self.audio_play_btn.pack(side=tk.LEFT)
-        self.audio_volume_var = tk.IntVar(value=80)
+        self.audio_volume_var = tk.DoubleVar(value=80)
         _vol = ttk.Scale(prow, from_=0, to=100, orient=tk.HORIZONTAL, length=140,
-                         style="G.Horizontal.TScale", variable=self.audio_volume_var)
+                         style="G.Horizontal.TScale", variable=self.audio_volume_var,
+                         command=lambda v: set_live_volume(v))
         _vol.pack(side=tk.LEFT, padx=(12, 0))
-        ToolTip(_vol, "Listening volume only. The exported segment's audio is never touched.")
+        ToolTip(_vol, "Listening volume only — moves live while a preview plays. The exported "
+                      "segment's audio is never touched.")
         self.audio_pos_label = tk.Label(prow, text="", font=("Consolas", 10),
                                         bg=COLORS["bg_surface"], fg=COLORS["text_secondary"])
         self.audio_pos_label.pack(side=tk.RIGHT)
@@ -2085,7 +2115,10 @@ class Gizmo:
         if not self.audio_src:
             return
         span = self._audio_span()
-        gain = max(0.0, float(self.audio_volume_var.get())) / 100.0
+        # Live volume when the backend allows it — the slider then works MID-play. Only when it
+        # doesn't (non-Windows external player) is the gain baked into the preview file.
+        gain = 1.0 if set_live_volume(self.audio_volume_var.get()) \
+            else max(0.0, float(self.audio_volume_var.get())) / 100.0
         self.audio_play_btn.configure(text="■  Stop")
         self._audio_playing = True
         threading.Thread(target=self._audio_play_worker,

@@ -109,6 +109,238 @@ def is_audio_file(path):
     return os.path.splitext(path)[1].lower() in AUDIO_EXTS
 
 
+# --- the voice recorder ------------------------------------------------------------------------
+# Capture runs CONTINUOUSLY while the recorder window is open, writing raw s16le PCM at the
+# training rate; push-to-record only marks timestamps, and the take is sliced out by byte
+# offset afterwards. Starting ffmpeg on press would clip the first word every time (opening a
+# capture device costs ~300-500 ms); with the mic already rolling, a pre-roll cushion even
+# catches a word that starts before the thumb lands. Raw PCM is the load-bearing format
+# choice: headerless, so byte offset = time exactly, slicing a growing file is always valid,
+# and terminate() is harmless — there is no header to finalise.
+
+CAPTURE_RATE = 32000                 # the training rate — takes need no resample
+CAPTURE_CHANNELS = 2
+CAPTURE_BPS = CAPTURE_RATE * CAPTURE_CHANNELS * 2      # bytes per second of s16le
+TAKE_PRE_ROLL = 0.25                 # seconds kept BEFORE the press
+TAKE_POST_ROLL = 0.15                # ...and after the release
+
+
+def parse_dshow_devices(stderr_text):
+    """Audio device names out of `ffmpeg -list_devices true -f dshow -i dummy` stderr.
+
+    The banner lists devices as `[dshow @ ...] "Name" (audio)` (older builds print a
+    `DirectShow audio devices` section header instead of the per-line tag). Both forms are
+    handled; anything unparseable yields [] and the caller falls back to "default"."""
+    devices, in_audio_section = [], False
+    for line in (stderr_text or "").splitlines():
+        if "DirectShow audio devices" in line:
+            in_audio_section = True
+            continue
+        if "DirectShow video devices" in line:
+            in_audio_section = False
+            continue
+        m = re.search(r'"([^"]+)"', line)
+        if not m or "Alternative name" in line:
+            continue
+        if "(audio)" in line or (in_audio_section and "(video)" not in line):
+            devices.append(m.group(1))
+    return devices
+
+
+def parse_pactl_sources(stdout_text):
+    """Source names out of `pactl list sources short`. Monitor sources (the loopback of an
+    OUTPUT) are skipped — recording your own speakers is never what a voice dataset wants."""
+    out = []
+    for line in (stdout_text or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and ".monitor" not in parts[1]:
+            out.append(parts[1])
+    return out
+
+
+def list_capture_devices(ffmpeg):
+    """Microphones this machine offers, best-effort. Always safe to call; [] means none
+    found (the recorder then offers just 'default' on Linux, or disables on Windows —
+    dshow cannot record without a concrete device name)."""
+    try:
+        if os.name == "nt":
+            p = _run([ffmpeg, "-hide_banner", "-list_devices", "true",
+                      "-f", "dshow", "-i", "dummy"])
+            return parse_dshow_devices((p.stderr or b"").decode("utf-8", "replace"))
+        import shutil
+        if shutil.which("pactl"):
+            p = _run(["pactl", "list", "sources", "short"])
+            found = parse_pactl_sources((p.stdout or b"").decode("utf-8", "replace"))
+            if found:
+                return found
+        return ["default"] if shutil.which("arecord") or shutil.which("pactl") else []
+    except Exception:
+        return []
+
+
+def build_capture_command(ffmpeg, device, out_raw):
+    """The continuous-capture command, or None when this machine cannot record (a pod).
+    Output is raw s16le at the training rate — see the section comment for why raw."""
+    if not ffmpeg:
+        return None
+    tail = ["-ac", str(CAPTURE_CHANNELS), "-ar", str(CAPTURE_RATE),
+            "-f", "s16le", "-y", out_raw]
+    if os.name == "nt":
+        if not device:
+            return None                       # dshow needs a real device name
+        return [ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-f", "dshow", "-i", f"audio={device}"] + tail
+    import shutil
+    if shutil.which("pactl") or (device and device != "alsa-default"):
+        return [ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-f", "pulse", "-i", device or "default"] + tail
+    if shutil.which("arecord"):
+        return [ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-f", "alsa", "-i", "default"] + tail
+    return None
+
+
+def slice_take(raw_path, press_s, release_s, out_wav, ffmpeg):
+    """Cut [press - pre-roll, release + post-roll] out of the session raw and wrap it as a
+    training-rate wav. Byte math on s16le: offset = secs x 32000 x 2ch x 2B, snapped to a
+    whole frame so channels never swap. Returns the take's duration in seconds."""
+    size = os.path.getsize(raw_path)
+    frame = CAPTURE_CHANNELS * 2
+    a = max(0, int((press_s - TAKE_PRE_ROLL) * CAPTURE_BPS)) // frame * frame
+    b = min(size, int((release_s + TAKE_POST_ROLL) * CAPTURE_BPS)) // frame * frame
+    if b <= a:
+        return 0.0
+    with open(raw_path, "rb") as f:
+        f.seek(a)
+        chunk = f.read(b - a)
+    tmp = out_wav + ".raw"
+    with open(tmp, "wb") as f:
+        f.write(chunk)
+    p = _run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+              "-f", "s16le", "-ar", str(CAPTURE_RATE), "-ac", str(CAPTURE_CHANNELS),
+              "-i", tmp, "-c:a", "pcm_s16le", out_wav])
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    if p.returncode != 0 or not os.path.exists(out_wav):
+        raise RuntimeError((p.stderr or b"").decode("utf-8", "replace")[-200:]
+                           or "could not write the take")
+    return len(chunk) / CAPTURE_BPS
+
+
+# Prompted sentences: the classic Harvard/IEEE list — public domain, phonetically balanced,
+# written for exactly this job. Grouped only by length at pick time (~2.6 words a second).
+HARVARD_SENTENCES = [
+    "The birch canoe slid on the smooth planks.",
+    "Glue the sheet to the dark blue background.",
+    "It's easy to tell the depth of a well.",
+    "These days a chicken leg is a rare dish.",
+    "Rice is often served in round bowls.",
+    "The juice of lemons makes fine punch.",
+    "The box was thrown beside the parked truck.",
+    "The hogs were fed chopped corn and garbage.",
+    "Four hours of steady work faced us.",
+    "A large size in stockings is hard to sell.",
+    "The boy was there when the sun rose.",
+    "A rod is used to catch pink salmon.",
+    "The source of the huge river is the clear spring.",
+    "Kick the ball straight and follow through.",
+    "Help the woman get back to her feet.",
+    "A pot of tea helps to pass the evening.",
+    "Smoky fires lack flame and heat.",
+    "The soft cushion broke the man's fall.",
+    "The salt breeze came across from the sea.",
+    "The girl at the booth sold fifty bonds.",
+    "The small pup gnawed a hole in the sock.",
+    "The fish twisted and turned on the bent hook.",
+    "Press the pants and sew a button on the vest.",
+    "The swan dive was far short of perfect.",
+    "The beauty of the view stunned the young boy.",
+    "Two blue fish swam in the tank.",
+    "Her purse was full of useless trash.",
+    "The colt reared and threw the tall rider.",
+    "It snowed, rained, and hailed the same morning.",
+    "Read verse out loud for pleasure.",
+    "Hoist the load to your left shoulder.",
+    "Take the winding path to reach the lake.",
+    "Note closely the size of the gas tank.",
+    "Wipe the grease off his dirty face.",
+    "Mend the coat before you go out.",
+    "The wrist was badly strained and hung limp.",
+    "The stray cat gave birth to kittens.",
+    "The young girl gave no clear response.",
+    "The meal was cooked before the bell rang.",
+    "What joy there is in living.",
+    # Short interjections for the sub-second slots — Harvard sentences bottom out at six
+    # words, and a 0.9 s take holds two or three. Interjections are real voice data too:
+    # exclamations carry pitch range a read sentence never shows.
+    "Oh, really?",
+    "Not today.",
+    "Here we go.",
+    "That's enough.",
+    "Come on, then.",
+    "Well, look at that.",
+    "Right, let's begin.",
+    "No, thank you.",
+]
+
+# Delivery prompts — an emotional-range axis for the dataset, and an honest caption clause.
+DELIVERY_PROMPTS = {
+    "plain": "",
+    "cheerfully": "cheerfully",
+    "wearily": "wearily",
+    "as a question": "questioningly",
+    "quietly": "quietly",
+    "excitedly": "excitedly",
+    "as if annoyed": "irritably",
+}
+
+WORDS_PER_SECOND = 2.6
+
+
+def pick_sentence(frames, rng=None):
+    """A sentence sized to the segment slot: word count within +-40% of what the slot's
+    seconds hold at a natural reading pace. Every slot matches SOMETHING (the pool spans
+    5..12 words and the slots want 2..14) — worst case the nearest-length sentence wins."""
+    import random as _random
+    rng = rng or _random
+    secs = hop_exact_samples(frames) / AUDIO_SAMPLE_RATE
+    want = secs * WORDS_PER_SECOND
+    scored = sorted(HARVARD_SENTENCES,
+                    key=lambda s: abs(len(s.split()) - want))
+    band = [s for s in scored if abs(len(s.split()) - want) <= max(2, want * 0.4)]
+    return rng.choice(band or scored[:5])
+
+
+# --- persisted settings (mic + default whisper language) ----------------------------------------
+SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gizmo_settings.json")
+SETTINGS_DEFAULTS = {"microphone": "", "whisper_language": "Auto detect"}
+
+
+def load_settings():
+    """gizmo_settings.json beside gizmo.py, or defaults. Corrupt/absent -> defaults, never
+    a crash — losing a mic choice is an inconvenience, losing the app is not."""
+    import json
+    try:
+        with open(SETTINGS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        return {**SETTINGS_DEFAULTS, **{k: v for k, v in data.items()
+                                        if k in SETTINGS_DEFAULTS}}
+    except Exception:
+        return dict(SETTINGS_DEFAULTS)
+
+
+def save_settings(settings):
+    import json
+    try:
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump({k: settings.get(k, v) for k, v in SETTINGS_DEFAULTS.items()},
+                      f, indent=2)
+    except OSError:
+        pass                                   # a read-only install keeps working unsaved
+
+
 def voice_output_name(src_path, out_dir, claimed=()):
     """<source stem>_01.wav, skipping past files on disk and names the queue has spoken for.
     No mute variant: a muted voice file would be a training item with nothing in it."""

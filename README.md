@@ -228,7 +228,11 @@ Parameters*, next to the settings they change.
 
 **There's no separate "style" setting, on purpose.** Style lives at the *clean* end alongside likeness — brushwork, palette and grain are surface properties, not compositional ones, which is what Fizgig's own Klein timestep work found. What makes a style LoRA different is rank and blocks, not the noise schedule.
 
-**Medium to High LR** sits beside it and is **best left at 100 unless you're experimenting.** It sets what the noisier steps — where pose, framing and face shape are decided — do to the learning rate. Across five datasets, 0% and 100% both rendered cleanly at 20 steps without Turbo, and **100% held face shape noticeably better**, which fits: shape is settled early at high noise, skin and texture come late. So lowering it trades geometry for surface, and nothing is damped by default.
+**Medium to High LR** sits beside it and is **best left at 100 unless you're experimenting.** It sets what the noisier steps — where pose, framing and face shape are decided — do to the learning rate.
+
+Across five datasets, at both structures and at 0% and 100%, nothing distorted at 20 steps without Turbo and **100% held face shape better every time** — which fits, since shape is settled early at high noise while skin and texture come late. So lowering it doesn't buy stability; it trades geometry for surface.
+
+That's still worth having. It's the *safe* way to push a run toward surface detail: mid-concentrated did that by changing which noise levels got sampled, which is what took LoRAs off-distribution and distorted them, whereas this leaves the schedule alone and only changes how much is learned from it. A skin-texture LoRA is the obvious use — but for a likeness LoRA, leave it at 100.
 
 **Mid-concentrated is gone.** It bunched training around the middle and thinned *both* tails — and the tail it quietly deleted was the high-noise end, leaving 0.7% of a run above 0.9 noise. A 20-step render spends most of its time there, so the LoRA was holding structure it had barely trained on: fine under a 4-step Turbo workflow, soft or distorted without one. Testing the same preset with it switched off, the LoRA works at full strength without Turbo *and* likeness didn't suffer — so it wasn't buying what it was supposed to buy either. A saved preset that still carries it now trains without it. Both settings are recorded in the LoRA's metadata and shown on the training queue, so runs stay comparable.
 

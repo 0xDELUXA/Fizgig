@@ -568,12 +568,18 @@ def minimax_shift_to_lownoise(shift):
 # makes high-noise steps the MAJORITY (92% at the model's own schedule against 40% here), and the
 # worry was that they would swamp the few clean-end steps carrying identity.
 #
-# Measured across FIVE datasets (Peter, 14 Aug), at 60% clean-end: 0% and 100% both render cleanly
-# at 20 steps without the Turbo LoRA, and 100% has visibly better face SHAPE. That fits — shape is
-# settled early, at high noise, while skin and texture come late — and it means damping costs
-# geometry rather than buying stability. So nothing is damped by default. Whether that still holds
-# at 8% clean-end, where the noisy end really is 92% of the run, is untested; the box is there to
-# find out.
+# Measured across FIVE datasets (Peter, 14 Aug), at BOTH densities and at 0% and 100%: nothing
+# corrupts in any of the four combinations, and 100% has visibly better face SHAPE every time.
+# That fits — shape is settled early, at high noise, while skin and texture come late — so damping
+# costs geometry rather than buying stability, including at 8% clean-end where the noisy end is
+# 92% of the run and the swamping worry should have been strongest. It was not. Nothing is damped
+# by default.
+#
+# The box stays because it is the SAFE way to bias a run toward surface detail. Mid-concentrated
+# tried to do that by changing which noise levels were SAMPLED, which took the adapter
+# off-distribution and distorted at 20 steps. This changes only how much is learned from them —
+# the schedule the model sees is untouched, which is why 0% renders cleanly at either density. A
+# skin-texture LoRA is the obvious use.
 #
 # The 8% is not a guess. ai-toolkit's H3 entry overrides its global 'sigmoid' timestep type with
 # 'shift' (ui/src/app/jobs/new/options.tsx) against a scheduler at the model's RELEASED video flow
@@ -6362,13 +6368,14 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(4, 0))
         # Says what it does and what was measured, so lowering it is a decision rather than a
-        # guess: at 60% clean-end, across five datasets, 0% and 100% both render cleanly at 20
-        # steps without the Turbo LoRA, and 100% holds face SHAPE better.
+        # guess: across five datasets, at both densities, 0% and 100% render cleanly at 20 steps
+        # without the Turbo LoRA and 100% holds face SHAPE better every time.
         self._minimax_hnlr_hint = tk.Label(
             parent,
             text="What the noisier steps — where pose, framing and face shape are decided — do to "
-                 "the learning rate. Lowering it trades geometry for surface detail; across five "
-                 "datasets tested, 100 gave the better face shape and nothing distorted either way.",
+                 "the learning rate. Lowering it biases the run toward surface detail at the cost "
+                 "of shape — useful for a skin-texture LoRA, not for a likeness one. Across five "
+                 "datasets 100 held face shape better, and nothing distorted at any setting.",
             font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             justify=tk.LEFT, wraplength=700)
         self._minimax_hnlr_hint.grid(row=24, column=0, columnspan=3, sticky=tk.W,

@@ -32,7 +32,7 @@
 > - **The workbench checks your LoRA before it loads 9 GB** (3.6.4) — pick a Krea 2 LoRA with the selector on Klein 9B in **Royale**, **Explorer** or **Repair Studio** and it now switches to match in milliseconds, instead of loading the wrong pipeline and failing 25 seconds later. Installs got faster and lighter on disk in the same release. All of it contributed by **[@FNGarvin](https://github.com/FNGarvin)**. [Release notes](docs/RELEASE_NOTES_v3.6.4.md)
 > - **Pick which graphics card Fizgig uses** (3.6.2) — more than one GPU in the machine? **Preferences** now lists them by name and size, and everything follows your choice: training, caching, samples, the workbench tabs and the VRAM gauge. In the same release, MiniMax text caching needs **1.5 GB less VRAM**, which brings it inside what a 16 GB card can give it — existing caches stay valid. [Release notes](docs/RELEASE_NOTES_v3.6.2.md)
 > - **MiniMax H3 stops asking you to choose between quality and speed** (3.6.0) — the new **✨ MiniMax H3 Fast** preset reaches full likeness in a few hundred steps at dim/alpha 8, and the lower rank tends to come out *more* flexible rather than less. Load it, caption a folder of 35–45 images, press Start — you shouldn't need to touch anything else. **Multi Concept** is new too: two subjects in one LoRA, each with its own folder and its own trigger word. One thing worth knowing — judge quality by **pausing** and loading an epoch in ComfyUI; the image previews are for watching likeness arrive, and can show distortion that simply isn't there in a real render. [Details ↓](#minimax-h3--third-model-family) · [Release notes](docs/RELEASE_NOTES_v3.6.0.md)
-> - **MiniMax H3 now hits real likeness.** H3 LoRAs used to nail pose and framing while staying soft on the face; they don't any more. The change that did it was the **optimizer** — MiniMax trains with `adamw` instead of `adamw8bit`, and it's the new default. Alongside it: a single **% of training in low noise** box replacing Detail Focus, and new defaults (LoKR 8, dim/alpha 16, 60 epochs, 0.5 MP, 60% low noise). [Details ↓](#minimax-h3--third-model-family)
+> - **MiniMax H3 now hits real likeness.** H3 LoRAs used to nail pose and framing while staying soft on the face; they don't any more. The change that did it was the **optimizer** — MiniMax trains with `adamw` instead of `adamw8bit`, and it's the new default. Alongside it, new defaults (LoKR 8, dim/alpha 16, 60 epochs, 0.25 MP) and the **Training Structure** setting that replaced Detail Focus. [Details ↓](#minimax-h3--third-model-family)
 > - **MiniMax on 24 GB just got ~4× faster** (3.4.1) — the trainer now picks base precision *and* block swap together instead of swap alone. A 24 GB card used to park 38 of 50 blocks on CPU; it now loads the same file 4-bit and swaps nothing. New **Base Precision** dropdown on the Training tab, Auto by default. [Details ↓](#minimax-h3--third-model-family)
 > - **LoRA training for MiniMax H3** — Fizgig trains LoRAs for MiniMax's ~33B H3 video model, from ordinary still-image datasets, on a single consumer GPU. It's the biggest model Fizgig supports, with in-training previews, LoKR, Adaptive LR and Pause/Resume all wired. Pick **MiniMax H3** from the Base Model selector; the model files it needs have download links on their rows in **Preferences**. [Details ↓](#minimax-h3--third-model-family)
 > - **Fizgig 3.0 trains LoKR.** LoKR (LyCORIS Kronecker) covers the whole weight matrix with structure instead of a thin low-rank slice — in our validation runs it produced the **highest likeness we have ever measured** with this app's own scorer, with noticeably more natural skin and light than standard LoRA on the same dataset and settings. Pick it from the **Network Type** dropdown on the Krea 2 Training tab: one **Factor** dial replaces rank and alpha, output loads straight into ComfyUI, and Repair Studio / LoRA the Explorer edit and save LoKR **natively — lossless, no conversion**. The short version of the trade: LoKR is higher quality, standard LoRA trains ~20% faster — and keep the factor at 8 (or below), where LoKR earns its cost. [Training ↓](#training)
@@ -42,17 +42,6 @@
 > - **Caption with the model that trains your LoRA** (v2.10) — the Captions tab can use **Qwen3-VL**, the same vision-language model that conditions Krea 2 training. Every task is an **editable preset** — including a style-LoRA preset validated on real training runs. The slot takes fp8_scaled builds and community fine-tunes; since that model writes your captions, swapping it changes how your dataset gets described.
 
 > **Two model families, one workbench.** Everything here works with both **Flux 2 Klein 9B** and **Krea 2 (12.9B)** — Repair Studio, Explorer, Royale, Profiler, Extract, plus Context LoRA, Adaptive LR and Pause/Resume. [Krea 2 details ↓](#krea-2--second-model-family)
-
-> ### ⚠ Using a MiniMax H3 LoRA **without** the Turbo LoRA?
-> Fizgig by default trains H3 with most of the run at **low noise** — that's what gives these LoRAs
-> their likeness, and it's why they look so good in a 4-step Turbo workflow. Take Turbo out and run
-> the stock 20-step workflow at the same strength and they can go soft, drift, or distort, and it's
-> worth turning it down in that case. I'll be adding more presets around training structure and so
-> on, but wanted to flag this advice for anyone sticking to non-Turbo workflows.
->
-> You might need to reduce down to `0.4` or `0.5`, or you might not need to reduce at all — it's
-> partly relative to the size of your dataset etc. A LoRA that seemed broken without Turbo usually
-> isn't.
 
 > **Two things worth reading about before you start.** The Krea 2 trainer **curates your dataset while it trains** — detecting problem images from their loss alone, throttling them, having the text encoder *look at* the stuck ones and rewrite their captions, and telling you the best epoch when the run plateaus. [Details ↓](#the-trainer-curates-your-dataset-while-it-trains-krea-2-experimental) And the **sample gallery is an instrument**, not a contact sheet: it scores every sample's likeness against your own photos live during training, with a Royale-style **Training Run Visualiser** to scrub and export the run. [Details ↓](#the-sample-gallery-is-an-instrument-both-families)
 
@@ -143,18 +132,6 @@ You can also edit any caption yourself mid-run from the Problem Images window �
 ## MiniMax H3 — third model family
 
 Fizgig now trains LoRAs for **MiniMax H3**, MiniMax's open-weight ~33B video model — the biggest model Fizgig supports — from **ordinary still-image datasets**, on a single consumer GPU. It's a native port, and the output is a standard `.safetensors` that loads straight into ComfyUI's H3 workflows, including the pruned inference builds.
-
-### ⚠ Using a MiniMax H3 LoRA **without** the Turbo LoRA?
-
-Fizgig by default trains H3 with most of the run at **low noise** — that's what gives these LoRAs
-their likeness, and it's why they look so good in a 4-step Turbo workflow. Take Turbo out and run
-the stock 20-step workflow at the same strength and they can go soft, drift, or distort, and it's
-worth turning it down in that case. I'll be adding more presets around training structure and so
-on, but wanted to flag this advice for anyone sticking to non-Turbo workflows.
-
-You might need to reduce down to `0.4` or `0.5`, or you might not need to reduce at all — it's
-partly relative to the size of your dataset etc. A LoRA that seemed broken without Turbo usually
-isn't.
 
 **Training only, for now.** MiniMax H3 trains, previews and pauses/resumes like the other two
 families, but the workbench tabs — Repair Studio, LoRA the Explorer, LoRA Royale, Profiler and

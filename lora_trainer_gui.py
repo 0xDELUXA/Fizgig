@@ -15742,9 +15742,9 @@ class LoRATrainerGUI:
         "krea2": ("krea2_raw_dit", "krea2_turbo_dit", "krea2_vae", "krea2_text_encoder"),
         "minimax": ("minimax_dit", "minimax_text_encoder", "minimax_vae"),
     }
-    # Badge names — "2 paths needed if training Klein" reads as advice, where a bare
+    # Badge names — "2 paths needed if training Klein 9B" reads as advice, where a bare
     # "2 paths needed" reads as a problem: someone who never trains that family owes it nothing.
-    _PREFS_FAMILY_NAMES = {"klein": "Klein", "krea2": "Krea 2", "minimax": "MiniMax H3"}
+    _PREFS_FAMILY_NAMES = {"klein": "Klein 9B", "krea2": "Krea 2", "minimax": "MiniMax H3"}
 
     def _prefs_family_section(self, parent, family, title, description):
         """A collapsible model-path section for one model family on the Preferences tab.

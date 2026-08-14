@@ -84,6 +84,42 @@ AUDIO_SAMPLE_RATE = 32000
 AUDIO_CHANNELS = 2
 MUTE_SUFFIX = "_mute"
 
+# --- audio / voice mode ------------------------------------------------------------------------
+# A voice training item's duration is quantized by the same frame grid as a clip's: H3 packs
+# round(frames/24*40) audio latents per grid slot, at 800 samples each. Gizmo exports segments at
+# EXACTLY latents x 800 samples, so the trainer's strict duration check always passes with no
+# tolerance spent. The 5-frame slot (0.2 s) is deliberately absent — fifty milliseconds of voice
+# trains nothing worth a file.
+AUDIO_EXTS = (".wav", ".mp3", ".flac", ".m4a")
+AUDIO_HOP = 800                                # the audio VAE's samples-per-latent
+AUDIO_GRID_FRAMES = (22, 39, 56, 73, 90, 107, 124)
+
+
+def audio_latents_for(frames):
+    return int(round(frames / FPS * 40))
+
+
+def hop_exact_samples(frames):
+    """The exact sample count a segment of `frames` exports at — and the exact count Fizgig's
+    cache validation expects. 22 frames -> 29600 (0.925 s) ... 124 -> 165600 (5.175 s)."""
+    return audio_latents_for(frames) * AUDIO_HOP
+
+
+def is_audio_file(path):
+    return os.path.splitext(path)[1].lower() in AUDIO_EXTS
+
+
+def voice_output_name(src_path, out_dir, claimed=()):
+    """<source stem>_01.wav, skipping past files on disk and names the queue has spoken for.
+    No mute variant: a muted voice file would be a training item with nothing in it."""
+    stem = os.path.splitext(os.path.basename(src_path))[0]
+    stem = re.sub(r"[^\w\-]+", "_", stem).strip("_") or "voice"
+    for i in range(1, 1000):
+        name = f"{stem}_{i:02d}.wav"
+        if not os.path.exists(os.path.join(out_dir, name)) and name not in claimed:
+            return os.path.join(out_dir, name)
+    raise RuntimeError("1000 segments from one recording — give the output folder a clean start.")
+
 # There is deliberately no size choice. Fizgig resizes clips down to the Target Megapixels on its
 # Training tab — measured: a 1280x704 clip reaches the VAE as 672x384 at 0.25 MP and untouched at
 # 1.0 — so cutting at native resolution keeps that decision open for every run afterwards, while
@@ -599,6 +635,18 @@ class Gizmo:
         self._playing = False
         self._play_job = None
 
+        # Voice / audio mode state — parallel world, deliberately separate variables: a video
+        # open on one tab and a recording on the other must never share a playhead.
+        self.audio_src = None
+        self.audio_dur = 0.0          # seconds
+        self.audio_from_video = False
+        self.audio_pos = 0.0          # segment start, seconds
+        self.audio_peaks = None       # [(lo, hi) 0..1] per waveform column, or None
+        self.audio_queue = []
+        self._audio_playing = False
+        self._audio_play_job = None
+        self._whisper_busy = False
+
         self._style()
         self._build()
         # Three ways in besides the Open button, none of them a dependency: drop a video on the
@@ -660,6 +708,16 @@ class Gizmo:
                     arrowcolor=COLORS["text_secondary"])
         s.map("Vertical.TScrollbar", background=[("active", COLORS["accent"])])
 
+        # The mode tabs. Clam's stock notebook is a light strip on our dark ground; restyle it
+        # to read as part of the app rather than a window inside a window.
+        s.configure("G.TNotebook", background=COLORS["bg_deep"], borderwidth=0)
+        s.configure("G.TNotebook.Tab", background=COLORS["bg_surface"],
+                    foreground=COLORS["text_secondary"], font=(FONT_FAMILY, 11, "bold"),
+                    padding=(18, 8), borderwidth=0)
+        s.map("G.TNotebook.Tab",
+              background=[("selected", COLORS["accent"]), ("active", COLORS["bg_hover"])],
+              foreground=[("selected", COLORS["text_primary"])])
+
     def _card(self, parent, title, description=None):
         outer = tk.Frame(parent, bg=COLORS["bg_surface"], highlightthickness=1,
                          highlightbackground=COLORS["border"])
@@ -712,18 +770,33 @@ class Gizmo:
         head.pack(fill=tk.X, padx=16, pady=(14, 10))
         tk.Label(head, text="Gizmo", font=(FONT_FAMILY, 22, "bold"),
                  bg=COLORS["bg_deep"], fg=COLORS["text_primary"]).pack(anchor="w")
-        tk.Label(head, text="Cut training clips Fizgig will accept — 24 fps, on the frame grid, "
-                            "sized and with the sound sorted out.",
+        tk.Label(head, text="Cut training clips and voice segments Fizgig will accept — on the "
+                            "grid, sized, captioned, with the sound sorted out.",
                  font=(FONT_FAMILY, 11), bg=COLORS["bg_deep"],
                  fg=COLORS["text_secondary"]).pack(anchor="w")
+
+        # Two modes, one window: video clips and voice segments share the queue-then-export
+        # rhythm but nothing else, so each gets its own tab rather than a mode toggle whose
+        # state has to be remembered.
+        self.notebook = ttk.Notebook(body, style="G.TNotebook")
+        self.notebook.pack(fill=tk.BOTH, expand=True)
+        video_tab = tk.Frame(self.notebook, bg=COLORS["bg_deep"])
+        audio_tab = tk.Frame(self.notebook, bg=COLORS["bg_deep"])
+        self.notebook.add(video_tab, text="Video clips")
+        self.notebook.add(audio_tab, text="Voice / audio")
+        self._video_tab, self._audio_tab = video_tab, audio_tab
 
         # Settings come BEFORE finding the moment, because the last-frame preview is only
         # meaningful once the length and the motion are settled — scrub first and it shows the
         # end of whatever length happened to be left over from the previous clip.
-        self._build_source_card(body)
-        self._build_settings_card(body)
-        self._build_scrub_card(body)
-        self._build_queue_card(body)
+        tk.Frame(video_tab, bg=COLORS["bg_deep"], height=10).pack()
+        self._build_source_card(video_tab)
+        self._build_settings_card(video_tab)
+        self._build_scrub_card(video_tab)
+        self._build_queue_card(video_tab)
+
+        tk.Frame(audio_tab, bg=COLORS["bg_deep"], height=10).pack()
+        self._build_audio_tab(audio_tab)
 
         self._bind_keys()
         self._set_enabled(False)
@@ -1145,13 +1218,29 @@ class Gizmo:
         """Frame-accurate marking with a mouse is miserable, and this is a tool you use thirty
         times in a row. Bound on the root so they work wherever focus happens to be — except
         inside the output-folder Entry, where a left arrow has to mean 'move the cursor'."""
-        for seq, fn in (("<Left>", lambda: self.step(-1)),
-                        ("<Right>", lambda: self.step(1)),
-                        ("<Shift-Left>", lambda: self.step(-10)),
-                        ("<Shift-Right>", lambda: self.step(10)),
-                        ("<Home>", self.go_to_start),
-                        ("<Control-s>", self.add_to_queue)):
-            self.root.bind(seq, lambda _e, f=fn: (f(), "break")[1])
+        # Each key routes by the active tab: on Voice/audio the arrows nudge the playhead and
+        # Ctrl+S marks a segment, on Video clips they keep their original meanings.
+        for seq, fn, afn in (("<Left>", lambda: self.step(-1), lambda: self._audio_nudge(-0.05)),
+                             ("<Right>", lambda: self.step(1), lambda: self._audio_nudge(0.05)),
+                             ("<Shift-Left>", lambda: self.step(-10),
+                              lambda: self._audio_nudge(-0.5)),
+                             ("<Shift-Right>", lambda: self.step(10),
+                              lambda: self._audio_nudge(0.5)),
+                             ("<Home>", self.go_to_start, lambda: self._audio_seek(0.0)),
+                             ("<Control-s>", self.add_to_queue, None)):
+            def _route(_e, f=fn, af=afn):
+                if self._audio_tab_active():
+                    (af or self.audio_add_to_queue)()
+                else:
+                    f()
+                return "break"
+            self.root.bind(seq, _route)
+
+    def _audio_tab_active(self):
+        try:
+            return self.notebook.select() == str(self._audio_tab)
+        except Exception:
+            return False
 
     @staticmethod
     def _shield_from_hotkeys(widget):
@@ -1201,6 +1290,13 @@ class Gizmo:
         path = str(path).strip().strip('"')
         if not path or not os.path.isfile(path):
             messagebox.showwarning("Gizmo", f"Not a file:\n{path}")
+            return
+        if is_audio_file(path):
+            self.notebook.select(self._audio_tab)
+            try:
+                self.load_audio(path)
+            except Exception as exc:
+                messagebox.showerror("Gizmo — cannot read that audio", str(exc))
             return
         if os.path.splitext(path)[1].lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
             messagebox.showinfo(
@@ -1677,6 +1773,563 @@ class Gizmo:
         self._playing = False
         if self.play_btn.winfo_exists():
             self.play_btn.configure(text="▶  Play sound")
+
+    # -- voice / audio mode -----------------------------------------------------------------------
+    #
+    # The same rhythm as the video side — open one file, mark the pieces you want, export the lot
+    # — with the axes swapped: there is nothing to crop or retime, only WHERE a segment starts
+    # and WHICH grid length it runs. Exports are wav, 32 kHz stereo, at exactly latents x 800
+    # samples, each with its caption .txt beside it — so a segment dropped into a training folder
+    # passes Fizgig's strict checks with nothing to configure.
+
+    AUDIO_WAVE_W, AUDIO_WAVE_H = 940, 150
+
+    def _build_audio_tab(self, body):
+        # 1. source
+        c = self._card(body, "1. Source recording",
+                       "A voice memo, a podcast, an interview — any wav, mp3, flac or m4a. Or a "
+                       "VIDEO file, to use just its audio track: nothing is shown, you scrub the "
+                       "sound itself.")
+        row = tk.Frame(c, bg=COLORS["bg_surface"])
+        row.pack(fill=tk.X)
+        self._button(row, "Open audio…", self.open_audio, "accent",
+                     tip="Open a recording — or a video whose SOUND you want.\n\nAny format or "
+                         "sample rate; Gizmo converts on export. The original is never "
+                         "modified.").pack(side=tk.LEFT)
+        self.audio_src_label = tk.Label(row, text="No recording open", font=(FONT_FAMILY, 10),
+                                        bg=COLORS["bg_surface"], fg=COLORS["text_muted"])
+        self.audio_src_label.pack(side=tk.LEFT, padx=12)
+        tk.Label(row, text="…or drag a wav/mp3 onto this window",
+                 font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"],
+                 fg=COLORS["text_muted"]).pack(side=tk.RIGHT)
+
+        # 2. caption + length — before the waveform, same doctrine as the video tab: decide what
+        # a segment IS before hunting for where it starts.
+        c = self._card(body, "2. Caption and length",
+                       "The caption teaches the voice, so describe only the sound — tone, pace, "
+                       "accent, mood. No visual claims: there is no picture for them to be true "
+                       "of. Transcribe appends the spoken words, which helps the voice bind.")
+        trow = tk.Frame(c, bg=COLORS["bg_surface"])
+        trow.pack(fill=tk.X)
+        tk.Label(trow, text="Trigger word:", font=(FONT_FAMILY, 10),
+                 bg=COLORS["bg_surface"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
+        self.audio_trigger_var = tk.StringVar(value="")
+        trig = tk.Entry(trow, textvariable=self.audio_trigger_var, width=24,
+                        bg=COLORS["bg_hover"], fg=COLORS["text_primary"],
+                        insertbackground=COLORS["text_primary"], relief=tk.FLAT)
+        trig.pack(side=tk.LEFT, padx=(8, 0), ipady=4)
+        self._shield_from_hotkeys(trig)
+        ToolTip(trig, "Leads every caption, exactly like the Captions tab's Qwen tool: "
+                      "\"<trigger>, <description> saying …\". Set it once per recording.")
+        self.audio_whisper_btn = self._button(
+            trow, "🎤 Transcribe", self.audio_transcribe,
+            tip="Listen to the marked segment with Whisper (a small speech-recognition model, "
+                "~150 MB, downloaded once) and append the words it hears to the caption as "
+                "saying \"…\". The description half stays yours — no model can hear that a "
+                "voice is warm.")
+        self.audio_whisper_btn.pack(side=tk.RIGHT)
+        self.audio_caption = tk.Text(c, height=3, wrap=tk.WORD, bg=COLORS["bg_hover"],
+                                     fg=COLORS["text_primary"], relief=tk.FLAT,
+                                     insertbackground=COLORS["text_primary"],
+                                     font=(FONT_FAMILY, 10))
+        self.audio_caption.pack(fill=tk.X, pady=(8, 0))
+        self._shield_from_hotkeys(self.audio_caption)
+        ToolTip(self.audio_caption,
+                "This segment's caption — saved as a .txt beside the exported wav. It stays put "
+                "between Adds, so describe the voice once and only touch it when something "
+                "changes (a different emotion, a different speaker).")
+
+        lrow = tk.Frame(c, bg=COLORS["bg_surface"])
+        lrow.pack(fill=tk.X, pady=(10, 0))
+        tk.Label(lrow, text="Segment length:", font=(FONT_FAMILY, 10),
+                 bg=COLORS["bg_surface"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
+        self.audio_frames_var = tk.IntVar(value=124)
+        for f in AUDIO_GRID_FRAMES:
+            secs = hop_exact_samples(f) / AUDIO_SAMPLE_RATE
+            rb = tk.Radiobutton(
+                lrow, text=f"{secs:.1f} s", variable=self.audio_frames_var, value=f,
+                command=self._audio_refresh, bg=COLORS["bg_surface"],
+                fg=COLORS["text_primary"], selectcolor=COLORS["bg_deep"],
+                activebackground=COLORS["bg_surface"], activeforeground=COLORS["text_primary"],
+                font=(FONT_FAMILY, 10))
+            rb.pack(side=tk.LEFT, padx=(10, 0))
+            ToolTip(rb, f"Exactly {hop_exact_samples(f) / AUDIO_SAMPLE_RATE:.3f} s "
+                        f"({audio_latents_for(f)} audio latents) — one of the grid lengths H3 "
+                        f"trains on, the same clock as video clips. Longer segments carry more "
+                        f"of the voice per item; 5.2 s is the ceiling the model packs.")
+
+        # 3. the waveform
+        c = self._card(body, "3. Find the moment",
+                       "Click the waveform to place a segment; the shaded span is what exports. "
+                       "←/→ nudge by 50 ms, Shift for 500 ms, Home for the start.")
+        self.audio_canvas = tk.Canvas(c, width=self.AUDIO_WAVE_W, height=self.AUDIO_WAVE_H,
+                                      bg=COLORS["bg_deep"], highlightthickness=1,
+                                      highlightbackground=COLORS["border"], cursor="crosshair")
+        self.audio_canvas.pack()
+        self.audio_canvas.bind("<Button-1>", self._audio_click)
+        self.audio_canvas.bind("<B1-Motion>", self._audio_click)
+        prow = tk.Frame(c, bg=COLORS["bg_surface"])
+        prow.pack(fill=tk.X, pady=(8, 0))
+        self.audio_play_btn = self._button(prow, "▶  Play segment", self.audio_toggle_play,
+                                           tip="Hear exactly what would export — the marked "
+                                               "span, nothing more.  (volume is listening "
+                                               "only, never saved)")
+        self.audio_play_btn.pack(side=tk.LEFT)
+        self.audio_volume_var = tk.IntVar(value=80)
+        _vol = ttk.Scale(prow, from_=0, to=100, orient=tk.HORIZONTAL, length=140,
+                         style="G.Horizontal.TScale", variable=self.audio_volume_var)
+        _vol.pack(side=tk.LEFT, padx=(12, 0))
+        ToolTip(_vol, "Listening volume only. The exported segment's audio is never touched.")
+        self.audio_pos_label = tk.Label(prow, text="", font=("Consolas", 10),
+                                        bg=COLORS["bg_surface"], fg=COLORS["text_secondary"])
+        self.audio_pos_label.pack(side=tk.RIGHT)
+
+        # 4. queue + export
+        c = self._card(body, "4. Mark it, then move on",
+                       "Add every segment you want from this recording, then export the lot — "
+                       "each wav lands with its caption .txt beside it, ready for the training "
+                       "folder.")
+        orow = tk.Frame(c, bg=COLORS["bg_surface"])
+        orow.pack(fill=tk.X)
+        tk.Label(orow, text="Save to:", font=(FONT_FAMILY, 10),
+                 bg=COLORS["bg_surface"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
+        self.audio_out_var = tk.StringVar(value="")
+        oe = tk.Entry(orow, textvariable=self.audio_out_var, bg=COLORS["bg_hover"],
+                      fg=COLORS["text_primary"], insertbackground=COLORS["text_primary"],
+                      relief=tk.FLAT)
+        oe.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8), ipady=4)
+        self._shield_from_hotkeys(oe)
+        ToolTip(oe, "Where the segments and their caption .txt files land — point it at your "
+                    "training folder to skip a copy step.")
+        self._button(orow, "Browse…", self._audio_pick_output, pad=10,
+                     tip="Pick the save folder.").pack(side=tk.LEFT)
+
+        qrow = tk.Frame(c, bg=COLORS["bg_surface"])
+        qrow.pack(fill=tk.X, pady=(10, 0))
+        self.audio_add_btn = self._button(
+            qrow, "➕  Add to queue", self.audio_add_to_queue, "accent",
+            tip="Remember this segment — where it starts, its length, its caption.  (Ctrl+S)\n\n"
+                "Nothing is written yet; keep marking.")
+        self.audio_add_btn.pack(side=tk.LEFT)
+        self.audio_export_btn = self._button(
+            qrow, "Export queue", self.audio_export_queue,
+            tip="Write every queued segment: 32 kHz stereo wav at the exact grid length, caption "
+                ".txt beside it. Fizgig accepts them as-is.")
+        self.audio_export_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.audio_status = tk.Label(qrow, text="", font=(FONT_FAMILY, 10),
+                                     bg=COLORS["bg_surface"], fg=COLORS["text_secondary"])
+        self.audio_status.pack(side=tk.LEFT, padx=12)
+        self._button(qrow, "📂 Open folder", self._audio_open_folder,
+                     tip="Open the save folder in your file browser.").pack(side=tk.RIGHT)
+
+        self.audio_queue_box = tk.Listbox(
+            c, height=6, bg=COLORS["bg_deep"], fg=COLORS["text_primary"], font=("Consolas", 9),
+            relief=tk.FLAT, highlightthickness=1, highlightbackground=COLORS["border"],
+            selectbackground=COLORS["accent"])
+        self.audio_queue_box.pack(fill=tk.X, pady=(10, 0))
+        self.audio_queue_box.bind("<Double-Button-1>", lambda _e: self._audio_recall())
+        ToolTip(self.audio_queue_box,
+                "The queue. ✓ has been written, · is still waiting.\n\nDouble-click a waiting "
+                "row to put the playhead, length and caption back where they were.")
+        brow = tk.Frame(c, bg=COLORS["bg_surface"])
+        brow.pack(fill=tk.X, pady=(6, 0))
+        self._button(brow, "Remove selected", self._audio_remove_selected, pad=10,
+                     tip="Drop the selected row from the queue. Already-exported segments stay "
+                         "on disk — delete those in your file browser.").pack(side=tk.LEFT)
+        self._button(brow, "Clear queue", self._audio_clear_queue, pad=10,
+                     tip="Empty the waiting list. Nothing already exported is "
+                         "touched.").pack(side=tk.LEFT, padx=(8, 0))
+
+        self._audio_set_enabled(False)
+
+    # -- audio: opening -----------------------------------------------------------------------------
+    def open_audio(self):
+        path = filedialog.askopenfilename(
+            title="Open a recording — or a video, for its audio track",
+            filetypes=[("Audio files", "*.wav *.mp3 *.flac *.m4a"),
+                       ("Video files (audio track)", "*.mp4 *.mov *.mkv *.avi *.m4v *.webm"),
+                       ("All files", "*.*")])
+        if not path:
+            return
+        self.notebook.select(self._audio_tab)
+        try:
+            self.load_audio(path)
+        except Exception as exc:
+            messagebox.showerror("Gizmo — cannot read that audio", str(exc))
+
+    def load_audio(self, path):
+        """Open a recording (or a video's audio track): probe duration, decode peaks in the
+        background, arm the tab."""
+        self._audio_stop()
+        # Duration by decoding to null — the one number the container cannot lie about, and it
+        # covers every format the same way. A few hundred ms even for long files.
+        p = _run([self.ffmpeg, "-hide_banner", "-i", path, "-vn",
+                  "-f", "null", os.devnull])
+        m = None
+        for m in re.finditer(r"time=(\d+):(\d\d):(\d\d(?:\.\d+)?)",
+                             (p.stderr or b"").decode("utf-8", "replace")):
+            pass
+        if m is None:
+            raise RuntimeError(f"{os.path.basename(path)}: no decodable audio in this file"
+                               + (" — it has a picture but no sound"
+                                  if not is_audio_file(path) else ""))
+        dur = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+        min_dur = hop_exact_samples(AUDIO_GRID_FRAMES[0]) / AUDIO_SAMPLE_RATE
+        if dur < min_dur:
+            raise RuntimeError(f"{os.path.basename(path)}: {dur:.2f} s of audio — the shortest "
+                               f"segment H3 trains on is {min_dur:.1f} s.")
+        self.audio_src = path
+        self.audio_dur = dur
+        self.audio_from_video = not is_audio_file(path)
+        self.audio_pos = 0.0
+        self.audio_peaks = None
+        self.audio_src_label.configure(
+            text=f"{os.path.basename(path)} — {dur:.1f} s"
+                 + ("  (a video's audio track)" if self.audio_from_video else ""),
+            fg=COLORS["text_primary"])
+        if not self.audio_out_var.get():
+            self.audio_out_var.set(os.path.join(os.path.dirname(path), "fizgig_voice"))
+        self._audio_set_enabled(True)
+        self._audio_refresh()
+        self.audio_status.configure(text="reading the waveform…", fg=COLORS["text_secondary"])
+        threading.Thread(target=self._audio_peaks_worker, args=(path,), daemon=True).start()
+
+    def _audio_peaks_worker(self, path):
+        """Decode to 8 kHz mono f32 and reduce to one (lo, hi) pair per waveform column.
+        array-module slices keep the reduction at C speed with no numpy dependency."""
+        import array
+        try:
+            p = _run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-vn",
+                      "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1", "-ar", "8000", "-"])
+            samples = array.array("f")
+            samples.frombytes(p.stdout or b"")
+            if not samples:
+                raise RuntimeError("decoded no samples")
+            n_cols = self.AUDIO_WAVE_W
+            step = max(1, len(samples) // n_cols)
+            peaks = []
+            for i in range(n_cols):
+                chunk = samples[i * step:(i + 1) * step]
+                peaks.append((min(chunk), max(chunk)) if chunk else (0.0, 0.0))
+            scale = max(1e-6, max(abs(lo) for lo, _ in peaks), max(hi for _, hi in peaks))
+            peaks = [(lo / scale, hi / scale) for lo, hi in peaks]
+        except Exception as exc:
+            err = str(exc)
+            self.root.after(0, lambda: (self.audio_status.configure(
+                text=f"waveform failed: {err[:60]}", fg=COLORS["error"])))
+            return
+        def done():
+            if self.audio_src == path:          # not superseded by another open
+                self.audio_peaks = peaks
+                self.audio_status.configure(text="", fg=COLORS["text_secondary"])
+                self._audio_refresh()
+        self.root.after(0, done)
+
+    # -- audio: the waveform ------------------------------------------------------------------------
+    def _audio_seek(self, seconds):
+        if not self.audio_src:
+            return
+        span = self._audio_span()
+        self.audio_pos = max(0.0, min(float(seconds), self.audio_dur - span))
+        self._audio_refresh()
+
+    def _audio_nudge(self, delta):
+        self._audio_seek(self.audio_pos + delta)
+
+    def _audio_click(self, event):
+        if not self.audio_src:
+            return
+        self._audio_seek(event.x / self.AUDIO_WAVE_W * self.audio_dur)
+
+    def _audio_span(self):
+        return hop_exact_samples(self.audio_frames_var.get()) / AUDIO_SAMPLE_RATE
+
+    def _audio_refresh(self):
+        """Redraw the waveform, the segment span and the position readout."""
+        c = self.audio_canvas
+        c.delete("all")
+        W, H = self.AUDIO_WAVE_W, self.AUDIO_WAVE_H
+        mid = H / 2
+        if self.audio_src and self.audio_dur:
+            span = self._audio_span()
+            self.audio_pos = max(0.0, min(self.audio_pos, max(0.0, self.audio_dur - span)))
+            x0 = self.audio_pos / self.audio_dur * W
+            x1 = min(W, (self.audio_pos + span) / self.audio_dur * W)
+            c.create_rectangle(x0, 0, x1, H, fill=COLORS["bg_hover"], outline="")
+        if self.audio_peaks:
+            for x, (lo, hi) in enumerate(self.audio_peaks):
+                c.create_line(x, mid - hi * (mid - 4), x, mid - lo * (mid - 4),
+                              fill=COLORS["accent"])
+        else:
+            c.create_line(0, mid, W, mid, fill=COLORS["border"])
+            if self.audio_src:
+                c.create_text(W / 2, mid - 14, text="reading the waveform…",
+                              fill=COLORS["text_muted"], font=(FONT_FAMILY, 10))
+        if self.audio_src and self.audio_dur:
+            span = self._audio_span()
+            x0 = self.audio_pos / self.audio_dur * W
+            x1 = min(W, (self.audio_pos + span) / self.audio_dur * W)
+            c.create_rectangle(x0, 0, x1, H, outline=COLORS["accent"], width=2)
+            self.audio_pos_label.configure(
+                text=f"{self.audio_pos:6.2f} s  →  {self.audio_pos + span:6.2f} s   "
+                     f"of {self.audio_dur:.1f} s")
+        else:
+            self.audio_pos_label.configure(text="")
+        self._audio_refresh_planned_name()
+
+    # -- audio: playback ----------------------------------------------------------------------------
+    def audio_toggle_play(self):
+        if self._audio_playing:
+            self._audio_stop()
+            return
+        if not self.audio_src:
+            return
+        span = self._audio_span()
+        gain = max(0.0, float(self.audio_volume_var.get())) / 100.0
+        self.audio_play_btn.configure(text="■  Stop")
+        self._audio_playing = True
+        threading.Thread(target=self._audio_play_worker,
+                         args=(self.audio_pos, span, gain), daemon=True).start()
+
+    def _audio_play_worker(self, start, span, gain):
+        err = None
+        try:
+            wav = os.path.join(tempfile.gettempdir(), "gizmo_voice_preview.wav")
+            p = _run([self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                      "-ss", f"{start:.3f}", "-t", f"{span:.3f}", "-i", self.audio_src,
+                      "-vn", "-af", f"volume={gain:.3f}", "-ac", "2", "-ar", "44100",
+                      "-c:a", "pcm_s16le", wav])
+            if p.returncode != 0 or not os.path.exists(wav):
+                raise RuntimeError((p.stderr or b"").decode("utf-8", "replace")[-300:]
+                                   or "could not extract the audio")
+            _play_wav(wav)
+        except Exception as exc:
+            err = str(exc)
+        self.root.after(0, self._audio_play_done, span, err)
+
+    def _audio_play_done(self, span, err):
+        if err:
+            self._audio_playing = False
+            self.audio_play_btn.configure(text="▶  Play segment")
+            messagebox.showerror("Gizmo — cannot play that audio", err)
+            return
+        self._audio_play_job = self.root.after(int(span * 1000) + 200, self._audio_stop)
+
+    def _audio_stop(self):
+        if self._audio_play_job is not None:
+            try:
+                self.root.after_cancel(self._audio_play_job)
+            except Exception:
+                pass
+            self._audio_play_job = None
+        _stop_wav()
+        self._audio_playing = False
+        try:
+            if self.audio_play_btn.winfo_exists():
+                self.audio_play_btn.configure(text="▶  Play segment")
+        except AttributeError:
+            pass                              # closing before the tab was built
+
+    # -- audio: whisper -----------------------------------------------------------------------------
+    def audio_transcribe(self):
+        """Whisper the marked segment and append `saying "…"` to the caption.
+
+        transformers is already in Fizgig's venv (it runs the EN→ZH translator the same way), so
+        no new dependency — just a one-time ~150 MB model download on first use."""
+        if self._whisper_busy or not self.audio_src:
+            return
+        self._whisper_busy = True
+        self.audio_whisper_btn.configure(state=tk.DISABLED)
+        self.audio_status.configure(text="listening… (first use downloads ~150 MB)",
+                                    fg=COLORS["text_secondary"])
+        threading.Thread(target=self._whisper_worker,
+                         args=(self.audio_pos, self._audio_span()), daemon=True).start()
+
+    def _whisper_worker(self, start, span):
+        text, err = None, None
+        try:
+            wav = os.path.join(tempfile.gettempdir(), "gizmo_whisper.wav")
+            p = _run([self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                      "-ss", f"{start:.3f}", "-t", f"{span:.3f}", "-i", self.audio_src,
+                      "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", wav])
+            if p.returncode != 0:
+                raise RuntimeError("could not extract the segment")
+            from transformers import pipeline
+            if not hasattr(self, "_whisper_pipe"):
+                self._whisper_pipe = pipeline("automatic-speech-recognition",
+                                              model="openai/whisper-base", device=-1)
+            text = (self._whisper_pipe(wav).get("text") or "").strip()
+        except Exception as exc:
+            err = (f"Whisper could not run: {exc}\n\nIt needs one ~150 MB download the first "
+                   f"time (internet required once). The caption still works without it — "
+                   f"describe the voice and skip the transcript.")
+        self.root.after(0, self._whisper_done, text, err)
+
+    def _whisper_done(self, text, err):
+        self._whisper_busy = False
+        self.audio_whisper_btn.configure(state=tk.NORMAL)
+        if err:
+            self.audio_status.configure(text="transcription failed", fg=COLORS["error"])
+            messagebox.showerror("Gizmo — Whisper", err)
+            return
+        self.audio_status.configure(text="", fg=COLORS["text_secondary"])
+        if not text:
+            self.audio_status.configure(text="Whisper heard no words in that segment",
+                                        fg=COLORS["text_secondary"])
+            return
+        current = self.audio_caption.get("1.0", tk.END).strip()
+        # Replace an earlier transcript rather than stacking them — re-transcribing after
+        # moving the segment is the normal flow.
+        current = re.sub(r'\s*saying\s+"[^"]*"\s*$', "", current)
+        joined = (current + " " if current else "") + f'saying "{text}"'
+        self.audio_caption.delete("1.0", tk.END)
+        self.audio_caption.insert("1.0", joined)
+
+    # -- audio: queue + export ----------------------------------------------------------------------
+    def _audio_caption_text(self):
+        cap = " ".join(self.audio_caption.get("1.0", tk.END).split())
+        trig = self.audio_trigger_var.get().strip().rstrip(",")
+        if trig and cap:
+            return f"{trig}, {cap}"
+        return trig or cap
+
+    def _audio_claimed(self):
+        return {os.path.basename(j["dst"]) for j in self.audio_queue}
+
+    def _audio_refresh_planned_name(self):
+        pass                                    # reserved: the queue card shows names on Add
+
+    def audio_add_to_queue(self):
+        if not self.audio_src:
+            return
+        out_dir = self.audio_out_var.get().strip()
+        if not out_dir:
+            messagebox.showwarning("Gizmo", "Pick a save folder first.")
+            return
+        if not self._audio_caption_text():
+            # A voice item with no caption is dropped by Fizgig's caption filter — refusing at
+            # the mark is kinder than a warning at training time.
+            messagebox.showwarning("Gizmo — caption first",
+                                   "Write the caption (or at least a trigger word) before "
+                                   "marking — every exported segment needs its .txt to train.")
+            return
+        frames = self.audio_frames_var.get()
+        span = self._audio_span()
+        if self.audio_pos + span > self.audio_dur + 0.01:
+            messagebox.showwarning("Gizmo", "That segment runs past the end of the recording.")
+            return
+        dst = voice_output_name(self.audio_src, out_dir, self._audio_claimed())
+        self.audio_queue.append({
+            "src": self.audio_src, "dst": dst, "start": self.audio_pos, "frames": frames,
+            "caption": self._audio_caption_text(), "done": False,
+        })
+        self._audio_refresh_queue_box()
+        self.audio_status.configure(text=f"marked {os.path.basename(dst)}",
+                                    fg=COLORS["text_secondary"])
+
+    def _audio_refresh_queue_box(self):
+        self.audio_queue_box.delete(0, tk.END)
+        for j in self.audio_queue:
+            secs = hop_exact_samples(j["frames"]) / AUDIO_SAMPLE_RATE
+            mark = "✓" if j["done"] else "·"
+            cap = j["caption"][:46] + ("…" if len(j["caption"]) > 46 else "")
+            self.audio_queue_box.insert(
+                tk.END, f'{mark} {os.path.basename(j["dst"]):<22} {j["start"]:7.2f}s '
+                        f'{secs:4.1f}s  {cap}')
+
+    def _audio_recall(self):
+        sel = self.audio_queue_box.curselection()
+        if not sel:
+            return
+        j = self.audio_queue[sel[0]]
+        if j["done"]:
+            return
+        self.audio_frames_var.set(j["frames"])
+        self.audio_caption.delete("1.0", tk.END)
+        cap = j["caption"]
+        trig = self.audio_trigger_var.get().strip().rstrip(",")
+        if trig and cap.startswith(trig + ", "):
+            cap = cap[len(trig) + 2:]
+        self.audio_caption.insert("1.0", cap)
+        self._audio_seek(j["start"])
+
+    def _audio_remove_selected(self):
+        sel = self.audio_queue_box.curselection()
+        if sel:
+            del self.audio_queue[sel[0]]
+            self._audio_refresh_queue_box()
+
+    def _audio_clear_queue(self):
+        self.audio_queue = [j for j in self.audio_queue if j["done"]]
+        self._audio_refresh_queue_box()
+
+    def audio_export_queue(self):
+        jobs = [j for j in self.audio_queue if not j["done"]]
+        if not jobs:
+            self.audio_status.configure(text="nothing waiting", fg=COLORS["text_secondary"])
+            return
+        self.audio_export_btn.configure(state=tk.DISABLED)
+        threading.Thread(target=self._audio_export_worker, args=(jobs,), daemon=True).start()
+
+    def _audio_export_worker(self, jobs):
+        wrote, failed = 0, []
+        for j in jobs:
+            try:
+                os.makedirs(os.path.dirname(j["dst"]), exist_ok=True)
+                n = hop_exact_samples(j["frames"])
+                # aresample first, then trim BY SAMPLE COUNT at the target rate — the exact
+                # length Fizgig's cache validation demands, no tolerance spent.
+                p = _run([self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                          "-ss", f'{j["start"]:.3f}', "-i", j["src"], "-vn",
+                          "-af", f"aresample={AUDIO_SAMPLE_RATE},atrim=end_sample={n},"
+                                 f"apad=whole_len={n}",
+                          "-ac", str(AUDIO_CHANNELS), "-ar", str(AUDIO_SAMPLE_RATE),
+                          "-c:a", "pcm_s16le", j["dst"]])
+                if p.returncode != 0 or not os.path.exists(j["dst"]):
+                    raise RuntimeError((p.stderr or b"").decode("utf-8", "replace")[-200:])
+                with open(os.path.splitext(j["dst"])[0] + ".txt", "w", encoding="utf-8") as f:
+                    f.write(j["caption"])
+                j["done"] = True
+                wrote += 1
+            except Exception as exc:
+                failed.append(f'{os.path.basename(j["dst"])}: {exc}')
+            self.root.after(0, self._audio_refresh_queue_box)
+        def done():
+            self.audio_export_btn.configure(state=tk.NORMAL)
+            if failed:
+                self.audio_status.configure(text=f"wrote {wrote}, {len(failed)} failed",
+                                            fg=COLORS["error"])
+                messagebox.showerror("Gizmo — some segments failed", "\n".join(failed[:6]))
+            else:
+                self.audio_status.configure(
+                    text=f"wrote {wrote} segment(s) + captions", fg=COLORS["success"])
+        self.root.after(0, done)
+
+    def _audio_pick_output(self):
+        d = filedialog.askdirectory(title="Where should the voice segments go?",
+                                    initialdir=self.audio_out_var.get() or os.path.expanduser("~"))
+        if d:
+            self.audio_out_var.set(d)
+
+    def _audio_open_folder(self):
+        d = self.audio_out_var.get().strip()
+        if not d or not os.path.isdir(d):
+            messagebox.showinfo("Gizmo", "Nothing there yet — export a segment first.")
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(d)                                     # noqa: S606
+            else:
+                subprocess.Popen(["xdg-open", d], stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            messagebox.showerror("Gizmo", f"Cannot open {d}\n\n{exc}")
+
+    def _audio_set_enabled(self, on):
+        state = tk.NORMAL if on else tk.DISABLED
+        for w in (self.audio_play_btn, self.audio_add_btn, self.audio_export_btn,
+                  self.audio_whisper_btn):
+            w.configure(state=state)
 
     # -- cost -------------------------------------------------------------------------------------
     def _refresh_length_note(self):

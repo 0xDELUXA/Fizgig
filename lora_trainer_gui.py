@@ -15742,6 +15742,9 @@ class LoRATrainerGUI:
         "krea2": ("krea2_raw_dit", "krea2_turbo_dit", "krea2_vae", "krea2_text_encoder"),
         "minimax": ("minimax_dit", "minimax_text_encoder", "minimax_vae"),
     }
+    # Badge names — "2 paths needed if training Klein" reads as advice, where a bare
+    # "2 paths needed" reads as a problem: someone who never trains that family owes it nothing.
+    _PREFS_FAMILY_NAMES = {"klein": "Klein", "krea2": "Krea 2", "minimax": "MiniMax H3"}
 
     def _prefs_family_section(self, parent, family, title, description):
         """A collapsible model-path section for one model family on the Preferences tab.
@@ -15771,7 +15774,8 @@ class LoRATrainerGUI:
             try:
                 section.badge.config(
                     text="✓ configured" if n == 0
-                    else f"{n} path{'s' if n != 1 else ''} needed",
+                    else (f"{n} path{'s' if n != 1 else ''} needed if training "
+                          f"{self._PREFS_FAMILY_NAMES[family]}"),
                     fg=COLORS["text_secondary"] if n == 0 else COLORS["warning"])
             except tk.TclError:
                 pass

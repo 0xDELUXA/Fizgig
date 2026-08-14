@@ -149,7 +149,7 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
                         index_offset=ds_i)
 
 
-def _report_headroom(device, batch_size):
+def _report_headroom(device, batch_size, with_vision=False):
     """Say what the encoder took and what is left, and shrink the batch when it is tight.
 
     Overcommitting VRAM does not raise on Windows — the driver pages the overflow into system
@@ -162,6 +162,13 @@ def _report_headroom(device, batch_size):
     almost independent of the batch — dropping the batch buys ~0.2 GB, not gigabytes. Which makes
     it a last-ditch lever rather than the fix, and worth pulling only inside that 1.9 GB band
     where a fifth of a gigabyte decides whether the card pages.
+
+    with_vision changes what the advice can honestly be. Those 12.78 GB assume cpu_embed, which
+    the vision build forces off (embedder.py: it scatters image embeddings from input_ids, so
+    inputs_embeds would drop the pixels) — the ~1.5 GB embedding table comes back onto the card,
+    and that is the entire margin 16 GB has. Telling someone in that state to close their browser
+    sends them looking for memory nothing else is holding (issue #71: 15.3 GB resident, 0.0 free,
+    nothing else on the GPU). Name the teacher instead.
     """
     if torch.device(device).type != "cuda" or not torch.cuda.is_available():
         return batch_size
@@ -180,12 +187,18 @@ def _report_headroom(device, batch_size):
                     f"{batch_size}. Costs about a second per image, once.")
         batch_size = small
     if free_gb < 1.9:                       # below the smallest forward this encoder can do
+        _what_to_do = (
+            "Reference distillation is what took it: the teacher needs the encoder's vision "
+            "tower, and that build has to hold the ~1.5 GB embedding table on the GPU rather "
+            "than in system RAM. That is the whole margin a 16 GB card has. Turn the teacher "
+            "off and caching fits; keeping it needs a bigger card."
+            if with_vision else
+            "Close anything else using the GPU — ComfyUI, and browsers, which can hold a couple "
+            "of GB on hardware acceleration — then run this again.")
         logger.warning(
             "[vram] only %.1f GB free with the encoder loaded, and a single forward needs about "
             "1.7 GB. Windows pages instead of failing here, so caching can appear frozen for a "
-            "very long time rather than stopping with an error. Close anything else using the "
-            "GPU — ComfyUI, and browsers, which can hold a couple of GB on hardware "
-            "acceleration — then run this again.", free_gb)
+            "very long time rather than stopping with an error. %s", free_gb, _what_to_do)
     return batch_size
 
 
@@ -207,7 +220,7 @@ def main():
     encoder = load_minimax_h3_te(args.text_encoder, device=device, compute_dtype=torch.bfloat16,
                                  quantize=not args.no_quantize, with_vision=bool(_refs))
 
-    args.batch_size = _report_headroom(device, args.batch_size or 16)
+    args.batch_size = _report_headroom(device, args.batch_size or 16, with_vision=bool(_refs))
     process_batches(args, datasets, all_files, all_paths,
                     lambda batch: encode_and_save_text(encoder, batch, args.batch_size))
 

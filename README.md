@@ -179,7 +179,7 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, Training Structure **Face likeness**, `adamw`, LR ceiling 2e-4 with **Adapter-relative LR** on at `0.003` |
+| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`, LR ceiling 2e-4 with **Adapter-relative LR** on at `0.003` |
 | **✨ MiniMax H3 Fast** | The same, at **rank 8 for 40 epochs** with a **flat 2e-4** (no Adapter-relative LR). Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible — it has no room to memorise your backgrounds and framing, so it encodes the subject instead. |
 
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
@@ -218,16 +218,17 @@ rest — **Weight averaging (EMA)**, **Adapter-relative LR**, **Caption dropout*
 Train**. **Training Structure**, reference distillation and **Multi Concept** stay in *Training
 Parameters*, next to the settings they change.
 
-**Training Structure** (default **Face likeness**) — how much of the run trains on nearly-clean images instead of heavily noised ones. Low noise is where fine detail and likeness are learned; high noise is where pose, framing and composition live. Pick a named setting rather than a number:
+**Training Structure** (default **Likeness and Style**) — how much of the run trains on nearly-clean images instead of heavily noised ones. Low noise is where fine detail and likeness are learned; high noise is where pose, framing and composition live. Pick a named setting rather than a number:
 
-| Setting | Clean-end share | Medium to High LR | For |
-|---|---|---|---|
-| **Face likeness** | 60% | 100% | The tuned default. Skin, hair, identity. |
-| **Balanced / style** | 25% | 50% | More of the run on pose, framing and composition. |
-| **Model default, movement** | 8% | 25% | The schedule H3's own flow shift implies, and what the reference trainer uses. |
-| **Custom** | your own | your own | Reveals the raw percentage box. |
+| Setting | Clean-end share | For |
+|---|---|---|
+| **Likeness and Style** | 60% | The default for stills. Skin, hair, identity — and style, which is a surface property too. |
+| **Model default, movement** | 8% | The schedule H3's own flow shift implies, and what the reference trainer uses. |
+| **Custom** | your own | Reveals the raw percentage box. |
 
-**Medium to High LR** is the second half of that decision. Dropping the clean-end share doesn't just add high-noise training — it makes it the *majority* (92% of steps at the model default, against 40% at Face likeness). Left at full strength those steps swamp the run and the few clean-end steps that carry identity can't hold it, so each setting recommends a damping figure. The box stays editable; 100% leaves the noisy steps alone, which is what every run before this did.
+**There's no separate "style" setting, on purpose.** Style lives at the *clean* end alongside likeness — brushwork, palette and grain are surface properties, not compositional ones, which is what Fizgig's own Klein timestep work found. What makes a style LoRA different is rank and blocks, not the noise schedule.
+
+**Medium to High LR** sits beside it and is **best left at 100 unless you're experimenting.** It sets what the noisier steps — where pose, framing and face shape are decided — do to the learning rate. Across five datasets, 0% and 100% both rendered cleanly at 20 steps without Turbo, and **100% held face shape noticeably better**, which fits: shape is settled early at high noise, skin and texture come late. So lowering it trades geometry for surface, and nothing is damped by default.
 
 **Mid-concentrated is gone.** It bunched training around the middle and thinned *both* tails — and the tail it quietly deleted was the high-noise end, leaving 0.7% of a run above 0.9 noise. A 20-step render spends most of its time there, so the LoRA was holding structure it had barely trained on: fine under a 4-step Turbo workflow, soft or distorted without one. Testing the same preset with it switched off, the LoRA works at full strength without Turbo *and* likeness didn't suffer — so it wasn't buying what it was supposed to buy either. A saved preset that still carries it now trains without it. Both settings are recorded in the LoRA's metadata and shown on the training queue, so runs stay comparable.
 

@@ -563,29 +563,40 @@ def minimax_shift_to_lownoise(shift):
 #          Converted to the trainer's --shift by minimax_lownoise_to_shift.
 #   lr   = what the steps ABOVE that threshold do to the learning rate, as a percentage.
 #
-# Why the LR figure moves with the density: dropping the clean-end share does not merely add
-# high-noise training, it makes high-noise training the MAJORITY — 92% of steps at the model's own
-# schedule against 40% at Face Likeness. Left at full strength those steps swamp the run and the
-# few clean-end steps remaining struggle to hold identity. Damping them is what makes the
-# movement-weighted options usable without re-tuning the global LR by hand.
+# Both presets recommend 100 — the noisy steps train at full rate — because that is the only
+# setting anything has been measured at. The dial exists because dropping the clean-end share
+# makes high-noise steps the MAJORITY (92% at the model's own schedule against 40% here), and the
+# worry was that they would swamp the few clean-end steps carrying identity.
+#
+# Measured across FIVE datasets (Peter, 14 Aug), at 60% clean-end: 0% and 100% both render cleanly
+# at 20 steps without the Turbo LoRA, and 100% has visibly better face SHAPE. That fits — shape is
+# settled early, at high noise, while skin and texture come late — and it means damping costs
+# geometry rather than buying stability. So nothing is damped by default. Whether that still holds
+# at 8% clean-end, where the noisy end really is 92% of the run, is untested; the box is there to
+# find out.
 #
 # The 8% is not a guess. ai-toolkit's H3 entry overrides its global 'sigmoid' timestep type with
 # 'shift' (ui/src/app/jobs/new/options.tsx) against a scheduler at the model's RELEASED video flow
 # shift of 12 (minimax_h3.py + packing.py). A shifted-uniform draw at shift 12 puts 1/13 = 7.7% of
 # steps below sigma 0.5. It is the schedule the model's own flow shift implies — not a published
 # statement of what MiniMax ran in pre-training, which is why the label says the former.
+# There is deliberately no "style" setting between these two. Style lives at the CLEAN end, not
+# the noisy one — Fizgig's own Klein work established that, extracting at three timestep ranges
+# and finding style concentrated in the late/clean band. Brushwork, palette and grain are surface
+# properties, so a style LoRA wants the same density a likeness one does; what distinguishes it is
+# rank and blocks, not the noise schedule. An earlier revision of this shipped a "Balanced / style
+# — 25%" option built by treating style as composition and pushing AWAY from the clean end. That
+# was backwards, and a mislabelled setting is worse than a missing one.
 MINIMAX_STRUCTURE_OPTIONS = {
-    "Face likeness — 60% clean-end": (60, 100),
-    "Balanced / style — 25% clean-end": (25, 50),
-    "Model default, movement — 8% clean-end": (8, 25),
+    "Likeness and Style — 60% clean-end": (60, 100),
+    "Model default, movement — 8% clean-end": (8, 100),
     "Custom": None,
 }
 MINIMAX_STRUCTURE_DESC = {
-    "Face likeness — 60% clean-end":
-        "Most of the run on nearly-clean images, where skin, hair and identity are learned. "
-        "The tuned default.",
-    "Balanced / style — 25% clean-end":
-        "More of the run on the noisy end, where pose, framing and composition are decided.",
+    "Likeness and Style — 60% clean-end":
+        "Most of the run on nearly-clean images. Skin, hair and identity are learned there — and "
+        "so is style, which is a surface property rather than a compositional one. The tuned "
+        "default for stills.",
     "Model default, movement — 8% clean-end":
         "The schedule H3's own flow shift implies, and what the reference trainer uses. Weighted "
         "to movement and composition rather than fine detail.",
@@ -593,7 +604,7 @@ MINIMAX_STRUCTURE_DESC = {
         "Type your own share. Below ~50% the high-noise steps become the majority, which is what "
         "the LR adjustment beside this is for.",
 }
-MINIMAX_STRUCTURE_DEFAULT = "Face likeness — 60% clean-end"
+MINIMAX_STRUCTURE_DEFAULT = "Likeness and Style — 60% clean-end"
 
 MINIMAX_BLOCK_OPTIONS = [
     "all · every block (50 of 50)",
@@ -6347,9 +6358,21 @@ class LoRATrainerGUI:
             0, str(self.settings.get("MINIMAX_HIGHNOISE_LR_PCT", "100")))
         self.entries["MINIMAX_HIGHNOISE_LR_PCT"].pack(side=tk.LEFT)
         tk.Label(self._minimax_hnlr_frame,
-                 text="%  — what the noisier steps do to the learning rate. 100 leaves them alone.",
+                 text="%  — best left at 100 unless you are experimenting.",
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(4, 0))
+        # Says what it does and what was measured, so lowering it is a decision rather than a
+        # guess: at 60% clean-end, across five datasets, 0% and 100% both render cleanly at 20
+        # steps without the Turbo LoRA, and 100% holds face SHAPE better.
+        self._minimax_hnlr_hint = tk.Label(
+            parent,
+            text="What the noisier steps — where pose, framing and face shape are decided — do to "
+                 "the learning rate. Lowering it trades geometry for surface detail; across five "
+                 "datasets tested, 100 gave the better face shape and nothing distorted either way.",
+            font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
+            justify=tk.LEFT, wraplength=700)
+        self._minimax_hnlr_hint.grid(row=24, column=0, columnspan=3, sticky=tk.W,
+                                     padx=(12, 5), pady=(0, 8))
 
         self._sync_minimax_structure_from_pct()
         self._refresh_minimax_shift_match()
@@ -6611,7 +6634,7 @@ class LoRATrainerGUI:
         # from the sample's token count, so there is nothing to dial there.
         for w in (self._minimax_structure_label, self._minimax_structure_combo,
                   self._minimax_structure_desc,
-                  self._minimax_hnlr_label, self._minimax_hnlr_frame,
+                  self._minimax_hnlr_label, self._minimax_hnlr_frame, self._minimax_hnlr_hint,
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
                   self._minimax_distill_frame, self._minimax_distill_hint,
                   self._minimax_quant_label, self._minimax_quant_frame,

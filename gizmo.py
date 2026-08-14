@@ -1864,6 +1864,17 @@ class Gizmo:
                 "saying \"…\". The description half stays yours — no model can hear that a "
                 "voice is warm.")
         self.audio_whisper_btn.pack(side=tk.RIGHT)
+        self.audio_lang_var = tk.StringVar(value="Auto detect")
+        _lang = ttk.Combobox(trow, textvariable=self.audio_lang_var, width=11,
+                             state="readonly", style="G.TCombobox",
+                             values=["Auto detect", "English", "French", "German", "Spanish",
+                                     "Italian", "Portuguese", "Dutch", "Polish", "Welsh",
+                                     "Russian", "Ukrainian", "Japanese", "Chinese", "Korean",
+                                     "Arabic", "Hindi"])
+        _lang.pack(side=tk.RIGHT, padx=(0, 8))
+        ToolTip(_lang, "The language Whisper listens FOR. Auto detect usually works, but a "
+                       "short segment can fool it — it once heard Welsh in English and looped. "
+                       "Pick the language and the guess is skipped entirely.")
         self.audio_caption = tk.Text(c, height=3, wrap=tk.WORD, bg=COLORS["bg_hover"],
                                      fg=COLORS["text_primary"], relief=tk.FLAT,
                                      insertbackground=COLORS["text_primary"],
@@ -2343,11 +2354,26 @@ class Gizmo:
         if self._whisper_busy or not self.audio_src:
             return
         self._whisper_busy = True
-        self.audio_whisper_btn.configure(state=tk.DISABLED)
-        self.audio_status.configure(text="listening… (first use downloads ~150 MB)",
-                                    fg=COLORS["text_secondary"])
+        self.audio_whisper_btn.configure(state=tk.DISABLED, text="⏳ Transcribing…")
+        self._whisper_dots = 0
+        self._whisper_progress_tick()
+        lang = self.audio_lang_var.get()
         threading.Thread(target=self._whisper_worker,
-                         args=(self.audio_pos, self._audio_span()), daemon=True).start()
+                         args=(self.audio_pos, self._audio_span(),
+                               None if lang == "Auto detect" else lang.lower()),
+                         daemon=True).start()
+
+    def _whisper_progress_tick(self):
+        """A visibly alive status line while Whisper works — the first run downloads ~150 MB
+        and a silent, disabled button for that long reads as a hang."""
+        if not self._whisper_busy:
+            return
+        self._whisper_dots = (self._whisper_dots + 1) % 4
+        base = ("listening — first use downloads ~150 MB, please wait"
+                if not hasattr(self, "_whisper_pipe") else "listening")
+        self.audio_status.configure(text=base + "." * self._whisper_dots,
+                                    fg=COLORS["text_secondary"])
+        self.root.after(400, self._whisper_progress_tick)
 
     @staticmethod
     def _whisper_degenerate(text, span):
@@ -2364,7 +2390,10 @@ class Gizmo:
             return True
         return False
 
-    def _whisper_worker(self, start, span):
+    def _whisper_worker(self, start, span, lang=None):
+        """lang None = auto-detect, with an English-forced retry if the output degenerates
+        (a wrong guess is the usual cause of the loop). A chosen language skips the guess
+        entirely — and the retry, since there is no better guess left to make."""
         text, err = None, None
         try:
             wav = os.path.join(tempfile.gettempdir(), "gizmo_whisper.wav")
@@ -2377,20 +2406,22 @@ class Gizmo:
             if not hasattr(self, "_whisper_pipe"):
                 self._whisper_pipe = pipeline("automatic-speech-recognition",
                                               model="openai/whisper-base", device=-1)
-            text = (self._whisper_pipe(wav).get("text") or "").strip()
-            if self._whisper_degenerate(text, span):
-                # The usual cause is a wrong language auto-detect (a short segment "sounds
-                # Welsh" and the decode loops). Forcing English heals exactly that case;
-                # auto-detect stays the first try so non-English voices still transcribe.
-                text = (self._whisper_pipe(
-                    wav, generate_kwargs={"language": "english", "task": "transcribe"}
-                ).get("text") or "").strip()
+
+            def hear(language):
+                kw = ({"generate_kwargs": {"language": language, "task": "transcribe"}}
+                      if language else {})
+                return (self._whisper_pipe(wav, **kw).get("text") or "").strip()
+
+            text = hear(lang)
+            if lang is None and self._whisper_degenerate(text, span):
+                text = hear("english")
             if self._whisper_degenerate(text, span):
                 text = None
                 err = ("Whisper looped on this segment — it hallucinated repeating text "
                        "instead of hearing it, which it does now and then on short or "
                        "ambiguous audio.\n\nNudge the start a little (even 100 ms changes the "
-                       "outcome) and try again, or just type the words.")
+                       "outcome) and try again, pick the language from the dropdown, or just "
+                       "type the words.")
         except Exception as exc:
             err = (f"Whisper could not run: {exc}\n\nIt needs one ~150 MB download the first "
                    f"time (internet required once). The caption still works without it — "
@@ -2399,7 +2430,7 @@ class Gizmo:
 
     def _whisper_done(self, text, err):
         self._whisper_busy = False
-        self.audio_whisper_btn.configure(state=tk.NORMAL)
+        self.audio_whisper_btn.configure(state=tk.NORMAL, text="🎤 Transcribe")
         if err:
             self.audio_status.configure(text="transcription failed", fg=COLORS["error"])
             messagebox.showerror("Gizmo — Whisper", err)

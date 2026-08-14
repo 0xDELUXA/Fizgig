@@ -590,9 +590,10 @@ def minimax_shift_to_lownoise(shift):
 # the noisy one — Fizgig's own Klein work established that, extracting at three timestep ranges
 # and finding style concentrated in the late/clean band. Brushwork, palette and grain are surface
 # properties, so a style LoRA wants the same density a likeness one does; what distinguishes it is
-# rank and blocks, not the noise schedule. An earlier revision of this shipped a "Balanced / style
-# — 25%" option built by treating style as composition and pushing AWAY from the clean end. That
-# was backwards, and a mislabelled setting is worse than a missing one.
+# often rank and LR, not the noise schedule.
+# An earlier revision of this shipped a "Balanced / style — 25%" option built by treating style as
+# composition and pushing AWAY from the clean end. That was backwards, and a mislabelled setting is
+# worse than a missing one.
 MINIMAX_STRUCTURE_OPTIONS = {
     "Likeness and Style — 60% clean-end": (60, 100),
     "Model default, movement — 8% clean-end": (8, 100),

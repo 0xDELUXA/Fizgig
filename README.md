@@ -203,7 +203,7 @@ Parameters*, next to the settings they change.
 | **Model default, movement** | 8% | The schedule H3's own flow shift implies, and what the reference trainer uses. |
 | **Custom** | your own | Reveals the raw percentage box. |
 
-**There's no separate "style" setting, on purpose.** Style lives at the *clean* end alongside likeness — brushwork, palette and grain are surface properties, not compositional ones, which is what Fizgig's own Klein timestep work found. What makes a style LoRA different is rank and blocks, not the noise schedule.
+**There's no separate "style" setting, on purpose.** Style lives at the *clean* end alongside likeness — brushwork, palette and grain are surface properties, not compositional ones, which is what Fizgig's own Klein timestep work found. What makes a style LoRA different is often rank and LR, not the noise schedule.
 
 **Medium to High LR** sits beside it and is **best left at 100 unless you're experimenting.** It sets what the noisier steps — where pose, framing and face shape are decided — do to the learning rate.
 

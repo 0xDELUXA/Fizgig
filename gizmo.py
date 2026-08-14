@@ -2749,10 +2749,22 @@ class Gizmo:
                 self._whisper_pipe = pipeline("automatic-speech-recognition",
                                               model="openai/whisper-base", device=-1)
 
+            # Raw samples, not the file path: handed a path, transformers shells out to its
+            # own ffmpeg to decode it — without the no-window flag, so a black console
+            # flashes over the app on every transcription. We just extracted this wav with
+            # our flashless ffmpeg; reading it back is a wave-module one-liner.
+            import wave as _wave
+
+            import numpy as _np
+            with _wave.open(wav) as _w:
+                _raw = _np.frombuffer(_w.readframes(_w.getnframes()),
+                                      dtype=_np.int16).astype(_np.float32) / 32768.0
+            _sample = {"raw": _raw, "sampling_rate": 16000}
+
             def hear(language):
                 kw = ({"generate_kwargs": {"language": language, "task": "transcribe"}}
                       if language else {})
-                return (self._whisper_pipe(wav, **kw).get("text") or "").strip()
+                return (self._whisper_pipe(dict(_sample), **kw).get("text") or "").strip()
 
             text = hear(lang)
             if lang is None and self._whisper_degenerate(text, span):

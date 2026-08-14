@@ -2010,17 +2010,17 @@ class Gizmo:
         # 3. the waveform
         c = self._card(body, "3. Find the moment",
                        "Play from here and just listen — click anywhere on the waveform and "
-                       "playback jumps there, which is how you scrub sound. When you hear the "
-                       "moment, the shaded span shows what would export at the chosen length; "
-                       "Play segment checks exactly that. Space is play / pause / resume, "
-                       "J-K-L shuttles like an edit suite (tap J or L again for 1.5/2/3x), "
-                       "←/→ nudge 50 ms, Shift 500 ms, Home for the start.")
+                       "playback jumps there, which is how you scrub sound. The shaded span is "
+                       "what would export at the chosen length: grab it to slide it, click "
+                       "outside it to place it, Play segment to check it. Space is play / "
+                       "pause / resume, J-K-L shuttles like an edit suite (tap J or L again "
+                       "for 1.5/2/3x), ←/→ nudge 50 ms, Shift 500 ms, Home for the start.")
         self.audio_canvas = tk.Canvas(c, width=self.AUDIO_WAVE_W, height=self.AUDIO_WAVE_H,
                                       bg=COLORS["bg_deep"], highlightthickness=1,
                                       highlightbackground=COLORS["border"], cursor="crosshair")
         self.audio_canvas.pack()
-        self.audio_canvas.bind("<Button-1>", self._audio_click)
-        self.audio_canvas.bind("<B1-Motion>", self._audio_click)
+        self.audio_canvas.bind("<Button-1>", self._audio_press)
+        self.audio_canvas.bind("<B1-Motion>", self._audio_drag)
         # Wheel over the waveform zooms it (returning "break" keeps the page from scrolling);
         # everywhere else the wheel still scrolls the window.
         self.audio_canvas.bind(
@@ -2275,11 +2275,26 @@ class Gizmo:
     def _audio_nudge(self, delta):
         self._audio_seek(self.audio_pos + delta)
 
-    def _audio_click(self, event):
+    def _audio_press(self, event):
+        """Button down: grabbing the shaded span means DRAG it (no jump — the segment stays
+        under your hand, offset by wherever inside it you grabbed); clicking outside it means
+        place it there."""
         if not self.audio_src:
             return
         v0, vd = self._audio_view_bounds()
-        self._audio_seek(v0 + event.x / self.AUDIO_WAVE_W * vd)
+        t = v0 + event.x / self.AUDIO_WAVE_W * vd
+        if self.audio_pos <= t <= self.audio_pos + self._audio_span():
+            self._audio_grab = t - self.audio_pos
+        else:
+            self._audio_grab = 0.0
+            self._audio_seek(t)
+
+    def _audio_drag(self, event):
+        if not self.audio_src:
+            return
+        v0, vd = self._audio_view_bounds()
+        t = v0 + event.x / self.AUDIO_WAVE_W * vd
+        self._audio_seek(t - getattr(self, "_audio_grab", 0.0))
 
     def _audio_zoom(self, factor):
         """Zoom the waveform around the playhead. factor >1 zooms in, <1 out, None = fit all."""

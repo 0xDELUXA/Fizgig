@@ -6,6 +6,7 @@
 </p>
 
 <p align="center">
+  <a href="#install"><img src="https://img.shields.io/badge/⬇%20Install%20Fizgig-2EA043?style=for-the-badge&logoColor=white" alt="Jump to the install instructions"></a>
   <a href="https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=faoq8ed6um&ref=vkb387ep"><img src="https://img.shields.io/badge/⚡%20Deploy%20on%20RunPod-673AB7?style=for-the-badge&logoColor=white" alt="Deploy Fizgig on RunPod"></a>
   <a href="https://buymeacoffee.com/lorasandlenses"><img src="https://img.shields.io/badge/Buy%20me%20a%20coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black" alt="Buy Me A Coffee"></a>
 </p>
@@ -28,17 +29,14 @@
 </p>
 
 > ### 📰 Latest news
+> - **MiniMax H3 LoRAs now work without the Turbo LoRA** (3.7.0) — a LoRA that looked right in a 4-step Turbo workflow could go soft or distort in the stock 20-step one, and the workaround was to drop its strength. The cause was a setting called **mid-concentrated**, which has been removed: across five datasets, LoRAs trained without it hold up at full strength with Turbo unloaded. The old percentage box is now a named **Training Structure** control on the Training tab. Also in the release: a substantial security audit by **[@FNGarvin](https://github.com/FNGarvin)**. [Release notes](docs/RELEASE_NOTES_v3.7.0.md)
 > - **The workbench checks your LoRA before it loads 9 GB** (3.6.4) — pick a Krea 2 LoRA with the selector on Klein 9B in **Royale**, **Explorer** or **Repair Studio** and it now switches to match in milliseconds, instead of loading the wrong pipeline and failing 25 seconds later. Installs got faster and lighter on disk in the same release. All of it contributed by **[@FNGarvin](https://github.com/FNGarvin)**. [Release notes](docs/RELEASE_NOTES_v3.6.4.md)
 > - **Pick which graphics card Fizgig uses** (3.6.2) — more than one GPU in the machine? **Preferences** now lists them by name and size, and everything follows your choice: training, caching, samples, the workbench tabs and the VRAM gauge. In the same release, MiniMax text caching needs **1.5 GB less VRAM**, which brings it inside what a 16 GB card can give it — existing caches stay valid. [Release notes](docs/RELEASE_NOTES_v3.6.2.md)
 > - **MiniMax H3 stops asking you to choose between quality and speed** (3.6.0) — the new **✨ MiniMax H3 Fast** preset reaches full likeness in a few hundred steps at dim/alpha 8, and the lower rank tends to come out *more* flexible rather than less. Load it, caption a folder of 35–45 images, press Start — you shouldn't need to touch anything else. **Multi Concept** is new too: two subjects in one LoRA, each with its own folder and its own trigger word. One thing worth knowing — judge quality by **pausing** and loading an epoch in ComfyUI; the image previews are for watching likeness arrive, and can show distortion that simply isn't there in a real render. [Details ↓](#minimax-h3--third-model-family) · [Release notes](docs/RELEASE_NOTES_v3.6.0.md)
-> - **MiniMax H3 now hits real likeness.** H3 LoRAs used to nail pose and framing while staying soft on the face; they don't any more. The change that did it was the **optimizer** — MiniMax trains with `adamw` instead of `adamw8bit`, and it's the new default. Alongside it: a single **% of training in low noise** box replacing Detail Focus, a **mid-concentrated** shape toggle, and new defaults (LoKR 8, dim/alpha 16, 60 epochs, 0.5 MP, 60% low noise). [Details ↓](#minimax-h3--third-model-family)
 > - **MiniMax on 24 GB just got ~4× faster** (3.4.1) — the trainer now picks base precision *and* block swap together instead of swap alone. A 24 GB card used to park 38 of 50 blocks on CPU; it now loads the same file 4-bit and swaps nothing. New **Base Precision** dropdown on the Training tab, Auto by default. [Details ↓](#minimax-h3--third-model-family)
-> - **LoRA training for MiniMax H3** — Fizgig trains LoRAs for MiniMax's ~33B H3 video model, from ordinary still-image datasets, on a single consumer GPU. It's the biggest model Fizgig supports, with in-training previews, LoKR, Adaptive LR and Pause/Resume all wired. Pick **MiniMax H3** from the Base Model selector; the model files it needs have download links on their rows in **Preferences**. [Details ↓](#minimax-h3--third-model-family)
 > - **Fizgig 3.0 trains LoKR.** LoKR (LyCORIS Kronecker) covers the whole weight matrix with structure instead of a thin low-rank slice — in our validation runs it produced the **highest likeness we have ever measured** with this app's own scorer, with noticeably more natural skin and light than standard LoRA on the same dataset and settings. Pick it from the **Network Type** dropdown on the Krea 2 Training tab: one **Factor** dial replaces rank and alpha, output loads straight into ComfyUI, and Repair Studio / LoRA the Explorer edit and save LoKR **natively — lossless, no conversion**. The short version of the trade: LoKR is higher quality, standard LoRA trains ~20% faster — and keep the factor at 8 (or below), where LoKR earns its cost. [Training ↓](#training)
 > - **One-click cloud training on RunPod** — no GPU, or want a 5090 for the afternoon? The official Fizgig template deploys the full app to a rented GPU in your browser: nothing to install, your files persist until you terminate the pod, and the in-app RunPod panel can even **auto-stop the pod when your run finishes** so an idle GPU never bills overnight. [**⚡ Deploy →**](https://console.runpod.io/deploy?type=GPU&gpu=RTX+5090&count=1&template=faoq8ed6um&ref=vkb387ep) · [Guide](docker/README.md)
 > - **Krea 2 trains on 8 GB** — confirmed by users running nothing but the stock preset defaults at batch size 1, with everything left on Auto. 10–12 GB cards do the same with headroom to spare. [VRAM guidance ↓](#vram-guidance)
-> - **Never lose a run** (v2.11) — training state saves at every checkpoint *and* at run end, so a crash costs nothing and a **finished LoRA can be trained further**: raise the epoch count, resume, and it carries on with optimizer and learning-rate history intact.
-> - **Caption with the model that trains your LoRA** (v2.10) — the Captions tab can use **Qwen3-VL**, the same vision-language model that conditions Krea 2 training. Every task is an **editable preset** — including a style-LoRA preset validated on real training runs. The slot takes fp8_scaled builds and community fine-tunes; since that model writes your captions, swapping it changes how your dataset gets described.
 
 > **Two model families, one workbench.** Everything here works with both **Flux 2 Klein 9B** and **Krea 2 (12.9B)** — Repair Studio, Explorer, Royale, Profiler, Extract, plus Context LoRA, Adaptive LR and Pause/Resume. [Krea 2 details ↓](#krea-2--second-model-family)
 
@@ -155,7 +153,7 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, 60% low noise + mid-concentrated, `adamw`, LR ceiling 2e-4 with **Adapter-relative LR** on at `0.003` |
+| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`, LR ceiling 2e-4 with **Adapter-relative LR** on at `0.003` |
 | **✨ MiniMax H3 Fast** | The same, at **rank 8 for 40 epochs** with a **flat 2e-4** (no Adapter-relative LR). Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible — it has no room to memorise your backgrounds and framing, so it encodes the subject instead. |
 
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
@@ -269,11 +267,27 @@ Every control below also has a short hint in the app; this is the full version.
 
 **Where they live.** *Training Parameters* keeps the settings you reach for on a normal run.
 *Memory & Precision* holds **Blocks Swap** and **Base Precision**. *Other Options* holds the
-rest — **Weight averaging (EMA)**, **Adapter-relative LR**, **Caption dropout**, **Blocks to
-Train**, and the **low-noise share** with its mid-concentrated tick. Reference distillation and
-**Multi Concept** stay in *Training Parameters*, next to the settings they change.
+rest — **Weight averaging (EMA)**, **Adapter-relative LR**, **Caption dropout** and **Blocks to
+Train**. **Training Structure**, reference distillation and **Multi Concept** stay in *Training
+Parameters*, next to the settings they change.
 
-**Low-noise training** (default 60%, **mid-concentrated** ticked) — how much of the run trains on nearly-clean images (noise below the halfway point) instead of heavily noised ones. Low noise is where fine detail and likeness are learned; high noise is where pose, framing and composition live. MiniMax's own default works out at about 8% — tuned for video, it leaves almost nothing for detail on stills. There's no cap and no table to cross-reference: type whatever share you want. Higher means more detail training, but each of those steps also lands harder, so if a high value overbakes, drop the Learning Rate before you drop the number. **mid-concentrated** changes the *shape* without changing the percentage: the same share of low-noise steps, but the mass bunched around the middle of the range (where identity is resolved) instead of spread evenly to both extremes — Krea 2 and Klein both train that way. The setting is recorded in the LoRA's metadata and shown on the training queue, so runs stay comparable.
+**Training Structure** (default **Likeness and Style**) — how much of the run trains on nearly-clean images instead of heavily noised ones. Low noise is where fine detail and likeness are learned; high noise is where pose, framing and composition live. Pick a named setting rather than a number:
+
+| Setting | Clean-end share | For |
+|---|---|---|
+| **Likeness and Style** | 60% | The default for stills. Skin, hair, identity — and style, which is a surface property too. |
+| **Model default, movement** | 8% | The schedule H3's own flow shift implies, and what the reference trainer uses. |
+| **Custom** | your own | Reveals the raw percentage box. |
+
+**There's no separate "style" setting, on purpose.** Style lives at the *clean* end alongside likeness — brushwork, palette and grain are surface properties, not compositional ones, which is what Fizgig's own Klein timestep work found. What makes a style LoRA different is often rank and LR, not the noise schedule.
+
+**Medium to High LR** sits beside it and is **best left at 100 unless you're experimenting.** It sets what the noisier steps — where pose, framing and face shape are decided — do to the learning rate.
+
+Across five datasets, at both structures and at 0% and 100%, nothing distorted at 20 steps without Turbo and **100% held face shape better every time** — which fits, since shape is settled early at high noise while skin and texture come late. So lowering it doesn't buy stability; it trades geometry for surface.
+
+That's still worth having. It's the *safe* way to push a run toward surface detail: mid-concentrated did that by changing which noise levels got sampled, which is what took LoRAs off-distribution and distorted them, whereas this leaves the schedule alone and only changes how much is learned from it. A skin-texture LoRA is the obvious use — but for a likeness LoRA, leave it at 100.
+
+**Mid-concentrated is gone.** It bunched training around the middle and thinned *both* tails — and the tail it quietly deleted was the high-noise end, leaving 0.7% of a run above 0.9 noise. A 20-step render spends most of its time there, so the LoRA was holding structure it had barely trained on: fine under a 4-step Turbo workflow, soft or distorted without one. Testing the same preset with it switched off, the LoRA works at full strength without Turbo *and* likeness didn't suffer — so it wasn't buying what it was supposed to buy either. A saved preset that still carries it now trains without it. Both settings are recorded in the LoRA's metadata and shown on the training queue, so runs stay comparable.
 
 **Blocks to Train** (default all 50) — an experiment with no recommended answer yet. H3 is 50 identical blocks and nobody has published what each one does. A block that doesn't carry identity still gets trained on *something* — your backgrounds, framing and lighting — so leaving blocks out may give a **cleaner** likeness with less memorised set, not just a faster run. The offered ranges are scaled from Klein's block map (a different architecture), so treat them as starting guesses: train one against a full-model run on the same dataset and judge the pair. You can type your own ranges and single blocks, comma-separated (`3-12, 14-15, 22, 31-33`; blocks are numbered 0–49). Fewer blocks also means faster steps, a smaller file, and less capacity overall — give a narrow range a few more epochs before calling it. Recorded as `ss_train_blocks` in the LoRA's metadata.
 

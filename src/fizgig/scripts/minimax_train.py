@@ -158,6 +158,12 @@ def setup_parser() -> argparse.ArgumentParser:
                         "unshifted logit-normal and 'resolution' = resolution-shifted "
                         "logit-normal, both A/B modes that overdrive adapters at 1e-4. "
                         "A float = the uniform-u shift map at that value.")
+    p.add_argument("--highnoise_lr_scale", type=float, default=1.0,
+                   help="Learning-rate multiplier for steps drawn ABOVE sigma 0.5 — the noisy "
+                        "half, where pose and composition are decided. 1.0 (default) leaves them "
+                        "alone. Lower it as --shift moves the run toward the noisy end, where "
+                        "those steps become the majority and would otherwise swamp the few "
+                        "clean-end steps that carry identity.")
     # Adaptive LR — bi-directional plateau tracker (starts at the geometric midpoint of min/max;
     # the Learning Rate box is ignored while it's on).
     p.add_argument("--adaptive_lr", action="store_true")
@@ -243,6 +249,7 @@ def main():
         ema_decay=args.ema_decay,
         quantize=not args.no_quantize,
         shift=args.shift,
+        highnoise_lr_scale=args.highnoise_lr_scale,
         blocks_to_swap=args.blocks_to_swap,
         gradient_checkpointing=args.gradient_checkpointing,
         adaptive_lr=args.adaptive_lr,

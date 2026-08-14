@@ -34,6 +34,11 @@ logger = logging.getLogger(__name__)
 
 VIDEO_SIGMA_SHIFT_TRAIN = 12.0     # H3's video shift — also the reference TRAINING density
 
+# Where "low noise" stops and the noisy half begins. The GUI defines its clean-end percentage
+# against this same 0.5, so the box and --highnoise_lr_scale always mean the same boundary; the
+# two must move together if either ever moves.
+MINIMAX_LOWNOISE_SIGMA = 0.5
+
 # Identity-first phase 1 trains at this fraction of the Learning Rate box (Peter, 11 Aug). Phase
 # 1 places the identity on a near-zero adapter, where a full-size Adam stride does the most
 # damage and the least good; phase 2 then gets the full rate from a sensible starting point.
@@ -1521,6 +1526,7 @@ def train_minimax(
     slow_block_lr_scale: float = 1.0,  # the multiplier applied to those blocks' LR
     quantize: bool = True,           # NF4 the base (QLoRA); False = bf16 base (needs ~66 GB VRAM)
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
+    highnoise_lr_scale: float = 1.0,  # LR multiplier for steps above sigma 0.5; 1.0 = unchanged
     blocks_to_swap="auto",           # "auto" | int — park the last N blocks on CPU between uses
     gradient_checkpointing="auto",   # "auto" | "on" | "off" — forced on when swap > 0
     adaptive_lr: bool = False,
@@ -1562,7 +1568,7 @@ def train_minimax(
                                        generate_dataset_group_by_blueprint, load_user_config)
     from fizgig.networks.lora import create_network
     from fizgig.training.optimizers import create_optimizer
-    from fizgig.training.train_utils import LossRecorder
+    from fizgig.training.train_utils import LossRecorder, validate_output_name
     from fizgig.training.metadata import build_metadata, resolve_title, ARCHITECTURE_MINIMAX
     from fizgig.minimax.loader import load_minimax_h3_dit
     from tqdm import tqdm
@@ -1575,6 +1581,7 @@ def train_minimax(
     # waits until the model is up (that is when the real block count is known).
     if train_blocks:
         parse_block_spec(train_blocks)
+    validate_output_name(output_name)          # same reason, one epoch later otherwise (#70)
 
     # ---- dataset (built from the caches the two cache scripts wrote) ----
     shared_epoch = Value("i", 0)
@@ -2063,7 +2070,19 @@ def train_minimax(
                            f"nothing left to train. Writing the final LoRA from the restored "
                            f"state. To train further, raise Max Train Epochs and resume again.")
 
-    if warmup_steps > 0 or ramp is not None or _p1_epochs:
+    # Steps drawn above sigma 0.5 — the noisy half, where pose and composition are decided — can
+    # be damped relative to the clean-end steps that carry identity. It has to scale the
+    # OPTIMIZER'S LR and not the loss: Adam's update is m / (sqrt(v) + eps), which is invariant to
+    # a constant factor on the gradient, so a loss multiplier here would do essentially nothing
+    # while reading as though it worked.
+    _hn_scale = float(highnoise_lr_scale)
+    _hn_active = abs(_hn_scale - 1.0) > 1e-9
+    _band_acc = []                       # this window's multipliers; averaged at the step
+    if _hn_active:
+        logger.info(f"[lr] steps above sigma {MINIMAX_LOWNOISE_SIGMA:g} train at "
+                    f"{_hn_scale * 100:.0f}% of the learning rate.")
+
+    if warmup_steps > 0 or ramp is not None or _p1_epochs or _hn_active:
         # Stashed AFTER the resume block: optimizer.load_state_dict replaces the param-group
         # dicts, so a stash made earlier would not survive a resume. Derived from the CONFIGURED
         # rate (x the group's depth-split scale), not the group's current lr, which a resumed
@@ -2107,6 +2126,7 @@ def train_minimax(
             "ss_learning_rate": f"{learning_rate:g}",
             "ss_optimizer": optimizer_label,
             "ss_timestep_density": _dens,
+            "ss_highnoise_lr_scale": f"{float(highnoise_lr_scale):g}",
             "ss_train_blocks": _blocks_used,
             "ss_train_adaln": "1" if _adaln_on else "0",
             "ss_distill": "dataset" if distill else "off",
@@ -2506,13 +2526,19 @@ def train_minimax(
                 _a = batch.get("audio_latent")
                 if _a is not None:
                     _a = _a[0].to(device)            # (1, A*2, 32) -> the DiT's row block
-                loss, _ = compute_loss(dit, latents, text, shift=shift,
-                                       audio_latent=_a, audio_weight=audio_weight,
-                                       parts_out=_audio_parts)
+                loss, _step_sigma = compute_loss(dit, latents, text, shift=shift,
+                                                 audio_latent=_a, audio_weight=audio_weight,
+                                                 parts_out=_audio_parts)
                 if _a is not None and _audio_parts.get("audio") is not None:
                     _audio_acc[0] += _audio_parts["video"]
                     _audio_acc[1] += _audio_parts["audio"]
                     _audio_acc[2] += 1
+                # The band multiplier needs to know where this step landed. Only the plain path
+                # reports it; a distillation step keeps the multiplier at 1.0, since its loss is
+                # a teacher comparison rather than a draw from the noise schedule. With sound in
+                # the batch the reported sigma is the VIDEO draw's — the box is defined against
+                # the video schedule, and audio's own remapped curve must not vote on the LR.
+                _band_acc.append(_hn_scale if _step_sigma >= MINIMAX_LOWNOISE_SIGMA else 1.0)
             # Divide so the accumulated gradient is the MEAN over the window, not the sum —
             # otherwise the effective LR scales with the accumulation count.
             (loss / _accum_n if _accum_n > 1 else loss).backward()
@@ -2521,15 +2547,26 @@ def train_minimax(
             if (i + 1) % _accum_n == 0 or (i + 1) >= steps_per_epoch:
                 if max_grad_norm and max_grad_norm > 0:
                     torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
-                if warmup_steps or ramp is not None or _p1_epochs:
-                    # Warmup, the ramp and the identity-first phase scale all COMPOSE: warmup
-                    # covers the first steps (where the adapter is near zero and the ramp's ratio
-                    # is undefined), the ramp takes over from there, and phase 1 runs the whole
-                    # thing at a third of the box. The product is the LR.
+                # The MEAN over the accumulation window, not the last draw: one optimizer step
+                # can cover several sigmas, and taking the last would make the setting depend on
+                # the order batches happened to arrive in.
+                _bm = (sum(_band_acc) / len(_band_acc)) if _band_acc else 1.0
+                _band_acc.clear()
+                if warmup_steps or ramp is not None or _p1_epochs or _hn_active:
+                    # Warmup, the ramp, the identity-first phase scale and the noise-band
+                    # multiplier all COMPOSE: warmup covers the first steps (where the adapter is
+                    # near zero and the ramp's ratio is undefined), the ramp takes over from
+                    # there, phase 1 runs the whole thing at a third of the box, and the band
+                    # multiplier damps whichever steps landed in the noisy half. The product is
+                    # the LR.
+                    #
+                    # `or _hn_active` is not decoration. Warmup is retired for this family and the
+                    # ramp is OFF in the Fast preset, so without it this block never runs for the
+                    # preset most people use and the setting would silently do nothing.
                     _wf = (min(1.0, (global_step + 1) / warmup_steps) if warmup_steps else 1.0)
                     _rm = ramp.mult if ramp is not None else 1.0
                     for _g in optimizer.param_groups:
-                        _g["lr"] = _g["_warmup_base_lr"] * _wf * _rm * _phase_lr
+                        _g["lr"] = _g["_warmup_base_lr"] * _wf * _rm * _phase_lr * _bm
                 if limiter is not None:
                     limiter.pre_step()   # snapshot BEFORE the optimizer moves anything
                 optimizer.step()

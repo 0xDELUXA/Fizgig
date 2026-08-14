@@ -2011,10 +2011,11 @@ class Gizmo:
         c = self._card(body, "3. Find the moment",
                        "Play from here and just listen — click anywhere on the waveform and "
                        "playback jumps there, which is how you scrub sound. The shaded span is "
-                       "what would export at the chosen length: grab it to slide it, click "
-                       "outside it to place it, Play segment to check it. Space is play / "
-                       "pause / resume, J-K-L shuttles like an edit suite (tap J or L again "
-                       "for 1.5/2/3x), ←/→ nudge 50 ms, Shift 500 ms, Home for the start.")
+                       "what would export: grab it to slide it, drag either END to snap it to "
+                       "the next allowed length, click outside it to place it, Play segment to "
+                       "check it. Space is play / pause / resume, J-K-L shuttles like an edit "
+                       "suite (tap J or L again for 1.5/2/3x), ←/→ nudge 50 ms, Shift 500 ms, "
+                       "Home for the start.")
         self.audio_canvas = tk.Canvas(c, width=self.AUDIO_WAVE_W, height=self.AUDIO_WAVE_H,
                                       bg=COLORS["bg_deep"], highlightthickness=1,
                                       highlightbackground=COLORS["border"], cursor="crosshair")
@@ -2022,6 +2023,7 @@ class Gizmo:
         self.audio_canvas.bind("<Button-1>", self._audio_press)
         self.audio_canvas.bind("<B1-Motion>", self._audio_drag)
         self.audio_canvas.bind("<ButtonRelease-1>", self._audio_release)
+        self.audio_canvas.bind("<Motion>", self._audio_hover)
         # Wheel over the waveform zooms it, anchored on the mouse — the sound you are pointing
         # at stays under the pointer, map-style. Returning "break" keeps the page from
         # scrolling; everywhere else the wheel still scrolls the window.
@@ -2262,9 +2264,12 @@ class Gizmo:
                 v0 = max(0.0, min(self.audio_pos - vd * 0.2, self.audio_dur - vd))
                 self.audio_view = (v0, vd)
         self._audio_refresh()
-        # Moving the playhead WHILE listening restarts playback from the new spot, in whichever
-        # mode is running — a nudge during Play segment should not demand another button press.
-        # Debounced so a drag or a held arrow key re-launches once, not once per step.
+        self._audio_arm_rescrub()
+
+    def _audio_arm_rescrub(self):
+        """Adjusting anything WHILE listening restarts playback from the new state, in
+        whichever mode is running — a nudge or an edge-resize during Play segment should not
+        demand another button press. Debounced so a drag or a held arrow relaunches once."""
         if self._audio_playing:
             if self._audio_cursor_job is not None:
                 self.root.after_cancel(self._audio_cursor_job)
@@ -2283,20 +2288,48 @@ class Gizmo:
     def _audio_nudge(self, delta):
         self._audio_seek(self.audio_pos + delta)
 
+    _AUDIO_EDGE_PX = 7                        # how close to a span edge counts as grabbing it
+
+    def _audio_edge_at(self, x):
+        """"left"/"right" when x is on a span edge, else None. Right wins a tie on a tiny
+        span — the more common resize."""
+        if not self.audio_src:
+            return None
+        v0, vd = self._audio_view_bounds()
+        x0 = (self.audio_pos - v0) / vd * self.AUDIO_WAVE_W
+        x1 = (self.audio_pos + self._audio_span() - v0) / vd * self.AUDIO_WAVE_W
+        if abs(x - x1) <= self._AUDIO_EDGE_PX:
+            return "right"
+        if abs(x - x0) <= self._AUDIO_EDGE_PX:
+            return "left"
+        return None
+
+    def _nearest_grid_frames(self, len_s, max_len_s):
+        """The allowed length closest to len_s that still fits in max_len_s."""
+        fits = [f for f in AUDIO_GRID_FRAMES
+                if hop_exact_samples(f) / AUDIO_SAMPLE_RATE <= max_len_s + 0.01]
+        if not fits:
+            fits = [AUDIO_GRID_FRAMES[0]]
+        return min(fits, key=lambda f: abs(hop_exact_samples(f) / AUDIO_SAMPLE_RATE - len_s))
+
     def _audio_press(self, event):
-        """Button down: grabbing the shaded span means DRAG it (no jump — the segment stays
-        under your hand, offset by wherever inside it you grabbed); clicking outside it means
-        place it there."""
+        """Button down, three grips: an EDGE of the span resizes it (snapping to the allowed
+        lengths), inside it DRAGS it (no jump — it stays under your hand), outside it places
+        it at the click."""
         if not self.audio_src:
             return
         self._audio_dragging = True
+        self._audio_edge = self._audio_edge_at(event.x)
         v0, vd = self._audio_view_bounds()
         t = v0 + event.x / self.AUDIO_WAVE_W * vd
-        if self.audio_pos <= t <= self.audio_pos + self._audio_span():
-            self._audio_grab = t - self.audio_pos
-        else:
-            self._audio_grab = 0.0
-            self._audio_seek(t)
+        if self._audio_edge == "left":
+            self._audio_edge_end = self.audio_pos + self._audio_span()   # the anchor
+        elif self._audio_edge is None:
+            if self.audio_pos <= t <= self.audio_pos + self._audio_span():
+                self._audio_grab = t - self.audio_pos
+            else:
+                self._audio_grab = 0.0
+                self._audio_seek(t)
 
     def _audio_drag(self, event):
         if not self.audio_src:
@@ -2307,11 +2340,36 @@ class Gizmo:
         # file. Panning further is a release away.
         x = max(0, min(event.x, self.AUDIO_WAVE_W))
         t = v0 + x / self.AUDIO_WAVE_W * vd
-        self._audio_seek(t - getattr(self, "_audio_grab", 0.0))
+        edge = getattr(self, "_audio_edge", None)
+        if edge == "right":
+            frames = self._nearest_grid_frames(t - self.audio_pos,
+                                               self.audio_dur - self.audio_pos)
+            if frames != self.audio_frames_var.get():
+                self.audio_frames_var.set(frames)
+                self._audio_refresh()
+                self._audio_arm_rescrub()
+        elif edge == "left":
+            end = self._audio_edge_end
+            frames = self._nearest_grid_frames(end - t, end)
+            span = hop_exact_samples(frames) / AUDIO_SAMPLE_RATE
+            if frames != self.audio_frames_var.get() or abs(end - span - self.audio_pos) > 1e-6:
+                self.audio_frames_var.set(frames)
+                self._audio_seek(end - span)     # seek arms the rescrub itself
+        else:
+            self._audio_seek(t - getattr(self, "_audio_grab", 0.0))
 
     def _audio_release(self, _event):
         self._audio_dragging = False
+        self._audio_edge = None
         self._audio_seek(self.audio_pos)      # one follow-check now the drag is over
+
+    def _audio_hover(self, event):
+        """A resize cursor over the span's edges, so the grips announce themselves."""
+        if getattr(self, "_audio_dragging", False):
+            return
+        want = "sb_h_double_arrow" if self._audio_edge_at(event.x) else "crosshair"
+        if self.audio_canvas.cget("cursor") != want:
+            self.audio_canvas.configure(cursor=want)
 
     def _audio_zoom(self, factor, focus_t=None):
         """Zoom the waveform. factor >1 in, <1 out, None = fit all. The anchor — what stays

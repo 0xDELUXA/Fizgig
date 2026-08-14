@@ -2021,6 +2021,7 @@ class Gizmo:
         self.audio_canvas.pack()
         self.audio_canvas.bind("<Button-1>", self._audio_press)
         self.audio_canvas.bind("<B1-Motion>", self._audio_drag)
+        self.audio_canvas.bind("<ButtonRelease-1>", self._audio_release)
         # Wheel over the waveform zooms it, anchored on the mouse — the sound you are pointing
         # at stays under the pointer, map-style. Returning "break" keeps the page from
         # scrolling; everywhere else the wheel still scrolls the window.
@@ -2252,7 +2253,10 @@ class Gizmo:
         self.audio_pos = max(0.0, min(float(seconds), self.audio_dur - span))
         self._audio_resume = None     # a moved playhead invalidates a paused position
         # Zoomed in and the playhead left the window: follow it, keeping a fifth of margin.
-        if self.audio_view is not None:
+        # NEVER while a drag is in progress — the pan would shift the view under the cursor,
+        # the same mouse position would map to a new time, and that feedback loop flings the
+        # segment across the whole recording on the slightest move.
+        if self.audio_view is not None and not getattr(self, "_audio_dragging", False):
             v0, vd = self.audio_view
             if not (v0 <= self.audio_pos <= v0 + vd * 0.95):
                 v0 = max(0.0, min(self.audio_pos - vd * 0.2, self.audio_dur - vd))
@@ -2285,6 +2289,7 @@ class Gizmo:
         place it there."""
         if not self.audio_src:
             return
+        self._audio_dragging = True
         v0, vd = self._audio_view_bounds()
         t = v0 + event.x / self.AUDIO_WAVE_W * vd
         if self.audio_pos <= t <= self.audio_pos + self._audio_span():
@@ -2297,8 +2302,16 @@ class Gizmo:
         if not self.audio_src:
             return
         v0, vd = self._audio_view_bounds()
-        t = v0 + event.x / self.AUDIO_WAVE_W * vd
+        # The cursor clamped to the canvas, THEN mapped: dragging past the edge parks the
+        # segment at the view's boundary instead of extrapolating off into the rest of the
+        # file. Panning further is a release away.
+        x = max(0, min(event.x, self.AUDIO_WAVE_W))
+        t = v0 + x / self.AUDIO_WAVE_W * vd
         self._audio_seek(t - getattr(self, "_audio_grab", 0.0))
+
+    def _audio_release(self, _event):
+        self._audio_dragging = False
+        self._audio_seek(self.audio_pos)      # one follow-check now the drag is over
 
     def _audio_zoom(self, factor, focus_t=None):
         """Zoom the waveform. factor >1 in, <1 out, None = fit all. The anchor — what stays

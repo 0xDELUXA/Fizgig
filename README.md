@@ -275,8 +275,9 @@ files: a muted voice recording would be a training item with nothing in it.
 **Set Training Structure to Likeness and Style for voices.** Tested head-to-head: the same
 voice dataset trains much faster and sounds better there than at Model default, for the same
 reason faces do — identity lives at the clean end of the noise schedule, and H3's audio
-schedule is chained to the video one. Fizgig reminds you on the Training tab when it sees
-voice recordings in the dataset.
+schedule is chained to the video one. The result holds up in both the stock 20-step workflow
+and under the Turbo LoRA. Fizgig reminds you on the Training tab when it sees voice
+recordings in the dataset.
 
 **What it needs** — four files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card):
 
@@ -328,6 +329,14 @@ Across five datasets, at both structures and at 0% and 100%, nothing distorted a
 That's still worth having. It's the *safe* way to push a run toward surface detail: mid-concentrated did that by changing which noise levels got sampled, which is what took LoRAs off-distribution and distorted them, whereas this leaves the schedule alone and only changes how much is learned from it. A skin-texture LoRA is the obvious use — but for a likeness LoRA, leave it at 100.
 
 **Mid-concentrated is gone.** It bunched training around the middle and thinned *both* tails — and the tail it quietly deleted was the high-noise end, leaving 0.7% of a run above 0.9 noise. A 20-step render spends most of its time there, so the LoRA was holding structure it had barely trained on: fine under a 4-step Turbo workflow, soft or distorted without one. Testing the same preset with it switched off, the LoRA works at full strength without Turbo *and* likeness didn't suffer — so it wasn't buying what it was supposed to buy either. A saved preset that still carries it now trains without it. Both settings are recorded in the LoRA's metadata and shown on the training queue, so runs stay comparable.
+
+**Using the Turbo LoRA in ComfyUI? Skip its custom sampler.** The dual-clock sampler node that
+ships alongside the H3 Turbo LoRA was a workaround for a real bug — 4-step sampling used to
+clip and hiss the audio — but ComfyUI fixed that natively (`ModelSamplingAV`, in builds from
+6 Aug 2026), and the Turbo LoRA's own author confirms stock Euler now samples cleanly. On a
+current ComfyUI the custom node is redundant at best and can degrade output; we see better
+results without it too. While you're at it: the community consensus is **8 steps over 4** (past
+8 stops helping) and `minimax_h3_turbo_v4_step600_ema` as the strongest Turbo checkpoint.
 
 **Blocks to Train** (default all 50) — an experiment with no recommended answer yet. H3 is 50 identical blocks and nobody has published what each one does. A block that doesn't carry identity still gets trained on *something* — your backgrounds, framing and lighting — so leaving blocks out may give a **cleaner** likeness with less memorised set, not just a faster run. The offered ranges are scaled from Klein's block map (a different architecture), so treat them as starting guesses: train one against a full-model run on the same dataset and judge the pair. You can type your own ranges and single blocks, comma-separated (`3-12, 14-15, 22, 31-33`; blocks are numbered 0–49). Fewer blocks also means faster steps, a smaller file, and less capacity overall — give a narrow range a few more epochs before calling it. Recorded as `ss_train_blocks` in the LoRA's metadata.
 

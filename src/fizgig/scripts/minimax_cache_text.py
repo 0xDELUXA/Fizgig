@@ -191,6 +191,11 @@ def _report_headroom(device, batch_size, with_vision=False):
     except Exception:
         return batch_size
     free_gb, resident_gb = free_b / (1024 ** 3), torch.cuda.memory_allocated(device) / (1024 ** 3)
+    try:
+        from fizgig.utils.device import plannable_free_vram
+        free_gb = min(free_gb, plannable_free_vram(device))   # FIZGIG_SIM_VRAM_GB honoured
+    except Exception:
+        pass
     logger.info(f"[vram] text encoder resident {resident_gb:.1f} GB, "
                 f"{free_gb:.1f} GB of {total_b / (1024 ** 3):.1f} GB free")
     if free_gb >= 2.5:                      # clears the measured batch-16 spike with room over
@@ -217,6 +222,8 @@ def _report_headroom(device, batch_size, with_vision=False):
 
 
 def main():
+    from fizgig.utils.device import apply_sim_vram_cap
+    apply_sim_vram_cap()          # FIZGIG_SIM_VRAM_GB: behave like a smaller card
     args = setup_parser().parse_args()
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 

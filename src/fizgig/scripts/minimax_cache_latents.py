@@ -48,6 +48,8 @@ def setup_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    from fizgig.utils.device import apply_sim_vram_cap
+    apply_sim_vram_cap()          # FIZGIG_SIM_VRAM_GB: behave like a smaller card
     args = setup_parser().parse_args()
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 

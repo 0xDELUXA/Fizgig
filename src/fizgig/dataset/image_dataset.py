@@ -786,7 +786,8 @@ class ImageDataset(torch.utils.data.Dataset):
         if not hasattr(self, "_clip_free_gb"):
             try:
                 import torch
-                self._clip_free_gb = (torch.cuda.mem_get_info()[0] / 2**30
+                from fizgig.utils.device import plannable_free_vram
+                self._clip_free_gb = (plannable_free_vram()   # honours FIZGIG_SIM_VRAM_GB
                                       if torch.cuda.is_available() else 0.0)
             except Exception:
                 self._clip_free_gb = 0.0

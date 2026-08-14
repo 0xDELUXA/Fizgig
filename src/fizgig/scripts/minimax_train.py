@@ -222,6 +222,8 @@ def _read_prompts(path):
 
 
 def main():
+    from fizgig.utils.device import apply_sim_vram_cap
+    apply_sim_vram_cap()          # FIZGIG_SIM_VRAM_GB: behave like a smaller card
     args = setup_parser().parse_args()
     train_minimax(
         dataset_config=args.dataset_config,

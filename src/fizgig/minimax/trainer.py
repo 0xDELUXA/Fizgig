@@ -1681,7 +1681,8 @@ def train_minimax(
         _base_mode = "none"
     if str(blocks_to_swap).lower() == "auto":
         if torch.cuda.is_available() and quantize:
-            _free_gb = torch.cuda.mem_get_info()[0] / 1e9
+            from fizgig.utils.device import plannable_free_vram
+            _free_gb = plannable_free_vram()   # honours FIZGIG_SIM_VRAM_GB
             _pruned = is_pruned_checkpoint(dit_path)
             # The adapter is NOT a rounding error and it is not fixed: LoKR 8 trains ~313 M
             # parameters against a rank-16 LoRA's ~75 M, and fp32 Adam state is 4x the 8-bit
@@ -2274,7 +2275,8 @@ def train_minimax(
         restore it (and its block-swap split). That is a ~21 GB round trip, which is why the
         result is cached against the prompt text and only paid when you actually change it."""
         from fizgig.minimax.sampling import encode_sample_prompts
-        _free = (torch.cuda.mem_get_info()[0] / 1e9) if torch.cuda.is_available() else 0.0
+        from fizgig.utils.device import plannable_free_vram
+        _free = plannable_free_vram() if torch.cuda.is_available() else 0.0
         _park = torch.cuda.is_available() and _free < 17.0     # TE + headroom
         if _park:
             logger.info(f"[sample override] parking the base on CPU to fit the text encoder "
@@ -2434,7 +2436,8 @@ def train_minimax(
                 if _opt_parked or _ema_parked:
                     gc.collect()
                     torch.cuda.empty_cache()
-                _free0 = torch.cuda.mem_get_info()[0] / 1e9
+                from fizgig.utils.device import plannable_free_vram
+                _free0 = plannable_free_vram()
                 logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
                             f'({len(_opt_parked)} optimizer tensors parked'
                             f'{", EMA shadow parked" if _ema_parked else ""})')
@@ -2467,7 +2470,8 @@ def train_minimax(
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-                    _free = torch.cuda.mem_get_info()[0] / 1e9
+                    from fizgig.utils.device import plannable_free_vram as _pfv
+                    _free = _pfv()
                     if _frames > 1 and _free < 7.5:
                         logger.info(f"[preview] {_free:.1f} GB free is too tight for clip "
                                     f"decode — parking the base on CPU for this decode pass.")

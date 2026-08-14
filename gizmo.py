@@ -661,7 +661,11 @@ class Gizmo:
         self.audio_dur = 0.0          # seconds
         self.audio_from_video = False
         self.audio_pos = 0.0          # segment start, seconds
-        self.audio_peaks = None       # [(lo, hi) 0..1] per waveform column, or None
+        self.audio_peaks = None       # [(lo, hi) 0..1] per column of the CURRENT view, or None
+        self._audio_samples = None    # 8 kHz mono f32 array — peaks re-slice from this on zoom
+        self._audio_peak_scale = 1.0  # one normalisation for the whole file, so zoom keeps scale
+        self.audio_view = None        # (start_s, dur_s) window, None = the whole file
+        self._audio_peaks_key = None  # cache key so refresh doesn't re-slice unchanged views
         self.audio_queue = []
         self._audio_playing = False
         self._audio_play_mode = None  # "file" (listen through) or "segment" (the export span)
@@ -1903,6 +1907,11 @@ class Gizmo:
         self.audio_canvas.pack()
         self.audio_canvas.bind("<Button-1>", self._audio_click)
         self.audio_canvas.bind("<B1-Motion>", self._audio_click)
+        # Wheel over the waveform zooms it (returning "break" keeps the page from scrolling);
+        # everywhere else the wheel still scrolls the window.
+        self.audio_canvas.bind(
+            "<MouseWheel>",
+            lambda e: (self._audio_zoom(4.0 if e.delta > 0 else 0.25), "break")[1])
         prow = tk.Frame(c, bg=COLORS["bg_surface"])
         prow.pack(fill=tk.X, pady=(8, 0))
         self.audio_listen_btn = self._button(
@@ -1923,6 +1932,23 @@ class Gizmo:
         _vol.pack(side=tk.LEFT, padx=(12, 0))
         ToolTip(_vol, "Listening volume only — moves live while a preview plays. The exported "
                       "segment's audio is never touched.")
+        # Fine placement: zoom to see the detail, nudge to land on it. Both live beside the
+        # play buttons because they are all one activity.
+        for txt, fn, tip in (
+                ("🔍−", lambda: self._audio_zoom(0.25), "Zoom out 4x. Fit shows the whole file."),
+                ("🔍+", lambda: self._audio_zoom(4.0),
+                 "Zoom in 4x around the playhead — one pixel gets 16x finer per press, which "
+                 "is what makes trimming a breath off a segment start possible."),
+                ("Fit", lambda: self._audio_zoom(None), "Show the whole recording again."),
+                ("−0.5s", lambda: self._audio_nudge(-0.5), "Nudge the segment half a second "
+                                                           "earlier.  (Shift+←)"),
+                ("−50ms", lambda: self._audio_nudge(-0.05), "Nudge the segment 50 ms earlier — "
+                                                            "restarts playback if something is "
+                                                            "playing.  (←)"),
+                ("+50ms", lambda: self._audio_nudge(0.05), "Nudge the segment 50 ms later.  (→)"),
+                ("+0.5s", lambda: self._audio_nudge(0.5), "Nudge the segment half a second "
+                                                          "later.  (Shift+→)")):
+            self._button(prow, txt, fn, pad=8, tip=tip).pack(side=tk.LEFT, padx=(6, 0))
         self.audio_pos_label = tk.Label(prow, text="", font=("Consolas", 10),
                                         bg=COLORS["bg_surface"], fg=COLORS["text_secondary"])
         self.audio_pos_label.pack(side=tk.RIGHT)
@@ -2026,6 +2052,9 @@ class Gizmo:
         self.audio_from_video = not is_audio_file(path)
         self.audio_pos = 0.0
         self.audio_peaks = None
+        self._audio_samples = None
+        self._audio_peaks_key = None
+        self.audio_view = None
         self.audio_src_label.configure(
             text=f"{os.path.basename(path)} — {dur:.1f} s"
                  + ("  (a video's audio track)" if self.audio_from_video else ""),
@@ -2037,25 +2066,23 @@ class Gizmo:
         self.audio_status.configure(text="reading the waveform…", fg=COLORS["text_secondary"])
         threading.Thread(target=self._audio_peaks_worker, args=(path,), daemon=True).start()
 
+    _AUDIO_PEAK_RATE = 8000
+
     def _audio_peaks_worker(self, path):
-        """Decode to 8 kHz mono f32 and reduce to one (lo, hi) pair per waveform column.
-        array-module slices keep the reduction at C speed with no numpy dependency."""
+        """Decode to 8 kHz mono f32 and KEEP the samples — zoom re-slices them into per-column
+        (lo, hi) pairs on demand. array-module slices keep every reduction at C speed with no
+        numpy dependency. The normalisation is computed once over the whole file, so zooming
+        into a quiet stretch shows it quiet instead of rescaling it to fill the canvas."""
         import array
         try:
             p = _run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-i", path, "-vn",
-                      "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1", "-ar", "8000", "-"])
+                      "-f", "f32le", "-acodec", "pcm_f32le", "-ac", "1",
+                      "-ar", str(self._AUDIO_PEAK_RATE), "-"])
             samples = array.array("f")
             samples.frombytes(p.stdout or b"")
             if not samples:
                 raise RuntimeError("decoded no samples")
-            n_cols = self.AUDIO_WAVE_W
-            step = max(1, len(samples) // n_cols)
-            peaks = []
-            for i in range(n_cols):
-                chunk = samples[i * step:(i + 1) * step]
-                peaks.append((min(chunk), max(chunk)) if chunk else (0.0, 0.0))
-            scale = max(1e-6, max(abs(lo) for lo, _ in peaks), max(hi for _, hi in peaks))
-            peaks = [(lo / scale, hi / scale) for lo, hi in peaks]
+            scale = max(1e-6, max(samples), -min(samples))
         except Exception as exc:
             err = str(exc)
             self.root.after(0, lambda: (self.audio_status.configure(
@@ -2063,10 +2090,41 @@ class Gizmo:
             return
         def done():
             if self.audio_src == path:          # not superseded by another open
-                self.audio_peaks = peaks
+                self._audio_samples = samples
+                self._audio_peak_scale = scale
+                self._audio_peaks_key = None
                 self.audio_status.configure(text="", fg=COLORS["text_secondary"])
                 self._audio_refresh()
         self.root.after(0, done)
+
+    def _audio_view_bounds(self):
+        """(start_s, dur_s) of what the canvas shows — the whole file unless zoomed."""
+        if self.audio_view is None:
+            return 0.0, max(self.audio_dur, 1e-6)
+        return self.audio_view
+
+    def _audio_slice_peaks(self):
+        """Per-column (lo, hi) for the current view, cached until the view or samples change."""
+        if self._audio_samples is None:
+            self.audio_peaks = None
+            return
+        v0, vd = self._audio_view_bounds()
+        key = (round(v0, 4), round(vd, 4), len(self._audio_samples))
+        if key == self._audio_peaks_key:
+            return
+        s = self._audio_samples
+        r = self._AUDIO_PEAK_RATE
+        lo_i = max(0, int(v0 * r))
+        n = max(1, int(vd * r))
+        n_cols = self.AUDIO_WAVE_W
+        step = max(1, n // n_cols)
+        peaks = []
+        for i in range(n_cols):
+            chunk = s[lo_i + i * step: lo_i + (i + 1) * step]
+            peaks.append((min(chunk) / self._audio_peak_scale,
+                          max(chunk) / self._audio_peak_scale) if chunk else (0.0, 0.0))
+        self.audio_peaks = peaks
+        self._audio_peaks_key = key
 
     # -- audio: the waveform ------------------------------------------------------------------------
     def _audio_seek(self, seconds):
@@ -2074,18 +2132,17 @@ class Gizmo:
             return
         span = self._audio_span()
         self.audio_pos = max(0.0, min(float(seconds), self.audio_dur - span))
+        # Zoomed in and the playhead left the window: follow it, keeping a fifth of margin.
+        if self.audio_view is not None:
+            v0, vd = self.audio_view
+            if not (v0 <= self.audio_pos <= v0 + vd * 0.95):
+                v0 = max(0.0, min(self.audio_pos - vd * 0.2, self.audio_dur - vd))
+                self.audio_view = (v0, vd)
         self._audio_refresh()
-
-    def _audio_nudge(self, delta):
-        self._audio_seek(self.audio_pos + delta)
-
-    def _audio_click(self, event):
-        if not self.audio_src:
-            return
-        self._audio_seek(event.x / self.AUDIO_WAVE_W * self.audio_dur)
-        # Clicking WHILE listening jumps playback there — that is what scrubbing sound is.
-        # Debounced so a drag re-launches once, not once per pixel.
-        if self._audio_playing and self._audio_play_mode == "file":
+        # Moving the playhead WHILE listening restarts playback from the new spot, in whichever
+        # mode is running — a nudge during Play segment should not demand another button press.
+        # Debounced so a drag or a held arrow key re-launches once, not once per step.
+        if self._audio_playing:
             if self._audio_cursor_job is not None:
                 self.root.after_cancel(self._audio_cursor_job)
                 self._audio_cursor_job = None
@@ -2095,25 +2152,60 @@ class Gizmo:
 
     def _audio_rescrub(self):
         self._audio_rescrub_job = None
-        if self._audio_playing and self._audio_play_mode == "file":
+        if self._audio_playing and self._audio_play_mode:
+            mode = self._audio_play_mode
             self._audio_stop()
-            self.audio_toggle_play("file")
+            self.audio_toggle_play(mode)
+
+    def _audio_nudge(self, delta):
+        self._audio_seek(self.audio_pos + delta)
+
+    def _audio_click(self, event):
+        if not self.audio_src:
+            return
+        v0, vd = self._audio_view_bounds()
+        self._audio_seek(v0 + event.x / self.AUDIO_WAVE_W * vd)
+
+    def _audio_zoom(self, factor):
+        """Zoom the waveform around the playhead. factor >1 zooms in, <1 out, None = fit all."""
+        if not self.audio_src:
+            return
+        if factor is None:
+            self.audio_view = None
+        else:
+            v0, vd = self._audio_view_bounds()
+            nd = max(0.5, min(self.audio_dur, vd / factor))
+            if nd >= self.audio_dur:
+                self.audio_view = None
+            else:
+                # Keep the playhead where the eye already is: same fraction of the window.
+                frac = (self.audio_pos - v0) / vd if vd else 0.5
+                n0 = max(0.0, min(self.audio_pos - frac * nd, self.audio_dur - nd))
+                self.audio_view = (n0, nd)
+        self._audio_refresh()
 
     def _audio_span(self):
         return hop_exact_samples(self.audio_frames_var.get()) / AUDIO_SAMPLE_RATE
 
     def _audio_refresh(self):
-        """Redraw the waveform, the segment span and the position readout."""
+        """Redraw the waveform (the current VIEW of it), the segment span and the readout."""
         c = self.audio_canvas
         c.delete("all")
         W, H = self.AUDIO_WAVE_W, self.AUDIO_WAVE_H
         mid = H / 2
+        v0, vd = self._audio_view_bounds()
+
+        def to_x(t):
+            return (t - v0) / vd * W
+
         if self.audio_src and self.audio_dur:
             span = self._audio_span()
             self.audio_pos = max(0.0, min(self.audio_pos, max(0.0, self.audio_dur - span)))
-            x0 = self.audio_pos / self.audio_dur * W
-            x1 = min(W, (self.audio_pos + span) / self.audio_dur * W)
-            c.create_rectangle(x0, 0, x1, H, fill=COLORS["bg_hover"], outline="")
+            x0 = max(0, to_x(self.audio_pos))
+            x1 = min(W, to_x(self.audio_pos + span))
+            if x1 > 0 and x0 < W:
+                c.create_rectangle(x0, 0, x1, H, fill=COLORS["bg_hover"], outline="")
+        self._audio_slice_peaks()
         if self.audio_peaks:
             for x, (lo, hi) in enumerate(self.audio_peaks):
                 c.create_line(x, mid - hi * (mid - 4), x, mid - lo * (mid - 4),
@@ -2125,12 +2217,20 @@ class Gizmo:
                               fill=COLORS["text_muted"], font=(FONT_FAMILY, 10))
         if self.audio_src and self.audio_dur:
             span = self._audio_span()
-            x0 = self.audio_pos / self.audio_dur * W
-            x1 = min(W, (self.audio_pos + span) / self.audio_dur * W)
-            c.create_rectangle(x0, 0, x1, H, outline=COLORS["accent"], width=2)
+            x0, x1 = to_x(self.audio_pos), to_x(self.audio_pos + span)
+            if x1 > 0 and x0 < W:
+                c.create_rectangle(max(0, x0), 0, min(W, x1), H,
+                                   outline=COLORS["accent"], width=2)
+            # The view's own clock, so a zoomed window says where in the file it is.
+            c.create_text(4, H - 4, anchor="sw", text=f"{v0:.2f} s",
+                          fill=COLORS["text_muted"], font=(FONT_FAMILY, 8))
+            c.create_text(W - 4, H - 4, anchor="se", text=f"{v0 + vd:.2f} s",
+                          fill=COLORS["text_muted"], font=(FONT_FAMILY, 8))
+            zoomed = f"   ·   view {vd:.1f} s of {self.audio_dur:.1f} s" \
+                if self.audio_view is not None else ""
             self.audio_pos_label.configure(
                 text=f"{self.audio_pos:6.2f} s  →  {self.audio_pos + span:6.2f} s   "
-                     f"of {self.audio_dur:.1f} s")
+                     f"of {self.audio_dur:.1f} s{zoomed}")
         else:
             self.audio_pos_label.configure(text="")
         self._audio_refresh_planned_name()
@@ -2201,9 +2301,17 @@ class Gizmo:
         c = self.audio_canvas
         c.delete("playcursor")
         if self.audio_dur:
-            x = min(self.AUDIO_WAVE_W - 1, cur / self.audio_dur * self.AUDIO_WAVE_W)
-            c.create_line(x, 0, x, self.AUDIO_WAVE_H, fill=COLORS["success"], width=2,
-                          tags="playcursor")
+            v0, vd = self._audio_view_bounds()
+            # Listening past the right edge of a zoomed view: pan the window along with the
+            # sound, so scrub-by-ear works zoomed in too.
+            if self.audio_view is not None and cur > v0 + vd and cur < self.audio_dur:
+                self.audio_view = (min(cur - vd * 0.1, self.audio_dur - vd), vd)
+                self._audio_refresh()
+                v0, vd = self._audio_view_bounds()
+            x = (cur - v0) / vd * self.AUDIO_WAVE_W
+            if 0 <= x <= self.AUDIO_WAVE_W:
+                c.create_line(x, 0, x, self.AUDIO_WAVE_H, fill=COLORS["success"], width=2,
+                              tags="playcursor")
         self._audio_cursor_job = self.root.after(50, self._audio_cursor_tick)
 
     def _audio_stop(self):

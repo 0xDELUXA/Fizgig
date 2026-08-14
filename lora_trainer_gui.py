@@ -6356,6 +6356,17 @@ class LoRATrainerGUI:
         self._minimax_structure_desc.grid(row=21, column=0, columnspan=3, sticky=tk.W,
                                           padx=(12, 5), pady=(0, 4))
 
+        # Shown when the dataset carries voice recordings and the structure ISN'T Likeness —
+        # A/B tested (Aug 2026): voices train much faster and sound better at Likeness and
+        # Style than at Model default, for the same reason faces do: identity lives at the
+        # clean end, and the audio schedule is chained to the video one. Managed by
+        # _refresh_audio_only_ui.
+        self._minimax_structure_voice_note = tk.Label(
+            parent, text="🎙 Voice recordings in this dataset — Likeness and Style trains "
+                         "voices much faster than Model default (tested). Consider switching.",
+            font=(FONT_FAMILY, 9), fg="#F59E0B", bg=COLORS["bg_surface"],
+            justify=tk.LEFT, wraplength=700)
+
         # The raw share, revealed only under Custom — the named options are the point.
         self._minimax_shift_label = ttk.Label(parent, text="Clean-end share:")
         self._minimax_shift_label.grid(row=22, column=0, sticky=tk.W, padx=5, pady=2)
@@ -6418,6 +6429,7 @@ class LoRATrainerGUI:
                     ent.insert(0, str(value))
         self._refresh_minimax_structure_ui()
         self._refresh_minimax_shift_match()
+        self._refresh_audio_only_ui()      # the voice hint clears the moment Likeness is picked
 
     def _sync_minimax_structure_from_pct(self):
         """Pick the dropdown entry the current percentage corresponds to, else Custom.
@@ -8253,6 +8265,19 @@ class LoRATrainerGUI:
                         pass
                 if audio_only and self.minimax_distill_var.get():
                     self.minimax_distill_var.set(False)
+            # The voice-structure hint: ANY audio in the dataset (mixed counts too — its voice
+            # steps benefit the same), family is MiniMax, and the structure is not already
+            # Likeness. A/B tested: voices train much faster there than at Model default.
+            if hasattr(self, "_minimax_structure_voice_note"):
+                _wants_note = (self._is_minimax_arch()
+                               and self._count_training_audio_files() > 0
+                               and not str(self.minimax_structure_var.get()).startswith(
+                                   "Likeness"))
+                if _wants_note:
+                    self._minimax_structure_voice_note.grid(
+                        row=25, column=0, columnspan=3, sticky=tk.W, padx=(12, 5), pady=(0, 4))
+                else:
+                    self._minimax_structure_voice_note.grid_remove()
         except tk.TclError:
             pass
 

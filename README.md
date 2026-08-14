@@ -272,6 +272,12 @@ training item, so a long recording is cut into segments — variety across segme
 sentences, different moods) is exactly what you'd want anyway. There is no mute for audio
 files: a muted voice recording would be a training item with nothing in it.
 
+**Set Training Structure to Likeness and Style for voices.** Tested head-to-head: the same
+voice dataset trains much faster and sounds better there than at Model default, for the same
+reason faces do — identity lives at the clean end of the noise schedule, and H3's audio
+schedule is chained to the video one. Fizgig reminds you on the Training tab when it sees
+voice recordings in the dataset.
+
 **What it needs** — four files (plus one optional), each with a **Download link on its row in Preferences** (the *Model Paths (MiniMax H3)* card):
 
 | Model | Size | Notes |

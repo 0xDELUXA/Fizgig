@@ -242,8 +242,18 @@ def main():
                                  quantize=not args.no_quantize, with_vision=bool(_refs))
 
     args.batch_size = _report_headroom(device, args.batch_size or 16, with_vision=bool(_refs))
-    process_batches(args, datasets, all_files, all_paths,
-                    lambda batch: encode_and_save_text(encoder, batch, args.batch_size))
+
+    def _encode(batch):
+        # Tight mode: defragment between forwards. The nvfp4 dequant wants ~0.5 GB fresh per
+        # forward, Windows has no expandable_segments to consolidate with, and on a 16 GB
+        # card nearly a GB can sit reserved-but-unallocated while the allocation fails
+        # (surfaced by the 16 GB simulator: 13.91 GiB allocated + 931 MiB fragmented at a
+        # 14.83 GiB budget). Same phase-boundary empty_cache doctrine the Repair Studio uses.
+        if args.batch_size <= 2 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        encode_and_save_text(encoder, batch, args.batch_size)
+
+    process_batches(args, datasets, all_files, all_paths, _encode)
 
     # r2v conditioning for the teacher. Written AFTER the plain cache and to sibling files, so
     # a run without --reference_count is byte-identical to before.

@@ -344,15 +344,20 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
             f"neither fits outright — 4-bit parks {n_swap} blocks against int8's {i_swap}")
 
 
-def _max_latent_frames(group) -> int:
-    """Longest clip in the dataset, in LATENT frames, read from the caches it already wrote.
+def _max_effective_mp(group):
+    """The heaviest single ITEM in the dataset, as effective megapixels: T x H x W per file.
 
     Header-only: safetensors key names carry the shape, so this is a directory scan and no
-    tensor is read. A still's key is `latent_HxW` and contributes 1; a clip's is `latent_TxHxW`.
-    Returns 1 for a stills dataset, which leaves every existing plan exactly as it was.
+    tensor is read. A still's `latent_HxW` contributes its own area; a clip's `latent_TxHxW`
+    contributes area x T. The per-file PRODUCT is the point — the old form took the largest
+    bucket and the longest T as two separate maxima, which planned a 1 MP stills + tiny-latent
+    voice dataset as ~37 MP and forced a several-times-slower max-swap run for nothing. (A
+    voice item's placeholder is (24, 37, 8, 8): 0.6 effective MP, smaller than one 1 MP still.)
+
+    Returns (max_mp, latent_t_of_that_item); (0.0, 1) when no cache exists yet.
     """
     from safetensors import safe_open
-    best = 1
+    best_mp, best_t = 0.0, 1
     seen = set()
     for ds in getattr(group, "datasets", []):
         cache_dir = getattr(ds, "cache_directory", None)
@@ -365,11 +370,16 @@ def _max_latent_frames(group) -> int:
             try:
                 with safe_open(os.path.join(cache_dir, name), framework="pt") as f:
                     for k in f.keys():
-                        if k.startswith("latent_") and k.count("x") == 2:
-                            best = max(best, int(k.split("_")[1].split("x")[0]))
+                        if k.startswith("latent_") and not k.startswith("latent_control_"):
+                            dims = [int(d) for d in k[len("latent_"):].split("x")]
+                            t = dims[0] if len(dims) == 3 else 1
+                            h, w = dims[-2], dims[-1]
+                            mp = t * (h * 16) * (w * 16) / 1e6
+                            if mp > best_mp:
+                                best_mp, best_t = mp, t
             except Exception:
                 continue                      # unreadable cache: the caching pass will say so
-    return best
+    return best_mp, best_t
 
 
 def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None,
@@ -488,7 +498,8 @@ def sample_sigmas(batch: int, device, shift=None, generator=None,
 def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
                  sigma: torch.Tensor = None, shift: float = None, generator=None,
                  noise: torch.Tensor = None, audio_latent: torch.Tensor = None,
-                 audio_weight: float = 1.0, parts_out: dict = None):
+                 audio_weight: float = 1.0, video_weight: float = 1.0,
+                 parts_out: dict = None):
     """One training step's loss.
 
     latent      : [1, 24, T, H, W] clean VAE latent (x0). T=1 is a still.
@@ -502,6 +513,10 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
     audio_weight: multiplier on the audio term. Audio is only ~4% of the packed sequence at any
                   clip length, so an unweighted term barely moves; this is the dial for that,
                   and it starts at parity until a measurement says otherwise.
+    video_weight: multiplier on the video term — 0 for an audio-only voice item, whose video
+                  latent is a zeros placeholder. At 0 the video loss never enters the graph:
+                  MSE against the dataset-mean latent is a real, wrong gradient ("every frame
+                  looks like the average"), not a harmless no-op.
 
     Returns (loss, sigma_used). parts_out, if given, receives the video and audio terms
     separately — they are on different noise schedules and averaging them into one number hides
@@ -539,6 +554,8 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
         loss = F.mse_loss(pred.float(), (x0 - noise).to(pred.dtype).float())
         if parts_out is not None:
             parts_out.update(video=float(loss.detach()), audio=None)
+        if video_weight != 1.0:              # degenerate (an audio item missing its rows) but honest
+            loss = video_weight * loss
         return loss, float(sigma.reshape(-1)[0])
 
     # The audio stream denoises on its OWN schedule — shift 3 against video's 12 — and
@@ -559,11 +576,17 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
     if pred_a is None:                      # pack_audio_rows off — nothing to train against
         if parts_out is not None:
             parts_out.update(video=float(v_loss.detach()), audio=None)
-        return v_loss, sigma_v
+        return video_weight * v_loss, sigma_v
     a_loss = F.mse_loss(pred_a.float(), (a0 - a_noise).float())
     if parts_out is not None:
         parts_out.update(video=float(v_loss.detach()), audio=float(a_loss.detach()),
                          sigma_audio=sigma_a)
+    if video_weight == 0.0:
+        # Not `0 * v_loss`: the multiplied form still builds the video branch's backward graph
+        # and autograd walks it for nothing. The audio term alone IS this item's loss.
+        return audio_weight * a_loss, sigma_v
+    if video_weight != 1.0:
+        return video_weight * v_loss + audio_weight * a_loss, sigma_v
     return v_loss + audio_weight * a_loss, sigma_v
 
 
@@ -1610,26 +1633,32 @@ def train_minimax(
         logger.info(f"[timesteps] explicit shift={shift} — uniform-u map.")
 
     # ---- VRAM plan: block swap + gradient checkpointing (before the base loads) ----
-    _mp = 0.25
-    try:
-        _mp = max(w * h / 1e6 for ds in group.datasets for (w, h) in ds.batch_manager.bucket_resos)
-    except Exception:
-        pass
     # A CLIP costs its spatial size TIMES its latent frames, and the planner's activation term is
-    # linear in exactly that — so a clip dataset must be handed the product, not the bucket. The
-    # bucket alone makes a 124-frame run look like the still it is one frame of.
+    # linear in exactly that — so the plan is built from the heaviest single ITEM's product, read
+    # from the cache headers. The bucket alone makes a 124-frame run look like the still it is
+    # one frame of; two separate maxima (largest bucket x longest T) would charge a 1 MP stills +
+    # voice dataset for a 37 MP step that no item performs.
     #
     # Measured, 0.25 MP buckets, gradient checkpointing on: activations run 1.7 GiB at 22 frames
     # to 9.2 at 124, dead linear. Left as the bucket size, a 32 GB card is told it can afford
     # int8 (19.8 GiB resident), the 124-frame step then peaks at 28.9 of 31.8 and the allocator
     # thrashes: 300 s a step against 17.7 s for the same step on NF4. Not an error — just a run
     # that never finishes, for want of telling the planner what it was planning for.
-    _clip_t = _max_latent_frames(group)
+    _mp = 0.25
+    try:
+        # Bucket fallback for when no cache exists yet. key[-2:] rather than unpacking the
+        # key: the audio sentinel is ("audio", w, h) and a bare (w, h) unpack would throw,
+        # silently leaving the whole estimate at 0.25.
+        _mp = max(key[-2] * key[-1] / 1e6
+                  for ds in group.datasets for key in ds.batch_manager.bucket_resos)
+    except Exception:
+        pass
+    _eff_mp, _clip_t = _max_effective_mp(group)
+    if _eff_mp > 0:
+        _mp = _eff_mp
     if _clip_t > 1:
-        _mp *= _clip_t
-        logger.info(f"[vram] longest clip is {_clip_t} latent frames, so the step carries "
-                    f"{_clip_t}x the tokens of a still at this bucket — planning against an "
-                    f"effective {_mp:.2f} MP.")
+        logger.info(f"[vram] the heaviest item is a {_clip_t}-latent-frame clip — planning "
+                    f"against its effective {_mp:.2f} MP (spatial size x frames).")
     _ckpt_req = str(gradient_checkpointing).lower()
     _base_mode = (base_quant if base_quant != "auto"
                   else ("int8" if is_pruned_checkpoint(dit_path) else "nf4"))
@@ -2110,10 +2139,19 @@ def train_minimax(
         interpretation completely, and one of which (58 of 258 modules) had been a silent bug.
         A LoRA that cannot describe its own run is a measurement you have to take on trust."""
         try:
-            _res = sorted({f"{w}x{h}" for ds in group.datasets
-                           for (w, h) in ds.batch_manager.bucket_resos})
+            # key[-2:], not an unpack: the audio sentinel key is ("audio", w, h), and a bare
+            # (w, h) unpack would throw and silently blank EVERY resolution out of the metadata.
+            _res = sorted({("voice" if isinstance(key[0], str) else f"{key[-2]}x{key[-1]}")
+                           for ds in group.datasets for key in ds.batch_manager.bucket_resos})
         except Exception:
             _res = []
+        try:
+            from fizgig.minimax.audio import is_audio as _is_af
+            _n_voice = sum(1 for ds in group.datasets
+                           for p in getattr(getattr(ds, "datasource", None), "image_paths", []) or []
+                           if _is_af(p))
+        except Exception:
+            _n_voice = 0
         _dens = ("shift12" if shift is None else
                  shift if isinstance(shift, str) else f"shift{shift:g}")
         return {
@@ -2147,6 +2185,7 @@ def train_minimax(
                 os.path.basename(str(getattr(d, "image_directory", "") or "").rstrip("/\\"))
                 for d in group.datasets),
             "ss_max_grad_norm": f"{max_grad_norm:g}",
+            "ss_audio_only_items": str(_n_voice),
             "ss_bucket_resolutions": ",".join(_res),
             "ss_gradient_checkpointing": "1" if use_ckpt else "0",
             "ss_blocks_swapped": str(n_swap),
@@ -2479,7 +2518,8 @@ def train_minimax(
     # Clips with sound only. Reported separately per epoch because the two streams sit on
     # different noise schedules — one averaged number would hide which of them is learning.
     _audio_parts = {}
-    _audio_acc = [0.0, 0.0, 0]          # video sum, audio sum, count
+    _audio_acc = [0.0, 0.0, 0]          # video sum, audio sum, count — clips with sound
+    _voice_acc = [0.0, 0]               # audio sum, count — audio-only voice items
     for epoch in range(start_epoch, max_train_epochs):
         shared_epoch.value = epoch + 1
         network.train()
@@ -2505,7 +2545,13 @@ def train_minimax(
             text = batch["hidden_states"].to(device, dtype)        # (1, L, 5120)
             if uncond_text is not None and random.random() < caption_dropout:
                 text = uncond_text.to(device, dtype)               # caption dropout step
-            if distill and (_teacher_phase or not _p1_epochs) and "ref_hidden_states" in batch:
+            _is_voice = bool(batch.get("audio_only") is not None and batch["audio_only"].any())
+            if (distill and (_teacher_phase or not _p1_epochs) and "ref_hidden_states" in batch
+                    and not _is_voice):
+                # `not _is_voice`: compute_distill_loss packs still-sized audio noise (4 rows)
+                # against a voice item's hundreds — the sequence and RoPE table would disagree
+                # in length and crash mid-run. A voice has no face to distill anyway; it takes
+                # the plain path below at video_weight 0.
                 _rz = batch["ref_latent"].to(device, dtype)      # (1, 24, h, w) from the cache
                 if _rz.dim() == 4:
                     _rz = _rz.unsqueeze(2)                       # -> (1, 24, 1, h, w)
@@ -2523,13 +2569,23 @@ def train_minimax(
             else:
                 # A clip that carried usable sound cached an audio_latent; a still, a muted clip
                 # and a silent one did not, and for those this is the original call unchanged.
+                # A VOICE item is its audio: the video latent is a zeros placeholder, and
+                # video_weight=0 keeps "every frame looks like the dataset mean" out of the run.
                 _a = batch.get("audio_latent")
                 if _a is not None:
                     _a = _a[0].to(device)            # (1, A*2, 32) -> the DiT's row block
                 loss, _step_sigma = compute_loss(dit, latents, text, shift=shift,
                                                  audio_latent=_a, audio_weight=audio_weight,
+                                                 video_weight=0.0 if _is_voice else 1.0,
                                                  parts_out=_audio_parts)
-                if _a is not None and _audio_parts.get("audio") is not None:
+                if _is_voice:
+                    # Its own ledger. The clip ledger's "video err" is a real number about real
+                    # footage; a voice item's video term is its error against the placeholder —
+                    # folding that in would poison both averages in the epoch report.
+                    if _audio_parts.get("audio") is not None:
+                        _voice_acc[0] += _audio_parts["audio"]
+                        _voice_acc[1] += 1
+                elif _a is not None and _audio_parts.get("audio") is not None:
                     _audio_acc[0] += _audio_parts["video"]
                     _audio_acc[1] += _audio_parts["audio"]
                     _audio_acc[2] += 1
@@ -2538,7 +2594,10 @@ def train_minimax(
                 # a teacher comparison rather than a draw from the noise schedule. With sound in
                 # the batch the reported sigma is the VIDEO draw's — the box is defined against
                 # the video schedule, and audio's own remapped curve must not vote on the LR.
-                _band_acc.append(_hn_scale if _step_sigma >= MINIMAX_LOWNOISE_SIGMA else 1.0)
+                # A voice step also sits out: its entire gradient lives on the audio schedule
+                # (shift 3), which the video-sigma classification does not describe.
+                _band_acc.append(1.0 if _is_voice else
+                                 (_hn_scale if _step_sigma >= MINIMAX_LOWNOISE_SIGMA else 1.0))
             # Divide so the accumulated gradient is the MEAN over the window, not the sum —
             # otherwise the effective LR scales with the accumulation count.
             (loss / _accum_n if _accum_n > 1 else loss).backward()
@@ -2616,6 +2675,11 @@ def train_minimax(
                 f"audio err {_aa:.4f} x{float(audio_weight):.2f} = {_wa:.4f} | "
                 f"sound is {_share:.1f}% of their loss")
             _audio_acc[:] = [0.0, 0.0, 0]
+        if _voice_acc[1]:
+            logger.info(f"[voice] {_voice_acc[1]} voice step(s) | "
+                        f"audio err {_voice_acc[0] / _voice_acc[1]:.4f} "
+                        f"x{float(audio_weight):.2f} (video loss zeroed — placeholder frames)")
+            _voice_acc[:] = [0.0, 0]
         if _distill_acc[2]:
             _t = _distill_acc[0] / _distill_acc[2]
             _p = _distill_acc[1] / _distill_acc[2]

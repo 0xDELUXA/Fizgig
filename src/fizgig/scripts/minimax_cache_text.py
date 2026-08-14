@@ -74,6 +74,18 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
     k = max(0, int(args.reference_count or 0))
     for ds_i, ds in enumerate(datasets):
         paths = list(getattr(getattr(ds, "datasource", None), "image_paths", []) or [])
+        # STILLS only, both roles. As a reference, a clip or voice file would reach
+        # Image.open() and kill the pass; as a student, a teref slot written for a clip or a
+        # voice item sends it down the distillation branch at train time, whose still-sized
+        # audio block cannot match a longer item's packed sequence. Neither has a face for the
+        # teacher to describe anyway.
+        from fizgig.minimax.audio import is_audio as _is_audio_file
+        from fizgig.minimax.clip import is_video as _is_video_file
+        _dropped = [p for p in paths if _is_video_file(p) or _is_audio_file(p)]
+        if _dropped:
+            paths = [p for p in paths if p not in set(_dropped)]
+            logger.info("[reference] %d clip/voice item(s) sit out of reference distillation — "
+                        "they train normally, the teacher only pairs photographs.", len(_dropped))
         n = len(paths)
         if n < 2:
             logger.warning("[reference] dataset %d has %d image(s) — need at least 2 to pair "
@@ -104,6 +116,8 @@ def _cache_reference_conditioning(args, datasets, all_files, all_paths, encoder)
         _img_cache, _lat_cache = {}, {}
 
         def reference_for(item):
+            if _is_video_file(str(item.item_key)) or _is_audio_file(str(item.item_key)):
+                return []                       # sits out by design — announced once above
             i = idx_of.get(item.item_key)
             if i is None:                       # key shapes differ -> match on the basename
                 i = idx_of.get(os.path.splitext(os.path.basename(str(item.item_key)))[0])

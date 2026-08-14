@@ -664,7 +664,11 @@ class Gizmo:
         self.audio_peaks = None       # [(lo, hi) 0..1] per waveform column, or None
         self.audio_queue = []
         self._audio_playing = False
+        self._audio_play_mode = None  # "file" (listen through) or "segment" (the export span)
+        self._audio_play_from = 0.0   # where the current playback started, for the cursor
+        self._audio_play_t0 = 0.0
         self._audio_play_job = None
+        self._audio_cursor_job = None
         self._whisper_busy = False
 
         self._style()
@@ -1888,8 +1892,11 @@ class Gizmo:
 
         # 3. the waveform
         c = self._card(body, "3. Find the moment",
-                       "Click the waveform to place a segment; the shaded span is what exports. "
-                       "←/→ nudge by 50 ms, Shift for 500 ms, Home for the start.")
+                       "Play from here and just listen — click anywhere on the waveform and "
+                       "playback jumps there, which is how you scrub sound. When you hear the "
+                       "moment, the shaded span shows what would export at the chosen length; "
+                       "Play segment checks exactly that. ←/→ nudge 50 ms, Shift 500 ms, Home "
+                       "for the start.")
         self.audio_canvas = tk.Canvas(c, width=self.AUDIO_WAVE_W, height=self.AUDIO_WAVE_H,
                                       bg=COLORS["bg_deep"], highlightthickness=1,
                                       highlightbackground=COLORS["border"], cursor="crosshair")
@@ -1898,11 +1905,17 @@ class Gizmo:
         self.audio_canvas.bind("<B1-Motion>", self._audio_click)
         prow = tk.Frame(c, bg=COLORS["bg_surface"])
         prow.pack(fill=tk.X, pady=(8, 0))
-        self.audio_play_btn = self._button(prow, "▶  Play segment", self.audio_toggle_play,
-                                           tip="Hear exactly what would export — the marked "
-                                               "span, nothing more.  (volume is listening "
-                                               "only, never saved)")
-        self.audio_play_btn.pack(side=tk.LEFT)
+        self.audio_listen_btn = self._button(
+            prow, "▶  Play from here", lambda: self.audio_toggle_play("file"),
+            tip="Listen through the recording from the playhead — click the waveform while it "
+                "plays to jump around. This is how you FIND the moment; Play segment is how "
+                "you check it.")
+        self.audio_listen_btn.pack(side=tk.LEFT)
+        self.audio_play_btn = self._button(
+            prow, "▶  Play segment", lambda: self.audio_toggle_play("segment"),
+            tip="Hear exactly what would export — the marked span, nothing more.  (volume is "
+                "listening only, never saved)")
+        self.audio_play_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.audio_volume_var = tk.DoubleVar(value=80)
         _vol = ttk.Scale(prow, from_=0, to=100, orient=tk.HORIZONTAL, length=140,
                          style="G.Horizontal.TScale", variable=self.audio_volume_var,
@@ -2070,6 +2083,21 @@ class Gizmo:
         if not self.audio_src:
             return
         self._audio_seek(event.x / self.AUDIO_WAVE_W * self.audio_dur)
+        # Clicking WHILE listening jumps playback there — that is what scrubbing sound is.
+        # Debounced so a drag re-launches once, not once per pixel.
+        if self._audio_playing and self._audio_play_mode == "file":
+            if self._audio_cursor_job is not None:
+                self.root.after_cancel(self._audio_cursor_job)
+                self._audio_cursor_job = None
+            if getattr(self, "_audio_rescrub_job", None) is not None:
+                self.root.after_cancel(self._audio_rescrub_job)
+            self._audio_rescrub_job = self.root.after(180, self._audio_rescrub)
+
+    def _audio_rescrub(self):
+        self._audio_rescrub_job = None
+        if self._audio_playing and self._audio_play_mode == "file":
+            self._audio_stop()
+            self.audio_toggle_play("file")
 
     def _audio_span(self):
         return hop_exact_samples(self.audio_frames_var.get()) / AUDIO_SAMPLE_RATE
@@ -2108,19 +2136,30 @@ class Gizmo:
         self._audio_refresh_planned_name()
 
     # -- audio: playback ----------------------------------------------------------------------------
-    def audio_toggle_play(self):
+    def audio_toggle_play(self, mode="segment"):
+        """Two ways to listen: "file" plays from the playhead onward (finding the moment),
+        "segment" plays exactly the export span (checking it). Either button stops whichever
+        is running."""
         if self._audio_playing:
             self._audio_stop()
             return
         if not self.audio_src:
             return
-        span = self._audio_span()
+        if mode == "file":
+            # To the end of the recording, capped at ten minutes of extraction — nobody scrubs
+            # longer than that in one sitting, and the temp wav stays sane.
+            span = min(max(0.1, self.audio_dur - self.audio_pos), 600.0)
+            self.audio_listen_btn.configure(text="■  Stop")
+        else:
+            span = self._audio_span()
+            self.audio_play_btn.configure(text="■  Stop")
         # Live volume when the backend allows it — the slider then works MID-play. Only when it
         # doesn't (non-Windows external player) is the gain baked into the preview file.
         gain = 1.0 if set_live_volume(self.audio_volume_var.get()) \
             else max(0.0, float(self.audio_volume_var.get())) / 100.0
-        self.audio_play_btn.configure(text="■  Stop")
         self._audio_playing = True
+        self._audio_play_mode = mode
+        self._audio_play_from = self.audio_pos
         threading.Thread(target=self._audio_play_worker,
                          args=(self.audio_pos, span, gain), daemon=True).start()
 
@@ -2142,25 +2181,49 @@ class Gizmo:
 
     def _audio_play_done(self, span, err):
         if err:
-            self._audio_playing = False
-            self.audio_play_btn.configure(text="▶  Play segment")
+            self._audio_stop()
             messagebox.showerror("Gizmo — cannot play that audio", err)
             return
+        # winsound only starts once the extraction lands, so the cursor clock starts HERE, not
+        # when the button was pressed — an early t0 would draw the cursor ahead of the sound.
+        import time as _time
+        self._audio_play_t0 = _time.monotonic()
         self._audio_play_job = self.root.after(int(span * 1000) + 200, self._audio_stop)
+        self._audio_cursor_tick()
+
+    def _audio_cursor_tick(self):
+        """The moving playback line — wall-clock driven, since winsound reports nothing. Close
+        enough for scrubbing by ear, which is what it exists for."""
+        if not self._audio_playing:
+            return
+        import time as _time
+        cur = self._audio_play_from + (_time.monotonic() - self._audio_play_t0)
+        c = self.audio_canvas
+        c.delete("playcursor")
+        if self.audio_dur:
+            x = min(self.AUDIO_WAVE_W - 1, cur / self.audio_dur * self.AUDIO_WAVE_W)
+            c.create_line(x, 0, x, self.AUDIO_WAVE_H, fill=COLORS["success"], width=2,
+                          tags="playcursor")
+        self._audio_cursor_job = self.root.after(50, self._audio_cursor_tick)
 
     def _audio_stop(self):
-        if self._audio_play_job is not None:
-            try:
-                self.root.after_cancel(self._audio_play_job)
-            except Exception:
-                pass
-            self._audio_play_job = None
+        for attr in ("_audio_play_job", "_audio_cursor_job"):
+            job = getattr(self, attr, None)
+            if job is not None:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
         _stop_wav()
         self._audio_playing = False
+        self._audio_play_mode = None
         try:
             if self.audio_play_btn.winfo_exists():
                 self.audio_play_btn.configure(text="▶  Play segment")
-        except AttributeError:
+                self.audio_listen_btn.configure(text="▶  Play from here")
+                self.audio_canvas.delete("playcursor")
+        except (AttributeError, tk.TclError):
             pass                              # closing before the tab was built
 
     # -- audio: whisper -----------------------------------------------------------------------------
@@ -2360,8 +2423,8 @@ class Gizmo:
 
     def _audio_set_enabled(self, on):
         state = tk.NORMAL if on else tk.DISABLED
-        for w in (self.audio_play_btn, self.audio_add_btn, self.audio_export_btn,
-                  self.audio_whisper_btn):
+        for w in (self.audio_listen_btn, self.audio_play_btn, self.audio_add_btn,
+                  self.audio_export_btn, self.audio_whisper_btn):
             w.configure(state=state)
 
     # -- cost -------------------------------------------------------------------------------------

@@ -223,6 +223,9 @@ _ACT_GB_CKPT = 0.5           # step overhead at 0.25 MP batch 1, checkpointed (m
 _SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active (measured 7.4 @ n=16)
 # H2D-only streaming (#73) keeps ring_size blocks resident at once (~0.8 GB at ring 2) —
 # inside this transient budget. Re-measure only if diag_h2d_speedup shows the peak moving.
+_H2D_PER_BLOCK_GB = 0.39     # one streamed int8 block's VRAM share (checkpoint header: 0.385)
+_H2D_TRANSIENT_GB = 2.0      # ring (2 x 0.39) + margin — validated on a simulated 16 GB card
+                             # at BOTH 0.25 MP and 1 MP buckets, swap 40 (~1.85 s/it at 1 MP)
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
 # Skipping checkpointing has to EARN it. Measured on H3, recompute costs ~0.1 s/step and saves
 # ~5 GB — so choosing "no checkpointing" on a thin margin trades five gigabytes of headroom for
@@ -313,20 +316,24 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
 
     Choosing a swap count from VRAM alone, with the quantisation already fixed, produces the
     worst available outcome on mid-range cards: the int8 base is ~21 GB, so a 24 GB card cannot
-    hold it and the planner parks 38 of 50 blocks on CPU — every one of them crossing PCIe every
-    step, for roughly 4x the step time. The same file loaded 4-bit is ~11 GB and needs no swap at
-    all. Krea 2 hit this exact failure and fixed it the same way (see _auto_krea2_strategy):
-    quantisation and swap are one decision.
+    hold it and the old CLASSIC swap parked 38 of 50 blocks on CPU — every one of them
+    round-tripping PCIe every step, ~4x the step time. That trade DIED with the H2D-only
+    streamer (#73, @rintic-13): int8 blocks are frozen, so they stream host->device only, on a
+    copy stream that overlaps compute — measured on the real base at swap 40 (a simulated
+    16 GB card, six epochs): ~1.35 s/it steady, where classic parking ran several times that.
+    So int8 no longer has to fit to be picked.
 
     Order of preference:
-      1. int8, no swap  — the most accurate base (~0.17% error against the reference's own
-                          storage) with no PCIe cost. Always preferred when it fits.
-      2. 4-bit, no swap — trades base accuracy (~9.5% error) for keeping every block resident.
-      3. 4-bit + swap   — 11 GB resident always parks fewer blocks than 21 GB would.
-
-    The trade in step 2 is real and worth stating: a LoRA fitted on a 9.5%-perturbed base spends
-    capacity correcting error that will not exist at inference, and it compounds with depth. It
-    is chosen only when the alternative is most of the model crossing PCIe on every step.
+      1. int8, no swap   — the most accurate base (~0.17% error against the reference's own
+                           storage) with no PCIe cost at all.
+      2. int8 + H2D swap — same accurate base; parked blocks stream one-way with prefetch.
+                           This replaced "4-bit, no swap": a LoRA fitted on NF4's ~9.5%-
+                           perturbed base spends capacity correcting error that will not exist
+                           at inference, and the speed argument for accepting that is gone.
+      3. 4-bit (+classic swap if even 11 GB doesn't fit) — the floor for cards the int8
+                           residual footprint (~5.6 GB of non-streamed weights + activations)
+                           genuinely cannot fit, and for the bf16 checkpoint (no int8 weights
+                           to stream — H2D is ConvRot-specific).
 
     Only applies to a pruned int8 checkpoint — the bf16 file has no int8 weights to keep, so
     there is nothing to choose between.
@@ -339,15 +346,26 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
                                transient_gb=_INT8_TRANSIENT_GB, adapter_gb=adapter_gb)
     if i_swap == 0:
         return "int8", i_swap, i_ckpt, "int8 fits with no block swap — the most accurate base"
+    # H2D-specific arithmetic — the classic anchors are WRONG for streaming and would refuse
+    # cards that measurably work. Classic swap's 7.5 GB backward transient is engine-held
+    # recompute segments of physically-moving blocks; H2D blocks never move — the transient is
+    # the ring (2 x 0.39 GB) plus margin. And an int8 block frees _H2D_PER_BLOCK_GB = 0.39
+    # (measured from the checkpoint header), not NF4's 0.34. Validated: a simulated 16 GB
+    # card (14.2 GB free) ran swap 40 for six epochs at ~1.35 s/it, peak within budget.
+    _base = _RESIDENT_INT8_GB + _INT8_TRANSIENT_GB + float(adapter_gb)
+    _scale = max(0.25, float(mp)) / 0.25
+    _need = _base + _ACT_GB_CKPT * _scale + _RESERVE_GB + _H2D_TRANSIENT_GB
+    _h2d_swap = int((_need - free_gb) / _H2D_PER_BLOCK_GB + 0.999)
+    if 0 < _h2d_swap <= 40:
+        return ("int8", _h2d_swap, True,
+                f"int8 with {_h2d_swap} blocks streamed H2D-only — the accurate base, and "
+                f"streaming (not parking) keeps the swap cheap")
 
     n_swap, n_ckpt = plan_vram(free_gb, mp=mp, resident_gb=_RESIDENT_PRUNED_GB,
                                adapter_gb=adapter_gb)
-    if n_swap == 0:
-        return ("nf4", n_swap, n_ckpt,
-                f"int8 would need {i_swap} of 50 blocks on CPU (~4x slower); 4-bit fits entirely "
-                f"in VRAM, at ~9% more error in the frozen base")
     return ("nf4", n_swap, n_ckpt,
-            f"neither fits outright — 4-bit parks {n_swap} blocks against int8's {i_swap}")
+            f"too tight even for streamed int8 — 4-bit parks {n_swap} blocks against "
+            f"int8's {i_swap}")
 
 
 def _max_effective_mp(group):
@@ -370,9 +388,21 @@ def _max_effective_mp(group):
         if not cache_dir or cache_dir in seen or not os.path.isdir(cache_dir):
             continue
         seen.add(cache_dir)
+        # Only caches whose stems are CURRENT images — the stale-cache guard's rule, applied
+        # to planning. Without it, a leftover cache from a previous Target Megapixels in the
+        # same dir inflates the plan (seen live: 992x992-era headers made a 0.25 MP run plan
+        # for 0.98 MP — conservative direction, but the plan should describe THIS run).
+        _stems = None
+        _img_dir = getattr(ds, "image_directory", None)
+        if _img_dir and os.path.isdir(_img_dir):
+            _stems = {os.path.splitext(f)[0] for f in os.listdir(_img_dir)}
         for name in os.listdir(cache_dir):
             if not name.endswith(".safetensors"):
                 continue
+            if _stems is not None:
+                _stem = "_".join(name.split("_")[:-2])       # {basename}_{WxH}_{arch}
+                if _stem and _stem not in _stems:
+                    continue
             try:
                 with safe_open(os.path.join(cache_dir, name), framework="pt") as f:
                     for k in f.keys():

@@ -5692,13 +5692,17 @@ class LoRATrainerGUI:
         try:
             from fizgig.dataset.image_dataset import IMAGE_EXTENSIONS
             _exts = {e.lower() for e in IMAGE_EXTENSIONS}
+            # Clips and voice recordings are training items too — count them or a MiniMax
+            # clip/audio folder reads "(0 images)" and looks like a queued mistake.
+            if "MiniMax" in str(item.get("architecture", "")):
+                _exts |= {".mp4"} | self.TRAINING_AUDIO_EXTENSIONS
             n_imgs = sum(1 for f in os.listdir(folder)
                          if os.path.splitext(f)[1].lower() in _exts) if os.path.isdir(folder) else 0
         except Exception:
             n_imgs = 0
         name = p.get("LORA_NAME") or os.path.basename(folder) or "(unnamed)"
         bits = [f"{item.get('architecture', '?')}",
-                f"{os.path.basename(folder) or '?'} ({n_imgs} images)"]
+                f"{os.path.basename(folder) or '?'} ({n_imgs} items)"]
         for label, key in (("LR", "LEARNING_RATE"), ("epochs", "MAX_TRAIN_EPOCHS"),
                            ("dim", "NETWORK_DIM"), ("type", "NETWORK_TYPE"),
                            ("area", "TARGET_LAYERS")):
@@ -8125,6 +8129,15 @@ class LoRATrainerGUI:
             "Browse the training folder and pick individual images to caption or inspect.",
         )
 
+        # Voice recordings never appear in the grid — their captions are written in Gizmo's
+        # audio tab, where you can hear what you are describing. This banner is how the tab
+        # says so instead of silently showing fewer items than the folder holds. Text set (and
+        # the label shown/hidden) per-refresh in refresh_caption_images.
+        self._caption_audio_banner = tk.Label(
+            preview_card, text="", font=(FONT_FAMILY, 10),
+            fg=COLORS["accent"], bg=COLORS["bg_surface"],
+            wraplength=760, justify=tk.LEFT)
+
         self.caption_grid_frame = tk.Frame(preview_card, bg=COLORS["bg_surface"])
         self.caption_grid_frame.pack(fill=tk.BOTH, expand=True)
         for _c in range(4):
@@ -8198,6 +8211,16 @@ class LoRATrainerGUI:
         frames = read_frames(path)
         return Image.fromarray(frames[len(frames) // 2])
 
+    TRAINING_AUDIO_EXTENSIONS = {'.wav', '.mp3', '.flac', '.m4a'}
+
+    def _count_training_audio_files(self):
+        """Voice recordings in the training folder — MiniMax only, 0 elsewhere."""
+        folder = self.image_folder_var.get()
+        if not folder or not os.path.isdir(folder) or not self._is_minimax_arch():
+            return 0
+        return sum(1 for f in os.listdir(folder)
+                   if os.path.splitext(f)[1].lower() in self.TRAINING_AUDIO_EXTENSIONS)
+
     def get_caption_image_files(self):
         """Get list of image files in caption folder"""
         folder = self.image_folder_var.get()
@@ -8228,6 +8251,24 @@ class LoRATrainerGUI:
 
         images = self.get_caption_image_files()
         total_images = len(images)
+
+        # Audio never enters the grid; count it so the tab explains itself rather than showing
+        # fewer items than the folder holds. Wordings per Peter: all-audio vs mixed.
+        _n_audio = self._count_training_audio_files()
+        if _n_audio and not total_images:
+            self._caption_audio_banner.config(
+                text="🎙 Audio-only training set — captions are written in Gizmo's audio tab.")
+            self._caption_audio_banner.pack(anchor=tk.W, pady=(0, 8),
+                                            before=self.caption_grid_frame)
+        elif _n_audio:
+            self._caption_audio_banner.config(
+                text=f"🎙 {_n_audio} audio file(s) in this training set — their captions are "
+                     f"handled in Gizmo; the grid below shows only images and clips.")
+            self._caption_audio_banner.pack(anchor=tk.W, pady=(0, 8),
+                                            before=self.caption_grid_frame)
+        else:
+            self._caption_audio_banner.pack_forget()
+
         total_pages = max(1, (total_images + self.images_per_page - 1) // self.images_per_page)
 
         # Clamp current page

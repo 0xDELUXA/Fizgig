@@ -2085,9 +2085,11 @@ class Gizmo:
                 ("+0.5s", lambda: self._audio_nudge(0.5), "Nudge the segment half a second "
                                                           "later.  (Shift+→)")):
             self._button(prow, txt, fn, pad=8, tip=tip).pack(side=tk.LEFT, padx=(6, 0))
-        self.audio_pos_label = tk.Label(prow, text="", font=("Consolas", 10),
+        # Its own line UNDER the buttons — in the button row it fought a dozen controls for
+        # width and lost, showing up truncated or not at all.
+        self.audio_pos_label = tk.Label(c, text="", font=("Consolas", 10),
                                         bg=COLORS["bg_surface"], fg=COLORS["text_secondary"])
-        self.audio_pos_label.pack(side=tk.RIGHT)
+        self.audio_pos_label.pack(anchor=tk.W, pady=(6, 0))
 
         # 4. queue + export
         c = self._card(body, "4. Mark it, then move on",

@@ -2349,6 +2349,21 @@ class Gizmo:
         threading.Thread(target=self._whisper_worker,
                          args=(self.audio_pos, self._audio_span()), daemon=True).start()
 
+    @staticmethod
+    def _whisper_degenerate(text, span):
+        """Whisper's two classic failures, caught by arithmetic rather than trust.
+
+        A wrong language guess feeds its repetition loop, and the result is paragraphs of the
+        same phrase — from 4.5 seconds of audio, which cannot physically hold more than ~30
+        characters a second of speech. A loop also has almost no unique words. Either signal
+        means the transcript is hallucinated, not heard."""
+        words = text.split()
+        if len(text) > max(80, span * 30):
+            return True
+        if len(words) >= 10 and len(set(w.lower() for w in words)) / len(words) < 0.4:
+            return True
+        return False
+
     def _whisper_worker(self, start, span):
         text, err = None, None
         try:
@@ -2363,6 +2378,19 @@ class Gizmo:
                 self._whisper_pipe = pipeline("automatic-speech-recognition",
                                               model="openai/whisper-base", device=-1)
             text = (self._whisper_pipe(wav).get("text") or "").strip()
+            if self._whisper_degenerate(text, span):
+                # The usual cause is a wrong language auto-detect (a short segment "sounds
+                # Welsh" and the decode loops). Forcing English heals exactly that case;
+                # auto-detect stays the first try so non-English voices still transcribe.
+                text = (self._whisper_pipe(
+                    wav, generate_kwargs={"language": "english", "task": "transcribe"}
+                ).get("text") or "").strip()
+            if self._whisper_degenerate(text, span):
+                text = None
+                err = ("Whisper looped on this segment — it hallucinated repeating text "
+                       "instead of hearing it, which it does now and then on short or "
+                       "ambiguous audio.\n\nNudge the start a little (even 100 ms changes the "
+                       "outcome) and try again, or just type the words.")
         except Exception as exc:
             err = (f"Whisper could not run: {exc}\n\nIt needs one ~150 MB download the first "
                    f"time (internet required once). The caption still works without it — "

@@ -654,6 +654,9 @@ class Gizmo:
         self._radios = []             # every radio button, armed together once a video is open
         self._playing = False
         self._play_job = None
+        self._video_sound = None      # (span_start_s, span_len_s, consumed_s) while paused
+        self._video_offset = 0.0      # how far into the current span playback started
+        self._video_t0 = 0.0
 
         # Voice / audio mode state — parallel world, deliberately separate variables: a video
         # open on one tab and a recording on the other must never share a playhead.
@@ -671,6 +674,9 @@ class Gizmo:
         self._audio_play_mode = None  # "file" (listen through) or "segment" (the export span)
         self._audio_play_from = 0.0   # where the current playback started, for the cursor
         self._audio_play_t0 = 0.0
+        self._audio_play_rate = 1.0   # J/K/L shuttle speed
+        self._audio_play_dir = 1      # 1 forward, -1 backward (J)
+        self._audio_resume = None     # (mode, position) left by pause, for space to resume
         self._audio_play_job = None
         self._audio_cursor_job = None
         self._whisper_busy = False
@@ -1266,6 +1272,33 @@ class Gizmo:
                 return "break"
             self.root.bind(seq, _route)
 
+        # Transport keys on both tabs: space = play/pause/resume, and the editing-suite J-K-L
+        # shuttle. On Voice, J/L shuttle backward/forward (tap again for 1.5/2/3x); on Video —
+        # which has no moving playhead to shuttle — J restarts the section's sound, L plays or
+        # resumes it. The focus guard leaves a focused Button or Listbox its own space/keys;
+        # text fields are already shielded by bindtags.
+        def _video_l():
+            if not self._playing:
+                self._video_space()
+
+        def _video_j():
+            self._stop_audio()
+            self._video_sound = None
+            self._video_play_sound(0.0)
+
+        for seq, afn, vfn in (("<space>", self._audio_space, self._video_space),
+                              ("<j>", lambda: self._audio_shuttle(-1), _video_j),
+                              ("<k>", self._audio_pause, self._video_pause),
+                              ("<l>", lambda: self._audio_shuttle(1), _video_l)):
+            def _troute(_e, af=afn, vf=vfn):
+                focus = self.root.focus_get()
+                if focus is not None and focus.winfo_class() in (
+                        "Button", "TButton", "Listbox", "TCombobox"):
+                    return None
+                (af if self._audio_tab_active() else vf)()
+                return "break"
+            self.root.bind(seq, _troute)
+
     def _audio_tab_active(self):
         try:
             return self.notebook.select() == str(self._audio_tab)
@@ -1754,7 +1787,14 @@ class Gizmo:
         """
         if self._playing:
             self._stop_audio()
+            self._video_sound = None
             return
+        self._video_sound = None
+        self._video_play_sound(0.0)
+
+    def _video_play_sound(self, offset):
+        """Play the marked section's audio from `offset` seconds into it — 0 for the button,
+        a stored consumed-time for space's resume."""
         if not self.src or not self.info or not self.info["has_audio"]:
             return
         fps = self.info["fps"]
@@ -1763,13 +1803,37 @@ class Gizmo:
         # Real time: the audio you would get. Slow motion: the source audio under the section,
         # which is what you are judging — the saved clip's audio comes from the same span.
         span = self._frames() * k / fps if k else self._frames() / FPS
+        if offset >= span - 0.05:
+            offset = 0.0                       # a stale resume past the end starts over
         # Live volume when the backend allows it — the slider then works MID-play; otherwise
         # the gain is baked into the preview file as before.
         gain = 1.0 if set_live_volume(self.volume_var.get()) \
             else max(0.0, float(self.volume_var.get())) / 100.0
+        self._video_offset = offset
         self.play_btn.configure(text="■  Stop")
         self._playing = True
-        threading.Thread(target=self._play_worker, args=(start, span, gain), daemon=True).start()
+        threading.Thread(target=self._play_worker,
+                         args=(start + offset, span - offset, gain), daemon=True).start()
+
+    def _video_pause(self):
+        """Freeze the marked section's sound where it is; space resumes from there."""
+        if not self._playing:
+            return
+        import time as _time
+        consumed = self._video_offset + (_time.monotonic() - self._video_t0)
+        self._stop_audio()
+        self._video_sound = consumed
+        self.status.configure(text=f"paused — space resumes", fg=COLORS["text_secondary"])
+
+    def _video_space(self):
+        """Space on the video tab: play the marked section's sound / pause / resume."""
+        if self._playing:
+            self._video_pause()
+        elif self._video_sound is not None:
+            offset, self._video_sound = self._video_sound, None
+            self._video_play_sound(offset)
+        else:
+            self._video_play_sound(0.0)
 
     def _play_worker(self, start, span, gain):
         err = None
@@ -1796,6 +1860,9 @@ class Gizmo:
             return
         # winsound plays asynchronously and never says when it finished, so the button is reset
         # on a timer the length of the clip. Under a second either way — nobody is counting.
+        # The clock for pause's consumed-time starts here, when the sound actually starts.
+        import time as _time
+        self._video_t0 = _time.monotonic()
         self._play_job = self.root.after(int(span * 1000) + 200, self._stop_audio)
 
     def _stop_audio(self):
@@ -1910,8 +1977,9 @@ class Gizmo:
                        "Play from here and just listen — click anywhere on the waveform and "
                        "playback jumps there, which is how you scrub sound. When you hear the "
                        "moment, the shaded span shows what would export at the chosen length; "
-                       "Play segment checks exactly that. ←/→ nudge 50 ms, Shift 500 ms, Home "
-                       "for the start.")
+                       "Play segment checks exactly that. Space is play / pause / resume, "
+                       "J-K-L shuttles like an edit suite (tap J or L again for 1.5/2/3x), "
+                       "←/→ nudge 50 ms, Shift 500 ms, Home for the start.")
         self.audio_canvas = tk.Canvas(c, width=self.AUDIO_WAVE_W, height=self.AUDIO_WAVE_H,
                                       bg=COLORS["bg_deep"], highlightthickness=1,
                                       highlightbackground=COLORS["border"], cursor="crosshair")
@@ -2143,6 +2211,7 @@ class Gizmo:
             return
         span = self._audio_span()
         self.audio_pos = max(0.0, min(float(seconds), self.audio_dur - span))
+        self._audio_resume = None     # a moved playhead invalidates a paused position
         # Zoomed in and the playhead left the window: follow it, keeping a fifth of margin.
         if self.audio_view is not None:
             v0, vd = self.audio_view
@@ -2248,39 +2317,86 @@ class Gizmo:
 
     # -- audio: playback ----------------------------------------------------------------------------
     def audio_toggle_play(self, mode="segment"):
-        """Two ways to listen: "file" plays from the playhead onward (finding the moment),
-        "segment" plays exactly the export span (checking it). Either button stops whichever
-        is running."""
+        """The two play BUTTONS: "file" from the playhead onward (finding the moment),
+        "segment" exactly the export span (checking it). While playing they read Pause and DO
+        pause — space resumes from there; pressing a play button starts its mode fresh."""
         if self._audio_playing:
-            self._audio_stop()
+            self._audio_pause()
             return
+        self._audio_start(mode)
+
+    def _audio_start(self, mode, start=None, rate=1.0, direction=1):
+        """Start playback: mode x position x speed x direction — the one engine every play
+        control drives. `start` None means the playhead (which for "segment" IS the segment
+        start); J/K/L and pause/resume pass explicit positions and rates."""
         if not self.audio_src:
             return
-        if mode == "file":
+        if self._audio_playing:
+            self._audio_stop()
+        if start is None:
+            start = self.audio_pos
+        start = max(0.0, min(float(start), self.audio_dur))
+        if mode == "segment":
+            seg_end = self.audio_pos + self._audio_span()
+            # Resuming inside the span plays the REMAINDER; a stale resume point past the end
+            # starts the segment over — the next tap should always produce sound.
+            if not (self.audio_pos <= start < seg_end - 0.05):
+                start = self.audio_pos
+            span = seg_end - start
+            self.audio_play_btn.configure(text="⏸  Pause")
+        elif direction < 0:
+            span = min(start, 600.0)            # backward: what lies behind the point
+            self.audio_listen_btn.configure(text="⏸  Pause")
+        else:
             # To the end of the recording, capped at ten minutes of extraction — nobody scrubs
             # longer than that in one sitting, and the temp wav stays sane.
-            span = min(max(0.1, self.audio_dur - self.audio_pos), 600.0)
-            self.audio_listen_btn.configure(text="■  Stop")
-        else:
-            span = self._audio_span()
-            self.audio_play_btn.configure(text="■  Stop")
+            span = min(max(0.1, self.audio_dur - start), 600.0)
+            self.audio_listen_btn.configure(text="⏸  Pause")
+        if span <= 0.02:
+            return
         # Live volume when the backend allows it — the slider then works MID-play. Only when it
         # doesn't (non-Windows external player) is the gain baked into the preview file.
         gain = 1.0 if set_live_volume(self.audio_volume_var.get()) \
             else max(0.0, float(self.audio_volume_var.get())) / 100.0
         self._audio_playing = True
         self._audio_play_mode = mode
-        self._audio_play_from = self.audio_pos
+        self._audio_play_rate = float(rate)
+        self._audio_play_dir = 1 if direction >= 0 else -1
+        self._audio_play_from = start
+        self._audio_resume = None
+        if rate != 1.0 or direction < 0:
+            self.audio_status.configure(
+                text=f"{'◀' if direction < 0 else '▶'} {rate:g}x", fg=COLORS["text_secondary"])
         threading.Thread(target=self._audio_play_worker,
-                         args=(self.audio_pos, span, gain), daemon=True).start()
+                         args=(start, span, gain, float(rate), self._audio_play_dir),
+                         daemon=True).start()
 
-    def _audio_play_worker(self, start, span, gain):
+    @staticmethod
+    def _atempo_chain(rate):
+        """ffmpeg's atempo tops out at 2.0 per stage, so 3x is a chain. Returns filter parts."""
+        parts = []
+        while rate > 2.0:
+            parts.append("atempo=2.0")
+            rate /= 2.0
+        if abs(rate - 1.0) > 1e-6:
+            parts.append(f"atempo={rate:g}")
+        return parts
+
+    def _audio_play_worker(self, start, span, gain, rate=1.0, direction=1):
         err = None
         try:
             wav = os.path.join(tempfile.gettempdir(), "gizmo_voice_preview.wav")
+            # Backward (J) extracts what lies BEHIND the point and reverses it; speed is an
+            # atempo chain either way. All of it happens in the extraction, because winsound
+            # can only ever play a file forward at 1x.
+            ss = start - span if direction < 0 else start
+            filters = [f"volume={gain:.3f}"]
+            if direction < 0:
+                filters.append("areverse")
+            filters += self._atempo_chain(rate)
             p = _run([self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
-                      "-ss", f"{start:.3f}", "-t", f"{span:.3f}", "-i", self.audio_src,
-                      "-vn", "-af", f"volume={gain:.3f}", "-ac", "2", "-ar", "44100",
+                      "-ss", f"{ss:.3f}", "-t", f"{span:.3f}", "-i", self.audio_src,
+                      "-vn", "-af", ",".join(filters), "-ac", "2", "-ar", "44100",
                       "-c:a", "pcm_s16le", wav])
             if p.returncode != 0 or not os.path.exists(wav):
                 raise RuntimeError((p.stderr or b"").decode("utf-8", "replace")[-300:]
@@ -2288,7 +2404,7 @@ class Gizmo:
             _play_wav(wav)
         except Exception as exc:
             err = str(exc)
-        self.root.after(0, self._audio_play_done, span, err)
+        self.root.after(0, self._audio_play_done, span / max(rate, 1e-6), err)
 
     def _audio_play_done(self, span, err):
         if err:
@@ -2307,23 +2423,33 @@ class Gizmo:
         enough for scrubbing by ear, which is what it exists for."""
         if not self._audio_playing:
             return
-        import time as _time
-        cur = self._audio_play_from + (_time.monotonic() - self._audio_play_t0)
+        cur = self._audio_playback_pos()
         c = self.audio_canvas
         c.delete("playcursor")
         if self.audio_dur:
             v0, vd = self._audio_view_bounds()
-            # Listening past the right edge of a zoomed view: pan the window along with the
-            # sound, so scrub-by-ear works zoomed in too.
-            if self.audio_view is not None and cur > v0 + vd and cur < self.audio_dur:
-                self.audio_view = (min(cur - vd * 0.1, self.audio_dur - vd), vd)
-                self._audio_refresh()
+            # Listening past the edge of a zoomed view: pan the window along with the sound
+            # (either direction), so scrub-by-ear works zoomed in too.
+            if self.audio_view is not None and 0 < cur < self.audio_dur:
+                if cur > v0 + vd:
+                    self.audio_view = (min(cur - vd * 0.1, self.audio_dur - vd), vd)
+                    self._audio_refresh()
+                elif cur < v0:
+                    self.audio_view = (max(0.0, cur - vd * 0.9), vd)
+                    self._audio_refresh()
                 v0, vd = self._audio_view_bounds()
             x = (cur - v0) / vd * self.AUDIO_WAVE_W
             if 0 <= x <= self.AUDIO_WAVE_W:
                 c.create_line(x, 0, x, self.AUDIO_WAVE_H, fill=COLORS["success"], width=2,
                               tags="playcursor")
         self._audio_cursor_job = self.root.after(50, self._audio_cursor_tick)
+
+    def _audio_playback_pos(self):
+        """Where the sound IS right now — direction- and speed-aware wall-clock estimate."""
+        import time as _time
+        elapsed = _time.monotonic() - self._audio_play_t0
+        cur = self._audio_play_from + self._audio_play_dir * self._audio_play_rate * elapsed
+        return max(0.0, min(cur, self.audio_dur))
 
     def _audio_stop(self):
         for attr in ("_audio_play_job", "_audio_cursor_job"):
@@ -2337,6 +2463,8 @@ class Gizmo:
         _stop_wav()
         self._audio_playing = False
         self._audio_play_mode = None
+        self._audio_play_rate = 1.0
+        self._audio_play_dir = 1
         try:
             if self.audio_play_btn.winfo_exists():
                 self.audio_play_btn.configure(text="▶  Play segment")
@@ -2344,6 +2472,46 @@ class Gizmo:
                 self.audio_canvas.delete("playcursor")
         except (AttributeError, tk.TclError):
             pass                              # closing before the tab was built
+
+    # -- audio: pause / resume and the J-K-L shuttle -----------------------------------------------
+    def _audio_pause(self):
+        """Freeze where the sound is; space (or K) again resumes from exactly there."""
+        if not self._audio_playing:
+            return
+        mode, cur = self._audio_play_mode, self._audio_playback_pos()
+        self._audio_stop()
+        self._audio_resume = (mode, cur)
+        self.audio_status.configure(text=f"paused at {cur:.2f} s — space resumes",
+                                    fg=COLORS["text_secondary"])
+
+    def _audio_space(self):
+        """Space: play / pause / resume — the one key that always does the obvious thing.
+        Idle it plays the segment from its start; playing it pauses; paused it resumes."""
+        if self._audio_playing:
+            self._audio_pause()
+        elif self._audio_resume is not None:
+            mode, cur = self._audio_resume
+            self._audio_start(mode, start=cur)
+        else:
+            self._audio_start("segment")
+
+    _SHUTTLE_RATES = (1.0, 1.5, 2.0, 3.0)
+
+    def _audio_shuttle(self, direction):
+        """The editing-suite J/L shuttle: tap to play that way, tap again to go faster
+        (1 -> 1.5 -> 2 -> 3x), from wherever the sound currently is."""
+        if self._audio_playing and self._audio_play_dir == direction \
+                and self._audio_play_mode == "file":
+            rates = self._SHUTTLE_RATES
+            i = min(len(rates) - 1,
+                    next((n for n, r in enumerate(rates)
+                          if r >= self._audio_play_rate - 1e-6), 0) + 1)
+            self._audio_start("file", start=self._audio_playback_pos(),
+                              rate=rates[i], direction=direction)
+            return
+        start = (self._audio_playback_pos() if self._audio_playing
+                 else (self._audio_resume[1] if self._audio_resume else self.audio_pos))
+        self._audio_start("file", start=start, rate=1.0, direction=direction)
 
     # -- audio: whisper -----------------------------------------------------------------------------
     def audio_transcribe(self):

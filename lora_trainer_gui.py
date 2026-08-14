@@ -495,44 +495,32 @@ def minimax_lownoise_to_shift(pct):
     return (1.0 - p) / p
 
 
-def minimax_lownoise_to_lognorm_shift(pct):
-    """Share of steps below sigma 0.5 (percent) -> the shift for a LOGIT-NORMAL base.
+def minimax_highnoise_lr(pct):
+    """'Medium to High LR adjustment' (percent) -> a plain multiplier. None if unusable.
 
-    The box means the same thing whichever shape is chosen; only the arithmetic behind it
-    changes. For a uniform base the inverse is closed-form. For a logit-normal base,
-    sigma < 0.5 happens when the base draw u < 1/(s+1), and u = sigmoid(z) with z ~ N(0,1), so
-
-        P = Phi(logit(1 / (s + 1)))
-
-    which is monotonically decreasing in s but has no tidy inverse — hence bisection. Bracketed
-    generously (1e-6 .. 1e6) so extreme box values still resolve rather than silently clamping.
+    Applies to steps drawn ABOVE sigma 0.5 — the same threshold the low-noise box is defined
+    against, so the two controls always agree about where the boundary is. 100 means unchanged.
+    0 is allowed and means those steps train nothing; the ceiling is 100 because raising the LR
+    for the noisy end is a different experiment from damping it, and one dial should do one thing.
     """
-    import math as _m
-    p = None
     try:
         p = float(str(pct).strip().rstrip("%")) / 100.0
     except (TypeError, ValueError):
         return None
-    if not (0.0 < p < 1.0):
-        return None
+    return None if not (0.0 <= p <= 1.0) else p
 
-    def _share(s):
-        u = 1.0 / (s + 1.0)                                   # the base draw that gives sigma 0.5
-        z = _m.log(u / (1.0 - u))                             # logit
-        return 0.5 * (1.0 + _m.erf(z / _m.sqrt(2.0)))         # Phi(z)
 
-    lo, hi = 1e-6, 1e6
-    if p >= _share(lo):
-        return lo
-    if p <= _share(hi):
-        return hi
-    for _ in range(200):                                      # ~1e-60 on the bracket; cheap
-        mid = _m.sqrt(lo * hi)                                # geometric: s spans many decades
-        if _share(mid) > p:
-            lo = mid
-        else:
-            hi = mid
-    return _m.sqrt(lo * hi)
+# The logit-normal ("mid-concentrated") variant of the above is GONE, deliberately.
+#
+# It bunched training around the middle and thinned BOTH tails, and the tail it was quietly
+# deleting is the high-noise end where pose and composition are decided — at 60% low noise it left
+# 0.7% of a run above sigma 0.9. A 20-step render spends most of its steps there, so the LoRA was
+# being asked to hold structure it had barely trained on: fine under a 4-step Turbo workflow,
+# soft or distorted without one.
+#
+# Tested directly (Peter, 14 Aug): the Likeness preset with mid-concentrated OFF works at strength
+# 1.0 without Turbo, and likeness did not suffer — so it was not buying what it was supposed to buy
+# either. The 60% share was never the problem.
 
 
 def minimax_shift_to_lownoise(shift):
@@ -569,6 +557,44 @@ def minimax_shift_to_lownoise(shift):
 # can be typed instead — "3-12, 14-15, 22, 31-33". The label separator is "·" and not "-" or a
 # plain space, because both of those appear inside a block spec; splitting on them would turn
 # "3-12, 14" into "3-12," and train the wrong set without ever complaining.
+# MiniMax H3 — "Training Structure" on the Training tab. One decision, two numbers behind it.
+#
+#   pct  = share of steps trained below sigma 0.5 (the clean end, where detail and identity live).
+#          Converted to the trainer's --shift by minimax_lownoise_to_shift.
+#   lr   = what the steps ABOVE that threshold do to the learning rate, as a percentage.
+#
+# Why the LR figure moves with the density: dropping the clean-end share does not merely add
+# high-noise training, it makes high-noise training the MAJORITY — 92% of steps at the model's own
+# schedule against 40% at Face Likeness. Left at full strength those steps swamp the run and the
+# few clean-end steps remaining struggle to hold identity. Damping them is what makes the
+# movement-weighted options usable without re-tuning the global LR by hand.
+#
+# The 8% is not a guess. ai-toolkit's H3 entry overrides its global 'sigmoid' timestep type with
+# 'shift' (ui/src/app/jobs/new/options.tsx) against a scheduler at the model's RELEASED video flow
+# shift of 12 (minimax_h3.py + packing.py). A shifted-uniform draw at shift 12 puts 1/13 = 7.7% of
+# steps below sigma 0.5. It is the schedule the model's own flow shift implies — not a published
+# statement of what MiniMax ran in pre-training, which is why the label says the former.
+MINIMAX_STRUCTURE_OPTIONS = {
+    "Face likeness — 60% clean-end": (60, 100),
+    "Balanced / style — 25% clean-end": (25, 50),
+    "Model default, movement — 8% clean-end": (8, 25),
+    "Custom": None,
+}
+MINIMAX_STRUCTURE_DESC = {
+    "Face likeness — 60% clean-end":
+        "Most of the run on nearly-clean images, where skin, hair and identity are learned. "
+        "The tuned default.",
+    "Balanced / style — 25% clean-end":
+        "More of the run on the noisy end, where pose, framing and composition are decided.",
+    "Model default, movement — 8% clean-end":
+        "The schedule H3's own flow shift implies, and what the reference trainer uses. Weighted "
+        "to movement and composition rather than fine detail.",
+    "Custom":
+        "Type your own share. Below ~50% the high-noise steps become the majority, which is what "
+        "the LR adjustment beside this is for.",
+}
+MINIMAX_STRUCTURE_DEFAULT = "Face likeness — 60% clean-end"
+
 MINIMAX_BLOCK_OPTIONS = [
     "all · every block (50 of 50)",
     "10-49 · skip the first 10",
@@ -812,7 +838,7 @@ MINIMAX_BUILT_IN_PRESETS = {
         # The canvas number is about what the model RENDERS; it turned out to say much less than
         # expected about what it can be TRAINED on.
         "DATASET_MEGAPIXELS": "0.25",
-        "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_LOGNORM": True,
+        "MINIMAX_LOWNOISE_PCT": "60", "MINIMAX_HIGHNOISE_LR_PCT": "100",
         # The experiment knobs all ship OFF, so the preset is the plain baseline every A/B is
         # measured against. Each of these was built to be TRIED, not to be on by default:
         #   blocks "all"      — no block-range restriction
@@ -1580,7 +1606,9 @@ class LoRATrainerGUI:
             # reads them. (OPTIMIZER_TYPE below is deliberately NOT changed to match the preset:
             # it is shared with Klein and Krea 2, and the MiniMax preset supplies adamw on switch.)
             "MINIMAX_LOWNOISE_PCT": "60",
-            "MINIMAX_LOGNORM": True,       # False = flat spread; True = mid-concentrated
+            # What the steps ABOVE sigma 0.5 do to the LR, as a percentage. 100 = unchanged, which
+            # is every run before this existed.
+            "MINIMAX_HIGHNOISE_LR_PCT": "100",
             "MINIMAX_BLOCKS": "all",
             "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
             # OFF by default (Peter's call from real runs). The reference trains AdaLN on the
@@ -3859,6 +3887,8 @@ class LoRATrainerGUI:
                                     "entry": self._lokr_factor_rowf,
                                     "browse": None, "parent": training_content}
 
+        self._build_minimax_structure_row(training_content)
+
         # Model Area to Train dropdown (blocks + timestep auto-fill)
         self._modelarea_label = ttk.Label(training_content, text="Model Area to Train:")
         self._modelarea_label.grid(row=10, column=0, sticky=tk.W, padx=5, pady=2)
@@ -4719,46 +4749,9 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
 
-        # --- Low-noise training share (MiniMax H3 only) -----------------------------------
-        # One number, uncapped: what fraction of steps train below sigma 0.5. Converted to the
-        # trainer's shift by minimax_lownoise_to_shift. Hidden for other families by
-        # _apply_training_arch_visibility.
-        self._minimax_shift_label = ttk.Label(scheduler_content, text="Low-noise training:")
-        self._minimax_shift_label.grid(row=33, column=0, sticky=tk.W, padx=5, pady=(8, 2))
-        self._minimax_shift_frame = ttk.Frame(scheduler_content)
-        self._minimax_shift_frame.grid(row=33, column=1, columnspan=2, sticky=tk.W, padx=5, pady=(8, 2))
-        self.entries["MINIMAX_LOWNOISE_PCT"] = ttk.Entry(self._minimax_shift_frame, width=8)
-        self.entries["MINIMAX_LOWNOISE_PCT"].insert(
-            0, str(self.settings.get("MINIMAX_LOWNOISE_PCT", "60")))
-        self.entries["MINIMAX_LOWNOISE_PCT"].pack(side=tk.LEFT)
-        ttk.Label(self._minimax_shift_frame, text="% of steps").pack(side=tk.LEFT, padx=(4, 0))
-        # Live readout: the number you type is the thing you care about, but the schedule it
-        # produces is worth seeing — especially at the extremes, where a couple of percent of
-        # change swings the shift enormously.
-        self._minimax_shift_match = tk.Label(self._minimax_shift_frame, text="",
-                                             font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
-        self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
-        self.minimax_lognorm_var = tk.BooleanVar(
-            value=bool(self.settings.get("MINIMAX_LOGNORM", True)))
-        ttk.Checkbutton(self._minimax_shift_frame, text="mid-concentrated",
-                        variable=self.minimax_lognorm_var,
-                        command=lambda: self._refresh_minimax_shift_match()).pack(side=tk.LEFT,
-                                                                                 padx=(10, 0))
-        self.entries["MINIMAX_LOWNOISE_PCT"].bind(
-            "<KeyRelease>", lambda _e: self._refresh_minimax_shift_match())
-        self._minimax_shift_hint = ttk.Label(
-            scheduler_content,
-            text="How much of the run trains on nearly-clean images — where fine detail and "
-                 "likeness are learned. 60% with mid-concentrated ticked is the tuned default. "
-                 "Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
-        self._minimax_shift_hint.grid(row=34, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
-
-        # Block A's initial populate — it used to sit at the tail of Training Parameters,
-        # which is now BEFORE the widget exists; the readout would have stayed blank until
-        # the user typed in the box.
-        self._refresh_minimax_shift_match()
-
+        # Training Structure lives in Training Parameters now — see _build_minimax_structure_row,
+        # called from that section. It used to sit here in Other Options, collapsed, which is
+        # where the single most consequential MiniMax setting was least likely to be found.
 
         # === Timestep & Noise Schedule Section (Collapsed by default) ===
         timestep_section = CollapsibleFrame(outer,"Timestep & Noise Schedule", default_expanded=False)
@@ -5185,8 +5178,7 @@ class LoRATrainerGUI:
 
         if "MINIMAX_DISTILL" in preset and hasattr(self, "minimax_distill_var"):
             self.minimax_distill_var.set(bool(preset["MINIMAX_DISTILL"]))
-        if "MINIMAX_LOGNORM" in preset and hasattr(self, "minimax_lognorm_var"):
-            self.minimax_lognorm_var.set(bool(preset["MINIMAX_LOGNORM"]))
+
         # Multi Concept: a BooleanVar plus a LIST of folders, so neither is reachable by the
         # generic self.entries loop above. Restore the folders BEFORE the toggle so the handler
         # that rewrites the TOML and locks caption dropout sees the finished state.
@@ -5689,7 +5681,10 @@ class LoRATrainerGUI:
         if ARCHITECTURES.get(item.get("architecture", ""), {}).get("is_minimax"):
             _sh = str(p.get("MINIMAX_LOWNOISE_PCT") or "").strip()
             if _sh:
-                bits.append(f"low-noise {_sh}%" + (" mid" if p.get("MINIMAX_LOGNORM") else ""))
+                bits.append(f"low-noise {_sh}%")
+            _hl = str(p.get("MINIMAX_HIGHNOISE_LR_PCT") or "100").strip()
+            if _hl and _hl != "100":
+                bits.append(f"high-noise LR {_hl}%")
             _bl = minimax_block_spec(p.get("MINIMAX_BLOCKS"))
             if _bl.lower() != "all":
                 bits.append(f"blocks {_bl}")
@@ -5985,7 +5980,6 @@ class LoRATrainerGUI:
         # and silently becomes an ordinary run (tests/test_minimax_distill_gui.py).
         _grab("minimax_distill_var", "MINIMAX_DISTILL")
         _grab("minimax_multiconcept_var", "MINIMAX_MULTICONCEPT")
-        _grab("minimax_lognorm_var", "MINIMAX_LOGNORM")
         _grab("grad_checkpoint_var", "GRADIENT_CHECKPOINTING")
         _grab("fp8_text_encoder_var", "FP8_TEXT_ENCODER")
         _grab("adaptive_lr_var", "ADAPTIVE_LR")
@@ -6290,18 +6284,123 @@ class LoRATrainerGUI:
         ent = self.entries.get("MINIMAX_LOWNOISE_PCT")
         if lbl is None or ent is None or not lbl.winfo_exists():
             return
-        lognorm = bool(getattr(self, "minimax_lognorm_var", None)
-                       and self.minimax_lognorm_var.get())
-        shift = (minimax_lownoise_to_lognorm_shift(ent.get()) if lognorm
-                 else minimax_lownoise_to_shift(ent.get()))
+        shift = minimax_lownoise_to_shift(ent.get())
         if shift is None:
             lbl.config(text="✗ enter a number above 0 and below 100", fg="#E74C3C")
             return
-        # The median is the shift map at the base's median draw — 0.5 for a uniform draw and for
-        # a logit-normal one alike — so it is shift/(shift+1) either way.
+        # The median is the shift map at the uniform base's median draw, so shift/(shift+1).
         med = shift / (shift + 1.0)
-        lbl.config(text=f"→ {'logit-normal' if lognorm else 'uniform'} shift {shift:.3g}, "
-                        f"median noise {med:.2f}", fg="#27AE60")
+        lbl.config(text=f"→ shift {shift:.3g}, median noise {med:.2f}", fg="#27AE60")
+
+    def _build_minimax_structure_row(self, parent):
+        """Training Structure — the MiniMax timestep density, named.
+
+        Rows 20-23 of Training Parameters, under Network Type. The dropdown is a VIEW of
+        MINIMAX_LOWNOISE_PCT rather than a setting of its own, so every existing preset and saved
+        run keeps working with no migration: 60 shows Face likeness, anything unrecognised shows
+        Custom and reveals the box it came from.
+        """
+        self._minimax_structure_label = ttk.Label(parent, text="Training Structure:")
+        self._minimax_structure_label.grid(row=20, column=0, sticky=tk.W, padx=5, pady=(8, 2))
+        self.minimax_structure_var = tk.StringVar(value=MINIMAX_STRUCTURE_DEFAULT)
+        self._minimax_structure_combo = ttk.Combobox(
+            parent, textvariable=self.minimax_structure_var,
+            values=list(MINIMAX_STRUCTURE_OPTIONS), state="readonly", width=36)
+        self._minimax_structure_combo.grid(row=20, column=1, columnspan=2, sticky=tk.W,
+                                           padx=5, pady=(8, 2))
+        self._minimax_structure_combo.bind("<<ComboboxSelected>>",
+                                           lambda _e: self._on_minimax_structure_changed())
+
+        self._minimax_structure_desc = tk.Label(
+            parent, text="", font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+            bg=COLORS["bg_surface"], justify=tk.LEFT, wraplength=700)
+        self._minimax_structure_desc.grid(row=21, column=0, columnspan=3, sticky=tk.W,
+                                          padx=(12, 5), pady=(0, 4))
+
+        # The raw share, revealed only under Custom — the named options are the point.
+        self._minimax_shift_label = ttk.Label(parent, text="Clean-end share:")
+        self._minimax_shift_label.grid(row=22, column=0, sticky=tk.W, padx=5, pady=2)
+        self._minimax_shift_frame = ttk.Frame(parent)
+        self._minimax_shift_frame.grid(row=22, column=1, columnspan=2, sticky=tk.W, padx=5, pady=2)
+        self.entries["MINIMAX_LOWNOISE_PCT"] = ttk.Entry(self._minimax_shift_frame, width=8)
+        self.entries["MINIMAX_LOWNOISE_PCT"].insert(
+            0, str(self.settings.get("MINIMAX_LOWNOISE_PCT", "60")))
+        self.entries["MINIMAX_LOWNOISE_PCT"].pack(side=tk.LEFT)
+        ttk.Label(self._minimax_shift_frame, text="% of steps").pack(side=tk.LEFT, padx=(4, 0))
+        # Live readout: the typed number is what you care about, but the schedule it produces is
+        # worth seeing — a couple of percent swings the shift enormously at the ends.
+        self._minimax_shift_match = tk.Label(self._minimax_shift_frame, text="",
+                                             font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"])
+        self._minimax_shift_match.pack(side=tk.LEFT, padx=(10, 0))
+        self.entries["MINIMAX_LOWNOISE_PCT"].bind(
+            "<KeyRelease>", lambda _e: self._refresh_minimax_shift_match())
+
+        # Always visible: a preset recommends a value, the user can override it without that
+        # counting as a different structure.
+        self._minimax_hnlr_label = ttk.Label(parent, text="Medium to High LR:")
+        self._minimax_hnlr_label.grid(row=23, column=0, sticky=tk.W, padx=5, pady=(2, 8))
+        self._minimax_hnlr_frame = ttk.Frame(parent)
+        self._minimax_hnlr_frame.grid(row=23, column=1, columnspan=2, sticky=tk.W,
+                                      padx=5, pady=(2, 8))
+        self.entries["MINIMAX_HIGHNOISE_LR_PCT"] = ttk.Entry(self._minimax_hnlr_frame, width=8)
+        self.entries["MINIMAX_HIGHNOISE_LR_PCT"].insert(
+            0, str(self.settings.get("MINIMAX_HIGHNOISE_LR_PCT", "100")))
+        self.entries["MINIMAX_HIGHNOISE_LR_PCT"].pack(side=tk.LEFT)
+        tk.Label(self._minimax_hnlr_frame,
+                 text="%  — what the noisier steps do to the learning rate. 100 leaves them alone.",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                 bg=COLORS["bg_surface"]).pack(side=tk.LEFT, padx=(4, 0))
+
+        self._sync_minimax_structure_from_pct()
+        self._refresh_minimax_shift_match()
+
+    def _on_minimax_structure_changed(self):
+        """A named option writes the numbers behind it; Custom just reveals them."""
+        vals = MINIMAX_STRUCTURE_OPTIONS.get(self.minimax_structure_var.get())
+        if vals is not None:
+            pct, hnlr = vals
+            for key, value in (("MINIMAX_LOWNOISE_PCT", pct), ("MINIMAX_HIGHNOISE_LR_PCT", hnlr)):
+                ent = self.entries.get(key)
+                if ent is not None:
+                    ent.delete(0, tk.END)
+                    ent.insert(0, str(value))
+        self._refresh_minimax_structure_ui()
+        self._refresh_minimax_shift_match()
+
+    def _sync_minimax_structure_from_pct(self):
+        """Pick the dropdown entry the current percentage corresponds to, else Custom.
+
+        Derived rather than stored, which is what lets every preset written before this control
+        existed keep working untouched.
+        """
+        try:
+            pct = float(str(self.entries["MINIMAX_LOWNOISE_PCT"].get()).strip().rstrip("%"))
+        except (KeyError, TypeError, ValueError, tk.TclError):
+            pct = None
+        name = "Custom"
+        if pct is not None:
+            for label, vals in MINIMAX_STRUCTURE_OPTIONS.items():
+                if vals is not None and abs(vals[0] - pct) < 1e-9:
+                    name = label
+                    break
+        self.minimax_structure_var.set(name)
+        self._refresh_minimax_structure_ui()
+
+    def _refresh_minimax_structure_ui(self):
+        """Description text, and the raw share shown only under Custom."""
+        name = self.minimax_structure_var.get()
+        desc = getattr(self, "_minimax_structure_desc", None)
+        if desc is not None and desc.winfo_exists():
+            desc.config(text=MINIMAX_STRUCTURE_DESC.get(name, ""))
+        custom = MINIMAX_STRUCTURE_OPTIONS.get(name) is None
+        for w in (getattr(self, "_minimax_shift_label", None),
+                  getattr(self, "_minimax_shift_frame", None)):
+            if w is None or not w.winfo_exists():
+                continue
+            if custom and self._is_minimax_arch():
+                w.grid()
+            else:
+                w.grid_remove()
 
     def _refresh_minimax_blocks_count(self):
         """Say how many blocks the Blocks to Train box currently means, or why it can't be read.
@@ -6510,7 +6609,9 @@ class LoRATrainerGUI:
 
         # Detail Focus is the inverse: MiniMax ONLY. Klein and Krea 2 already derive their shift
         # from the sample's token count, so there is nothing to dial there.
-        for w in (self._minimax_shift_label, self._minimax_shift_frame, self._minimax_shift_hint,
+        for w in (self._minimax_structure_label, self._minimax_structure_combo,
+                  self._minimax_structure_desc,
+                  self._minimax_hnlr_label, self._minimax_hnlr_frame,
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
                   self._minimax_distill_frame, self._minimax_distill_hint,
                   self._minimax_quant_label, self._minimax_quant_frame,
@@ -6523,6 +6624,9 @@ class LoRATrainerGUI:
                   self._minimax_mc_frame,
                   ):
             self._set_widget_visible(w, is_minimax)
+        # The clean-end box answers to BOTH the family and the dropdown: visible only for MiniMax,
+        # and only when the structure is Custom.
+        self._refresh_minimax_structure_ui()
         # The Multi Concept sub-rows are owned by its own toggle handler (they are hidden even
         # under MiniMax until the box is ticked), so route them through it rather than the loop.
         if is_minimax:
@@ -22545,7 +22649,8 @@ class LoRATrainerGUI:
             # trainer's shift. Keeping the percentage is what makes a saved preset mean the same
             # thing later, rather than a shift number nobody can interpret.
             "MINIMAX_LOWNOISE_PCT": str(self.entries["MINIMAX_LOWNOISE_PCT"].get() or "").strip(),
-            "MINIMAX_LOGNORM": bool(self.minimax_lognorm_var.get()),
+            "MINIMAX_HIGHNOISE_LR_PCT": str(
+                self.entries["MINIMAX_HIGHNOISE_LR_PCT"].get() or "").strip(),
             "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
@@ -23583,14 +23688,15 @@ class LoRATrainerGUI:
         # The trainer stamps the same thing into the LoRA as ss_timestep_density.
         # Low-noise share -> shift. Always sent, including the default, so the launched command
         # records which density ran instead of leaving it implicit.
-        if self.settings.get("MINIMAX_LOGNORM"):
-            _shift = minimax_lownoise_to_lognorm_shift(self.settings.get("MINIMAX_LOWNOISE_PCT"))
-            if _shift is not None:
-                cmd += ["--shift", f"lognorm:{_shift:g}"]
-        else:
-            _shift = minimax_lownoise_to_shift(self.settings.get("MINIMAX_LOWNOISE_PCT"))
-            if _shift is not None:
-                cmd += ["--shift", f"{_shift:g}"]
+        # Always the plain uniform-base shift. A saved preset or queue row carrying the retired
+        # MINIMAX_LOGNORM is deliberately ignored rather than migrated — mid-concentrated is the
+        # thing being removed, so honouring it here would keep shipping the fault.
+        _shift = minimax_lownoise_to_shift(self.settings.get("MINIMAX_LOWNOISE_PCT"))
+        if _shift is not None:
+            cmd += ["--shift", f"{_shift:g}"]
+        _hl = minimax_highnoise_lr(self.settings.get("MINIMAX_HIGHNOISE_LR_PCT"))
+        if _hl is not None and abs(_hl - 1.0) > 1e-9:
+            cmd += ["--highnoise_lr_scale", f"{_hl:g}"]
         # Blocks to Train — only sent when it's a real range; "all" is the trainer's own default,
         # and not sending it keeps the flag's presence meaning "this run was a block experiment".
         _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))

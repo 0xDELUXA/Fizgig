@@ -2021,11 +2021,15 @@ class Gizmo:
         self.audio_canvas.pack()
         self.audio_canvas.bind("<Button-1>", self._audio_press)
         self.audio_canvas.bind("<B1-Motion>", self._audio_drag)
-        # Wheel over the waveform zooms it (returning "break" keeps the page from scrolling);
-        # everywhere else the wheel still scrolls the window.
-        self.audio_canvas.bind(
-            "<MouseWheel>",
-            lambda e: (self._audio_zoom(4.0 if e.delta > 0 else 0.25), "break")[1])
+        # Wheel over the waveform zooms it, anchored on the mouse — the sound you are pointing
+        # at stays under the pointer, map-style. Returning "break" keeps the page from
+        # scrolling; everywhere else the wheel still scrolls the window.
+        def _wheel_zoom(e):
+            v0, vd = self._audio_view_bounds()
+            self._audio_zoom(4.0 if e.delta > 0 else 0.25,
+                             focus_t=v0 + e.x / self.AUDIO_WAVE_W * vd)
+            return "break"
+        self.audio_canvas.bind("<MouseWheel>", _wheel_zoom)
         prow = tk.Frame(c, bg=COLORS["bg_surface"])
         prow.pack(fill=tk.X, pady=(8, 0))
         self.audio_listen_btn = self._button(
@@ -2296,21 +2300,25 @@ class Gizmo:
         t = v0 + event.x / self.AUDIO_WAVE_W * vd
         self._audio_seek(t - getattr(self, "_audio_grab", 0.0))
 
-    def _audio_zoom(self, factor):
-        """Zoom the waveform around the playhead. factor >1 zooms in, <1 out, None = fit all."""
+    def _audio_zoom(self, factor, focus_t=None):
+        """Zoom the waveform. factor >1 in, <1 out, None = fit all. The anchor — what stays
+        put on screen — is `focus_t` when given (the wheel passes the time under the mouse, so
+        the sound you are pointing at stays under the pointer), else the playhead (buttons)."""
         if not self.audio_src:
             return
         if factor is None:
             self.audio_view = None
         else:
             v0, vd = self._audio_view_bounds()
+            anchor = self.audio_pos if focus_t is None else max(0.0, min(focus_t, self.audio_dur))
             nd = max(0.5, min(self.audio_dur, vd / factor))
             if nd >= self.audio_dur:
                 self.audio_view = None
             else:
-                # Keep the playhead where the eye already is: same fraction of the window.
-                frac = (self.audio_pos - v0) / vd if vd else 0.5
-                n0 = max(0.0, min(self.audio_pos - frac * nd, self.audio_dur - nd))
+                # The anchor keeps its screen position: same fraction of the window.
+                frac = (anchor - v0) / vd if vd else 0.5
+                frac = max(0.0, min(1.0, frac))
+                n0 = max(0.0, min(anchor - frac * nd, self.audio_dur - nd))
                 self.audio_view = (n0, nd)
         self._audio_refresh()
 

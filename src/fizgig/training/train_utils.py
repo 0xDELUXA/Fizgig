@@ -130,18 +130,18 @@ def validate_output_name(output_name: str) -> str:
     if bad is not None:
         _shown = repr(bad)[1:-1] if bad < " " else bad          # \n rather than an invisible gap
         raise ValueError(
-            f"output name {name!r} contains {_shown!r}, which cannot go in a filename. "
-            f"Remove it — a pasted name often carries a stray newline.")
+            f"output name {name!r} cannot contain {_shown!r} — file names can't include that "
+            f"character. A name pasted from somewhere else often carries a stray line break.")
     if not name.strip() or name != name.strip() or name.endswith("."):
         raise ValueError(
-            f"output name {name!r} must not be empty or start/end with spaces or a dot — "
-            f"Windows silently drops those, so the checkpoint would not be where you expect.")
+            f"output name {name!r} cannot be empty, or start or end with a space or a dot — "
+            f"the saved file would not come out with the name you gave it.")
     # Both separators, on both platforms: a backslash is legal in a Linux filename, but a LoRA
     # named that way on a pod becomes an unopenable path the moment it reaches Windows.
     if "/" in name or "\\" in name or os.path.basename(name) != name:
         raise ValueError(
-            f"output name {name!r} must be a plain name, not a path. Set the output DIRECTORY "
-            f"separately; the name is only the file it writes there.")
+            f"output name {name!r} must be just a name, not a path — the folder it saves into "
+            f"is set separately.")
     return name
 
 

@@ -22167,8 +22167,8 @@ class LoRATrainerGUI:
             return name, "LoRA name cannot be empty"
         bad = next((c for c in name if c in '<>:"|?*/\\'), None)
         if bad is not None:
-            return name, (f"LoRA name cannot contain '{bad}' — it becomes a filename. "
-                          f"Use letters, numbers, spaces, - _ or .")
+            return name, (f"LoRA name cannot contain '{bad}' — file names can't include that "
+                          f"character. Use letters, numbers, spaces, - _ or .")
         return name, None
 
     def validate_inputs(self):

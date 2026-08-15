@@ -3505,6 +3505,11 @@ class LoRATrainerGUI:
 
         # Initial check (deferred so tools_card exists)
         self.master.after(100, _check_model_paths)
+        # The audio-aware Training-tab rows (grey-outs, the voice-structure hint, the
+        # per-category retirement row) refresh on folder-change traces — but the RESTORED
+        # folder's trace fires during startup, before those widgets exist, and nothing
+        # re-fires after the tab is built. One deferred pass covers the restored state.
+        self.master.after(150, self._refresh_audio_only_ui)
 
         # Tools card — highlights the post-training workbench tabs
         tools_card = tk.Frame(container, bg=COLORS["bg_surface"],

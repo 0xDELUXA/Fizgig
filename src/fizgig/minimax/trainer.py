@@ -1587,7 +1587,8 @@ def train_minimax(
     shift: float = None,             # None = auto resolution schedule (logit-normal); float = legacy
     highnoise_lr_scale: float = 1.0,  # LR multiplier for steps above sigma 0.5; 1.0 = unchanged
     # Mixed visual+voice datasets: each category can retire at its own epoch, because the two
-    # never converge together (voice ~10 epochs at Likeness, faces ~40+). "anchor" keeps the
+    # need not converge together (a much smaller category can finish, or start to overbake,
+    # well before the larger one). "anchor" keeps the
     # retired category training at ANCHOR_LR_SCALE — rehearsal against drift on the shared
     # adapters, and its epoch ledger stays live as the drift alarm; "stop" skips its steps
     # entirely (faster epochs, blind). 0 = never retire.

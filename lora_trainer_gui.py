@@ -6373,7 +6373,8 @@ class LoRATrainerGUI:
             justify=tk.LEFT, wraplength=700)
 
         # Per-category retirement — MIXED datasets only (managed by _refresh_audio_only_ui).
-        # Visuals and voice never converge together (voice ~10 epochs at Likeness, faces 40+),
+        # Visuals and voice need not converge together (a much smaller category can finish,
+        # or start to overbake, well before the larger one),
         # so each can retire at its own epoch. "Anchor" keeps the finished category training at
         # a REAL 10% LR (it multiplies the optimizer's lr — a loss multiplier would be an Adam
         # no-op) as a drift guard, with its epoch ledger staying live as the drift alarm;
@@ -6398,12 +6399,13 @@ class LoRATrainerGUI:
             str(self.settings.get("MIXED_STOP_MODE", "")) or _RETIRE_MODES[0])
         self.entries["MIXED_STOP_MODE"].pack(side=tk.LEFT)
         self._mixed_stop_hint = tk.Label(
-            parent, text="Voice and visuals rarely finish together (voice converges much "
-                         "faster at Likeness). Blank = both train to the end. Anchor keeps "
-                         "the finished category at a true 10% learning rate — holding its "
-                         "quality against drift from the still-training category, with its "
-                         "epoch report staying live as the drift alarm. Stop skips its steps "
-                         "entirely: faster epochs, but that category goes unwatched.",
+            parent, text="If one category is a substantially different size from the other, "
+                         "it may be done (or start to overbake) well before the rest — finish "
+                         "it early instead of overtraining it. Blank = both train to the end. "
+                         "Anchor keeps the finished category at a true 10% learning rate — "
+                         "holding its quality against drift from the still-training category, "
+                         "with its epoch report staying live as the drift alarm. Stop skips "
+                         "its steps entirely: faster epochs, but that category goes unwatched.",
             font=(FONT_FAMILY, 8, "italic"), fg="#95A5A6", bg=COLORS["bg_surface"],
             justify=tk.LEFT, wraplength=720)
 

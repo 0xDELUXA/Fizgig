@@ -1310,6 +1310,7 @@ class Gizmo:
         self._audio_play_rate = 1.0   # J/K/L shuttle speed
         self._audio_play_dir = 1      # 1 forward, -1 backward (J)
         self._audio_resume = None     # (mode, position) left by pause, for space to resume
+        self._audio_autopan_job = None  # the move-drag edge-scroll timer, when armed
         self._audio_play_job = None
         self._audio_cursor_job = None
         self._whisper_busy = False
@@ -3303,10 +3304,50 @@ class Gizmo:
                 self._audio_seek(end - span)     # seek arms the rescrub itself
         else:
             self._audio_seek(t - getattr(self, "_audio_grab", 0.0))
+            # Edge-autoscroll for a MOVE drag: parking the cursor at the canvas edge pans the
+            # view on a timer while the box stays under the hand — without it the box stopped
+            # at the view's boundary with audio sitting just off-screen, and moving further
+            # meant release-pan-regrab (Peter). Timer-driven on purpose: the old fling bug
+            # came from panning inside the seek itself, where a stationary cursor remapped to
+            # new time every refresh; a clock advances one measured step per tick instead.
+            self._audio_last_drag_x = x
+            if (self.audio_view is not None
+                    and (x >= self.AUDIO_WAVE_W - self._AUTO_PAN_ZONE
+                         or x <= self._AUTO_PAN_ZONE)
+                    and self._audio_autopan_job is None):
+                self._audio_autopan_job = self.root.after(50, self._audio_autopan_tick)
+
+    _AUTO_PAN_ZONE = 14
+
+    def _audio_autopan_tick(self):
+        self._audio_autopan_job = None
+        if (not getattr(self, "_audio_dragging", False)
+                or getattr(self, "_audio_edge", None) is not None
+                or self.audio_view is None):
+            return
+        x = getattr(self, "_audio_last_drag_x", None)
+        if x is None:
+            return
+        v0, vd = self.audio_view
+        w0, wl = self._audio_world()
+        step = vd * 0.04
+        if x >= self.AUDIO_WAVE_W - self._AUTO_PAN_ZONE and v0 + vd < w0 + wl - 1e-9:
+            nv0 = min(v0 + step, w0 + wl - vd)
+        elif x <= self._AUTO_PAN_ZONE and v0 > w0 + 1e-9:
+            nv0 = max(v0 - step, w0)
+        else:
+            return                             # cursor left the zone — the next motion re-arms
+        self.audio_view = (nv0, vd)
+        t = nv0 + x / self.AUDIO_WAVE_W * vd   # the box stays under the hand in the new view
+        self._audio_seek(t - getattr(self, "_audio_grab", 0.0))
+        self._audio_autopan_job = self.root.after(50, self._audio_autopan_tick)
 
     def _audio_release(self, _event):
         self._audio_dragging = False
         self._audio_edge = None
+        if getattr(self, "_audio_autopan_job", None) is not None:
+            self.root.after_cancel(self._audio_autopan_job)
+            self._audio_autopan_job = None
         self._audio_seek(self.audio_pos)      # one follow-check now the drag is over
 
     def _audio_pan(self, frac):

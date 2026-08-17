@@ -139,13 +139,14 @@ you using an H3 LoRA in ComfyUI in the meantime.
 
 **How it works:** pick **MiniMax H3** from the Base Model selector at the top of the Training tab, and the usual flow applies — Start-tab folder, Captions, Samples, Training. The base trains frozen and quantized with your LoRA in bf16 on top, so a **32 GB card trains comfortably with everything on defaults**. Leave **Blocks Swap** and **Base Precision** on Auto: at launch the trainer reads your **free** VRAM — not your card's size, so close ComfyUI first — and picks the base precision and the block-swap count *together*. Measured, with the shipped defaults:
 
-| Free VRAM | What Auto does | Peak |
-|---|---|---|
-| ~30 GB | **int8**, no block swap, up to 1 MP | ~24.5 GB |
-| ~22 GB | **4-bit**, no block swap | ~18 GB |
-| ~14 GB | **4-bit** with block swap | ~13.5 GB |
+| Free VRAM | What Auto does |
+|---|---|
+| ~30 GB | **int8**, no block swap, up to 1 MP |
+| ~22 GB | **int8**, ~14 blocks streamed |
+| ~15 GB | **int8**, ~36 blocks streamed |
+| ≤12 GB | **4-bit**, as before |
 
-int8 is the checkpoint's own storage and the most accurate base (~0.17% error); 4-bit loads the *same file* at ~10.5 GB instead of ~21, at ~9% error in the frozen base. Auto only reaches for 4-bit when the alternative is most of the model crossing PCIe every step — which is several times slower — and the console tells you when it does. Pin either one from the dropdown and the swap plan is built around your choice. Mileage varies with your dataset and bucket sizes; if you hit an out-of-memory, set **Blocks Swap** to a number to override the planner outright. **Adaptive LR**, **LoKR**, **Pause/Resume** and **in-training previews** are all wired.
+int8 is the checkpoint's own storage and the most accurate base (~0.17% error); 4-bit loads the *same file* at ~10.5 GB instead of ~21, at ~9% error in the frozen base. Block swap **streams one way only** — the base is frozen, so blocks flow host-to-GPU into a small prefetching ring and never travel back, which measures **6.4× faster than the old round-trip swap** at the same depth (design contributed by [@rintic-13](https://github.com/rintic-13), [#73](https://github.com/shootthesound/Fizgig/issues/73)). That's what lets 16 and 24 GB cards keep the accurate base instead of falling back to 4-bit. Pin either precision from the dropdown and the swap plan is built around your choice. Mileage varies with your dataset and bucket sizes; if you hit an out-of-memory, set **Blocks Swap** to a number to override the planner outright. **Adaptive LR**, **LoKR**, **Pause/Resume** and **in-training previews** are all wired.
 
 **Quality:** H3 LoRAs used to get pose, hair and framing right while staying soft on the face. That's fixed — the fix was the optimizer, and MiniMax now trains with `adamw` rather than `adamw8bit` by default. If you're loading an older preset or your own saved settings, set **Optimizer Type** to `adamw` on the Training tab; it costs about 1.9 GB more VRAM and nothing else.
 
@@ -159,6 +160,39 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
 
 **Previews are 1024×1024 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch.
+
+### Video and sound: how do I…
+
+Quick answers; the two sections below carry the detail.
+
+**…train on video clips?** Drop `.mp4` clips into the training folder next to your images and
+caption them like everything else — no settings, mixing is fine. Clips must be on H3's spec;
+anything Gizmo exports passes.
+
+**…make clips from my footage?** Open Gizmo (Image Prep tab, or the *Launch Gizmo* .bat), drop
+a video on it, scrub to a moment, pick a length, *Add to queue* — repeat, then *Export queue*.
+
+**…chop a long video automatically?** Gizmo's **✂ Auto-chop** scene-detects the whole source
+and offers every segment as a thumbnail — click to keep or skip, and the keepers join the
+queue.
+
+**…train a voice from a recording?** Gizmo's **Voice** tab: open any audio file (or a video,
+for its soundtrack), mark segments on the waveform, caption the sound, export — segments come
+out training-ready with their captions beside them.
+
+**…record a voice dataset from scratch?** Voice tab → **🎙 Record**: read the prompted
+sentences while holding the button (or the **R** key). Every take arrives captioned; ten
+minutes of reading is a usable dataset.
+
+**…keep a clip's sound out of training?** Mute it in Gizmo — it adds `_mute` to the filename,
+reversible by renaming. The video still trains.
+
+**…train photos and a voice into one LoRA?** Same folder, one trigger word, one run. If one
+category is much smaller, **Finish one category early** on the Training tab lets it finish at
+a chosen epoch while the rest trains on.
+
+**…set it up?** One extra model file: the **audio VAE** (~605 MB), on its own Preferences row.
+Blank = clips train silent; required only once the folder has voice recordings.
 
 ### Training on video clips — and on their sound
 
@@ -191,6 +225,12 @@ before you commit — then export the lot in one go. You can **play the sound** 
 deciding whether to train on it, and from high-frame-rate footage you can keep more frames than
 real time gives, which plays back as slow motion — offered as a choice, never applied behind your
 back.
+
+**Or let Auto-chop do the marking.** It scans the whole source for scene cuts and offers every
+segment that fits a clip as a thumbnail — click to keep or skip, double-click to jump the
+playhead there for a closer look, and the keepers join the queue as if you'd marked each one by
+hand. Segments never straddle a cut, a sensitivity setting handles fast-cut or slow footage, and
+long scenes can yield back-to-back clips or just one from the top.
 
 **Crop to the subject.** A clip's cost is its pixels, so a wide shot spends most of that budget on
 background. Pick *Choose an area* and drag a rectangle on the preview: every token then goes on
@@ -254,16 +294,18 @@ trains on, or it's refused with a message saying which lengths those are:
 | Caption | a `.txt` beside the file, or it silently won't train |
 | Audio VAE | required — the ~605 MB Preferences row |
 
-**Or record the dataset right inside Gizmo.** The Voice tab's **🎙 Record** button opens a
-push-to-record window: Gizmo prompts a sentence to read (pangrams, classic lines, deliberately
+**Or record the dataset right inside Gizmo.** The Voice tab's **🎙 Record** button swaps in a
+record card: Gizmo prompts a sentence to read (pangrams, classic lines, deliberately
 ridiculous ones that make you smile — a smile audibly changes a voice — and darker lines for
-range, rotating tone take by take, sized to your segment length), you **hold the button or the
-space bar while you speak and release when done** — the mic is already rolling, so nothing
-clips, and the silence either side is trimmed to a quarter-second. Each take drops straight
-into the editor **with its caption already written** (the prompted sentence *is* the
-transcript — no Whisper needed), ready to Ctrl+S. A usable voice dataset takes about ten
-minutes and zero source files. Pick your microphone (and a default Whisper language) in
-Gizmo's **⚙ settings**.
+range, rotating tone take by take, sized to your segment length) and **rolls a random delivery
+style for each take** — cheerfully, wearily, quietly — visible in a dropdown you can override,
+or switch off in settings. You **hold the button or the R key while you speak and release when
+done** — the mic is already rolling, so nothing clips, and the silence either side is trimmed
+to a quarter-second. Each take drops straight into the editor **with its caption already
+written** (the prompted sentence *is* the transcript — no Whisper needed), ready to Add to
+queue. Your takes survive leaving record mode and coming back. A usable voice dataset takes
+about ten minutes and zero source files. Pick your microphone (and a default Whisper language)
+in Gizmo's **⚙ settings**.
 
 **Gizmo's Voice / audio tab cuts them for you** — that's the whole point of the strict rule.
 Open a recording (or a **video**, to use just its audio track — you scrub the waveform, nothing
@@ -369,9 +411,8 @@ The learning rate is yours to set — there's no automatic throttle on top of it
 
 **When do changes apply?** Settings are read when a run launches — changing them mid-run does nothing. Pause → Resume relaunches with your current settings, so these *can* be changed at a pause. Dataset and caption changes need a fresh run (Resume says no re-caching).
 
-**Current caveats — this is deliberately minimal for now:**
-- **Image datasets only.** H3 is an omni audio + video model, but Fizgig trains it from still images only (each treated as a single video frame) — **no video-clip training and no audio training yet**. The LoRAs you get are learned from stills; you can still deploy them in ComfyUI's video workflows.
-- **Audio isn't rendered.** Preview clips are silent — H3 generates a soundtrack alongside the video, and Fizgig denoises it so the picture is conditioned correctly, but only the frames are saved.
+**Current caveats:**
+- **Audio isn't rendered in previews.** Preview clips are silent — H3 generates a soundtrack alongside the video, and Fizgig denoises it so the picture is conditioned correctly, but only the frames are saved. Judge a voice by loading the LoRA checkpoint in ComfyUI.
 - **Training only.** The workbench tools (Repair Studio, Explorer, Royale, Profiler, Extract) don't support H3 yet, and Context LoRA isn't wired for it. Pause/Resume and resumable state saving work as on the other families.
 - **Batch size 1**, and the Training tab hides the controls that don't apply — what you see is what's wired.
 

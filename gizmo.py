@@ -1079,6 +1079,8 @@ class Gizmo:
         self.photo = None             # live references, or Tk garbage-collects the images
         self.end_photo = None
         self._scrub_job = None
+        self._scrub_inflight = False  # one live grab at a time while the slider drags
+        self._scrub_shown = -1        # the frame the live preview last painted
         self._busy = False
         self._motion_keep = [None]    # parallel to the Motion dropdown; see _keep_every
         self.queue = []               # marked clips, exported in one go — see add_to_queue
@@ -1884,6 +1886,7 @@ class Gizmo:
         self.src, self.info = path, info
         self.root.title(f"Gizmo — {os.path.basename(path)}")
         self.frame_pos = 0
+        self._scrub_shown = -1        # the live preview's memory belongs to the old video
         total = int((info["duration"] or 0) * info["fps"])
         self.scale.configure(from_=0, to=max(1, total - 1))
         self.scale.set(0)
@@ -1963,10 +1966,42 @@ class Gizmo:
             return
         self.frame_pos = int(float(value))
         self._update_pos_labels()
-        # Debounced: dragging the slider fires this continuously and each frame is an ffmpeg call.
+        # Live while dragging, not on release: a debounce alone kept cancelling itself for the
+        # whole drag, so the picture froze until the thumb stopped (Peter). Instead, at most one
+        # grab is ever in flight, and the moment it lands the preview re-grabs if the playhead
+        # has moved on — so the picture follows the drag at whatever rate this machine decodes,
+        # never queueing a backlog of ffmpeg calls. Only the FIRST frame is chased (half the
+        # cost per update); the trailing debounce below still renders the resting position in
+        # full, first and last frame both.
+        self._scrub_chase()
         if self._scrub_job:
             self.root.after_cancel(self._scrub_job)
         self._scrub_job = self.root.after(120, self.show_frame)
+
+    def _scrub_chase(self):
+        if self._scrub_inflight or self._scrub_shown == self.frame_pos:
+            return
+        self._scrub_inflight = True
+        self._scrub_shown = self.frame_pos
+        threading.Thread(target=self._live_grab_worker,
+                         args=(self.frame_pos / self.info["fps"],), daemon=True).start()
+
+    def _live_grab_worker(self, start_s):
+        size = (self.info["display_width"], self.info["display_height"])
+        try:
+            img = grab_frame(self.ffmpeg, self.src, start_s, src_size=size)
+        except Exception:
+            img = None
+        self.root.after(0, self._live_grab_done, img)
+
+    def _live_grab_done(self, img):
+        self._scrub_inflight = False
+        if not self.src:
+            return
+        if img is not None:
+            self.photo = self._paint(self.canvas, img, PREVIEW_W, PREVIEW_H)
+            self._draw_crop_overlay()
+        self._scrub_chase()               # the drag moved on while that frame decoded
 
     def step(self, delta):
         if not self.src:

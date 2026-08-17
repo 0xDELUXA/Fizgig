@@ -829,14 +829,12 @@ MINIMAX_BUILT_IN_PRESETS = {
     "✨ MiniMax H3 Defaults (LoRA 16, 0.25 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": 8,
-        # 2e-4 is a CEILING, not a dose — it is what Adapter-relative LR works its way up toward,
-        # and a flat run should be judged from its samples rather than trusted to this number.
+        # Flat 2e-4, same as Fast — with the ramp off this IS the rate, not a ceiling.
         "LEARNING_RATE": 2e-4,
-        # Ships ON at the slow build (Peter, 11 Aug). A LoRA starts at zero, so the first steps
-        # are enormous relative to its own size — the ramp holds that ratio steady instead of
-        # asking for a number that is wrong at one end of the run or the other. Off is still a
-        # dropdown away for a flat run.
-        "MINIMAX_ADAPTER_RAMP": "0.003 (slow build)",
+        # Ships OFF (Peter, 17 Aug — reversing 11 Aug): the slow build spent the early epochs
+        # crawling and the flat 2e-4 runs have been the ones delivering. The ramp stays a
+        # dropdown away for anyone who wants the held-ratio start.
+        "MINIMAX_ADAPTER_RAMP": "Off",
         # Carried so "load Defaults" genuinely resets it. Multi Concept overrides this to Off
         # when it is on, and the command builder locks it there regardless.
         "MINIMAX_CAPTION_DROPOUT": "0.05 (default)",

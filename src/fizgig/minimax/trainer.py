@@ -637,6 +637,81 @@ def write_wav(path, wav, sample_rate=32000):
         f.writeframes(data.t().contiguous().numpy().tobytes())
 
 
+_EGRID_CACHE = [None]
+
+
+def _load_h3_egrid():
+    """The full model's silu(t_emb) rows on a 1025-point t grid, [1025, 2688].
+
+    Bundled from larryvrh's ComfyUI-MiniMax-H3-Turbo node (Apache-2.0) — it exists because
+    the PRUNED base collapsed the time embedder into an 8-wide curve table, so silu(t_emb)
+    cannot be computed from the loaded weights; the grid is the full model's answer,
+    precomputed."""
+    if _EGRID_CACHE[0] is None:
+        import fizgig
+        from safetensors.torch import load_file
+        p = os.path.join(os.path.dirname(fizgig.__file__), "assets",
+                         "h3_silu_temb_grid.safetensors")
+        _EGRID_CACHE[0] = load_file(p)["silu_t_emb_grid"]
+    return _EGRID_CACHE[0]
+
+
+def _turbo_adaln_forward(base, A, B, table, egrid):
+    """A replacement AdalnProj.forward that adds the Turbo's AdaLN update.
+
+    The update lives in the full model's silu(t_emb) space; the pruned base only has curve
+    rows, so each incoming t_emb row is matched to its nearest table row (the model built it
+    by lerping adjacent rows — half a grid step of error at worst, larryvrh's own approach)
+    and the corresponding full-width grid row stands in: x += B @ A @ silu(t_emb). Strength
+    is folded into B at collection time."""
+    def forward(t_emb):
+        import torch.nn.functional as _F
+        x = base.linear(_F.silu(t_emb) if base.apply_silu else t_emb)
+        idx = torch.cdist(t_emb.detach().float(),
+                          table.to(t_emb.device, torch.float32)).argmin(dim=1)
+        st = egrid.to(t_emb.device)[idx].to(x.dtype)
+        x = x + (B.to(x) @ (A.to(x) @ st.T)).T
+        x = x.view(x.shape[0] * base.modalities, base.expand * base.hidden)
+        return x.chunk(base.expand, dim=-1)
+    return forward
+
+
+def turbo_adaln_patch(dit, pairs, device, dtype, egrid=None):
+    """Install the AdaLN injection for the preview render. Returns modules patched.
+
+    Instance-attribute forwards, like the reference node: assignment shadows the class
+    method, deletion restores it — the module tree is never rebuilt, and a training AdaLN
+    adapter wrapped around .linear keeps firing because the replacement still calls
+    base.linear."""
+    if not pairs or not getattr(dit, "pruned_adaln", False):
+        return 0
+    egrid = _load_h3_egrid() if egrid is None else egrid
+    table = dit.adaln_t_table
+    if table.shape[0] != egrid.shape[0]:
+        logger.warning(f"[turbo] adaln grid rows {egrid.shape[0]} != table rows "
+                       f"{table.shape[0]} — adaln injection skipped")
+        return 0
+    eg = egrid.to(device)
+    n = 0
+    for mod, A, B in pairs:
+        if A.shape[1] != eg.shape[1]:
+            continue
+        mod.forward = _turbo_adaln_forward(mod, A.to(device, dtype), B.to(device, dtype),
+                                           table, eg)
+        n += 1
+    return n
+
+
+def turbo_adaln_unpatch(pairs):
+    """Remove the injection (idempotent) — the class forward comes back, and the GPU copies
+    of A/B/grid die with the closures."""
+    for mod, _a, _b in pairs:
+        try:
+            del mod.forward
+        except AttributeError:
+            pass
+
+
 def load_preview_turbo(dit, path, strength):
     """The Turbo LoRA, wired for previews: applied ONCE to the live DiT with every module
     DISABLED, weights parked on CPU. The preview phase flips `enabled` on and moves the
@@ -644,28 +719,42 @@ def load_preview_turbo(dit, path, strength):
     passthrough that never touches its weights, so the training step pays one Python branch
     per wrapped Linear and nothing else — no weight surgery on the training model, ever.
 
-    The file's modules are prefiltered to Linears that exist on THIS base with matching
-    shapes: the Turbo ships full-model AdaLN rows (2688-wide) that the pruned curve-table
-    base cannot host, and load_state_dict raises on a shape mismatch even with strict=False —
-    ComfyUI drops the same rows silently when it applies the Turbo to the pruned build."""
+    Returns (network, adaln_pairs). The file's backbone modules are prefiltered to Linears
+    that exist on THIS base with matching shapes. Its AdaLN modules (2688-wide, full-model
+    space) cannot be hosted by the pruned curve-table base as weight modules — but they are
+    NOT discarded: they carry the per-timestep modulation for the video AND audio streams,
+    and dropping them is what made few-step audio fall apart (Peter; same finding as
+    larryvrh's dedicated loader node). They come back as (adaln_module, A, B*strength)
+    pairs for turbo_adaln_patch's run-time injection during previews."""
     from safetensors.torch import load_file
     from fizgig.networks.lora import (create_network_from_weights,
                                       ensure_kohya_lora_state_dict)
     sd = ensure_kohya_lora_state_dict(load_file(path))
     linears = {f"lora_unet_{n.replace('.', '_')}": m
                for n, m in dit.named_modules() if isinstance(m, torch.nn.Linear)}
-    keep, dropped = {}, []
+    adaln_parents = {f"lora_unet_{n.replace('.', '_')}_linear": m
+                     for n, m in dit.named_modules()
+                     if type(m).__name__ == "AdalnProj"}
+    keep, adaln_pairs, dropped = {}, [], []
     for name in sorted({k.split(".")[0] for k in sd}):
         m = linears.get(name)
         down = sd.get(f"{name}.lora_down.weight")
         up = sd.get(f"{name}.lora_up.weight")
-        if (m is None or down is None or up is None
-                or down.shape[1] != m.in_features or up.shape[0] != m.out_features):
+        if down is None or up is None:
             dropped.append(name)
             continue
-        for suf in (".lora_down.weight", ".lora_up.weight", ".alpha"):
-            if f"{name}{suf}" in sd:
-                keep[f"{name}{suf}"] = sd[f"{name}{suf}"]
+        if (m is not None and down.shape[1] == m.in_features
+                and up.shape[0] == m.out_features):
+            for suf in (".lora_down.weight", ".lora_up.weight", ".alpha"):
+                if f"{name}{suf}" in sd:
+                    keep[f"{name}{suf}"] = sd[f"{name}{suf}"]
+            continue
+        ap = adaln_parents.get(name)
+        if ap is not None and up.shape[0] == ap.linear.out_features:
+            # full-model AdaLN rows: hosted at preview time by the e-grid injection
+            adaln_pairs.append((ap, down.clone(), up.clone() * float(strength)))
+            continue
+        dropped.append(name)
     if not keep:
         raise RuntimeError("no module in this LoRA matches the loaded base — wrong file?")
     net = create_network_from_weights(None, float(strength), keep, None, dit,
@@ -678,9 +767,10 @@ def load_preview_turbo(dit, path, strength):
     for m in net.unet_loras:
         m.enabled = False
     logger.info(f"[turbo] {len(net.unet_loras)} modules wired at strength {strength:g}"
-                + (f" ({len(dropped)} skipped — not on this base, e.g. full-model AdaLN)"
-                   if dropped else ""))
-    return net
+                + (f" + {len(adaln_pairs)} adaln via run-time injection"
+                   if adaln_pairs else "")
+                + (f" ({len(dropped)} skipped)" if dropped else ""))
+    return net, adaln_pairs
 
 
 @contextlib.contextmanager
@@ -2059,13 +2149,15 @@ def train_minimax(
 
     # The preview Turbo LoRA — a nicety, never a run-killer: any failure logs and trains on.
     turbo_net = None
+    turbo_adaln = []
     if turbo_lora_path:
         if not os.path.isfile(turbo_lora_path):
             logger.warning(f"[turbo] file not found — previews render without it: "
                            f"{turbo_lora_path}")
         else:
             try:
-                turbo_net = load_preview_turbo(dit, turbo_lora_path, turbo_lora_strength)
+                turbo_net, turbo_adaln = load_preview_turbo(dit, turbo_lora_path,
+                                                            turbo_lora_strength)
                 logger.info(f"[turbo] previews render with "
                             f"{os.path.basename(turbo_lora_path)} at "
                             f"{turbo_lora_strength:g} x {sample_steps} steps")
@@ -2638,12 +2730,14 @@ def train_minimax(
                             f'{", EMA shadow parked" if _ema_parked else ""})')
             if turbo_net is not None:
                 # On for the sampling phase only: weights to the GPU (~0.8 GB), modules
-                # enabled at their strength. Off + back to CPU before decode.
+                # enabled at their strength, AdaLN injected. Off + back to CPU before decode.
                 turbo_net.to(device=device, dtype=dtype)
                 for _tm in turbo_net.unet_loras:
                     _tm.enabled = True
+                _n_ad = turbo_adaln_patch(dit, turbo_adaln, device, dtype)
                 logger.info(f"[preview] Turbo LoRA on — {sample_steps} steps at "
-                            f"{turbo_lora_strength:g}")
+                            f"{turbo_lora_strength:g}"
+                            + (f", {_n_ad} adaln injected" if _n_ad else ""))
             _want_audio = bool(sample_audio and _frames > 1)
             _rendered = []
             for i, txt in enumerate(_prompts):
@@ -2667,6 +2761,7 @@ def train_minimax(
             if turbo_net is not None:
                 for _tm in turbo_net.unet_loras:
                     _tm.enabled = False
+                turbo_adaln_unpatch(turbo_adaln)
                 turbo_net.to("cpu")
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()      # its ~0.8 GB back before the decode phase
@@ -2765,9 +2860,11 @@ def train_minimax(
                 _audio_dec_state["dec"].to("cpu")        # idempotent; covers a mid-decode raise
             if turbo_net is not None:
                 # Idempotent, and NON-NEGOTIABLE on an exception mid-sample: a Turbo left
-                # enabled would ride every subsequent TRAINING step at 0.75.
+                # enabled (or an injected AdaLN forward left installed) would ride every
+                # subsequent TRAINING step.
                 for _tm in turbo_net.unet_loras:
                     _tm.enabled = False
+                turbo_adaln_unpatch(turbo_adaln)
                 turbo_net.to("cpu")
             for _st, _k in _opt_parked:      # exception during phase 1: state must return
                 _st[_k] = _st[_k].to(device)

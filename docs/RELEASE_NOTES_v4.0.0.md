@@ -138,6 +138,12 @@ note rather than rendering 6-step mush. Steps and strength are adjustable on the
 6 at 75% is the tested recommendation. If your H3 paths are set but the Turbo (or the audio
 VAE) isn't, Fizgig mentions it once at startup.
 
+The application matches what the community's dedicated Turbo loader node does, including the
+part that keeps few-step **audio** intact: the Turbo's AdaLN correction cannot live as
+weights on the pruned base, so it is re-injected at render time through the full model's
+silu(t\_emb) grid (bundled, Apache-2.0, credit @larryvrh) — and removed with everything else
+before training resumes.
+
 ## Finish one category early
 
 Mixed datasets are rarely balanced — thirty photos and two hundred voice takes, or the

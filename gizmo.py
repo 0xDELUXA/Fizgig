@@ -4763,11 +4763,12 @@ class GizmoRecorder:
         self.rec_btn.bind("<ButtonPress-1>", self._press)
         self.rec_btn.bind("<ButtonRelease-1>", self._release)
 
-        # 3. level + elapsed. The meter is labelled, tall and full-width on purpose — the
-        # original thin strip was technically present and visually absent (Peter read the
-        # card as having no level bar at all).
+        # 3. level + elapsed. The meter is built but NOT packed — HIDDEN for now (Peter): its
+        # data source is the raw file's size polled at 100 ms, which trails the microphone by
+        # the writer's flush lag, and a meter that answers half a second late is worse than no
+        # meter. To bring it back, pack lrow and feed it from the capture stream directly
+        # rather than from the file.
         lrow = tk.Frame(inner, bg=S)
-        lrow.pack(fill=tk.X, pady=(2, 0))
         tk.Label(lrow, text="Mic level", font=(FONT_FAMILY, 9), bg=S,
                  fg=COLORS["text_secondary"]).pack(side=tk.LEFT, padx=(0, 8))
         self.level = tk.Canvas(lrow, height=22, bg=COLORS["bg_deep"],

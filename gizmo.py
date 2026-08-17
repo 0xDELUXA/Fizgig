@@ -203,6 +203,69 @@ def build_capture_command(ffmpeg, device, out_raw):
     return None
 
 
+def take_envelope(chunk, window_s=0.01):
+    """Peak amplitude per `window_s` window of a raw s16le stereo chunk — the take's shape,
+    cheap enough to run on every release (array module, no numpy)."""
+    import array
+    a = array.array("h", chunk[: len(chunk) // 2 * 2])
+    win = max(1, int(window_s * CAPTURE_RATE)) * CAPTURE_CHANNELS
+    peaks = []
+    for i in range(0, len(a), win):
+        seg = a[i:i + win]
+        peaks.append(max(max(seg), -min(seg)) if len(seg) else 0)
+    return peaks
+
+
+def find_speech_bounds(peaks, window_s=0.01, min_run_s=0.15):
+    """The first and last SUSTAINED sound in an envelope, as (start_window, end_window).
+
+    Sustained is the load-bearing word: the R key's click is loud but short, so an amplitude
+    threshold alone would keep it and defeat the trim. A run has to stay above the threshold
+    for min_run_s to count as speech — clicks, pops and chair creaks are transients and fall
+    out of both ends on their own. The threshold rides the take's own noise floor (20th
+    percentile of the envelope) with an absolute floor, so a hot mic and a quiet one both
+    work. None when the take holds no sustained sound at all."""
+    if not peaks:
+        return None
+    floor = sorted(peaks)[len(peaks) // 5]
+    threshold = max(floor * 3, 600)              # 600/32767 ~ -35 dBFS
+    need = max(1, int(round(min_run_s / window_s)))
+    active = [p >= threshold for p in peaks]
+    runs, start = [], None
+    for i, on in enumerate(active + [False]):
+        if on and start is None:
+            start = i
+        elif not on and start is not None:
+            if i - start >= need:
+                runs.append((start, i))
+            start = None
+    if not runs:
+        return None
+    return runs[0][0], runs[-1][1]
+
+
+def trim_take_silence(chunk, margin_lead_s=0.12, margin_tail_s=0.15):
+    """Trim a raw take to its speech, with a comfort margin either side.
+
+    Cuts the leading and trailing silence AND the key-down/key-up click that push-to-record
+    inevitably captures (Peter). Conservative on purpose: a take with no sustained sound, or
+    one the trim would reduce to almost nothing, comes back unchanged — a bad trim loses a
+    take, no trim only costs a moment of silence. Returns (chunk, cut_lead_s, cut_tail_s)."""
+    window_s = 0.01
+    total_s = len(chunk) / CAPTURE_BPS
+    bounds = find_speech_bounds(take_envelope(chunk, window_s), window_s)
+    if bounds is None:
+        return chunk, 0.0, 0.0
+    lead = max(0.0, bounds[0] * window_s - margin_lead_s)
+    end = min(total_s, bounds[1] * window_s + margin_tail_s)
+    frame = CAPTURE_CHANNELS * 2
+    a = int(lead * CAPTURE_BPS) // frame * frame
+    b = int(end * CAPTURE_BPS) // frame * frame
+    if b - a < int(0.2 * CAPTURE_BPS):
+        return chunk, 0.0, 0.0
+    return chunk[a:b], lead, total_s - end
+
+
 def wait_for_capture(raw_path, until_s, timeout=2.5, poll=0.05):
     """Block until the session raw file actually CONTAINS audio up to `until_s` seconds.
 
@@ -223,10 +286,11 @@ def wait_for_capture(raw_path, until_s, timeout=2.5, poll=0.05):
     return False
 
 
-def slice_take(raw_path, press_s, release_s, out_wav, ffmpeg):
+def slice_take(raw_path, press_s, release_s, out_wav, ffmpeg, trim_silence=False):
     """Cut [press - pre-roll, release + post-roll] out of the session raw and wrap it as a
     training-rate wav. Byte math on s16le: offset = secs x 32000 x 2ch x 2B, snapped to a
-    whole frame so channels never swap. Returns the take's duration in seconds."""
+    whole frame so channels never swap. trim_silence=True then shrinks the cut to its speech
+    (see trim_take_silence) — the recorder's default. Returns the duration in seconds."""
     size = os.path.getsize(raw_path)
     frame = CAPTURE_CHANNELS * 2
     a = max(0, int((press_s - TAKE_PRE_ROLL) * CAPTURE_BPS)) // frame * frame
@@ -236,6 +300,8 @@ def slice_take(raw_path, press_s, release_s, out_wav, ffmpeg):
     with open(raw_path, "rb") as f:
         f.seek(a)
         chunk = f.read(b - a)
+    if trim_silence:
+        chunk, _lead, _tail = trim_take_silence(chunk)
     tmp = out_wav + ".raw"
     with open(tmp, "wb") as f:
         f.write(chunk)
@@ -4468,9 +4534,10 @@ class GizmoRecorder:
                                  bd=0, padx=24, pady=16, cursor="hand2", takefocus=0)
         self.rec_btn.pack(fill=tk.X, pady=(12, 6))
         ToolTip(self.rec_btn,
-                "Hold while you speak, release when the sentence ends — a quarter-second "
-                "either side is kept for you, so don't rush the press. R works as the hold "
-                "key too, unless you are typing in a text field.")
+                "Hold while you speak, release when the sentence ends — no need to rush "
+                "either: the silence at both ends, and the key click itself, are trimmed off "
+                "the take automatically. R works as the hold key too, unless you are typing "
+                "in a text field.")
         self.rec_btn.bind("<ButtonPress-1>", self._press)
         self.rec_btn.bind("<ButtonRelease-1>", self._release)
 
@@ -4680,7 +4747,8 @@ class GizmoRecorder:
                 # The writer runs behind the microphone; slice only once the file actually
                 # holds the release point, or the take loses its tail to the flush lag.
                 wait_for_capture(self.raw, release + TAKE_POST_ROLL)
-                dur = slice_take(self.raw, press, release, path, self.app.ffmpeg)
+                dur = slice_take(self.raw, press, release, path, self.app.ffmpeg,
+                                 trim_silence=True)
             except Exception as exc:
                 self.app.root.after(0, lambda: self.status.configure(
                     text=f"take failed: {exc}", fg=COLORS["error"]))

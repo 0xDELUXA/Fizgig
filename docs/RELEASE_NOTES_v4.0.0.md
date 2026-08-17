@@ -113,10 +113,10 @@ Block swap used to round-trip every swapped block between GPU and CPU. But the b
 [@rintic-13](https://github.com/rintic-13) proposed and prototyped a one-way design: blocks
 stream host-to-GPU into a small ring of buffers, the next block prefetching while the current
 one computes. As promised on [#73](https://github.com/shootthesound/Fizgig/issues/73): this is
-his speedup, and 16 GB users get the biggest share of it.
+their speedup, and 16 GB users get the biggest share of it.
 
 Measured at the same swap depth on the same card, the streamed path is **6.4× faster** than
-the old round-trip (rintic-13 measured 2.7× on a 5060 Ti with his prototype). That changes
+the old round-trip (rintic-13 measured 2.7× on a 5060 Ti with their prototype). That changes
 what the Auto planner picks: swap is now cheap enough that **16 GB and 24 GB cards get the
 int8 base** — the checkpoint's own storage, ~0.17% error — where they previously fell back to
 4-bit (~9% error the LoRA had to spend capacity correcting):

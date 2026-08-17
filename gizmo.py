@@ -3146,6 +3146,14 @@ class Gizmo:
                 self._audio_samples = samples
                 self._audio_peak_scale = scale
                 self._audio_peaks_key = None
+                # The decoded samples are the ground truth for duration. The load-time probe
+                # parses ffmpeg's progress line, which can under-report — and then the
+                # waveform (drawn from these samples) visibly extends past where the segment
+                # clamp thinks the file ends, so the box refuses to move into sound that is
+                # plainly on screen (Peter). Trust the samples.
+                real = len(samples) / self._AUDIO_PEAK_RATE
+                if abs(real - self.audio_dur) > 0.02:
+                    self.audio_dur = real
                 self.audio_status.configure(text="", fg=COLORS["text_secondary"])
                 self._audio_refresh()
         self.root.after(0, done)
@@ -3266,6 +3274,7 @@ class Gizmo:
         if not self.audio_src:
             return
         self._audio_dragging = True
+        self._audio_limit_hinted = False
         self._audio_edge = self._audio_edge_at(event.x)
         v0, vd = self._audio_view_bounds()
         t = v0 + event.x / self.AUDIO_WAVE_W * vd
@@ -3295,6 +3304,15 @@ class Gizmo:
                 self.audio_frames_var.set(frames)
                 self._audio_refresh()
                 self._audio_arm_rescrub()
+            elif (t - self.audio_pos) > hop_exact_samples(frames) / AUDIO_SAMPLE_RATE + 0.25 \
+                    and not getattr(self, "_audio_limit_hinted", False):
+                # The drag is demanding more than the largest length that fits from this
+                # position. Doing silently nothing here read as "the box is stuck" (Peter) —
+                # say what the wall is and what would move past it.
+                self._audio_limit_hinted = True
+                self.audio_status.configure(
+                    text="no longer length fits from here — drag the box's middle to move "
+                         "it, or start it earlier", fg=COLORS["warning"])
         elif edge == "left":
             end = self._audio_edge_end
             frames = self._nearest_grid_frames(end - t, end)

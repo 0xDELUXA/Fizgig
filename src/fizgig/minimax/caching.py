@@ -185,7 +185,8 @@ def _is_clip(item: ItemInfo) -> bool:
 
 def _encode_clip(vae, item: ItemInfo, audio_vae, device, dtype) -> None:
     """One clip -> one cache file holding its video latent and, if it has sound, its audio rows."""
-    from fizgig.minimax.clip import expected_audio_samples, read_audio
+    from fizgig.minimax.audio import HOP_LENGTH
+    from fizgig.minimax.clip import read_audio
     from fizgig.minimax.model import audio_latents_for_frames
 
     frames = torch.from_numpy(np.stack(item.content))            # (T, H, W, C) uint8
@@ -208,7 +209,16 @@ def _encode_clip(vae, item: ItemInfo, audio_vae, device, dtype) -> None:
             # AAC granularity leaves a 22-frame clip about 20 ms short, which is one latent
             # short of the 37 the DiT will pack — and a row count the model does not expect is
             # a shifted target, not an error anyone would see.
-            want_samples = expected_audio_samples(n_frames)
+            #
+            # HOP-EXACT, never seconds-based: the target is the latent count the DiT demands
+            # times the VAE's 800-sample hop — the voice path's trim_to_grid doctrine. The old
+            # target, ceil(frames/24 x 32000) samples, disagrees with round(frames/24 x 40)
+            # latents whenever the latent count rounds DOWN: a 56-frame clip got 74,667
+            # samples, which encodes to 94 latents against the 93 required, and the belt-and-
+            # braces check below refused every 5-, 56- and 107-frame clip with sound (Peter's
+            # run died on the first 56). 22/39/73/90/124 agreed by rounding luck, which is why
+            # it survived earlier clip training.
+            want_samples = audio_latents_for_frames(n_frames) * HOP_LENGTH
             have = wav.shape[1]
             if have < want_samples:
                 wav = np.pad(wav, ((0, 0), (0, want_samples - have)))

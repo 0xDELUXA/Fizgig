@@ -1081,6 +1081,9 @@ DEFAULT_PREFS = {
     # real training target; without it, clips train video only, which is what every dataset did
     # before clips existed. Never loaded for a stills folder.
     "minimax_audio_vae": "",
+    # Turbo LoRA — optional, previews only: 6-step in-training samples with the community Turbo
+    # applied at ~75% on top of the training adapter, exactly how fast ComfyUI inference runs it.
+    "minimax_turbo_lora": "",
     # Output directories — relative to repo root, portable across clones/moves.
     # Resolved to absolute in load_prefs(); in-memory pref values are absolute.
     # All three live as top-level folders inside the repo:
@@ -1708,6 +1711,9 @@ class LoRATrainerGUI:
             "SAMPLE_FLOW_SHIFT": "",
             "SAMPLE_NEGATIVE": "blurry, low detail, noisy, washed out, oversaturated, distorted anatomy, extra limbs, duplicate objects, text, watermark, logo, frame, cropped subject, flat lighting, muddy colors",
             "SAMPLE_CFG_SCALE": 1.0,
+            # MiniMax Turbo previews (used only when the Turbo LoRA is set in Preferences)
+            "MINIMAX_TURBO_STEPS": 6,
+            "MINIMAX_TURBO_STRENGTH": 75,
             # Florence captioning settings
             "CAPTION_TRIGGER_WORD": "",
             "CAPTION_MODEL": "MiaoshouAI/Florence-2-base-PromptGen",
@@ -3505,6 +3511,58 @@ class LoRATrainerGUI:
 
         # Initial check (deferred so tools_card exists)
         self.master.after(100, _check_model_paths)
+
+        def _check_minimax_extras():
+            # An H3 user (DiT set) missing the NEW files — the Audio VAE and the Turbo LoRA
+            # both arrived after most people set up their paths, so nothing else would ever
+            # tell them these exist (Peter). One popup, dismissable forever.
+            if self.prefs.get("minimax_extras_prompt_dismissed"):
+                return
+            if not str(self.prefs.get("minimax_dit", "") or "").strip():
+                return
+            missing = [label for key, label in (
+                ("minimax_audio_vae",
+                 "Audio VAE (~605 MB) — train on the sound in video clips, and on voices"),
+                ("minimax_turbo_lora",
+                 "Turbo LoRA (~780 MB) — fast 6-step in-training previews"))
+                if not str(self.prefs.get(key, "") or "").strip()]
+            if not missing:
+                return
+            win = tk.Toplevel(self.master)
+            win.title("MiniMax H3 — new model files")
+            win.configure(bg=COLORS["bg_deep"], padx=20, pady=16)
+            win.transient(self.master)
+            win.resizable(False, False)
+            tk.Label(win, text="Your MiniMax H3 setup is missing the new files",
+                     font=(FONT_FAMILY, 12, "bold"), bg=COLORS["bg_deep"],
+                     fg=COLORS["text_primary"]).pack(anchor=tk.W)
+            tk.Label(win, text="Fizgig can now train on video, sound and voices, and render "
+                               "fast Turbo previews. Your H3 model paths are set, but these "
+                               "are not:\n\n"
+                               + "\n".join(f"  •  {m}" for m in missing)
+                               + "\n\nPreferences has a download link on each row — or press "
+                                 "Download models for me and point it at your models folder.",
+                     font=(FONT_FAMILY, 10), justify=tk.LEFT, wraplength=520,
+                     bg=COLORS["bg_deep"], fg=COLORS["text_explain"]).pack(
+                anchor=tk.W, pady=(8, 12))
+            row = tk.Frame(win, bg=COLORS["bg_deep"])
+            row.pack(anchor=tk.E)
+
+            def _to_prefs():
+                win.destroy()
+                self.notebook.select(self.prefs_tab)
+
+            def _never():
+                self.prefs["minimax_extras_prompt_dismissed"] = True
+                save_prefs(self.prefs)
+                win.destroy()
+
+            ttk.Button(row, text="Open Preferences", command=_to_prefs).pack(side=tk.LEFT)
+            ttk.Button(row, text="Later", command=win.destroy).pack(side=tk.LEFT, padx=(8, 0))
+            ttk.Button(row, text="Don't ask again", command=_never).pack(side=tk.LEFT,
+                                                                         padx=(8, 0))
+        self._check_minimax_extras = _check_minimax_extras     # bound for tests / re-checks
+        self.master.after(700, _check_minimax_extras)
         # The audio-aware Training-tab rows (grey-outs, the voice-structure hint, the
         # per-category retirement row) refresh on folder-change traces — but the RESTORED
         # folder's trace fires during startup, before those widgets exist, and nothing
@@ -5403,7 +5461,8 @@ class LoRATrainerGUI:
     _QUEUE_SAMPLE_KEYS = ("SAMPLE_ENABLED", "SAMPLE_WIDTH", "SAMPLE_HEIGHT", "SAMPLE_STEPS",
                           "SAMPLE_SEED", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_EVERY_N_STEPS",
                           "SAMPLE_AT_FIRST", "SAMPLE_FLOW_SHIFT", "SAMPLE_NEGATIVE",
-                          "SAMPLE_CFG_SCALE", "SAMPLE_FRAMES")
+                          "SAMPLE_CFG_SCALE", "SAMPLE_FRAMES",
+                          "MINIMAX_TURBO_STEPS", "MINIMAX_TURBO_STRENGTH")
 
     def _queue_snapshot(self):
         """Capture the currently configured run as a queue item."""
@@ -5961,6 +6020,7 @@ class LoRATrainerGUI:
         "SAMPLE_SEED", "SAMPLE_EVERY_N_EPOCHS", "SAMPLE_EVERY_N_STEPS",
         "SAMPLE_AT_FIRST", "SAMPLE_FLOW_SHIFT",
         "SAMPLE_NEGATIVE", "SAMPLE_CFG_SCALE",
+        "MINIMAX_TURBO_STEPS", "MINIMAX_TURBO_STRENGTH",
         "RESUME_TRAINING",
     }
 
@@ -9911,6 +9971,33 @@ class LoRATrainerGUI:
         for _w in (self.sample_frames_label, self.sample_frames_combo, self._sample_frames_hint):
             _w.grid_remove()
 
+        # --- Turbo preview pace (MiniMax only) ---------------------------------------------
+        # Live only when the Turbo LoRA is set in Preferences; 6 steps at 75% is the tested
+        # recommendation (Peter). Shown/hidden with the sample-length row above.
+        self.turbo_pace_label = ttk.Label(prompt_card, text="Turbo preview:")
+        self.turbo_pace_label.grid(row=10, column=0, sticky=tk.W, padx=(0, 10), pady=4)
+        self._turbo_pace_row = tk.Frame(prompt_card, bg=COLORS["bg_surface"])
+        self._turbo_pace_row.grid(row=10, column=1, columnspan=2, sticky=tk.W, pady=4)
+        self.turbo_steps_entry = ttk.Entry(self._turbo_pace_row, width=5)
+        self.turbo_steps_entry.insert(0, str(self.settings.get("MINIMAX_TURBO_STEPS", 6)))
+        self.turbo_steps_entry.pack(side=tk.LEFT)
+        ttk.Label(self._turbo_pace_row, text="steps at").pack(side=tk.LEFT, padx=6)
+        self.turbo_strength_entry = ttk.Entry(self._turbo_pace_row, width=5)
+        self.turbo_strength_entry.insert(0, str(self.settings.get("MINIMAX_TURBO_STRENGTH", 75)))
+        self.turbo_strength_entry.pack(side=tk.LEFT)
+        ttk.Label(self._turbo_pace_row, text="% strength").pack(side=tk.LEFT, padx=(6, 0))
+        self._turbo_pace_hint = tk.Label(prompt_card,
+                 text="Used when the Turbo LoRA is set in Preferences: previews render in "
+                      "these few steps with the Turbo at this strength on top of your "
+                      "training LoRA — previews only, never the saved LoRA. 6 steps at 75% "
+                      "is the tested recommendation; without the Turbo, the Steps box above "
+                      "applies as before.",
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                 bg=COLORS["bg_surface"], wraplength=560, justify=tk.LEFT)
+        self._turbo_pace_hint.grid(row=11, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))
+        for _w in (self.turbo_pace_label, self._turbo_pace_row, self._turbo_pace_hint):
+            _w.grid_remove()
+
         # Card 2: Generation Frequency
         freq_card = self._start_section_card(
             self.sample_settings_frame, "Generation Frequency",
@@ -10088,6 +10175,8 @@ class LoRATrainerGUI:
         self.entries["SAMPLE_NEGATIVE"] = self.sample_negative_entry
         self.entries["SAMPLE_CFG_SCALE"] = self.sample_cfg_scale_entry
         self.entries["SAMPLE_FRAMES"] = self.sample_frames_combo
+        self.entries["MINIMAX_TURBO_STEPS"] = self.turbo_steps_entry
+        self.entries["MINIMAX_TURBO_STRENGTH"] = self.turbo_strength_entry
 
         # Initial UI state based on current architecture
         self.update_samples_ui_for_architecture()
@@ -10367,7 +10456,10 @@ class LoRATrainerGUI:
             _mm = bool(config.get("is_minimax"))
             for _w in (getattr(self, "sample_frames_label", None),
                        getattr(self, "sample_frames_combo", None),
-                       getattr(self, "_sample_frames_hint", None)):
+                       getattr(self, "_sample_frames_hint", None),
+                       getattr(self, "turbo_pace_label", None),
+                       getattr(self, "_turbo_pace_row", None),
+                       getattr(self, "_turbo_pace_hint", None)):
                 if _w is None:
                     continue
                 (_w.grid if _mm else _w.grid_remove)()
@@ -16241,9 +16333,22 @@ class LoRATrainerGUI:
             download_url="https://huggingface.co/Comfy-Org/MiniMax-H3/blob/main/vae/minimax_h3_audio_vae_fp32.safetensors",
             download_note="~605MB — Comfy-Org/MiniMax-H3 → vae/minimax_h3_audio_vae_fp32.safetensors",
         )
+        mr = self._add_pref_row(
+            mm_card, mr, "Turbo LoRA:", "minimax_turbo_lora",
+            "OPTIONAL — fast in-training previews. With this set, previews render in 6 steps "
+            "with the community Turbo LoRA applied at 75% on top of your training LoRA — the "
+            "same pairing fast ComfyUI inference uses — instead of the full 20-step pass. It "
+            "touches PREVIEWS ONLY: the Turbo is switched in for the sample render and out "
+            "again before the next training step, and your saved LoRA never contains it. "
+            "Steps and strength are adjustable on the Samples tab.",
+            download_url="https://huggingface.co/larryvrh/MiniMax-H3-Turbo-Lora/blob/main/minimax_h3_turbo_v4_step600.safetensors",
+            download_note="~780MB — larryvrh/MiniMax-H3-Turbo-Lora → "
+                          "minimax_h3_turbo_v4_step600.safetensors (you may already have it in "
+                          "ComfyUI's loras folder)",
+        )
         self._add_fetch_models_row(
             mm_card, mr, "minimax",
-            "Fetches the DiT, text encoder and both VAEs above, plus the Krea 2 Qwen3-VL captioning "
+            "Fetches the DiT, text encoder, both VAEs and the Turbo LoRA above, plus the Krea 2 Qwen3-VL captioning "
             "text encoder (~47 GB all in), and fills in these paths for you — plus the small "
             "helper models (Florence-2 captioner, face model for the Look "
             "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
@@ -24248,9 +24353,29 @@ class LoRATrainerGUI:
                 _sf = str(getattr(self, "sample_frames_var", None)
                           and self.sample_frames_var.get() or "").split(" ")[0]
                 cmd += ["--sample_frames", _sf if _sf.isdigit() else "1"]
-                _st = self.sample_steps_var.get().strip()
-                if _st.isdigit() and int(_st) > 0:
-                    cmd += ["--sample_steps", _st]
+                # The Turbo LoRA (Preferences) takes over the preview pace when set: its own
+                # steps + strength from the Samples tab (6 @ 75% recommended), nothing else
+                # changed. Without it, the ordinary Steps box applies as before.
+                _turbo = self._krea2_pref("minimax_turbo_lora")
+                if _turbo and os.path.isfile(_turbo):
+                    # read the WIDGETS, like the other sample fields — settings can lag them
+                    _ts = str(getattr(self, "turbo_steps_entry", None)
+                              and self.turbo_steps_entry.get() or "").strip()
+                    _ts = _ts if _ts.isdigit() and int(_ts) > 0 else "6"
+                    try:
+                        _tstr = float(str(getattr(self, "turbo_strength_entry", None)
+                                          and self.turbo_strength_entry.get()
+                                          or "").strip() or 75) / 100.0
+                    except ValueError:
+                        _tstr = 0.75
+                    _tstr = min(2.0, max(0.0, _tstr))
+                    cmd += ["--turbo_lora_path", _turbo,
+                            "--turbo_lora_strength", f"{_tstr:.3f}",
+                            "--sample_steps", _ts]
+                else:
+                    _st = self.sample_steps_var.get().strip()
+                    if _st.isdigit() and int(_st) > 0:
+                        cmd += ["--sample_steps", _st]
                 try:
                     _cfg = float(self.sample_cfg_scale_var.get().strip())
                 except (ValueError, AttributeError):

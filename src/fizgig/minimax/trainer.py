@@ -659,7 +659,7 @@ def write_preview_mp4(path, frames, wav_path, fps=24):
                            or "ffmpeg failed")
 
 
-_PREVIEW_RUNGS = (1536, 1280, 1024, 768, 640)
+_PREVIEW_RUNGS = (1536, 1280, 1024, 768, 640, 512)
 
 
 def _rung_below(v):
@@ -672,17 +672,17 @@ def _rung_below(v):
 def next_preview_res(w, h):
     """One rung down the preview OOM ladder, walking the STANDARD resolutions: the taller
     axis drops to the next standard size first, then the other — 1024x1024 -> 1024x768 ->
-    768x768 -> 768x640 -> 640x640 (Peter). Floors at 640; returns the same pair when
-    nothing is below (the caller re-raises then)."""
-    if h >= w and h > 640:
+    768x768 -> 768x640 -> 640x640 -> 640x512 -> 512x512 (Peter). Floors at 512; returns
+    the same pair when nothing is below (the caller re-raises then)."""
+    if h >= w and h > 512:
         nh = _rung_below(h)
         if nh < h:
             return w, nh
-    if w > 640:
+    if w > 512:
         nw = _rung_below(w)
         if nw < w:
             return nw, h
-    if h > 640:
+    if h > 512:
         nh = _rung_below(h)
         if nh < h:
             return w, nh
@@ -2677,7 +2677,7 @@ def train_minimax(
         _clip_state["slow_done"] = True
         logger.warning(
             f"[preview] step {step}/{total} took {seconds:.0f}s — the render is spilling "
-            f"into system RAM even at the resolution floor (640x640). It will finish, just "
+            f"into system RAM even at the resolution floor (512x512). It will finish, just "
             f"slowly. In order of impact: set the Turbo LoRA in Preferences (6-step previews "
             f"— over 3x fewer forwards than the standard 20); pick a shorter Sample length "
             f"if you are rendering clips (frames are the expensive axis), or a still. "

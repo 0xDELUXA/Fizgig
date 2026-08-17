@@ -659,6 +659,19 @@ def write_preview_mp4(path, frames, wav_path, fps=24):
                            or "ffmpeg failed")
 
 
+def next_preview_res(w, h):
+    """One rung down the preview OOM ladder: shrink the taller axis by 128 first, then the
+    other, flooring at 640 — 768x768 -> 768x640 -> 640x640 (Peter). Returns the same pair
+    when the floor is reached (the caller re-raises then)."""
+    if h >= w and h > 640:
+        return w, max(640, h - 128)
+    if w > 640:
+        return max(640, w - 128), h
+    if h > 640:
+        return w, max(640, h - 128)
+    return w, h
+
+
 def write_wav(path, wav, sample_rate=32000):
     """[2, L] float waveform in [-1, 1] -> 16-bit interleaved stereo wav. Stdlib only."""
     import wave as _wave
@@ -2621,6 +2634,9 @@ def train_minimax(
     # state the failure handlers can lower.
     _clip_state = {"frames": max(1, int(sample_frames or 1)), "notice_done": False,
                    "slow_done": False}
+    # An OOM'd preview downgrades its resolution one ladder rung and retries; the cap is
+    # STICKY so later epochs don't re-OOM their way down the same ladder every time.
+    _res_cap = {"wh": None, "warned": False}
 
     def _slow_step_notice(seconds, step, total):
         """Told once when a preview step runs absurdly long.
@@ -2715,6 +2731,10 @@ def train_minimax(
                 logger.info(f"[sample override] active — '{_ov['prompt'][:60]}' "
                             f"seed={_seed} {_w}x{_h}")
 
+            if _res_cap["wh"] is not None:
+                _cw, _ch = _res_cap["wh"]
+                if (_cw, _ch) != (_w, _h) and (_cw <= _w and _ch <= _h):
+                    _w, _h = _cw, _ch
             _seed = _seed if _seed != 0 else random.randint(1, 2 ** 31 - 1)
             ts = _time.strftime("%Y%m%d%H%M%S")
             _frames = max(1, int(_clip_state["frames"]))
@@ -2776,15 +2796,39 @@ def train_minimax(
             for i, txt in enumerate(_prompts):
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
                       f"({_w}x{_h}, {_frames} frame(s), seed {_seed + i})", flush=True)
-                lat, _arows = sampling.sample_image(
-                    dit, txt.to(device, dtype),
-                    width=_w, height=_h, steps=sample_steps,
-                    cfg_scale=sample_cfg_scale,
-                    uncond_embeds=(encoded_negative.to(device, dtype)
-                                   if encoded_negative is not None else None),
-                    seed=_seed + i, device=device, dtype=dtype, log_steps=True,
-                    num_frames=_frames, on_slow_step=_slow_step_notice,
-                    return_audio=True)
+                while True:
+                    try:
+                        lat, _arows = sampling.sample_image(
+                            dit, txt.to(device, dtype),
+                            width=_w, height=_h, steps=sample_steps,
+                            cfg_scale=sample_cfg_scale,
+                            uncond_embeds=(encoded_negative.to(device, dtype)
+                                           if encoded_negative is not None else None),
+                            seed=_seed + i, device=device, dtype=dtype, log_steps=True,
+                            num_frames=_frames, on_slow_step=_slow_step_notice,
+                            return_audio=True)
+                        break
+                    except torch.cuda.OutOfMemoryError:
+                        # Downgrade one ladder rung and retry rather than losing previews for
+                        # the run: 768x768 -> 768x640 -> 640x640. The cap sticks for later
+                        # epochs. At the floor there is nothing left to give back — re-raise
+                        # into the trainer's usual preview handling.
+                        _nw, _nh = next_preview_res(_w, _h)
+                        if (_nw, _nh) == (_w, _h):
+                            raise
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        _msg = f"[preview] OOM at {_w}x{_h} — retrying at {_nw}x{_nh}"
+                        if min(_nw, _nh) < 768 and not _res_cap["warned"]:
+                            _res_cap["warned"] = True
+                            _msg += (". NOTE: below H3's 768 training canvas the model is "
+                                     "outside its expected regime — treat these previews as "
+                                     "a rough guide, and judge the LoRA at full size in "
+                                     "ComfyUI.")
+                        logger.warning(_msg)
+                        _w, _h = _nw, _nh
+                        _res_cap["wh"] = (_w, _h)
                 _rendered.append((f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}",
                                   lat.to("cpu"),
                                   _arows.to("cpu") if (_want_audio and _arows is not None)

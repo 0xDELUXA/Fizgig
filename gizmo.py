@@ -4763,17 +4763,21 @@ class GizmoRecorder:
         self.rec_btn.bind("<ButtonPress-1>", self._press)
         self.rec_btn.bind("<ButtonRelease-1>", self._release)
 
-        # 3. level + elapsed
+        # 3. level + elapsed. The meter is labelled, tall and full-width on purpose — the
+        # original thin strip was technically present and visually absent (Peter read the
+        # card as having no level bar at all).
         lrow = tk.Frame(inner, bg=S)
-        lrow.pack(fill=tk.X)
-        self.level = tk.Canvas(lrow, width=380, height=12, bg=COLORS["bg_deep"],
+        lrow.pack(fill=tk.X, pady=(2, 0))
+        tk.Label(lrow, text="Mic level", font=(FONT_FAMILY, 9), bg=S,
+                 fg=COLORS["text_secondary"]).pack(side=tk.LEFT, padx=(0, 8))
+        self.level = tk.Canvas(lrow, height=22, bg=COLORS["bg_deep"],
                                highlightthickness=1, highlightbackground=COLORS["border"])
-        self.level.pack(side=tk.LEFT)
+        self.level.pack(side=tk.LEFT, fill=tk.X, expand=True)
         ToolTip(self.level, "Live input level — talk and it should move. Flat while you "
                             "speak means the wrong microphone: pick another in ⚙ settings.")
-        self.status = tk.Label(lrow, text="", font=(FONT_FAMILY, 10),
+        self.status = tk.Label(inner, text="", font=(FONT_FAMILY, 10),
                                bg=S, fg=COLORS["text_secondary"])
-        self.status.pack(side=tk.LEFT, padx=10)
+        self.status.pack(anchor=tk.W, pady=(4, 0))
 
         # 4. takes
         tk.Label(inner, text="Takes (double-click to load one into the editor):",
@@ -4978,7 +4982,9 @@ class GizmoRecorder:
         self.level.delete("all")
         frac = min(1.0, peak / 28000)
         colour = COLORS["success"] if frac < 0.85 else COLORS["warning"]
-        self.level.create_rectangle(0, 0, 380 * frac, 12, fill=colour, outline="")
+        lw = max(1, self.level.winfo_width())          # the meter stretches with the card
+        lh = max(1, self.level.winfo_height())
+        self.level.create_rectangle(0, 0, lw * frac, lh, fill=colour, outline="")
         if self.press_t is not None:
             self.status.configure(text=f"recording…  {self._now() - self.press_t:.1f} s",
                                   fg="#EF4444")

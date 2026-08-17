@@ -190,7 +190,7 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
         audio_rows = torch.randn(n_audio, model.config.audio_latents_dim,
                                  generator=gen, dtype=torch.float32).to(device)
 
-    from fizgig.minimax.model import AUDIO_SIGMA_SHIFT, sigma_remap_slope
+    from fizgig.minimax.model import AUDIO_SIGMA_SHIFT, remap_sigma
     # Built once: identical for every step, so it never lands in the hot loop.
     _ref_kw = {}
     if ref_latents:
@@ -219,17 +219,35 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                   flush=True)
         t = torch.tensor([1.0 - s_curr], device=device)     # the DiT is conditioned on cleanness
         if joint_audio:
-            out, a_out = model(x.to(dtype), t, text_embeds,
-                               audio_rows=audio_rows, return_audio=True, **_ref_kw)
+            # The audio rides the video schedule as a CARRIED VARIABLE, ComfyUI's
+            # ModelSamplingAV scheme exactly: the sampler's state is y = x_a * (sv/sa), the
+            # model sees the stream's own latent x_a = y * (sa/sv), and the model's raw audio
+            # velocity is transformed to d/d(sigma_v) of y — a closed form, exact at ANY step
+            # count. The previous slope-at-step-start conversion was only exact for
+            # infinitesimal steps: at 6 steps the slope (0.25 -> 4.0 across the schedule)
+            # changes hugely INSIDE each step, over-stepping the audio into clipping — the
+            # same clip-and-hiss failure the Turbo node's README documents, measured here at
+            # 1.6% clipped samples vs 0.0% at 20 steps.
+            _sv = max(float(s_curr), 1e-6)
+            _sa = float(remap_sigma(torch.tensor(_sv), shift, AUDIO_SIGMA_SHIFT))
+            _ascale = float(shift) / float(AUDIO_SIGMA_SHIFT)
+            a_in = (audio_rows * (_sa / _sv)).to(dtype)
+            out, a_raw = model(x.to(dtype), t, text_embeds,
+                               audio_rows=a_in, return_audio=True, **_ref_kw)
             out = out.float()
             if use_cfg:
                 # NOTE the unconditional pass keeps the reference rows: they are conditioning
                 # the workflow supplies, not part of the prompt being dropped.
-                out_u, _ = model(x.to(dtype), t, uncond_embeds,
-                                 audio_rows=audio_rows, return_audio=True, **_ref_uncond_kw)
+                out_u, a_raw_u = model(x.to(dtype), t, uncond_embeds,
+                                       audio_rows=a_in, return_audio=True, **_ref_uncond_kw)
                 out = out_u.float() + cfg_scale * (out - out_u.float())
-            # stepped BELOW, on the video grid, with the same update the video gets
-            a_out = a_out.float()
+                if a_raw is not None and a_raw_u is not None:
+                    a_raw = a_raw_u.float() + cfg_scale * (a_raw.float() - a_raw_u.float())
+            # d/d(sigma_v) of the carried variable — the reference model's own transform
+            a_out = None
+            if a_raw is not None:
+                a_out = ((1.0 - _ascale) * a_in.float()
+                         + (1.0 + (_ascale - 1.0) * _sa) * a_raw.float())
         else:
             a_out = None
             out = model(x.to(dtype), t, text_embeds, **_ref_kw).float()
@@ -240,17 +258,10 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
         # from sigma to 0). Euler is x + (sigma - sigma_next)*out, identical to comfy's
         # to_d()/dt form; res_multistep reuses the PREVIOUS denoised for a 2nd-order step.
         denoised = x + s_curr * out
-        # The audio stream rides the VIDEO sigma grid via the slope conversion, so the SAME
-        # update drives both — which is what the reference does: comfy packs audio and video
-        # into one latent and returns (-slope)*audio_out, so res_multistep's second-order step
-        # applies to the audio rows as well. Stepping audio separately with plain Euler on its
-        # own grid made it FIRST-order while the video it is coupled to was second-order, and
-        # the two step sizes diverge from 1.3% at the top of the schedule to 24% by step 19.
-        # The video tokens attend to these rows at every step, so their trajectory is part of
-        # the video's conditioning, not a side channel.
         if a_out is not None:
-            a_scaled = sigma_remap_slope(s_curr, shift, AUDIO_SIGMA_SHIFT) * a_out
-            denoised_a = audio_rows + s_curr * a_scaled
+            # The carried audio variable is an ordinary video-schedule flow latent now, so
+            # the SAME update (Euler or second-order) drives both streams below.
+            denoised_a = audio_rows + s_curr * a_out
         _second_order = (sampler == "res_multistep" and prev_denoised is not None and s_next > 0)
         if _second_order:
             a_x, hb1, hb2 = _res_multistep_coeffs(s_curr, s_next, sigmas[i - 1])
@@ -261,7 +272,7 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
             if _second_order and prev_denoised_a is not None:
                 audio_rows = a_x * audio_rows + hb1 * denoised_a + hb2 * prev_denoised_a
             else:
-                audio_rows = audio_rows + (s_curr - s_next) * a_scaled
+                audio_rows = audio_rows + (s_curr - s_next) * a_out
             prev_denoised_a = denoised_a
         prev_denoised = denoised
         # One-shot slow-step notice. A preview that oversubscribes VRAM does NOT raise on
@@ -278,9 +289,12 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                     pass
     if return_audio:
         # The fully-denoised audio rows ([2*T, 32], channel-major, same layout the cache
-        # uses) — they were always computed for the joint denoise; this just stops
-        # discarding them. None for stills or a model without packed audio.
-        return x, (audio_rows if joint_audio and latent_t > 1 else None)
+        # uses). The loop's state is the CARRIED variable y = x_a * (sv/sa); at sigma 0 the
+        # carry limit is sv/sa -> shift_v/shift_a, so y(0) = audio_scale * x0 — divide it
+        # back out (ModelSamplingAV's "audio target is scaled by audio_scale").
+        if joint_audio and latent_t > 1 and audio_rows is not None:
+            return x, audio_rows / (float(shift) / float(AUDIO_SIGMA_SHIFT))
+        return x, None
     return x
 
 

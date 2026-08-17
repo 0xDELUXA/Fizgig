@@ -624,7 +624,8 @@ def pick_sentence(frames, rng=None):
 # --- persisted settings (mic + default whisper language) ----------------------------------------
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gizmo_settings.json")
 SETTINGS_DEFAULTS = {"microphone": "", "whisper_language": "Auto detect",
-                     "random_delivery": True, "trim_takes": True, "trigger_word": ""}
+                     "random_delivery": True, "trim_takes": True, "trigger_word": "",
+                     "clip_out_dir": "", "voice_out_dir": ""}
 
 
 def load_settings():
@@ -1833,8 +1834,11 @@ class Gizmo:
         label(10, "Save to:", OUT_TIP)
         outrow = tk.Frame(grid, bg=COLORS["bg_surface"])
         outrow.grid(row=10, column=1, sticky="ew", pady=5)
-        self.out_var = tk.StringVar(value="")
+        # Remembered across sessions; the beside-the-source default only fills it when
+        # nothing was remembered.
+        self.out_var = tk.StringVar(value=self.settings.get("clip_out_dir", ""))
         self.out_var.trace_add("write", lambda *_a: self._refresh_planned_name())
+        self._persist_var(self.out_var, "clip_out_dir")
         out_entry = tk.Entry(outrow, textvariable=self.out_var, bg=COLORS["bg_hover"],
                              fg=COLORS["text_primary"], insertbackground=COLORS["text_primary"],
                              relief=tk.FLAT, font=(FONT_FAMILY, 10))
@@ -2030,6 +2034,23 @@ class Gizmo:
         matches, which is exactly the kind of guard that looks right and does nothing.
         """
         widget.bindtags((str(widget), widget.winfo_class(), "all"))
+
+    def _persist_var(self, var, key):
+        """Remember a field in gizmo_settings.json as it changes, debounced 400 ms so typing
+        doesn't hammer the file. The save directories and the trigger word ride this — the
+        things you set once and resent retyping every session (Peter)."""
+        job = [None]
+
+        def write(*_a):
+            if job[0] is not None:
+                self.root.after_cancel(job[0])
+
+            def save():
+                job[0] = None
+                self.settings[key] = var.get().strip()
+                save_settings(self.settings)
+            job[0] = self.root.after(400, save)
+        var.trace_add("write", write)
 
     def go_to_start(self):
         if self.src:
@@ -2857,21 +2878,9 @@ class Gizmo:
         tk.Label(trow, text="Trigger word:", font=(FONT_FAMILY, 10),
                  bg=COLORS["bg_surface"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
         # Remembered across sessions (Peter): a voice dataset is usually built over several
-        # sittings, and retyping the same trigger word every open is pure friction. Saved on
-        # a short debounce so typing doesn't hammer the settings file.
+        # sittings, and retyping the same trigger word every open is pure friction.
         self.audio_trigger_var = tk.StringVar(value=self.settings.get("trigger_word", ""))
-        self._trigger_save_job = None
-
-        def _remember_trigger(*_a):
-            if self._trigger_save_job is not None:
-                self.root.after_cancel(self._trigger_save_job)
-
-            def save():
-                self._trigger_save_job = None
-                self.settings["trigger_word"] = self.audio_trigger_var.get().strip()
-                save_settings(self.settings)
-            self._trigger_save_job = self.root.after(400, save)
-        self.audio_trigger_var.trace_add("write", _remember_trigger)
+        self._persist_var(self.audio_trigger_var, "trigger_word")
         trig = tk.Entry(trow, textvariable=self.audio_trigger_var, width=24,
                         bg=COLORS["bg_hover"], fg=COLORS["text_primary"],
                         insertbackground=COLORS["text_primary"], relief=tk.FLAT)
@@ -3015,7 +3024,8 @@ class Gizmo:
         orow.pack(fill=tk.X)
         tk.Label(orow, text="Save to:", font=(FONT_FAMILY, 10),
                  bg=COLORS["bg_surface"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
-        self.audio_out_var = tk.StringVar(value="")
+        self.audio_out_var = tk.StringVar(value=self.settings.get("voice_out_dir", ""))
+        self._persist_var(self.audio_out_var, "voice_out_dir")
         oe = tk.Entry(orow, textvariable=self.audio_out_var, bg=COLORS["bg_hover"],
                       fg=COLORS["text_primary"], insertbackground=COLORS["text_primary"],
                       relief=tk.FLAT)

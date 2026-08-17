@@ -10821,7 +10821,9 @@ class LoRATrainerGUI:
         .gallery-item.new { animation: highlight 2s ease-out; }
         @keyframes highlight { 0%, 30% { box-shadow: 0 0 30px #27AE60; } 100% { box-shadow: none; } }
         .image-container { position: relative; }
-        .gallery-item img { width: 100%; height: 280px; object-fit: cover; display: block; background-color: #1B2A38; }
+        /* contain, not cover: a widescreen preview letterboxes instead of losing its sides —
+           the grid is for JUDGING samples, and a cropped frame lies about the composition */
+        .gallery-item img { width: 100%; height: 280px; object-fit: contain; display: block; background-color: #1B2A38; }
         .badge { position: absolute; top: 10px; left: 10px; padding: 6px 12px; border-radius: 4px; font-weight: bold; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
         .epoch-badge { background-color: #27AE60; color: white; }
         .clip-badge { background-color: #8E44AD; color: white; right: 8px; left: auto; }
@@ -12075,7 +12077,7 @@ class LoRATrainerGUI:
         .gallery-item {{ background-color: #2C3E50; border-radius: 8px; overflow: hidden; cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }}
         .gallery-item:hover {{ transform: translateY(-5px); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3); }}
         .image-container {{ position: relative; }}
-        .gallery-item img {{ width: 100%; height: 250px; object-fit: cover; display: block; }}
+        .gallery-item img {{ width: 100%; height: 250px; object-fit: contain; display: block; background-color: #1B2A38; }}
         .epoch-badge, .step-badge {{ position: absolute; top: 10px; left: 10px; padding: 6px 12px; border-radius: 4px; font-weight: bold; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }}
         .epoch-badge {{ background-color: #27AE60; color: white; }}
         .step-badge {{ background-color: #E67E22; color: white; }}

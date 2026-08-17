@@ -1508,6 +1508,51 @@ def _validate_state_dir(state_dir):
     raise RuntimeError(os.linesep.join(lines))
 
 
+def resume_network_shape(state_dir, network_type, network_dim, network_alpha, lokr_factor):
+    """The network shape a RESUME must build: the checkpoint's, not the GUI's.
+
+    The state dir carries the adapter exactly as it trained; rebuilding from whatever the
+    boxes say NOW crashed the relaunch the moment settings had moved on (a rank-8 pause
+    resumed under a rank-16 preset died on a size-mismatch wall, Peter 17 Aug). This reads
+    the shape out of the saved lora.safetensors — parametrization by key suffix, LoKR factor
+    from w1, rank/alpha from a non-AdaLN module (AdaLN's rank caps at 8, so it lies about
+    the network's dim) — and returns (type, dim, alpha, factor, notes). The caller logs the
+    notes and builds THAT network; a resume continues the run it resumes."""
+    path = os.path.join(state_dir, "lora.safetensors")
+    notes = []
+    if not os.path.isfile(path):
+        return network_type, network_dim, network_alpha, lokr_factor, notes
+    from safetensors import safe_open
+    with safe_open(path, framework="pt", device="cpu") as f:
+        keys = list(f.keys())
+        if any(k.endswith(".lokr_w1") for k in keys):
+            if network_type != "lokr":
+                notes.append(f"the checkpoint is LoKR — overriding the configured "
+                             f"{network_type}")
+                network_type = "lokr"
+            w1 = f.get_slice(next(k for k in keys if k.endswith(".lokr_w1")))
+            if int(w1.get_shape()[0]) != int(lokr_factor):
+                notes.append(f"LoKR factor {int(w1.get_shape()[0])} from the checkpoint "
+                             f"(configured: {lokr_factor})")
+                lokr_factor = int(w1.get_shape()[0])
+        else:
+            if network_type != "lora":
+                notes.append(f"the checkpoint is a standard LoRA — overriding the "
+                             f"configured {network_type}")
+                network_type = "lora"
+            dk = next((k for k in keys if k.endswith(".lora_down.weight")
+                       and "adaln" not in k), None)
+            if dk is not None:
+                dim = int(f.get_slice(dk).get_shape()[0])
+                ak = dk.replace(".lora_down.weight", ".alpha")
+                alpha = float(f.get_tensor(ak)) if ak in keys else float(dim)
+                if dim != int(network_dim) or abs(alpha - float(network_alpha)) > 1e-6:
+                    notes.append(f"rank {dim}/alpha {alpha:g} from the checkpoint "
+                                 f"(configured: {network_dim}/{float(network_alpha):g})")
+                    network_dim, network_alpha = dim, alpha
+    return network_type, network_dim, network_alpha, lokr_factor, notes
+
+
 def _load_training_state(state_dir, network, optimizer, *, device):
     """Restore network + optimizer + RNG from a state dir. Returns (start_epoch, global_step, meta)."""
     _validate_state_dir(state_dir)
@@ -1940,6 +1985,14 @@ def train_minimax(
                 " + AdaLN (deploy-consistent on this build; rank caps at 8)" if _adaln_on
                 else (" (AdaLN excluded - turned off for this run)" if dit.pruned_adaln
                       else " (AdaLN excluded - dropped by pruned inference builds)"))
+    if resume_state_dir:
+        # A resume builds the CHECKPOINT'S network, whatever the boxes say now — settings
+        # that moved on since the pause used to crash the relaunch on a size-mismatch wall.
+        network_type, network_dim, network_alpha, lokr_factor, _rs_notes = \
+            resume_network_shape(resume_state_dir, network_type, network_dim,
+                                 network_alpha, lokr_factor)
+        for _n in _rs_notes:
+            logger.warning(f"[resume] {_n} — a resume continues the run it resumes")
     if network_type == "lokr":
         # LoKR (Kronecker) — same mechanism as Krea 2's: module_class swaps the parametrization
         # inside the identical scan/wrap machinery, so include_patterns (adaln exclusion) and the

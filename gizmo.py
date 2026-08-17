@@ -4501,6 +4501,7 @@ class GizmoRecorder:
         os.makedirs(self.takes_dir, exist_ok=True)
         self.t0 = None                # monotonic when the capture actually started writing
         self._capture_launched = 0.0  # monotonic at Popen — the clock's hard floor
+        self._pending_press = None    # a press buffered while the device was still opening
         self.press_t = None
         self.takes = []               # {path, dur, sentence, delivery}
         self._hold_release_job = None
@@ -4650,11 +4651,31 @@ class GizmoRecorder:
     def _start_capture(self):
         device = self.app.settings.get("microphone", "")
         if os.name == "nt" and not device:
-            devices = list_capture_devices(self.app.ffmpeg)
-            if devices:
-                device = devices[0]
-                self.app.settings["microphone"] = device
-                save_settings(self.app.settings)
+            # First ever use, no saved mic. The scan is an ffmpeg subprocess that takes a
+            # second or two, and it used to run ON the GUI thread — record mode appeared
+            # frozen and the mic went live late, which is most of the cold-start delay
+            # (Peter). Scan in the background, save the pick, and come back here.
+            self.status.configure(text="finding your microphone…",
+                                  fg=COLORS["text_secondary"])
+
+            def scan():
+                devices = list_capture_devices(self.app.ffmpeg)
+
+                def done():
+                    if not self.alive():
+                        return
+                    if devices:
+                        self.app.settings["microphone"] = devices[0]
+                        save_settings(self.app.settings)
+                        self._start_capture()
+                    else:
+                        self.rec_btn.configure(state=tk.DISABLED)
+                        self.status.configure(
+                            text="no microphone available on this machine",
+                            fg=COLORS["warning"])
+                self.app.root.after(0, done)
+            threading.Thread(target=scan, daemon=True).start()
+            return
         # A FRESH, uniquely named raw per record session. Reusing one path was the bug that
         # collapsed 4-second takes to under a second (Peter): close()'s delete can fail while
         # the old ffmpeg still holds the handle, the next session's first size-poll then read
@@ -4677,6 +4698,7 @@ class GizmoRecorder:
             self.status.configure(text="no microphone available on this machine",
                                   fg=COLORS["warning"])
             return
+        self._device = device or "default"     # for the live status — which mic is this?
         # The hard floor for the clock: audio cannot have been captured before the process
         # that captures it existed. Every t0 estimate below is clamped to this.
         self._capture_launched = _time.monotonic()
@@ -4713,8 +4735,18 @@ class GizmoRecorder:
                 # Refined further by the running minimum in _level_tick.
                 self.t0 = max(_time.monotonic() - size / CAPTURE_BPS,
                               self._capture_launched)
-                self.status.configure(text="mic is live — hold and speak",
-                                      fg=COLORS["success"])
+                # Which mic, by name — the answer to "is it even using the right one?"
+                # without a trip to settings (Peter).
+                self.status.configure(
+                    text=f"live: {getattr(self, '_device', 'microphone')} — hold and speak",
+                    fg=COLORS["success"])
+                if self._pending_press is not None:
+                    # A press arrived while the device was opening. It was buffered, not
+                    # dropped — convert it now, clamped to the start of what was captured.
+                    self.press_t = max(0.0, self._pending_press - self.t0)
+                    self._pending_press = None
+                    self.rec_btn.configure(bg="#B91C1C",
+                                           text="●  recording — release when done")
                 self._level_tick()
                 return
         except OSError:
@@ -4760,12 +4792,28 @@ class GizmoRecorder:
 
     # -- push-to-record ----------------------------------------------------------------------
     def _press(self, _e=None):
-        if self.t0 is None or self.press_t is not None:
+        if self.press_t is not None or self._pending_press is not None:
+            return
+        if self.t0 is None:
+            # The device is still opening. Dropping the press silently made the first record
+            # of a session feel dead (Peter) — remember it instead, arm the button, and
+            # _await_first_bytes converts it the moment the capture is live.
+            import time as _time
+            self._pending_press = _time.monotonic()
+            self.rec_btn.configure(bg="#B91C1C", text="●  mic is waking — keep holding…")
             return
         self.press_t = self._now()
         self.rec_btn.configure(bg="#B91C1C", text="●  recording — release when done")
 
     def _release(self, _e=None):
+        if self._pending_press is not None:
+            # Released before the mic came alive — nothing was captured to slice.
+            self._pending_press = None
+            self.rec_btn.configure(bg=COLORS["bg_hover"],
+                                   text="🎙  HOLD to record  (or hold R)")
+            self.status.configure(text="the mic was still waking — hold again once it says "
+                                       "live", fg=COLORS["warning"])
+            return
         if self.press_t is None:
             return
         press, self.press_t = self.press_t, None
@@ -4904,6 +4952,7 @@ class GizmoRecorder:
                 pass
         self._root_binds = []
         self.press_t = None
+        self._pending_press = None
         self.t0 = None                # stops the level ticker at its next alive() check
         if self.proc is not None and self.proc.poll() is None:
             try:

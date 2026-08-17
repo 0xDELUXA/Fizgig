@@ -659,16 +659,33 @@ def write_preview_mp4(path, frames, wav_path, fps=24):
                            or "ffmpeg failed")
 
 
+_PREVIEW_RUNGS = (1536, 1280, 1024, 768, 640)
+
+
+def _rung_below(v):
+    for r in _PREVIEW_RUNGS:
+        if r < v:
+            return r
+    return v
+
+
 def next_preview_res(w, h):
-    """One rung down the preview OOM ladder: shrink the taller axis by 128 first, then the
-    other, flooring at 640 — 768x768 -> 768x640 -> 640x640 (Peter). Returns the same pair
-    when the floor is reached (the caller re-raises then)."""
+    """One rung down the preview OOM ladder, walking the STANDARD resolutions: the taller
+    axis drops to the next standard size first, then the other — 1024x1024 -> 1024x768 ->
+    768x768 -> 768x640 -> 640x640 (Peter). Floors at 640; returns the same pair when
+    nothing is below (the caller re-raises then)."""
     if h >= w and h > 640:
-        return w, max(640, h - 128)
+        nh = _rung_below(h)
+        if nh < h:
+            return w, nh
     if w > 640:
-        return max(640, w - 128), h
+        nw = _rung_below(w)
+        if nw < w:
+            return nw, h
     if h > 640:
-        return w, max(640, h - 128)
+        nh = _rung_below(h)
+        if nh < h:
+            return w, nh
     return w, h
 
 

@@ -3344,8 +3344,9 @@ class LoRATrainerGUI:
                  font=(FONT_FAMILY, 22, "bold"),
                  fg=COLORS["text_primary"], bg=COLORS["bg_deep"]).pack(anchor=tk.W)
         tk.Label(container,
-                 text="A focused, local trainer and workbench for Flux 2 Klein 9B and Krea 2 LoRAs — "
-                      "train, profile, repair, explore, and extract, all in one place.",
+                 text="A focused, local trainer and workbench for Flux 2 Klein 9B, Krea 2 and "
+                      "MiniMax H3 LoRAs — train, profile, repair, explore, and extract, all in "
+                      "one place.",
                  font=(FONT_FAMILY, 11),
                  fg=COLORS["text_secondary"], bg=COLORS["bg_deep"],
                  wraplength=800, justify=tk.LEFT).pack(anchor=tk.W, pady=(4, 24))
@@ -3391,7 +3392,7 @@ class LoRATrainerGUI:
 
         steps = [
             ("1", "Start",      "Choose your training image folder below.",                     False),
-            ("2", "Image Prep", "Resize, convert to PNG, or face-crop.",                        True),   # optional
+            ("2", "Image Prep", "Resize, convert to PNG, or face-crop. (Video Prep for MiniMax)", True),  # optional
             ("3", "Captions",   "Write trigger-word captions or generate them with AI.",        False),
             ("4", "Samples",    "Configure in-training preview prompts.",                       False),
             ("5", "Training",   "Pick a preset, tune settings, click Start Training.",          False),
@@ -9804,6 +9805,33 @@ class LoRATrainerGUI:
         )
         _bkids = self._samples_banner.winfo_children()
         self._samples_banner_sub = _bkids[1] if len(_bkids) > 1 else None
+
+        # === Base Model chooser (Peter) — the tab's options are family-shaped (Sample length
+        # with sound, Turbo pace are MiniMax-only), so choose the family HERE rather than
+        # round-tripping to the Training tab. Same StringVar as the Training-tab combobox, so
+        # the two can never disagree; the bind is required because architecture changes ride
+        # <<ComboboxSelected>>, not a var trace. Sits OUTSIDE sample_settings_frame on purpose:
+        # it must survive the master-enable toggle and the enable/disable widget walk.
+        if len(ARCHITECTURE_LIST) > 1:
+            arch_card = self._start_section_card(
+                outer, "Base Model",
+                "Pick what you're training — the sample options below match it. Same setting "
+                "as the Training tab.",
+            )
+            arch_row = tk.Frame(arch_card, bg=COLORS["bg_surface"])
+            arch_row.pack(anchor=tk.W)
+            tk.Label(
+                arch_row, text="Model:",
+                font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            samples_arch_combo = ttk.Combobox(
+                arch_row, textvariable=self.architecture_var, state="readonly",
+                width=28, values=ARCHITECTURE_LIST,
+            )
+            samples_arch_combo.pack(side=tk.LEFT)
+            samples_arch_combo.bind("<<ComboboxSelected>>", self._on_architecture_selected)
+            ToolTip(samples_arch_combo, "Model family to train (Klein 9B, Krea 2 or MiniMax H3)")
+            self._samples_arch_combo = samples_arch_combo
 
         # Grid holder — video warning / master checkbox / settings block all row-managed
         # so update_samples_ui_for_architecture() can still .grid() / .grid_remove() them.

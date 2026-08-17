@@ -445,7 +445,8 @@ def pick_sentence(frames, rng=None):
 
 # --- persisted settings (mic + default whisper language) ----------------------------------------
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gizmo_settings.json")
-SETTINGS_DEFAULTS = {"microphone": "", "whisper_language": "Auto detect"}
+SETTINGS_DEFAULTS = {"microphone": "", "whisper_language": "Auto detect",
+                     "random_delivery": True}
 
 
 def load_settings():
@@ -1127,6 +1128,19 @@ class Gizmo:
         # launcher does, and what Explorer's "Open with" does — or paste a path with Ctrl+V.
         self.can_drop = enable_file_drop(self.root, self.open_path)
         self.root.bind("<Control-v>", lambda _e: self.paste_path())
+        # The recorder is an in-window card now, so closing the APP can be the only exit while
+        # the mic is rolling — its ffmpeg must die with the window, or an orphan keeps
+        # recording to temp forever.
+
+        def _quit():
+            rec = self._recorder
+            if rec is not None and rec.proc is not None and rec.proc.poll() is None:
+                try:
+                    rec.proc.terminate()
+                except Exception:
+                    pass
+            self.root.destroy()
+        self.root.protocol("WM_DELETE_WINDOW", _quit)
         if not self.ffmpeg:
             messagebox.showerror(
                 "Gizmo — no ffmpeg",
@@ -2420,11 +2434,15 @@ class Gizmo:
     AUDIO_WAVE_W, AUDIO_WAVE_H = 940, 150
 
     def _build_audio_tab(self, body):
+        # The record card pack-swaps with the source card, so both need handles: the tab body
+        # to build into, and the source card's OUTER frame to hide and restore in place.
+        self._audio_tab_body = body
         # 1. source
         c = self._card(body, "1. Source recording",
                        "A voice memo, a podcast, an interview — any wav, mp3, flac or m4a. Or a "
                        "VIDEO file, to use just its audio track: nothing is shown, you scrub the "
                        "sound itself.")
+        self._audio_source_outer = c.master.master      # body -> inner -> outer (see _card)
         row = tk.Frame(c, bg=COLORS["bg_surface"])
         row.pack(fill=tk.X)
         self._button(row, "Open audio…", self.open_audio, "accent",
@@ -3446,16 +3464,14 @@ class Gizmo:
                   self.audio_export_btn, self.audio_whisper_btn):
             w.configure(state=state)
 
-    # -- the voice recorder window ------------------------------------------------------------------
+    # -- the voice recorder card --------------------------------------------------------------------
     def open_recorder(self):
-        """The push-to-record window. One per session — a second click raises the first."""
-        if getattr(self, "_recorder", None) is not None and self._recorder.alive():
-            self._recorder.win.lift()
-            # Deferred past the opener button's refocus wrapper, same as at first open.
-            self._recorder.win.after(150, self._recorder.win.focus_force)
-            return
+        """Swap the Voice tab's source card for the record card. Built once per session and
+        then shown again with its takes intact — the whole point of it not being a popup."""
         self.notebook.select(self._audio_tab)
-        self._recorder = GizmoRecorder(self)
+        if getattr(self, "_recorder", None) is None:
+            self._recorder = GizmoRecorder(self)
+        self._recorder.show()
 
     def open_settings(self):
         """The ⚙ popup: microphone + default Whisper language, persisted beside gizmo.py."""
@@ -3506,16 +3522,31 @@ class Gizmo:
                             "once and Whisper stops guessing (a wrong guess on a short "
                             "segment is what makes it hallucinate).")
 
+        rand_var = tk.BooleanVar(value=bool(self.settings.get("random_delivery", True)))
+        rand_cb = tk.Checkbutton(win, text="Vary the delivery style between takes",
+                                 variable=rand_var, bg=COLORS["bg_deep"],
+                                 fg=COLORS["text_primary"], selectcolor=COLORS["bg_surface"],
+                                 activebackground=COLORS["bg_deep"],
+                                 activeforeground=COLORS["text_primary"],
+                                 font=(FONT_FAMILY, 10), highlightthickness=0, bd=0,
+                                 cursor="hand2")
+        rand_cb.grid(row=5, column=0, sticky=tk.W, pady=(12, 0))
+        ToolTip(rand_cb, "After every take the recorder rolls a random delivery prompt "
+                         "(cheerfully, wearily, quietly…) so the dataset's emotional range "
+                         "fills itself. Off keeps whatever the delivery dropdown says — and "
+                         "either way the dropdown can be changed by hand for the next take.")
+
         def save():
             self.settings["microphone"] = mic_var.get().strip()
             self.settings["whisper_language"] = lang_var.get()
+            self.settings["random_delivery"] = bool(rand_var.get())
             save_settings(self.settings)
             if hasattr(self, "audio_lang_var"):
                 self.audio_lang_var.set(lang_var.get())
             win.destroy()
 
         row = tk.Frame(win, bg=COLORS["bg_deep"])
-        row.grid(row=5, column=0, columnspan=2, sticky=tk.E, pady=(16, 0))
+        row.grid(row=6, column=0, columnspan=2, sticky=tk.E, pady=(16, 0))
         self._button(row, "Save", save, "accent", pad=12,
                      tip="Keep these — they persist in gizmo_settings.json.").pack(side=tk.LEFT)
         self._button(row, "Cancel", win.destroy, pad=12,
@@ -4121,11 +4152,17 @@ class GizmoRecorder:
     afterwards with cushions either side. That is what makes push-to-record clip nothing:
     the capture was already running when the thumb landed.
 
+    A CARD, not a popup (Peter): this swaps in for the Voice tab's Source recording card and
+    Done swaps it back out. The popup lost its takes when it closed; a hidden card keeps
+    them — leave record mode, come back, and the takes list is exactly as you left it. It
+    also dissolves the popup's focus problem outright: everything lives in the main window,
+    where the R binding already routes.
+
     R, not space and not Shift (Peter): space already means too much — it is the transport on
     both main tabs and Tk's activate key for any focused widget — and Shift walks into
     Windows' accessibility traps (five presses pops the Sticky Keys prompt, an 8 s hold pops
-    Filter Keys). R is easy to find without looking, means record, and does nothing else in
-    this window. Bound by both keysyms so Caps Lock cannot un-bind it.
+    Filter Keys). R is easy to find without looking, means record, and does nothing else
+    here. Bound by both keysyms so Caps Lock cannot un-bind it.
     """
 
     LEVEL_POLL_MS = 100
@@ -4140,41 +4177,60 @@ class GizmoRecorder:
         self.press_t = None
         self.takes = []               # {path, dur, sentence, delivery}
         self._hold_release_job = None
-        self._closed = False
+        self.active = False           # showing + mic rolling; the card itself is permanent
+        self._root_binds = []
 
-        win = self.win = tk.Toplevel(app.root)
-        win.title("Gizmo — record a voice")
-        win.configure(bg=COLORS["bg_deep"], padx=20, pady=16)
-        win.geometry("+%d+%d" % (app.root.winfo_rootx() + 80, app.root.winfo_rooty() + 120))
-        win.protocol("WM_DELETE_WINDOW", self.close)
+        # The card. Built ONCE, in the Voice tab's card stack, and never destroyed — show()
+        # and close() pack-swap it with the source card. Accent border: record mode should
+        # look like a mode.
+        S = COLORS["bg_surface"]
+        outer = self.frame = tk.Frame(app._audio_tab_body, bg=S, highlightthickness=1,
+                                      highlightbackground=COLORS["accent"])
+        inner = tk.Frame(outer, bg=S)
+        inner.pack(fill=tk.BOTH, expand=True, padx=20, pady=16)
+        head = tk.Frame(inner, bg=S)
+        head.pack(fill=tk.X)
+        tk.Label(head, text="1. Record a voice", font=(FONT_FAMILY, 12, "bold"),
+                 bg=S, fg=COLORS["text_primary"]).pack(side=tk.LEFT)
+        app._button(head, "✓ Done — back to files", self.close, "accent", pad=12,
+                    tip="Stop the microphone and put the Source recording card back. Your "
+                        "takes are kept — press Record again and they are still "
+                        "here.").pack(side=tk.RIGHT)
+        tk.Label(inner, text="Hold and read; every release lands in Takes and loads straight "
+                             "into the editor below — queue it with Ctrl+S, then hold for the "
+                             "next one. The mic stays live until Done.",
+                 font=(FONT_FAMILY, 9), justify=tk.LEFT, wraplength=900,
+                 bg=S, fg=COLORS["text_explain"]).pack(anchor="w", pady=(2, 8))
 
         # 1. the sentence to read
-        tk.Label(win, text="Read this:", font=(FONT_FAMILY, 10),
-                 bg=COLORS["bg_deep"], fg=COLORS["text_secondary"]).pack(anchor=tk.W)
+        tk.Label(inner, text="Read this:", font=(FONT_FAMILY, 10),
+                 bg=S, fg=COLORS["text_secondary"]).pack(anchor=tk.W)
         self.sentence_var = tk.StringVar()
-        tk.Label(win, textvariable=self.sentence_var, font=(FONT_FAMILY, 15, "bold"),
-                 bg=COLORS["bg_deep"], fg=COLORS["text_primary"], wraplength=520,
+        tk.Label(inner, textvariable=self.sentence_var, font=(FONT_FAMILY, 15, "bold"),
+                 bg=S, fg=COLORS["text_primary"], wraplength=880,
                  justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 8))
-        srow = tk.Frame(win, bg=COLORS["bg_deep"])
+        srow = tk.Frame(inner, bg=S)
         srow.pack(fill=tk.X)
         app._button(srow, "🎲 New sentence", self.new_sentence, pad=10,
-                    tip="Another prompt, sized to the segment length picked on the main "
-                        "window. Pangrams and Harvard sentences — phonetically dense on "
+                    tip="Another prompt, sized to the segment length picked below. Pangrams "
+                        "and Harvard sentences — phonetically dense on "
                         "purpose.").pack(side=tk.LEFT)
         tk.Label(srow, text="delivery:", font=(FONT_FAMILY, 9),
-                 bg=COLORS["bg_deep"], fg=COLORS["text_secondary"]).pack(side=tk.LEFT,
-                                                                        padx=(14, 4))
+                 bg=S, fg=COLORS["text_secondary"]).pack(side=tk.LEFT, padx=(14, 4))
         self.delivery_var = tk.StringVar(value="plain")
         dcombo = ttk.Combobox(srow, textvariable=self.delivery_var, width=13,
                               state="readonly", style="G.TCombobox",
                               values=list(DELIVERY_PROMPTS))
         dcombo.pack(side=tk.LEFT)
         ToolTip(dcombo, "Say it that way, and the caption records it honestly — emotional "
-                        "range across takes is dataset variety a voice LoRA wants.")
+                        "range across takes is dataset variety a voice LoRA wants.\n\nRolled "
+                        "at random after every take so the range arrives on its own; pick one "
+                        "here to override the next take, or turn the rolling off in ⚙ "
+                        "settings.")
 
         # 2. the hold button. Press/release bindings, NOT command — and NOT app._button,
         # whose focus-return wrapper would fight the hold.
-        self.rec_btn = tk.Button(win, text="🎙  HOLD to record  (or hold R)",
+        self.rec_btn = tk.Button(inner, text="🎙  HOLD to record  (or hold R)",
                                  font=(FONT_FAMILY, 13, "bold"), bg=COLORS["bg_hover"],
                                  fg=COLORS["text_primary"], activebackground="#B91C1C",
                                  activeforeground=COLORS["text_primary"], relief=tk.FLAT,
@@ -4183,50 +4239,27 @@ class GizmoRecorder:
         ToolTip(self.rec_btn,
                 "Hold while you speak, release when the sentence ends — a quarter-second "
                 "either side is kept for you, so don't rush the press. R works as the hold "
-                "key too: R for record, and it means nothing else in this window.")
+                "key too, unless you are typing in a text field.")
         self.rec_btn.bind("<ButtonPress-1>", self._press)
         self.rec_btn.bind("<ButtonRelease-1>", self._release)
-        # Both keysyms: with Caps Lock on (or Shift down) the key arrives as "R", and a
-        # binding on "r" alone would silently stop working.
-        for sym in ("r", "R"):
-            win.bind(f"<KeyPress-{sym}>", self._hold_press)
-            win.bind(f"<KeyRelease-{sym}>", self._hold_release)
-        # ...and on the MAIN window too, unbound again on close. A key bound only on this
-        # Toplevel fires only while keyboard focus is INSIDE it — which it essentially never
-        # was (the button that opens this window refocuses its own toplevel right after, and
-        # the designed loop bounces to the editor for Ctrl+S between takes). This is why the
-        # hold key never responded, all the way back to when it was space. Guarded like the
-        # main window's transport keys: a focused text field keeps its letters.
-        self._root_binds = []
-        for sym in ("r", "R"):
-            self._root_binds.append((f"<KeyPress-{sym}>",
-                                     app.root.bind(f"<KeyPress-{sym}>", self._root_press,
-                                                   add="+")))
-            self._root_binds.append((f"<KeyRelease-{sym}>",
-                                     app.root.bind(f"<KeyRelease-{sym}>", self._root_release,
-                                                   add="+")))
-        # Keyboard focus, deferred: the opener's refocus wrapper runs synchronously after this
-        # constructor returns, so an immediate focus_set here would lose the race it is meant
-        # to win.
-        win.after(150, lambda: self.alive() and win.focus_force())
 
         # 3. level + elapsed
-        lrow = tk.Frame(win, bg=COLORS["bg_deep"])
+        lrow = tk.Frame(inner, bg=S)
         lrow.pack(fill=tk.X)
-        self.level = tk.Canvas(lrow, width=380, height=12, bg=COLORS["bg_surface"],
+        self.level = tk.Canvas(lrow, width=380, height=12, bg=COLORS["bg_deep"],
                                highlightthickness=1, highlightbackground=COLORS["border"])
         self.level.pack(side=tk.LEFT)
         ToolTip(self.level, "Live input level — talk and it should move. Flat while you "
                             "speak means the wrong microphone: pick another in ⚙ settings.")
-        self.status = tk.Label(lrow, text="starting the microphone…", font=(FONT_FAMILY, 10),
-                               bg=COLORS["bg_deep"], fg=COLORS["text_secondary"])
+        self.status = tk.Label(lrow, text="", font=(FONT_FAMILY, 10),
+                               bg=S, fg=COLORS["text_secondary"])
         self.status.pack(side=tk.LEFT, padx=10)
 
         # 4. takes
-        tk.Label(win, text="Takes (double-click to load one into the editor):",
-                 font=(FONT_FAMILY, 9), bg=COLORS["bg_deep"],
+        tk.Label(inner, text="Takes (double-click to load one into the editor):",
+                 font=(FONT_FAMILY, 9), bg=S,
                  fg=COLORS["text_secondary"]).pack(anchor=tk.W, pady=(10, 2))
-        self.takes_box = tk.Listbox(win, height=5, width=64, bg=COLORS["bg_surface"],
+        self.takes_box = tk.Listbox(inner, height=5, width=64, bg=COLORS["bg_deep"],
                                     fg=COLORS["text_primary"], font=("Consolas", 9),
                                     relief=tk.FLAT, highlightthickness=1,
                                     highlightbackground=COLORS["border"],
@@ -4235,16 +4268,51 @@ class GizmoRecorder:
         self.takes_box.bind("<Double-Button-1>", lambda _e: self.use_selected())
         ToolTip(self.takes_box, "Every release lands here. The newest take loads into the "
                                 "editor automatically, caption written for you — listen, "
-                                "Ctrl+S to queue, come back and hold for the next one.")
+                                "Ctrl+S to queue, come back and hold for the next one. The "
+                                "list survives Done: takes are only ever added.")
 
         self.new_sentence()
-        self._start_capture()
 
     def alive(self):
+        """Record mode is on: the card is showing and the mic is (or is starting) live."""
         try:
-            return not self._closed and self.win.winfo_exists()
+            return self.active and self.frame.winfo_exists()
         except tk.TclError:
             return False
+
+    def show(self):
+        """Enter record mode: swap this card in for the source card, arm R, start the mic."""
+        if self.active:
+            return
+        self.active = True
+        self.frame.pack(fill=tk.X, padx=16, pady=(0, 12),
+                        before=self.app._audio_source_outer)
+        self.app._audio_source_outer.pack_forget()
+        # R on the ROOT — where keyboard focus actually lives — released again on close.
+        # Guarded like the transport keys: a focused text field keeps its letters. Both
+        # keysyms, so Caps Lock cannot un-bind it.
+        for sym in ("r", "R"):
+            self._root_binds.append((f"<KeyPress-{sym}>",
+                                     self.app.root.bind(f"<KeyPress-{sym}>",
+                                                        self._root_press, add="+")))
+            self._root_binds.append((f"<KeyRelease-{sym}>",
+                                     self.app.root.bind(f"<KeyRelease-{sym}>",
+                                                        self._root_release, add="+")))
+        self.rec_btn.configure(state=tk.NORMAL)
+        self.status.configure(text="starting the microphone…", fg=COLORS["text_secondary"])
+        self.maybe_roll_delivery()
+        self._start_capture()
+
+    def maybe_roll_delivery(self):
+        """A random delivery per take (Peter): the emotional-range axis fills itself instead
+        of waiting for someone to remember the dropdown exists. The roll is VISIBLE — it sets
+        the dropdown, so the instruction is explicit — and the dropdown stays live to
+        override the next take by hand. The ⚙ settings checkbox turns the rolling off."""
+        if not self.app.settings.get("random_delivery", True):
+            return
+        import random
+        others = [d for d in DELIVERY_PROMPTS if d != self.delivery_var.get()]
+        self.delivery_var.set(random.choice(others))
 
     # -- capture lifecycle -------------------------------------------------------------------
     def _start_capture(self):
@@ -4294,7 +4362,7 @@ class GizmoRecorder:
                 return
         except OSError:
             pass
-        self.win.after(50, self._await_first_bytes)
+        self.app.root.after(50, self._await_first_bytes)
 
     def _now(self):
         import time as _time
@@ -4322,7 +4390,7 @@ class GizmoRecorder:
         if self.press_t is not None:
             self.status.configure(text=f"recording…  {self._now() - self.press_t:.1f} s",
                                   fg="#EF4444")
-        self.win.after(self.LEVEL_POLL_MS, self._level_tick)
+        self.app.root.after(self.LEVEL_POLL_MS, self._level_tick)
 
     # -- push-to-record ----------------------------------------------------------------------
     def _press(self, _e=None):
@@ -4369,6 +4437,7 @@ class GizmoRecorder:
                               fg=COLORS["success"])
         self.use_take(len(self.takes) - 1)
         self.new_sentence()
+        self.maybe_roll_delivery()
 
     # -- R as the hold key (with auto-repeat filtering) --------------------------------------
     def _root_key_ok(self):
@@ -4393,14 +4462,14 @@ class GizmoRecorder:
         # Auto-repeat delivers release+press pairs back to back; a REAL press has no pending
         # ghost release to cancel.
         if self._hold_release_job is not None:
-            self.win.after_cancel(self._hold_release_job)
+            self.app.root.after_cancel(self._hold_release_job)
             self._hold_release_job = None
             return "break"
         self._press()
         return "break"
 
     def _hold_release(self, _e):
-        self._hold_release_job = self.win.after(60, self._hold_release_real)
+        self._hold_release_job = self.app.root.after(60, self._hold_release_real)
         return "break"
 
     def _hold_release_real(self):
@@ -4440,29 +4509,38 @@ class GizmoRecorder:
         self.sentence_var.set(pick_sentence(frames))
 
     def close(self):
-        self._closed = True
-        # The root bindings outlive the window unless removed — a ghost recorder must not
-        # keep eating R. (tkinter's unbind clears the whole sequence regardless of funcid,
-        # which is fine: nothing else on the root binds R.)
-        for seq, _funcid in getattr(self, "_root_binds", []):
+        """Done — back to file mode. The mic stops and R is released; the card and its takes
+        survive hidden, ready for the next show()."""
+        if not self.active:
+            return
+        self.active = False
+        # The root bindings must not outlive record mode — R has to type an r again.
+        # (tkinter's unbind clears the whole sequence regardless of funcid, which is fine:
+        # nothing else on the root binds R.)
+        for seq, _funcid in self._root_binds:
             try:
                 self.app.root.unbind(seq)
             except tk.TclError:
                 pass
         self._root_binds = []
+        self.press_t = None
+        self.t0 = None                # stops the level ticker at its next alive() check
         if self.proc is not None and self.proc.poll() is None:
             try:
                 self.proc.terminate()          # raw output: nothing to finalise, safe to kill
             except Exception:
                 pass
+        self.proc = None
         try:
             os.path.exists(self.raw) and os.remove(self.raw)
         except OSError:
             pass                               # ffmpeg may still hold it for an instant
         try:
-            self.win.destroy()
+            self.app._audio_source_outer.pack(fill=tk.X, padx=16, pady=(0, 12),
+                                              before=self.frame)
+            self.frame.pack_forget()
         except tk.TclError:
-            pass
+            pass                               # app teardown mid-close
 
 
 def main():

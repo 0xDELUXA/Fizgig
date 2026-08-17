@@ -2651,11 +2651,16 @@ def train_minimax(
         logger.warning(
             f"[preview] step {step}/{total} took {seconds:.0f}s — far slower than this should "
             f"be, which almost always means the preview does not fit in VRAM and is spilling "
-            f"into system RAM. It will finish, just slowly. For future previews, lower "
-            f"Width/Height on the Samples tab (and Sample length if you are rendering clips). "
-            f"Previews are a heartbeat between checkpoints, not the verdict: every epoch saves "
-            f"a .safetensors, and you can Pause the run to free the GPU, judge an epoch in "
-            f"ComfyUI, then close ComfyUI and Resume.")
+            f"into system RAM. It will finish, just slowly. (Fizgig auto-downgrades previews "
+            f"that hard-OOM, but Windows paging never raises, so this case needs a hand.) "
+            f"In order of impact: set the Turbo LoRA in Preferences (6-step previews — over "
+            f"3x fewer forwards than the standard 20); pick a shorter Sample length if you "
+            f"are rendering clips (frames are the expensive axis); lower Width/Height on the "
+            f"Samples tab (768 -> 640 helps, though below 768 the model is outside its "
+            f"training canvas — treat those previews as a rough guide). Previews are a "
+            f"heartbeat between checkpoints, not the verdict: every epoch saves a "
+            f".safetensors, and you can Pause the run, judge an epoch in ComfyUI, then "
+            f"Resume.")
 
     def _render_previews(epoch):
         """Render one still per prompt on the RESIDENT training DiT and write them where the

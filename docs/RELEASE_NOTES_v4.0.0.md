@@ -159,9 +159,12 @@ autoplay; scrub-only clips keep the frame slider as before. Pairs with the Turbo
 picture-and-sound previews, which is how a voice LoRA gets judged without leaving Fizgig.
 Needs the audio VAE in Preferences — the same file voice training uses.
 
-Previews default to **768×768 stills** (H3's native short edge); clips and sound are a
-dropdown away, and a preview that runs out of VRAM steps itself down a resolution ladder
-(768×640, then 640×640) with a note that below 768 the model is outside its training canvas.
+Previews default to **768×768, 56-frame clips with sound** — the regime H3 was trained in
+(stills and other lengths stay in the dropdown; no audio VAE just means silent clips). A
+preview that outgrows VRAM steps itself down a resolution ladder (768×640, then 640×640)
+rather than dying — triggered by a hard OOM *or* by detecting the Windows paging crawl,
+which never raises an error on its own — with a note that below 768 the model is outside
+its training canvas.
 
 ## Finish one category early
 

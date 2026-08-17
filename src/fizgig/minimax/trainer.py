@@ -2639,28 +2639,34 @@ def train_minimax(
     _res_cap = {"wh": None, "warned": False}
 
     def _slow_step_notice(seconds, step, total):
-        """Told once when a preview step runs absurdly long.
+        """Told once per render when a preview step runs absurdly long.
 
         A preview that does not fit in VRAM does NOT raise on Windows — the driver pages to
-        system RAM and the render succeeds at roughly a hundred times the cost, so the
-        clip->stills fallback (which is exception-driven) never fires and the run looks hung.
-        Wall time is the only symptom that survives, so it is what we watch."""
+        system RAM and the render succeeds at roughly a hundred times the cost. Wall time is
+        the only symptom that survives, so it is what we watch — and when the resolution
+        ladder still has a rung below, we don't just advise: returning True aborts the render
+        and the preview loop retries one rung down, same as a hard OOM (Peter). Only at the
+        640 floor does this fall back to advice.
+        """
+        _cur = _clip_state.get("cur_wh")
+        if _cur and next_preview_res(*_cur) != tuple(_cur):
+            logger.warning(
+                f"[preview] step {step}/{total} took {seconds:.0f}s — the render is paging "
+                f"into system RAM (Windows never raises an OOM for this). Abandoning this "
+                f"sample and retrying one resolution rung down.")
+            return True
         if _clip_state["slow_done"]:
-            return
+            return False
         _clip_state["slow_done"] = True
         logger.warning(
-            f"[preview] step {step}/{total} took {seconds:.0f}s — far slower than this should "
-            f"be, which almost always means the preview does not fit in VRAM and is spilling "
-            f"into system RAM. It will finish, just slowly. (Fizgig auto-downgrades previews "
-            f"that hard-OOM, but Windows paging never raises, so this case needs a hand.) "
-            f"In order of impact: set the Turbo LoRA in Preferences (6-step previews — over "
-            f"3x fewer forwards than the standard 20); pick a shorter Sample length if you "
-            f"are rendering clips (frames are the expensive axis); lower Width/Height on the "
-            f"Samples tab (768 -> 640 helps, though below 768 the model is outside its "
-            f"training canvas — treat those previews as a rough guide). Previews are a "
-            f"heartbeat between checkpoints, not the verdict: every epoch saves a "
-            f".safetensors, and you can Pause the run, judge an epoch in ComfyUI, then "
-            f"Resume.")
+            f"[preview] step {step}/{total} took {seconds:.0f}s — the render is spilling "
+            f"into system RAM even at the resolution floor (640x640). It will finish, just "
+            f"slowly. In order of impact: set the Turbo LoRA in Preferences (6-step previews "
+            f"— over 3x fewer forwards than the standard 20); pick a shorter Sample length "
+            f"if you are rendering clips (frames are the expensive axis), or a still. "
+            f"Previews are a heartbeat between checkpoints, not the verdict: every epoch "
+            f"saves a .safetensors, and you can Pause the run, judge an epoch in ComfyUI, "
+            f"then Resume.")
 
     def _render_previews(epoch):
         """Render one still per prompt on the RESIDENT training DiT and write them where the
@@ -2802,6 +2808,7 @@ def train_minimax(
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
                       f"({_w}x{_h}, {_frames} frame(s), seed {_seed + i})", flush=True)
                 while True:
+                    _clip_state["cur_wh"] = (_w, _h)   # the slow-step callback reads this
                     try:
                         lat, _arows = sampling.sample_image(
                             dit, txt.to(device, dtype),
@@ -2813,11 +2820,15 @@ def train_minimax(
                             num_frames=_frames, on_slow_step=_slow_step_notice,
                             return_audio=True)
                         break
-                    except torch.cuda.OutOfMemoryError:
+                    except (torch.cuda.OutOfMemoryError, sampling.PreviewAborted):
                         # Downgrade one ladder rung and retry rather than losing previews for
-                        # the run: 768x768 -> 768x640 -> 640x640. The cap sticks for later
+                        # the run: 768x768 -> 768x640 -> 640x640. Two triggers, one ladder:
+                        # a hard CUDA OOM (Linux, or a too-big single allocation), and the
+                        # slow-step abort (Windows paging never raises — the callback bails
+                        # after the first crawling step instead). The cap sticks for later
                         # epochs. At the floor there is nothing left to give back — re-raise
-                        # into the trainer's usual preview handling.
+                        # into the trainer's usual preview handling (the abort never fires at
+                        # the floor by construction).
                         _nw, _nh = next_preview_res(_w, _h)
                         if (_nw, _nh) == (_w, _h):
                             raise

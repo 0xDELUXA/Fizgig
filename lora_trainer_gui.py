@@ -3815,8 +3815,8 @@ class LoRATrainerGUI:
                 model_card,
                 text=("⏱ Previews track LIKENESS, not quality. Judge quality in ComfyUI — Pause "
                       "frees the GPU, so you can check an epoch there and Resume.\n"
-                      "Defaults are 768×768 stills; Sample length gives clips. 📖 Full "
-                      "write-ups in the README."),
+                      "Defaults are 768×768 56-frame clips with sound; Sample length has "
+                      "stills and other lengths. 📖 Full write-ups in the README."),
                 font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
                 wraplength=760, justify=tk.LEFT,
             )
@@ -9941,13 +9941,14 @@ class LoRATrainerGUI:
         # Shown/hidden by update_samples_ui_for_architecture.
         self.sample_frames_label = ttk.Label(prompt_card, text="Sample length:")
         self.sample_frames_label.grid(row=8, column=0, sticky=tk.W, padx=(0, 10), pady=4)
-        # Default: STILL (Peter, 11 Aug). Previews are a heartbeat between per-epoch
-        # checkpoints, not the verdict, and a still renders in seconds where a clip takes
-        # minutes — at 1024 it is 1024 video rows against 17408 for a 56-frame clip. The
-        # softness that once argued for clips was four dtype/integration divergences from
-        # ComfyUI, since fixed. Pick a clip length when motion is what you need to see.
+        # Default: 56-FRAME CLIP WITH SOUND (Peter, 17 Aug — reversing the 11 Aug stills
+        # call). What changed: the Turbo makes a 6-step clip render affordable, the sampler's
+        # audio is finally trustworthy, and a clip IS the regime H3 was trained in — a
+        # picture-and-sound preview is now the honest default heartbeat. Without the audio
+        # VAE set it degrades to a silent clip with a console note; Still stays in the
+        # dropdown for anyone who wants seconds-per-preview.
         self.sample_frames_var = tk.StringVar(
-            value=self.last_used.get("sample_frames", "Still (1 frame)"))
+            value=self.last_used.get("sample_frames", "56 frames with sound (~2.3s)"))
         self.sample_frames_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_frames_var, state="readonly", width=34,
             values=["Still (1 frame)", "22 frames (~1s)", "56 frames (~2.3s)",

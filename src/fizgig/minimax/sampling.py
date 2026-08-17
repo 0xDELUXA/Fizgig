@@ -133,6 +133,13 @@ def _res_multistep_coeffs(sig_cur, sig_next, sig_prev):
     return math.exp(-h), h * b1, h * b2
 
 
+class PreviewAborted(RuntimeError):
+    """Raised out of sample_image when on_slow_step returns True — the caller decided the
+    render is paging into system RAM and wants to retry smaller rather than let every
+    remaining step crawl. A CUDA op cannot be interrupted mid-flight, so this fires after
+    the first slow step completes; that still saves the other steps."""
+
+
 @torch.no_grad()
 def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scale=1.0,
                  uncond_embeds=None, seed=0, shift=12.0, device="cuda",
@@ -289,10 +296,14 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
             _elapsed = _t.time() - _step_t0
             if _elapsed > slow_step_s:
                 _slow_fired = True
+                _abort = None
                 try:
-                    on_slow_step(_elapsed, i + 1, n_eval)
+                    _abort = on_slow_step(_elapsed, i + 1, n_eval)
                 except Exception:       # a notice must never take the preview down with it
                     pass
+                if _abort:
+                    # The callback wants out — the sanctioned abort, NOT the swallowed path.
+                    raise PreviewAborted(f"step {i + 1}/{n_eval} took {_elapsed:.0f}s")
     if return_audio:
         # The fully-denoised audio rows ([2*T, 32], channel-major, same layout the cache
         # uses). The loop's state is the CARRIED variable y = x_a * (sv/sa); at sigma 0 the

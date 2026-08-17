@@ -4403,6 +4403,7 @@ class GizmoRecorder:
         self.takes_dir = os.path.join(tempfile.gettempdir(), "gizmo_takes")
         os.makedirs(self.takes_dir, exist_ok=True)
         self.t0 = None                # monotonic when the capture actually started writing
+        self._capture_launched = 0.0  # monotonic at Popen — the clock's hard floor
         self.press_t = None
         self.takes = []               # {path, dur, sentence, delivery}
         self._hold_release_job = None
@@ -4554,16 +4555,31 @@ class GizmoRecorder:
                 device = devices[0]
                 self.app.settings["microphone"] = device
                 save_settings(self.app.settings)
+        # A FRESH, uniquely named raw per record session. Reusing one path was the bug that
+        # collapsed 4-second takes to under a second (Peter): close()'s delete can fail while
+        # the old ffmpeg still holds the handle, the next session's first size-poll then read
+        # the STALE file before the new ffmpeg truncated it, and the clock backed itself off
+        # by minutes of old audio — a mistake the running minimum could never recover from.
+        # A new name every time means the first byte seen is always this session's.
+        import time as _time
+        self.raw = os.path.join(tempfile.gettempdir(),
+                                f"gizmo_capture_{os.getpid()}_{int(_time.time() * 1000)}.raw")
+        try:                                   # yesterday's leftovers, best effort
+            import glob
+            for old in glob.glob(os.path.join(tempfile.gettempdir(), "gizmo_capture*.raw")):
+                if old != self.raw:
+                    os.remove(old)
+        except OSError:
+            pass
         cmd = build_capture_command(self.app.ffmpeg, device, self.raw)
         if cmd is None:
             self.rec_btn.configure(state=tk.DISABLED)
             self.status.configure(text="no microphone available on this machine",
                                   fg=COLORS["warning"])
             return
-        try:
-            os.path.exists(self.raw) and os.remove(self.raw)
-        except OSError:
-            pass
+        # The hard floor for the clock: audio cannot have been captured before the process
+        # that captures it existed. Every t0 estimate below is clamped to this.
+        self._capture_launched = _time.monotonic()
         try:
             self.proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
                                          stderr=subprocess.PIPE, creationflags=_NO_WINDOW)
@@ -4592,9 +4608,11 @@ class GizmoRecorder:
                 # Backing now off by the audio the file contains lands t0 on the capture's
                 # true start — stamping now instead shifted every press/release mapping
                 # early by the burst, which is what put takes out of sync with the thumb
-                # (short measured durations, clipped endings). Refined further by the
-                # running minimum in _level_tick.
-                self.t0 = _time.monotonic() - size / CAPTURE_BPS
+                # (short measured durations, clipped endings). Clamped to the launch time:
+                # no estimate may claim audio from before the capture process existed.
+                # Refined further by the running minimum in _level_tick.
+                self.t0 = max(_time.monotonic() - size / CAPTURE_BPS,
+                              self._capture_launched)
                 self.status.configure(text="mic is live — hold and speak",
                                       fg=COLORS["success"])
                 self._level_tick()
@@ -4614,10 +4632,13 @@ class GizmoRecorder:
             size = os.path.getsize(self.raw)
             # The clock rides the bytes: (now - size/BPS) equals the capture's true start
             # plus however far the writer is lagging right now, so its running MINIMUM
-            # converges on the true start. That is what keeps press/release timestamps
-            # mapped to the right bytes for the whole session, whatever the buffering does.
+            # converges on the true start — clamped to the launch time, so nothing the file
+            # holds can ever drag the clock before the capture process existed. That keeps
+            # press/release timestamps mapped to the right bytes for the whole session,
+            # whatever the buffering does.
             import time as _time
-            self.t0 = min(self.t0, _time.monotonic() - size / CAPTURE_BPS)
+            self.t0 = max(min(self.t0, _time.monotonic() - size / CAPTURE_BPS),
+                          self._capture_launched)
             window = int(0.1 * CAPTURE_BPS) // 4 * 4
             with open(self.raw, "rb") as f:
                 f.seek(max(0, size - window))

@@ -4540,8 +4540,10 @@ class GizmoRecorder:
         srow = tk.Frame(inner, bg=S)
         srow.pack(fill=tk.X)
         app._button(srow, "🎲 New sentence", self.new_sentence, pad=10,
-                    tip="Another prompt, sized to the segment length picked below. Pangrams "
-                        "and Harvard sentences — phonetically dense on "
+                    tip="Another prompt. Lengths rotate from a quick interjection to a line "
+                        "that fills the longest slot — a voice dataset wants range in "
+                        "phrasing as much as in tone — and the sentences are pangrams, "
+                        "Harvard lines and character pieces: phonetically dense on "
                         "purpose.").pack(side=tk.LEFT)
         tk.Label(srow, text="delivery:", font=(FONT_FAMILY, 9),
                  bg=S, fg=COLORS["text_secondary"]).pack(side=tk.LEFT, padx=(14, 4))
@@ -4871,11 +4873,20 @@ class GizmoRecorder:
         app._audio_seek(0.0)
 
     def new_sentence(self):
-        try:
-            frames = self.app.audio_frames_var.get()
-        except Exception:
-            frames = 124
-        self.sentence_var.set(pick_sentence(frames))
+        """A fresh prompt, sized by the recorder's OWN rotating length — a shuffled bag of
+        every grid slot, so seven takes cover the full 0.9-5.2 s range.
+
+        Deliberately NOT the editor's segment-length dropdown: every finished take sets that
+        dropdown to its own best-fit slot, so sizing prompts from it was a feedback loop —
+        one short take locked it to the 0.9 s slot, which only fits three-word sentences,
+        which produce short takes (Peter). Length variety is a dataset axis, same as
+        delivery; it has to be driven, not inherited."""
+        if not getattr(self, "_len_bag", None):
+            import random
+            self._len_bag = list(AUDIO_GRID_FRAMES)
+            random.shuffle(self._len_bag)
+        self._prompt_frames = self._len_bag.pop()
+        self.sentence_var.set(pick_sentence(self._prompt_frames))
 
     def close(self):
         """Done — back to file mode. The mic stops and R is released; the card and its takes

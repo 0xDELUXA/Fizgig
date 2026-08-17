@@ -159,7 +159,7 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
 
-**Previews are 1024×1024 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch. Set the **Turbo LoRA** in Preferences and previews render in **6 steps instead of 20**, with the Turbo applied at 75% on top of your training LoRA for the render only — previews only, never the saved LoRA; steps and strength are adjustable on the Samples tab.
+**Previews are 768×768 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch. Set the **Turbo LoRA** in Preferences and previews render in **6 steps instead of 20**, with the Turbo applied at 75% on top of your training LoRA for the render only — previews only, never the saved LoRA; steps and strength are adjustable on the Samples tab.
 
 ### Video and sound: how do I…
 

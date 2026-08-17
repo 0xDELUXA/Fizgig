@@ -404,16 +404,11 @@ ARCHITECTURES = {
         "sample_is_distilled": True,
         "sample_cfg_fixed": True,
         "sample_steps_default": 20,   # the reference pipeline default
-        # 1024x1024 STILLS (Peter, 11 Aug). Once the four dtype/integration divergences from
-        # ComfyUI were fixed (VAE decode dtype, audio integration order, the int8 per-row scale,
-        # AdaLN precision) previews stopped being soft, and a still at full size became the
-        # better trade than a clip at a small one: 1 latent frame is 1/17th the video rows of a
-        # 56-frame clip, so 1024 costs less than 640 did before and renders in seconds instead
-        # of minutes. Our still decode is its own path (a 5-token group, keeping frame 3) and
-        # measures ~28 dB against the VAE's own reconstruction, well clear of the reference's
-        # single-frame route. Clips are still a dropdown away when motion is what you need.
-        "sample_width_default": 1024,
-        "sample_height_default": 1024,
+        # 768x768 (Peter, 17 Aug — down from the 11 Aug 1024): H3's native canvas is a 768
+        # short edge, and with clips-with-sound in the preview mix the smaller frame keeps
+        # those affordable too. 1024 is still one dropdown away.
+        "sample_width_default": 768,
+        "sample_height_default": 768,
         "lora_name_suffix": "mmh3",
     },
 }
@@ -3820,7 +3815,7 @@ class LoRATrainerGUI:
                 model_card,
                 text=("⏱ Previews track LIKENESS, not quality. Judge quality in ComfyUI — Pause "
                       "frees the GPU, so you can check an epoch there and Resume.\n"
-                      "Defaults are 1024×1024 stills; Sample length gives clips. 📖 Full "
+                      "Defaults are 768×768 stills; Sample length gives clips. 📖 Full "
                       "write-ups in the README."),
                 font=(FONT_FAMILY, 9), fg=COLORS["warning"], bg=COLORS["bg_surface"],
                 wraplength=760, justify=tk.LEFT,

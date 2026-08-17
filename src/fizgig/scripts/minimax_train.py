@@ -199,6 +199,12 @@ def setup_parser() -> argparse.ArgumentParser:
                    help="Pixel frames per sample on the 17n+5 grid (1=still; 124=trained minimum, ~5s). Off-grid snaps down.")
     p.add_argument("--sample_negative", default=None, help="Only used when --sample_cfg_scale > 1")
     p.add_argument("--sample_seed", type=int, default=42, help="0 = random each preview")
+    p.add_argument("--turbo_lora_path", default=None,
+                   help="H3 Turbo LoRA (minimax_h3_turbo_v4_step600.safetensors) — applied to "
+                        "PREVIEWS only, at --turbo_lora_strength, and removed before the next "
+                        "training step. Pair with --sample_steps 6.")
+    p.add_argument("--turbo_lora_strength", type=float, default=0.75,
+                   help="Preview strength for --turbo_lora_path (0.75 recommended)")
     p.add_argument("--text_encoder", default=None,
                    help="Qwen3-VL-32B TE — needed only to pre-encode preview prompts")
     p.add_argument("--vae", default=None, help="H3 video VAE (reserved for the full decoder)")
@@ -291,6 +297,8 @@ def main():
         sample_frames=args.sample_frames,
         sample_negative=args.sample_negative,
         sample_seed=args.sample_seed,
+        turbo_lora_path=args.turbo_lora_path,
+        turbo_lora_strength=args.turbo_lora_strength,
     )
 
 

@@ -626,6 +626,52 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
     return v_loss + audio_weight * a_loss, sigma_v
 
 
+def load_preview_turbo(dit, path, strength):
+    """The Turbo LoRA, wired for previews: applied ONCE to the live DiT with every module
+    DISABLED, weights parked on CPU. The preview phase flips `enabled` on and moves the
+    weights to the GPU; afterwards both revert. A disabled LoRAInfModule's forward is a pure
+    passthrough that never touches its weights, so the training step pays one Python branch
+    per wrapped Linear and nothing else — no weight surgery on the training model, ever.
+
+    The file's modules are prefiltered to Linears that exist on THIS base with matching
+    shapes: the Turbo ships full-model AdaLN rows (2688-wide) that the pruned curve-table
+    base cannot host, and load_state_dict raises on a shape mismatch even with strict=False —
+    ComfyUI drops the same rows silently when it applies the Turbo to the pruned build."""
+    from safetensors.torch import load_file
+    from fizgig.networks.lora import (create_network_from_weights,
+                                      ensure_kohya_lora_state_dict)
+    sd = ensure_kohya_lora_state_dict(load_file(path))
+    linears = {f"lora_unet_{n.replace('.', '_')}": m
+               for n, m in dit.named_modules() if isinstance(m, torch.nn.Linear)}
+    keep, dropped = {}, []
+    for name in sorted({k.split(".")[0] for k in sd}):
+        m = linears.get(name)
+        down = sd.get(f"{name}.lora_down.weight")
+        up = sd.get(f"{name}.lora_up.weight")
+        if (m is None or down is None or up is None
+                or down.shape[1] != m.in_features or up.shape[0] != m.out_features):
+            dropped.append(name)
+            continue
+        for suf in (".lora_down.weight", ".lora_up.weight", ".alpha"):
+            if f"{name}{suf}" in sd:
+                keep[f"{name}{suf}"] = sd[f"{name}{suf}"]
+    if not keep:
+        raise RuntimeError("no module in this LoRA matches the loaded base — wrong file?")
+    net = create_network_from_weights(None, float(strength), keep, None, dit,
+                                      for_inference=True)
+    net.apply_to(text_encoders=None, unet=dit, apply_text_encoder=False, apply_unet=True)
+    # AFTER apply_to, or the modules keep their zero init and contribute nothing — the same
+    # trap the Krea 2 context-LoRA path documents.
+    net.load_state_dict(keep, strict=False)
+    net.requires_grad_(False)
+    for m in net.unet_loras:
+        m.enabled = False
+    logger.info(f"[turbo] {len(net.unet_loras)} modules wired at strength {strength:g}"
+                + (f" ({len(dropped)} skipped — not on this base, e.g. full-model AdaLN)"
+                   if dropped else ""))
+    return net
+
+
 @contextlib.contextmanager
 def lora_disabled(network):
     """Run the frozen BASE inside this block — every adapter's multiplier is temporarily 0.
@@ -1619,6 +1665,10 @@ def train_minimax(
     sample_frames: int = 1,      # pixel frames on the 17n+5 grid; 1 = classic still
     sample_negative: str = None,
     sample_seed: int = 42,
+    # Turbo LoRA for previews ONLY: applied once with every module disabled, flipped on for
+    # the sampling phase, off again after. The training math never sees it.
+    turbo_lora_path: str = None,
+    turbo_lora_strength: float = 0.75,
     # Output metadata (recorded in the saved LoRA).
     metadata_title: str = None,
     metadata_author: str = None,
@@ -1938,6 +1988,22 @@ def train_minimax(
             f"of the model.")
     _n_targeted = len(_targeted)
     logger.info(f"[network] {len(network.unet_loras)}/{_n_targeted} targeted Linears wrapped")
+
+    # The preview Turbo LoRA — a nicety, never a run-killer: any failure logs and trains on.
+    turbo_net = None
+    if turbo_lora_path:
+        if not os.path.isfile(turbo_lora_path):
+            logger.warning(f"[turbo] file not found — previews render without it: "
+                           f"{turbo_lora_path}")
+        else:
+            try:
+                turbo_net = load_preview_turbo(dit, turbo_lora_path, turbo_lora_strength)
+                logger.info(f"[turbo] previews render with "
+                            f"{os.path.basename(turbo_lora_path)} at "
+                            f"{turbo_lora_strength:g} x {sample_steps} steps")
+            except Exception as _te:
+                logger.warning(f"[turbo] could not load ({type(_te).__name__}: {_te}) — "
+                               f"previews render without it")
 
     params = list(network.get_trainable_params())
 
@@ -2472,6 +2538,14 @@ def train_minimax(
                 logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
                             f'({len(_opt_parked)} optimizer tensors parked'
                             f'{", EMA shadow parked" if _ema_parked else ""})')
+            if turbo_net is not None:
+                # On for the sampling phase only: weights to the GPU (~0.8 GB), modules
+                # enabled at their strength. Off + back to CPU before decode.
+                turbo_net.to(device=device, dtype=dtype)
+                for _tm in turbo_net.unet_loras:
+                    _tm.enabled = True
+                logger.info(f"[preview] Turbo LoRA on — {sample_steps} steps at "
+                            f"{turbo_lora_strength:g}")
             _rendered = []
             for i, txt in enumerate(_prompts):
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
@@ -2487,6 +2561,13 @@ def train_minimax(
                 _rendered.append((f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}",
                                   lat.to("cpu")))
                 del lat
+
+            if turbo_net is not None:
+                for _tm in turbo_net.unet_loras:
+                    _tm.enabled = False
+                turbo_net.to("cpu")
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()      # its ~0.8 GB back before the decode phase
 
             # optimizer state back before anything else - the next training step needs it
             for _st, _k in _opt_parked:
@@ -2558,6 +2639,12 @@ def train_minimax(
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
             del decoder                                  # free the ~4.85 GB decoder immediately
+            if turbo_net is not None:
+                # Idempotent, and NON-NEGOTIABLE on an exception mid-sample: a Turbo left
+                # enabled would ride every subsequent TRAINING step at 0.75.
+                for _tm in turbo_net.unet_loras:
+                    _tm.enabled = False
+                turbo_net.to("cpu")
             for _st, _k in _opt_parked:      # exception during phase 1: state must return
                 _st[_k] = _st[_k].to(device)
             if _ema_parked:                  # next ema.update() needs the shadow on-device

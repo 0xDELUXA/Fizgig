@@ -1215,10 +1215,14 @@ class Gizmo:
         # takefocus=0 plus a refocus after every click: a button that keeps keyboard focus
         # eats the space bar (Tk's Button class binding fires before any root handler can),
         # and the space bar's job in this tool is the transport, not re-pressing Open.
+        # The refocus goes to the button's OWN toplevel, never self.root: focusing the root
+        # from a button that lives on a popup ACTIVATES the main window, which puts the popup
+        # behind it — the recorder's New sentence button "closing" the recorder was exactly
+        # this.
         def _run_and_refocus():
             command()
             try:
-                self.root.focus_set()
+                b.winfo_toplevel().focus_set()
             except tk.TclError:
                 pass
         b = tk.Button(parent, text=text, command=_run_and_refocus,
@@ -4111,9 +4115,15 @@ class GizmoRecorder:
     """The push-to-record window.
 
     The mic rolls CONTINUOUSLY while this window is open (one ffmpeg writing raw PCM);
-    holding the button — or space — only marks timestamps, and the take is sliced out
+    holding the button — or the R key — only marks timestamps, and the take is sliced out
     afterwards with cushions either side. That is what makes push-to-record clip nothing:
     the capture was already running when the thumb landed.
+
+    R, not space and not Shift (Peter): space already means too much — it is the transport on
+    both main tabs and Tk's activate key for any focused widget — and Shift walks into
+    Windows' accessibility traps (five presses pops the Sticky Keys prompt, an 8 s hold pops
+    Filter Keys). R is easy to find without looking, means record, and does nothing else in
+    this window. Bound by both keysyms so Caps Lock cannot un-bind it.
     """
 
     LEVEL_POLL_MS = 100
@@ -4127,7 +4137,7 @@ class GizmoRecorder:
         self.t0 = None                # monotonic when the capture actually started writing
         self.press_t = None
         self.takes = []               # {path, dur, sentence, delivery}
-        self._space_release_job = None
+        self._hold_release_job = None
         self._closed = False
 
         win = self.win = tk.Toplevel(app.root)
@@ -4162,7 +4172,7 @@ class GizmoRecorder:
 
         # 2. the hold button. Press/release bindings, NOT command — and NOT app._button,
         # whose focus-return wrapper would fight the hold.
-        self.rec_btn = tk.Button(win, text="🎙  HOLD to record  (or hold space)",
+        self.rec_btn = tk.Button(win, text="🎙  HOLD to record  (or hold R)",
                                  font=(FONT_FAMILY, 13, "bold"), bg=COLORS["bg_hover"],
                                  fg=COLORS["text_primary"], activebackground="#B91C1C",
                                  activeforeground=COLORS["text_primary"], relief=tk.FLAT,
@@ -4170,14 +4180,15 @@ class GizmoRecorder:
         self.rec_btn.pack(fill=tk.X, pady=(12, 6))
         ToolTip(self.rec_btn,
                 "Hold while you speak, release when the sentence ends — a quarter-second "
-                "either side is kept for you, so don't rush the press. If a Windows "
-                "accessibility prompt ever interrupts a take (Sticky/Filter Keys), hold with "
-                "the mouse instead, or turn those off in Windows Settings → Accessibility → "
-                "Keyboard.")
+                "either side is kept for you, so don't rush the press. R works as the hold "
+                "key too: R for record, and it means nothing else in this window.")
         self.rec_btn.bind("<ButtonPress-1>", self._press)
         self.rec_btn.bind("<ButtonRelease-1>", self._release)
-        win.bind("<KeyPress-space>", self._space_press)
-        win.bind("<KeyRelease-space>", self._space_release)
+        # Both keysyms: with Caps Lock on (or Shift down) the key arrives as "R", and a
+        # binding on "r" alone would silently stop working.
+        for sym in ("r", "R"):
+            win.bind(f"<KeyPress-{sym}>", self._hold_press)
+            win.bind(f"<KeyRelease-{sym}>", self._hold_release)
 
         # 3. level + elapsed
         lrow = tk.Frame(win, bg=COLORS["bg_deep"])
@@ -4306,7 +4317,7 @@ class GizmoRecorder:
         press, self.press_t = self.press_t, None
         release = self._now()
         self.rec_btn.configure(bg=COLORS["bg_hover"],
-                               text="🎙  HOLD to record  (or hold space)")
+                               text="🎙  HOLD to record  (or hold R)")
         sentence, delivery = self.sentence_var.get(), self.delivery_var.get()
 
         def worker():
@@ -4339,23 +4350,23 @@ class GizmoRecorder:
         self.use_take(len(self.takes) - 1)
         self.new_sentence()
 
-    # -- space as the hold key (with auto-repeat filtering) ----------------------------------
-    def _space_press(self, _e):
+    # -- R as the hold key (with auto-repeat filtering) --------------------------------------
+    def _hold_press(self, _e):
         # Auto-repeat delivers release+press pairs back to back; a REAL press has no pending
         # ghost release to cancel.
-        if self._space_release_job is not None:
-            self.win.after_cancel(self._space_release_job)
-            self._space_release_job = None
+        if self._hold_release_job is not None:
+            self.win.after_cancel(self._hold_release_job)
+            self._hold_release_job = None
             return "break"
         self._press()
         return "break"
 
-    def _space_release(self, _e):
-        self._space_release_job = self.win.after(60, self._space_release_real)
+    def _hold_release(self, _e):
+        self._hold_release_job = self.win.after(60, self._hold_release_real)
         return "break"
 
-    def _space_release_real(self):
-        self._space_release_job = None
+    def _hold_release_real(self):
+        self._hold_release_job = None
         self._release()
 
     # -- takes -> the editor -----------------------------------------------------------------

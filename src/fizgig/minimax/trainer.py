@@ -2004,6 +2004,13 @@ def train_minimax(
             except Exception as _te:
                 logger.warning(f"[turbo] could not load ({type(_te).__name__}: {_te}) — "
                                f"previews render without it")
+        if turbo_net is None and sample_steps < 20:
+            # The launched command carried the TURBO pace — a few steps only make sense with
+            # the Turbo applied, and rendering the fallback at 6 would produce mush and read
+            # as a broken LoRA (Peter). Standard pass instead, said out loud.
+            logger.warning(f"[turbo] previews fall back to the standard pass: {sample_steps} "
+                           f"steps was the Turbo pace — using 20 instead")
+            sample_steps = 20
 
     params = list(network.get_trainable_params())
 

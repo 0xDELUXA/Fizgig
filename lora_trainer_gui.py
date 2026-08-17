@@ -8254,6 +8254,35 @@ class LoRATrainerGUI:
     # pick them up — so only there do they need captions.
     TRAINING_VIDEO_EXTENSIONS = {'.mp4'}
 
+    @staticmethod
+    def _read_middle_clip_frame(path):
+        """One frame from the middle of a clip WITHOUT decoding the whole file. cv2 seeks the
+        container to the midpoint and decodes from the nearest keyframe — milliseconds,
+        against read_frames' full decode of every frame at native resolution (seconds per
+        clip, and it was running on the GUI thread at every Captions tab refresh — the tab
+        froze for the sum of it, Peter). None on any failure; the caller falls back."""
+        try:
+            import cv2
+            from PIL import Image
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                return None
+            try:
+                n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+                if n > 1:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, n // 2)
+                ok, frame = cap.read()
+                if not ok and n > 1:           # an odd container refused the seek — frame 0
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ok, frame = cap.read()
+                if not ok or frame is None:
+                    return None
+                return Image.fromarray(frame[:, :, ::-1])      # BGR -> RGB
+            finally:
+                cap.release()
+        except Exception:
+            return None
+
     def _open_training_frame(self, path):
         """A PIL image for any training item. A video clip gives up its middle frame.
 
@@ -8263,13 +8292,41 @@ class LoRATrainerGUI:
         latent cache keys on the filename stem with the extension stripped, so a sidecar
         walk_03.png would land on walk_03.mp4's own cache file and one would silently overwrite
         the other.
+
+        Clip frames are cached by (path, mtime) at a bounded size, so a Captions tab revisit
+        costs nothing. The returned image is always a COPY — callers thumbnail() it in place,
+        which would shrink the cached original for everyone after them. The clip's true
+        resolution rides along as `fizgig_source_size`, because the cached frame is capped and
+        a resolution label lying about the file would be worse than the wait was.
         """
         from PIL import Image
         if os.path.splitext(path)[1].lower() not in self.TRAINING_VIDEO_EXTENSIONS:
             return Image.open(path)
-        from fizgig.minimax.clip import read_frames
-        frames = read_frames(path)
-        return Image.fromarray(frames[len(frames) // 2])
+        cache = getattr(self, "_clip_frame_cache", None)
+        if cache is None:
+            cache = self._clip_frame_cache = {}
+        try:
+            key = (path, os.path.getmtime(path))
+        except OSError:
+            key = (path, 0)
+        hit = cache.get(key)
+        if hit is None:
+            img = self._read_middle_clip_frame(path)
+            if img is None:                    # cv2 refused the file — the slow, sure way
+                from fizgig.minimax.clip import read_frames
+                frames = read_frames(path)
+                img = Image.fromarray(frames[len(frames) // 2])
+            true_size = img.size
+            img.thumbnail((1280, 1280), Image.LANCZOS)
+            for k in [k for k in cache if k[0] == path]:      # a re-exported clip re-reads
+                del cache[k]
+            while len(cache) >= 64:            # bounded: ~2-3 MB a frame, oldest out first
+                del cache[next(iter(cache))]
+            cache[key] = hit = (img, true_size)
+        frame, true_size = hit
+        out = frame.copy()
+        out.fizgig_source_size = true_size
+        return out
 
     TRAINING_AUDIO_EXTENSIONS = {'.wav', '.mp3', '.flac', '.m4a'}
 
@@ -8445,7 +8502,7 @@ class LoRATrainerGUI:
         img_res = None
         try:
             with self._open_training_frame(img_path) as img:
-                img_res = img.size
+                img_res = getattr(img, "fizgig_source_size", img.size)
                 img.thumbnail((150, 150), Image.LANCZOS)
                 photo = ImageTk.PhotoImage(img)
                 self.caption_thumbnails[img_path] = photo  # Keep reference
@@ -8564,7 +8621,7 @@ class LoRATrainerGUI:
                             if os.path.basename(path) in files else ""))
             try:
                 with self._open_training_frame(path) as img:
-                    _w, _h = img.size
+                    _w, _h = getattr(img, "fizgig_source_size", img.size)
                     img.thumbnail((300, 300), Image.LANCZOS)
                     photo = ImageTk.PhotoImage(img)
                     img_label.configure(image=photo)

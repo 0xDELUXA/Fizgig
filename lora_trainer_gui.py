@@ -10825,7 +10825,9 @@ class LoRATrainerGUI:
         .badge { position: absolute; top: 10px; left: 10px; padding: 6px 12px; border-radius: 4px; font-weight: bold; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
         .epoch-badge { background-color: #27AE60; color: white; }
         .clip-badge { background-color: #8E44AD; color: white; right: 8px; left: auto; }
-        .sound-badge { background-color: #16A085; color: white; right: 8px; left: auto; top: 34px; }
+        /* below the clip badge with clear air — the two overlapped at 34px (Peter) */
+        .sound-badge { background-color: #16A085; color: white; right: 8px; left: auto; top: 40px; }
+        #lightbox-vid { display: none; max-width: 90vw; max-height: 72vh; border-radius: 4px; }
         #lb-scrub-wrap { display: none; width: min(80vw, 640px); margin-top: 10px; text-align: center; }
         #lb-scrub-wrap.active { display: block; }
         #lb-scrub { width: 100%; }
@@ -10947,6 +10949,7 @@ class LoRATrainerGUI:
         <span class="close-btn" onclick="closeLightbox()">&times;</span>
         <span class="nav-btn prev-btn" onclick="navigateLightbox(-1)">&#10094;</span>
         <img id="lightbox-img" src="" alt="">
+        <video id="lightbox-vid" controls preload="metadata"></video>
         <span class="nav-btn next-btn" onclick="navigateLightbox(1)">&#10095;</span>
         <div id="lb-scrub-wrap">
             <input type="range" id="lb-scrub" min="0" max="0" value="0"
@@ -11110,6 +11113,11 @@ class LoRATrainerGUI:
                         const sj = await fetch('sounds.json?t=' + Date.now());
                         if (sj.ok) { const sm = await sj.json(); images.forEach(im => { if (sm[im.filename]) im.sound = sm[im.filename]; }); }
                     } catch (e) {}
+                    // Playable clips (frames + sound muxed): filename -> mp4. Never autoplays.
+                    try {
+                        const vj = await fetch('videos.json?t=' + Date.now());
+                        if (vj.ok) { const vm = await vj.json(); images.forEach(im => { if (vm[im.filename]) im.video = vm[im.filename]; }); }
+                    } catch (e) {}
                     await loadLikeness();
                     renderGallery();
                     renderLikenessChart();
@@ -11165,8 +11173,9 @@ class LoRATrainerGUI:
                         <img src="${img.filename}" alt="${img.filename}" loading="lazy">
                         <span class="badge epoch-badge">Epoch ${img.epoch}</span>
                         ${likBadge(img)}
-                        ${img.clip ? `<span class="badge clip-badge">🎞 scrub</span>` : ''}
-                        ${img.sound ? `<span class="badge sound-badge">🔊 sound</span>` : ''}
+                        ${img.video ? `<span class="badge clip-badge">🎬 video</span>` : ''}
+                        ${!img.video && img.clip ? `<span class="badge clip-badge">🎞 scrub</span>` : ''}
+                        ${!img.video && img.sound ? `<span class="badge sound-badge">🔊 sound</span>` : ''}
                     </div>
                     <div class="image-info">
                         <div class="lora-name">${img.loraName}</div>
@@ -11540,11 +11549,33 @@ class LoRATrainerGUI:
         function showLightbox(img) {
             const wrap = document.getElementById('lb-scrub-wrap');
             const slider = document.getElementById('lb-scrub');
-            // The sample's generated sound, when it has one. A play CONTROL, never autoplay —
-            // scrubbing stays silent and the audio is there when you ask for it.
             const aw = document.getElementById('lb-audio-wrap');
             const au = document.getElementById('lb-audio');
+            const vid = document.getElementById('lightbox-vid');
+            const imEl = document.getElementById('lightbox-img');
             au.pause();
+            vid.pause();
+            // A sample with a muxed mp4 plays as a REAL clip — controls, never autoplay —
+            // replacing both the scrub slider and the separate audio player.
+            if (img.video) {
+                vid.src = img.video;
+                vid.style.display = 'block';
+                imEl.style.display = 'none';
+                aw.style.display = 'none';
+                au.removeAttribute('src');
+                wrap.classList.remove('active');
+                lbClip = null;
+                document.getElementById('lightbox-name').textContent = img.filename;
+                document.getElementById('lightbox-meta').textContent = `${img.loraName} | Epoch ${img.epoch} | Seed: ${img.seed} | ${img.time}`;
+                document.getElementById('lightbox').classList.add('active');
+                document.body.style.overflow = 'hidden';
+                return;
+            }
+            vid.removeAttribute('src');
+            vid.style.display = 'none';
+            imEl.style.display = '';
+            // The sample's generated sound, when it has one (wav without an mp4 — e.g. the
+            // mux failed). A play CONTROL, never autoplay — scrubbing stays silent.
             if (img.sound) { au.src = img.sound; aw.style.display = 'block'; }
             else { au.removeAttribute('src'); aw.style.display = 'none'; }
             lbClip = img.clip || null;
@@ -11569,6 +11600,7 @@ class LoRATrainerGUI:
 
         function closeLightbox() {
             document.getElementById('lb-audio').pause();
+            document.getElementById('lightbox-vid').pause();
             document.getElementById('lightbox').classList.remove('active');
             document.body.style.overflow = '';
         }
@@ -11664,6 +11696,12 @@ class LoRATrainerGUI:
                       if f.lower().endswith(".wav")}
             with open(os.path.join(samples_dir, "sounds.json"), 'w', encoding='utf-8') as f:
                 json.dump(sounds, f)
+            # Playable clips (frames + sound muxed): <stem>.mp4 — the lightbox plays these
+            # instead of the scrub slider + separate audio player.
+            videos = {f[:-4] + ".png": f for f in os.listdir(samples_dir)
+                      if f.lower().endswith(".mp4")}
+            with open(os.path.join(samples_dir, "videos.json"), 'w', encoding='utf-8') as f:
+                json.dump(videos, f)
         except Exception:
             pass
 

@@ -626,6 +626,39 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
     return v_loss + audio_weight * a_loss, sigma_v
 
 
+def _find_ffmpeg():
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        import shutil
+        return shutil.which("ffmpeg")
+
+
+def write_preview_mp4(path, frames, wav_path, fps=24):
+    """Mux decoded preview frames [3, F, H, W] in [0,1] with their wav into a playable mp4.
+
+    The gallery plays THIS for samples with sound — a real clip at the true frame rate with
+    its soundtrack, instead of a scrub slider plus a separate audio player. Raises on any
+    failure; the caller treats the mp4 as a nicety."""
+    import subprocess
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("no ffmpeg available")
+    f, h, w = frames.shape[1], frames.shape[2], frames.shape[3]
+    raw = (frames.permute(1, 2, 3, 0).clamp(0, 1) * 255).byte().cpu().numpy().tobytes()
+    cmd = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
+           "-i", wav_path,
+           "-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+           "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", path]
+    p = subprocess.run(cmd, input=raw, capture_output=True,
+                       creationflags=0x08000000 if os.name == "nt" else 0)
+    if p.returncode != 0 or not os.path.isfile(path):
+        raise RuntimeError((p.stderr or b"").decode("utf-8", "replace")[-300:]
+                           or "ffmpeg failed")
+
+
 def write_wav(path, wav, sample_rate=32000):
     """[2, L] float waveform in [-1, 1] -> 16-bit interleaved stereo wav. Stdlib only."""
     import wave as _wave
@@ -2790,6 +2823,7 @@ def train_minimax(
                         _base_parked = True
                 decoder = decoder.to(device)
             for stem, lat, _arows in _rendered:
+                _px_mp4 = None                # full frames held only for a with-sound mp4
                 lat = lat.to(device)
                 if lat.shape[2] > 1 and decoder is not None:
                     # Clip: decode every frame, store EVERY 2ND frame as JPEG in a sibling
@@ -2811,6 +2845,8 @@ def train_minimax(
                     img = Image.fromarray(mid)
                     print(f"[preview] decoded {n_f}-frame clip at {_w}x{_h} "
                           f"({(n_f + 1) // 2} scrub frames)", flush=True)
+                    if _arows is not None:
+                        _px_mp4 = px.cpu()     # every frame, for the playable mp4 below
                     del px
                 elif decoder is not None:
                     px = decoder.decode(lat.float())[0]          # [3, H, W] in [0, 1]
@@ -2834,13 +2870,26 @@ def train_minimax(
                             _adec.to(device)
                             _wave = _adec.decode(
                                 unpack_audio(_arows).to(device, torch.float32))
-                            write_wav(os.path.join(sample_dir, stem + ".wav"),
-                                      _wave[0].cpu())
+                            _wav_path = os.path.join(sample_dir, stem + ".wav")
+                            write_wav(_wav_path, _wave[0].cpu())
                             print(f"[preview] wrote sound: {stem}.wav", flush=True)
+                            if _px_mp4 is not None:
+                                # a real playable clip — frames at true rate, sound muxed in;
+                                # the gallery plays this instead of scrub + separate audio
+                                try:
+                                    write_preview_mp4(
+                                        os.path.join(sample_dir, stem + ".mp4"),
+                                        _px_mp4, _wav_path)
+                                    print(f"[preview] wrote video: {stem}.mp4", flush=True)
+                                except Exception as _me:
+                                    logger.warning(f"[preview] mp4 mux skipped "
+                                                   f"({type(_me).__name__}: {_me}) — the "
+                                                   f"wav and scrub frames still work")
                         except Exception as _we:
                             logger.warning(f"[preview] audio decode failed "
                                            f"({type(_we).__name__}: {_we}) — this sample "
                                            f"renders silent")
+                    _px_mp4 = None
                 img.save(os.path.join(sample_dir, stem + ".png"))
                 del lat
             if _audio_dec_state["dec"] is not None:

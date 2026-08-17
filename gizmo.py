@@ -1097,6 +1097,21 @@ class Gizmo:
         self._video_sound = None      # (span_start_s, span_len_s, consumed_s) while paused
         self._video_offset = 0.0      # how far into the current span playback started
         self._video_t0 = 0.0
+        # Video playback (the ▶ button): its own small state machine, parallel to the sound
+        # button's — see video_toggle_play. The generation counter is how stale readers,
+        # ticks and sound workers die: anything holding an old gen returns silently.
+        self._vplay_gen = 0
+        self._vplay_playing = False
+        self._vplay_resume = None     # clip-time seconds to resume from after a pause
+        self._vplay_frames = []       # decoded PIL frames, appended by the reader thread
+        self._vplay_total = 0
+        self._vplay_eof = False
+        self._vplay_proc = None
+        self._vplay_job = None
+        self._vplay_t0 = None         # wall clock at first painted frame; None = not started
+        self._vplay_offset = 0.0
+        self._vplay_last_idx = -1
+        self._vplay_sound_ready = True
 
         # Voice / audio mode state — parallel world, deliberately separate variables: a video
         # open on one tab and a recording on the other must never share a playhead.
@@ -1409,6 +1424,12 @@ class Gizmo:
 
         nav = tk.Frame(c, bg=COLORS["bg_surface"])
         nav.pack()
+        self.vplay_btn = self._button(
+            nav, "▶ Play", self.video_toggle_play, pad=10,
+            tip="Watch the marked clip — exactly the frames and pace Save would export, slow "
+                "motion included, with its sound when the source has a track.\n\nClick again "
+                "to pause; a paused clip resumes where it stopped.")
+        self.vplay_btn.pack(side=tk.LEFT, padx=(0, 10))
         self._button(nav, "⏮ Start", self.go_to_start, pad=10,
                      tip="Jump to the beginning of the source video.  (Home)").pack(
             side=tk.LEFT, padx=3)
@@ -1747,7 +1768,7 @@ class Gizmo:
     def _set_enabled(self, on):
         state = tk.NORMAL if on else tk.DISABLED
         for w in (self.add_btn, self.chop_btn, self.export_btn, self.scale, self.open_btn,
-                  self.pos_entry, self.crop_clear_btn, *self._radios):
+                  self.pos_entry, self.crop_clear_btn, self.vplay_btn, *self._radios):
             w.configure(state=state)
         for box in (self.len_box, self.motion_box, self.shape_box):
             box.configure(state="readonly" if on else tk.DISABLED)
@@ -1838,10 +1859,12 @@ class Gizmo:
     # Length and motion both move the END of the clip, so both have to redraw the last-frame
     # preview as well as the cost line.
     def _on_length_changed(self):
+        self._vplay_stop()                     # the marked clip just changed shape
         self._refresh_cost()
         self.show_frame()
 
     def _on_motion_changed(self):
+        self._vplay_stop()
         self._update_pos_labels()
         self.show_frame()
 
@@ -1896,6 +1919,7 @@ class Gizmo:
         """Everything opening a video does, with no dialog in the way — so it can be tested."""
         info = probe_source(self.ffmpeg, path)
         self._stop_audio()
+        self._vplay_stop()
         # An open auto-chop review belongs to the video it scanned, and this is a new one.
         self._autochop_close()
         # A crop belongs to the frame it was drawn on, and a new video is a new frame.
@@ -1982,6 +2006,8 @@ class Gizmo:
     def _on_scrub(self, value):
         if not self.src:
             return
+        if self._vplay_playing or self._vplay_resume is not None:
+            self._vplay_stop()                 # a moved playhead outdates play AND its resume
         self.frame_pos = int(float(value))
         self._update_pos_labels()
         # Live while dragging, not on release: a debounce alone kept cancelling itself for the
@@ -2331,6 +2357,7 @@ class Gizmo:
         keeps the promise the tooltip makes: the gain exists in a temp file for listening and
         never reaches the saved clip.
         """
+        self._vplay_stop()                     # full playback yields to the sound-only button
         if self._playing:
             self._stop_audio()
             self._video_sound = None
@@ -2372,7 +2399,12 @@ class Gizmo:
         self.status.configure(text=f"paused — space resumes", fg=COLORS["text_secondary"])
 
     def _video_space(self):
-        """Space on the video tab: play the marked section's sound / pause / resume."""
+        """Space on the video tab: play the marked section's sound / pause / resume. Once the
+        ▶ button has full playback going (or paused), space toggles THAT instead — two
+        transports fighting over one space bar would play sound under the moving picture."""
+        if self._vplay_playing or self._vplay_resume is not None:
+            self.video_toggle_play()
+            return
         if self._playing:
             self._video_pause()
         elif self._video_sound is not None:
@@ -2422,6 +2454,180 @@ class Gizmo:
         self._playing = False
         if self.play_btn.winfo_exists():
             self.play_btn.configure(text="▶  Play sound")
+
+    # -- video playback (the ▶ button on the scrub card) --------------------------------------
+    # Plays the MARKED CLIP — the same span, retime filters and pace that Save would export,
+    # slow motion included — as moving pictures on the first-frame canvas, with the clip's
+    # sound alongside. One ffmpeg decodes the span to raw frames at preview size on a reader
+    # thread; a wall-clock tick paints the frame the elapsed time calls for, dropping frames
+    # if decode falls behind rather than drifting. The clock starts only when the first frame
+    # AND the sound are both ready, so picture and audio leave the gate together.
+
+    def video_toggle_play(self):
+        """The combined play/pause: play from the playhead, pause where it is, resume."""
+        if self._vplay_playing:
+            self._video_clip_pause()
+        elif self._vplay_resume is not None:
+            offset, self._vplay_resume = self._vplay_resume, None
+            self._video_clip_play(offset)
+        else:
+            self._video_clip_play(0.0)
+
+    def _vplay_clip_len(self):
+        return self._frames() / FPS            # the clip's OWN timeline, both motion modes
+
+    def _video_clip_play(self, offset):
+        if not self.src or not self.info:
+            return
+        self._stop_audio()                     # the sound-only button yields to full playback
+        clip_len = self._vplay_clip_len()
+        if offset >= clip_len - 0.04:
+            offset = 0.0
+        fps = self.info["fps"]
+        k = self._keep_every()
+        start = self.frame_pos / fps
+        # `offset` is clip time. In real time that IS source time; in slow motion each clip
+        # second consumes k*FPS/fps source seconds. The export's audio track is the source's
+        # real-time audio from `start` either way, so sound maps 1:1 to clip time.
+        src_off = offset * k * FPS / fps if k else offset
+        n_frames = max(1, int(round((clip_len - offset) * FPS)))
+        w, h = fit_within(self.info["display_width"], self.info["display_height"],
+                          PREVIEW_W, PREVIEW_H)
+        if k:
+            vf = f"select='not(mod(n\\,{k}))',setpts=N/({FPS}*TB)"
+        else:
+            vf = f"fps={FPS}"
+        vf += f",scale={w}:{h}"
+        cmd = [self.ffmpeg, "-hide_banner", "-loglevel", "error",
+               "-ss", f"{max(0.0, start + src_off):.3f}", "-i", self.src,
+               "-vf", vf, "-frames:v", str(n_frames), "-an",
+               "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+
+        self._vplay_gen += 1
+        gen = self._vplay_gen
+        self._vplay_frames = []
+        self._vplay_total = n_frames
+        self._vplay_eof = False
+        self._vplay_offset = offset
+        self._vplay_t0 = None
+        self._vplay_last_idx = -1
+        self._vplay_playing = True
+        self.vplay_btn.configure(text="⏸ Pause")
+
+        has_sound = bool(self.info["has_audio"] and (audio_playback_backend() or ""))
+        self._vplay_sound_ready = not has_sound
+        if has_sound:
+            gain = 1.0 if set_live_volume(self.volume_var.get()) \
+                else max(0.0, float(self.volume_var.get())) / 100.0
+            threading.Thread(target=self._vplay_sound_worker,
+                             args=(start + offset, clip_len - offset, gain, gen),
+                             daemon=True).start()
+        threading.Thread(target=self._vplay_reader, args=(cmd, w, h, gen),
+                         daemon=True).start()
+        self._vplay_job = self.root.after(20, self._vplay_tick, gen)
+
+    def _vplay_reader(self, cmd, w, h, gen):
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                    creationflags=_NO_WINDOW)
+        except Exception:
+            self._vplay_eof = True
+            return
+        self._vplay_proc = proc
+        need = w * h * 3
+        try:
+            while gen == self._vplay_gen and len(self._vplay_frames) < self._vplay_total:
+                buf = b""
+                while len(buf) < need:
+                    chunk = proc.stdout.read(need - len(buf))
+                    if not chunk:
+                        break
+                    buf += chunk
+                if len(buf) < need:
+                    break                       # source ran out under the clip — play what is
+                self._vplay_frames.append(Image.frombytes("RGB", (w, h), buf))
+        finally:
+            self._vplay_eof = True
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+    def _vplay_sound_worker(self, start_s, span, gain, gen):
+        """The clip's audio, extracted exactly as the sound button does it, into its own temp
+        file so the two players never fight over one. ready is set even on failure — a broken
+        track must not hold the picture at the gate forever."""
+        try:
+            wav = os.path.join(tempfile.gettempdir(), "gizmo_vpreview.wav")
+            p = _run([self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                      "-ss", f"{start_s:.3f}", "-t", f"{span:.3f}", "-i", self.src,
+                      "-vn", "-af", f"volume={gain:.3f}", "-ac", "2", "-ar", "44100",
+                      "-c:a", "pcm_s16le", wav])
+            if gen != self._vplay_gen:
+                return
+            if p.returncode == 0 and os.path.exists(wav):
+                _play_wav(wav)
+        except Exception:
+            pass
+        finally:
+            if gen == self._vplay_gen:
+                self._vplay_sound_ready = True
+
+    def _vplay_tick(self, gen):
+        if gen != self._vplay_gen or not self._vplay_playing:
+            return
+        import time as _time
+        if self._vplay_t0 is None:
+            # Hold the gate until the first frame and the sound are both ready.
+            if self._vplay_frames and self._vplay_sound_ready:
+                self._vplay_t0 = _time.monotonic()
+            self._vplay_job = self.root.after(20, self._vplay_tick, gen)
+            return
+        idx = int((_time.monotonic() - self._vplay_t0) * FPS)
+        frames = self._vplay_frames
+        if idx >= self._vplay_total or (self._vplay_eof and idx >= len(frames)):
+            self._vplay_stop(repaint=True)     # ran its course — back to the still preview
+            return
+        paint = min(idx, len(frames) - 1)
+        if paint >= 0 and paint != self._vplay_last_idx:
+            self._vplay_last_idx = paint
+            self.photo = self._paint(self.canvas, frames[paint], PREVIEW_W, PREVIEW_H)
+            # The crop rectangle rides on top of the moving picture — watching whether the
+            # subject stays inside it is half of what playback is for.
+            self._draw_crop_overlay()
+        self._vplay_job = self.root.after(20, self._vplay_tick, gen)
+
+    def _video_clip_pause(self):
+        import time as _time
+        consumed = self._vplay_offset + ((_time.monotonic() - self._vplay_t0)
+                                         if self._vplay_t0 is not None else 0.0)
+        self._vplay_stop()                     # keeps the paused frame on the canvas
+        self._vplay_resume = min(consumed, self._vplay_clip_len())
+
+    def _vplay_stop(self, repaint=False):
+        """Tear playback down. The gen bump is the actual kill switch — reader, tick and
+        sound worker all check it. Resume memory is cleared here; pause re-sets it after."""
+        self._vplay_gen += 1
+        self._vplay_playing = False
+        self._vplay_resume = None
+        if self._vplay_job is not None:
+            try:
+                self.root.after_cancel(self._vplay_job)
+            except Exception:
+                pass
+            self._vplay_job = None
+        if self._vplay_proc is not None:
+            try:
+                self._vplay_proc.kill()
+            except Exception:
+                pass
+            self._vplay_proc = None
+        _stop_wav()
+        self._vplay_frames = []
+        if self.vplay_btn.winfo_exists():
+            self.vplay_btn.configure(text="▶ Play")
+        if repaint and self.src:
+            self.show_frame()                  # restores first+last frames and crop overlay
 
     # -- voice / audio mode -----------------------------------------------------------------------
     #

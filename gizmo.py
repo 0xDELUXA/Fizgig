@@ -216,19 +216,22 @@ def take_envelope(chunk, window_s=0.01):
     return peaks
 
 
-def find_speech_bounds(peaks, window_s=0.01, min_run_s=0.15):
-    """The first and last SUSTAINED sound in an envelope, as (start_window, end_window).
+def find_speech_bounds(peaks, window_s=0.01, min_run_s=0.12, attach_gap_s=0.12):
+    """The first and last speech in an envelope, as (start_window, end_window).
 
-    Sustained is the load-bearing word: the R key's click is loud but short, so an amplitude
-    threshold alone would keep it and defeat the trim. A run has to stay above the threshold
-    for min_run_s to count as speech — clicks, pops and chair creaks are transients and fall
-    out of both ends on their own. The threshold rides the take's own noise floor (20th
-    percentile of the envelope) with an absolute floor, so a hot mic and a quiet one both
-    work. None when the take holds no sustained sound at all."""
+    Two-phase, because real speech is not a steady tone. ANCHORS first: runs that stay above
+    the threshold for min_run_s — the R key's click is loud but short, so it can never anchor.
+    Then ATTACH: quieter activity within attach_gap_s of the speech is pulled in, because soft
+    onsets and tails (an s, an f, a trailing breath of a word) cluster right against the loud
+    part and belong to it — cutting at the anchor alone clipped word edges and read real takes
+    short (Peter). A click stays excluded because it sits ALONE, behind a gap bigger than
+    anything inside speech. The threshold rides the take's own noise floor (20th percentile)
+    with an absolute floor, so a hot mic and a quiet one both work. None when the take holds
+    no sustained sound at all."""
     if not peaks:
         return None
     floor = sorted(peaks)[len(peaks) // 5]
-    threshold = max(floor * 3, 600)              # 600/32767 ~ -35 dBFS
+    threshold = max(floor * 2.5, 400)            # 400/32767 ~ -38 dBFS
     need = max(1, int(round(min_run_s / window_s)))
     active = [p >= threshold for p in peaks]
     runs, start = [], None
@@ -236,15 +239,25 @@ def find_speech_bounds(peaks, window_s=0.01, min_run_s=0.15):
         if on and start is None:
             start = i
         elif not on and start is not None:
-            if i - start >= need:
-                runs.append((start, i))
+            runs.append((start, i))
             start = None
-    if not runs:
+    anchors = [r for r in runs if r[1] - r[0] >= need]
+    if not anchors:
         return None
-    return runs[0][0], runs[-1][1]
+    a, b = anchors[0][0], anchors[-1][1]
+    gap = max(1, int(round(attach_gap_s / window_s)))
+    changed = True
+    while changed:                               # chains of soft clusters attach one by one
+        changed = False
+        for s, e in runs:
+            if e <= a and a - e <= gap and s < a:
+                a, changed = s, True
+            if s >= b and s - b <= gap and e > b:
+                b, changed = e, True
+    return a, b
 
 
-def trim_take_silence(chunk, margin_lead_s=0.12, margin_tail_s=0.15):
+def trim_take_silence(chunk, margin_lead_s=0.15, margin_tail_s=0.2):
     """Trim a raw take to its speech, with a comfort margin either side.
 
     Cuts the leading and trailing silence AND the key-down/key-up click that push-to-record
@@ -266,13 +279,15 @@ def trim_take_silence(chunk, margin_lead_s=0.12, margin_tail_s=0.15):
     return chunk[a:b], lead, total_s - end
 
 
-def wait_for_capture(raw_path, until_s, timeout=2.5, poll=0.05):
+def wait_for_capture(raw_path, until_s, timeout=6.0, poll=0.05):
     """Block until the session raw file actually CONTAINS audio up to `until_s` seconds.
 
     ffmpeg writes a few hundred milliseconds behind the microphone, so a take sliced at the
     instant of release is clamped at the current file size and loses its tail — which is what
     made short sentences read as "too short" and the auto-picked length cut endings off
-    (Peter). Returns True when the bytes arrived, False on timeout (slice what exists)."""
+    (Peter). The timeout is generous because it only ever costs a slow machine a wait, while
+    timing out early costs the take its tail. Returns True when the bytes arrived, False on
+    timeout (slice what exists)."""
     import time as _time
     need = int(until_s * CAPTURE_BPS)
     deadline = _time.monotonic() + timeout
@@ -535,7 +550,7 @@ def pick_sentence(frames, rng=None):
 # --- persisted settings (mic + default whisper language) ----------------------------------------
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gizmo_settings.json")
 SETTINGS_DEFAULTS = {"microphone": "", "whisper_language": "Auto detect",
-                     "random_delivery": True}
+                     "random_delivery": True, "trim_takes": True}
 
 
 def load_settings():
@@ -3831,17 +3846,33 @@ class Gizmo:
                          "fills itself. Off keeps whatever the delivery dropdown says — and "
                          "either way the dropdown can be changed by hand for the next take.")
 
+        trim_var = tk.BooleanVar(value=bool(self.settings.get("trim_takes", True)))
+        trim_cb = tk.Checkbutton(win, text="Trim silence and key clicks from takes",
+                                 variable=trim_var, bg=COLORS["bg_deep"],
+                                 fg=COLORS["text_primary"], selectcolor=COLORS["bg_surface"],
+                                 activebackground=COLORS["bg_deep"],
+                                 activeforeground=COLORS["text_primary"],
+                                 font=(FONT_FAMILY, 10), highlightthickness=0, bd=0,
+                                 cursor="hand2")
+        trim_cb.grid(row=6, column=0, sticky=tk.W, pady=(4, 0))
+        ToolTip(trim_cb, "Each take is trimmed to its speech: the silence either side and "
+                         "the hold key's click are cut off automatically. Turn off if takes "
+                         "come out clipped on your microphone — the untrimmed take keeps "
+                         "everything between a quarter-second before the press and after the "
+                         "release.")
+
         def save():
             self.settings["microphone"] = mic_var.get().strip()
             self.settings["whisper_language"] = lang_var.get()
             self.settings["random_delivery"] = bool(rand_var.get())
+            self.settings["trim_takes"] = bool(trim_var.get())
             save_settings(self.settings)
             if hasattr(self, "audio_lang_var"):
                 self.audio_lang_var.set(lang_var.get())
             win.destroy()
 
         row = tk.Frame(win, bg=COLORS["bg_deep"])
-        row.grid(row=6, column=0, columnspan=2, sticky=tk.E, pady=(16, 0))
+        row.grid(row=7, column=0, columnspan=2, sticky=tk.E, pady=(16, 0))
         self._button(row, "Save", save, "accent", pad=12,
                      tip="Keep these — they persist in gizmo_settings.json.").pack(side=tk.LEFT)
         self._button(row, "Cancel", win.destroy, pad=12,
@@ -4748,7 +4779,8 @@ class GizmoRecorder:
                 # holds the release point, or the take loses its tail to the flush lag.
                 wait_for_capture(self.raw, release + TAKE_POST_ROLL)
                 dur = slice_take(self.raw, press, release, path, self.app.ffmpeg,
-                                 trim_silence=True)
+                                 trim_silence=bool(
+                                     self.app.settings.get("trim_takes", True)))
             except Exception as exc:
                 self.app.root.after(0, lambda: self.status.configure(
                     text=f"take failed: {exc}", fg=COLORS["error"]))

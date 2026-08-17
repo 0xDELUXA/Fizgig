@@ -2,8 +2,8 @@
 
 MiniMax H3 is an omni model — it generates video and audio together — and until now Fizgig
 could only feed it photographs. This release completes the picture. Train on **short video
-clips**, on **their sound**, on **voice recordings alone**, or any mix of those with your
-stills in one folder, one run, one LoRA.
+clips**, on **their sound**, on **voice recordings alone** — and crucially, **all of it at
+once: photos, clips and voice recordings in one folder train one LoRA in one run.**
 
 The strict part — clips and voice segments have to be exactly on H3's spec — is handled by
 **Gizmo**, a new prep tool that ships with Fizgig. It cuts clips from any footage, cuts voice
@@ -17,9 +17,11 @@ accurate int8 base instead of 4-bit**, thanks to a redesign of block swap contri
 ## How do I…
 
 **…train on video clips?** Cut them with **Gizmo** — it exports clips already on H3's spec —
-then drop them into the training folder next to your images and caption them like everything
-else. Mixing stills and clips is fine, no settings. (Clips from elsewhere work too, if they're
-exactly on spec: 24 fps, one of eight lengths, /32 dimensions, 32 kHz audio.)
+then drop them into the training folder next to your images, and caption them on Fizgig's
+**Captions tab** exactly like a photo (each clip shows a frame from its middle there).
+**Photos, clips and voice recordings all train together in the same folder** — no settings, no
+separate runs. (Clips from elsewhere work too, if they're exactly on spec: 24 fps, one of
+eight lengths, /32 dimensions, 32 kHz audio.)
 
 **…make clips from my footage?** Open Gizmo (from the Image Prep tab, or the *Launch Gizmo*
 .bat), drop a video on it, scrub to a moment, pick a length, *Add to queue* — repeat for every
@@ -33,7 +35,9 @@ and the keepers join the export queue. No clip ever straddles a cut.
 **…train a voice from a recording?** Gizmo's **Voice** tab: open any audio file — or a video,
 to use just its soundtrack — mark segments on the waveform, caption them (describe only the
 sound; **Transcribe** appends the spoken words), export. Segments come out sample-exact with
-their caption `.txt` beside them, ready to drop into the training folder.
+their caption `.txt` beside them, ready to drop into the training folder. Voice captions are
+written here in Gizmo, not on the Captions tab — describing a voice means hearing it, and the
+Captions tab points you back here when it sees audio files.
 
 **…record a voice dataset from scratch?** Voice tab → **🎙 Record**. Gizmo prompts a sentence
 to read and a delivery style — rotating both take by take, so tonal range arrives on its own —
@@ -44,10 +48,10 @@ its caption already written, loaded into the editor ready to queue.
 `_mute` to the filename, so you can also change your mind later by renaming. A muted clip
 trains its video normally.
 
-**…train photos and a voice into one LoRA?** Put them in the same folder — one trigger word,
-one run. If one side of the dataset is much smaller than the other, the new **Finish one
-category early** row on the Training tab lets voice (or photos & clips) finish at a chosen
-epoch while the rest trains on.
+**…train photos, clips and a voice into one LoRA?** Put them all in the same folder — one
+trigger word, one run, any mix. If one side of the dataset is much smaller than the other, the
+new **Finish one category early** row on the Training tab lets voice (or photos & clips)
+finish at a chosen epoch while the rest trains on.
 
 **…set it up?** One extra model file: the **audio VAE** (~605 MB), on its own Preferences row
 with a download link. Leave it blank and clips simply train silent; it's required only once

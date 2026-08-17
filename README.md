@@ -166,8 +166,10 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 Quick answers; the two sections below carry the detail.
 
 **…train on video clips?** Cut them with **Gizmo** — it exports clips already on H3's spec —
-then drop them into the training folder next to your images and caption them like everything
-else. Mixing stills and clips is fine, no settings.
+then drop them into the training folder next to your images, and caption them on the
+**Captions tab** exactly like a photo (each clip shows a frame from its middle there).
+**Photos, clips and voice recordings all train together in the same folder** — no settings, no
+separate runs.
 
 **…make clips from my footage?** Open Gizmo (Image Prep tab, or the *Launch Gizmo* .bat), drop
 a video on it, scrub to a moment, pick a length, *Add to queue* — repeat, then *Export queue*.
@@ -178,7 +180,8 @@ queue.
 
 **…train a voice from a recording?** Gizmo's **Voice** tab: open any audio file (or a video,
 for its soundtrack), mark segments on the waveform, caption the sound, export — segments come
-out training-ready with their captions beside them.
+out training-ready with their captions beside them. Voice captions are written here in Gizmo,
+not on the Captions tab, which points you back here when it sees audio files.
 
 **…record a voice dataset from scratch?** Voice tab → **🎙 Record**: read the prompted
 sentences while holding the button (or the **R** key). Every take arrives captioned; ten
@@ -187,9 +190,9 @@ minutes of reading is a usable dataset.
 **…keep a clip's sound out of training?** Mute it in Gizmo — it adds `_mute` to the filename,
 reversible by renaming. The video still trains.
 
-**…train photos and a voice into one LoRA?** Same folder, one trigger word, one run. If one
-category is much smaller, **Finish one category early** on the Training tab lets it finish at
-a chosen epoch while the rest trains on.
+**…train photos, clips and a voice into one LoRA?** Same folder, one trigger word, one run,
+any mix. If one category is much smaller, **Finish one category early** on the Training tab
+lets it finish at a chosen epoch while the rest trains on.
 
 **…set it up?** One extra model file: the **audio VAE** (~605 MB), on its own Preferences row.
 Blank = clips train silent; required only once the folder has voice recordings.

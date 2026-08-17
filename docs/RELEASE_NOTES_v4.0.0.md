@@ -79,6 +79,8 @@ two identical-looking datasets train differently. Gizmo is the other half of tha
 separate app (it opens in under a second — no torch, no CUDA) that turns whatever you have
 into files Fizgig accepts.
 
+<p align="center"><img src="https://raw.githubusercontent.com/shootthesound/Fizgig/master/assets/gizmo_video.png" alt="Gizmo — Find the moment: first/last frame previews with frame-accurate stepping" width="720"></p>
+
 **Video clips:** open any footage — any format, frame rate or size — and cut to-spec clips
 from it. A **▶ Play** button plays the marked clip exactly as it will export — same span,
 same pace, slow motion included, sound and crop overlay along for the ride. First-and-last-
@@ -86,6 +88,8 @@ frame previews before you commit, frame-accurate stepping, crop to the subject w
 locks (1:1, 16:9, 9:16…), per-clip sound-or-mute, and a mark-everything-then-export-once
 queue. The preview follows the playhead live while you drag, and Gizmo tells you which clip
 lengths your card can actually train, at which megapixels, before you cut anything.
+
+<p align="center"><img src="https://raw.githubusercontent.com/shootthesound/Fizgig/master/assets/gizmo_voice.png" alt="Gizmo — Voice tab: waveform with a marked segment, trigger word, transcribed caption and grid lengths" width="720"></p>
 
 **Voice segments:** a waveform editor for cutting training segments out of any recording.
 Zoom rides the mouse wheel, segments snap to H3's allowed lengths, space and J-K-L work like

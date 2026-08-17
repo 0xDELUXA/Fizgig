@@ -159,6 +159,8 @@ Stills teach H3 a look; clips teach it **motion**, and clips with sound teach it
 | Dimensions | multiples of 32 |
 | Audio | 32 kHz stereo, or no track at all |
 
+<p align="center"><img src="assets/gizmo_video.png" alt="Gizmo — Find the moment: first/last frame previews with frame-accurate stepping" width="720"></p>
+
 **Gizmo makes clips that hit it** — mark every section you want (frame-accurate stepping, first/last-frame previews, a ▶ Play of the exact clip), then export the lot in one go. **Crop to the subject**: a clip's cost is its pixels, so drag a rectangle and every token goes on what you want learned — with shape locks (1:1, 16:9, 9:16…) when you want consistent framing. High-frame-rate footage can keep extra frames as slow motion, offered as a choice. Clips are cut at native resolution and resized to your Target Megapixels at training time, so cutting large keeps the choice open.
 
 **What it costs:** 22 frames is the shortest that shows real movement at ~7× a still per step; 124 frames is ~37×. Gizmo says which lengths your card can train, at which megapixels, before you cut anything:
@@ -180,6 +182,8 @@ Drop **`.wav` / `.mp3` / `.flac` / `.m4a`** files into the training folder — a
 | Content | actual sound — digital silence is refused |
 | Caption | a `.txt` beside the file, or it silently won't train |
 | Audio VAE | required — the ~605 MB Preferences row |
+
+<p align="center"><img src="assets/gizmo_voice.png" alt="Gizmo — Voice tab: waveform with a marked segment, trigger word, transcribed caption and grid lengths" width="720"></p>
 
 **Gizmo's Voice tab cuts them for you** — open a recording (or a video, for its soundtrack), mark segments on the waveform, pick a length, caption, export sample-exact. **Caption the voice, not a picture** — *"a man speaking calmly, low pitch, unhurried"* — with your trigger word leading; the **Transcribe** button (Whisper) appends the spoken words. **Or record the dataset from scratch**: **🎙 Record** prompts sentences across every length and five tonal flavours, rolls a delivery style per take, and every hold-and-release lands trimmed, captioned and ready to queue. **Set Training Structure to Likeness and Style for voices** — tested head-to-head, it converges much faster; Fizgig reminds you when it sees voice files.
 

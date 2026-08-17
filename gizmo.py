@@ -3451,6 +3451,8 @@ class Gizmo:
         """The push-to-record window. One per session — a second click raises the first."""
         if getattr(self, "_recorder", None) is not None and self._recorder.alive():
             self._recorder.win.lift()
+            # Deferred past the opener button's refocus wrapper, same as at first open.
+            self._recorder.win.after(150, self._recorder.win.focus_force)
             return
         self.notebook.select(self._audio_tab)
         self._recorder = GizmoRecorder(self)
@@ -4189,6 +4191,24 @@ class GizmoRecorder:
         for sym in ("r", "R"):
             win.bind(f"<KeyPress-{sym}>", self._hold_press)
             win.bind(f"<KeyRelease-{sym}>", self._hold_release)
+        # ...and on the MAIN window too, unbound again on close. A key bound only on this
+        # Toplevel fires only while keyboard focus is INSIDE it — which it essentially never
+        # was (the button that opens this window refocuses its own toplevel right after, and
+        # the designed loop bounces to the editor for Ctrl+S between takes). This is why the
+        # hold key never responded, all the way back to when it was space. Guarded like the
+        # main window's transport keys: a focused text field keeps its letters.
+        self._root_binds = []
+        for sym in ("r", "R"):
+            self._root_binds.append((f"<KeyPress-{sym}>",
+                                     app.root.bind(f"<KeyPress-{sym}>", self._root_press,
+                                                   add="+")))
+            self._root_binds.append((f"<KeyRelease-{sym}>",
+                                     app.root.bind(f"<KeyRelease-{sym}>", self._root_release,
+                                                   add="+")))
+        # Keyboard focus, deferred: the opener's refocus wrapper runs synchronously after this
+        # constructor returns, so an immediate focus_set here would lose the race it is meant
+        # to win.
+        win.after(150, lambda: self.alive() and win.focus_force())
 
         # 3. level + elapsed
         lrow = tk.Frame(win, bg=COLORS["bg_deep"])
@@ -4351,6 +4371,24 @@ class GizmoRecorder:
         self.new_sentence()
 
     # -- R as the hold key (with auto-repeat filtering) --------------------------------------
+    def _root_key_ok(self):
+        """Whether an R arriving via the MAIN window should record: yes unless someone is
+        typing in a text field (belt — shielded fields never reach the root binding anyway)."""
+        if not self.alive():
+            return False
+        try:
+            focus = self.app.root.focus_get()
+        except (KeyError, tk.TclError):
+            return True                # focus in a window Tk can't name; not a text field
+        return not (focus is not None
+                    and focus.winfo_class() in ("Entry", "TEntry", "Text"))
+
+    def _root_press(self, e):
+        return self._hold_press(e) if self._root_key_ok() else None
+
+    def _root_release(self, e):
+        return self._hold_release(e) if self._root_key_ok() else None
+
     def _hold_press(self, _e):
         # Auto-repeat delivers release+press pairs back to back; a REAL press has no pending
         # ghost release to cancel.
@@ -4403,6 +4441,15 @@ class GizmoRecorder:
 
     def close(self):
         self._closed = True
+        # The root bindings outlive the window unless removed — a ghost recorder must not
+        # keep eating R. (tkinter's unbind clears the whole sequence regardless of funcid,
+        # which is fine: nothing else on the root binds R.)
+        for seq, _funcid in getattr(self, "_root_binds", []):
+            try:
+                self.app.root.unbind(seq)
+            except tk.TclError:
+                pass
+        self._root_binds = []
         if self.proc is not None and self.proc.poll() is None:
             try:
                 self.proc.terminate()          # raw output: nothing to finalise, safe to kill

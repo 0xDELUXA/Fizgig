@@ -1,4 +1,4 @@
-# Fizgig v4.0.0 — video, sound, and voices
+# Fizgig v4.0.0 — video, sound, training samples and 16 GB fixes
 
 MiniMax H3 is an omni model — it generates video and audio together — and until now Fizgig
 could only feed it photographs. This release completes the picture. Train on **short video

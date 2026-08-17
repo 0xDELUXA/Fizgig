@@ -161,8 +161,9 @@ Needs the audio VAE in Preferences — the same file voice training uses.
 
 Previews default to **768×768, 56-frame clips with sound** — the regime H3 was trained in
 (stills and other lengths stay in the dropdown; no audio VAE just means silent clips). A
-preview that outgrows VRAM steps itself down a resolution ladder (768×640, 640×640, on to a
-512×512 floor) rather than dying — triggered by a hard OOM *or* by detecting the Windows
+preview that outgrows VRAM steps itself down a ladder rather than dying — a shorter clip
+first (56 → 22 frames, since a shorter clip is still a clip), then resolution (768×640,
+640×640, on to a 512×512 floor) — triggered by a hard OOM *or* by detecting the Windows
 paging crawl, which never raises an error on its own — with a note that below 768 the model
 is outside its training canvas, and the size that fit is saved as the new default so the
 next run starts there.

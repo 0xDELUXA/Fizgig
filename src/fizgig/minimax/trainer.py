@@ -89,6 +89,47 @@ def clip_fallback_frames(frames: int) -> int:
     return half - (half - 5) % 17      # largest 17n+5 value <= half
 
 
+def restore_parked_dit(dit, device, n_swap: int):
+    """Bring a whole-DiT park (``dit.to("cpu")``) back WITHOUT materializing the full base on
+    the GPU.
+
+    ``dit.to(device)`` moves all 50 blocks up before ``enable_block_swap`` can re-park its
+    tail — invisible on a card that briefly fits the whole ~21 GB int8 base (32 GB), a
+    guaranteed OOM on the tier that never could (16 GB — found by the VRAM sim, where the
+    restore's failure was then mis-blamed on the clip render that had already succeeded).
+    Move only the resident head and the non-block modules; the swapped tail stays on CPU,
+    which is exactly where ``enable_block_swap`` expects to find it (the H2D offloader
+    re-pins from wherever the sources live, and classic parking re-parks CPU→CPU for free).
+    """
+    n = max(0, min(int(n_swap or 0), len(dit.blocks) - 2))
+    if n <= 0:
+        dit.to(device)
+        return
+    _old = getattr(dit, "_h2d_offloader", None)
+    if _old is not None:
+        # Free the stale GPU ring BEFORE refilling the card — enable_block_swap would release
+        # it too, but only after the head blocks are already up, and on a tight card that
+        # ordering is the difference between fitting and not.
+        _old.release()
+        dit._h2d_offloader = None
+        for _blk in dit.blocks:
+            if hasattr(_blk, "_h2d_offloader"):
+                _blk._h2d_offloader = None
+    keep = len(dit.blocks) - n
+    for i, blk in enumerate(dit.blocks):
+        blk.to(device if i < keep else "cpu")
+    for name, child in dit.named_children():
+        if name != "blocks":
+            child.to(device)
+    for _pn, _p in list(dit._parameters.items()):
+        if _p is not None:
+            _p.data = _p.data.to(device)
+    for _bn, _b in list(dit._buffers.items()):
+        if _b is not None:
+            dit._buffers[_bn] = _b.to(device)
+    dit.enable_block_swap(n)              # rebuilds the H2D ring / re-parks, mode preserved
+
+
 def parse_block_spec(spec, num_blocks: int = None):
     """"3-12, 14-15, 22,27,31-33" -> [3,4,...,12,14,15,22,27,31,32,33].
 
@@ -2638,9 +2679,7 @@ def train_minimax(
             return encode_sample_prompts(te_path, [prompt], device=device, quantize=quantize)
         finally:
             if _park:
-                dit.to(device)
-                if n_swap > 0:
-                    dit.enable_block_swap(n_swap)   # restores the parked-block split
+                restore_parked_dit(dit, device, n_swap)   # swap-aware: never the whole base
                 gc.collect()
                 torch.cuda.empty_cache()
 
@@ -2660,30 +2699,33 @@ def train_minimax(
 
         A preview that does not fit in VRAM does NOT raise on Windows — the driver pages to
         system RAM and the render succeeds at roughly a hundred times the cost. Wall time is
-        the only symptom that survives, so it is what we watch — and when the resolution
-        ladder still has a rung below, we don't just advise: returning True aborts the render
-        and the preview loop retries one rung down, same as a hard OOM (Peter). Only at the
-        640 floor does this fall back to advice.
+        the only symptom that survives, so it is what we watch — and when the ladder still
+        has a rung below (a shorter clip first, then a resolution step), we don't just
+        advise: returning True aborts the render and the preview loop retries one rung down,
+        same as a hard OOM (Peter). Only at the floor of both axes does this fall back to
+        advice.
         """
         _cur = _clip_state.get("cur_wh")
-        if _cur and next_preview_res(*_cur) != tuple(_cur):
+        _curf = int(_clip_state.get("cur_frames", 1))
+        _has_rung = ((_curf > 1 and clip_fallback_frames(_curf) > 1)
+                     or (_cur and next_preview_res(*_cur) != tuple(_cur)))
+        if _has_rung:
             logger.warning(
                 f"[preview] step {step}/{total} took {seconds:.0f}s — the render is paging "
                 f"into system RAM (Windows never raises an OOM for this). Abandoning this "
-                f"sample and retrying one resolution rung down.")
+                f"sample and retrying one rung down (a shorter clip first, then resolution).")
             return True
         if _clip_state["slow_done"]:
             return False
         _clip_state["slow_done"] = True
         logger.warning(
             f"[preview] step {step}/{total} took {seconds:.0f}s — the render is spilling "
-            f"into system RAM even at the resolution floor (512x512). It will finish, just "
-            f"slowly. In order of impact: set the Turbo LoRA in Preferences (6-step previews "
-            f"— over 3x fewer forwards than the standard 20); pick a shorter Sample length "
-            f"if you are rendering clips (frames are the expensive axis), or a still. "
-            f"Previews are a heartbeat between checkpoints, not the verdict: every epoch "
-            f"saves a .safetensors, and you can Pause the run, judge an epoch in ComfyUI, "
-            f"then Resume.")
+            f"into system RAM even at the ladder floor (shortest clip, 512x512). It will "
+            f"finish, just slowly. In order of impact: set the Turbo LoRA in Preferences "
+            f"(6-step previews — over 3x fewer forwards than the standard 20), or switch "
+            f"Sample length to a still. Previews are a heartbeat between checkpoints, not "
+            f"the verdict: every epoch saves a .safetensors, and you can Pause the run, "
+            f"judge an epoch in ComfyUI, then Resume.")
 
     def _render_previews(epoch):
         """Render one still per prompt on the RESIDENT training DiT and write them where the
@@ -2825,7 +2867,8 @@ def train_minimax(
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
                       f"({_w}x{_h}, {_frames} frame(s), seed {_seed + i})", flush=True)
                 while True:
-                    _clip_state["cur_wh"] = (_w, _h)   # the slow-step callback reads this
+                    _clip_state["cur_wh"] = (_w, _h)       # the slow-step callback reads these
+                    _clip_state["cur_frames"] = _frames
                     try:
                         lat, _arows = sampling.sample_image(
                             dit, txt.to(device, dtype),
@@ -2839,13 +2882,27 @@ def train_minimax(
                         break
                     except (torch.cuda.OutOfMemoryError, sampling.PreviewAborted):
                         # Downgrade one ladder rung and retry rather than losing previews for
-                        # the run: 768x768 -> 768x640 -> 640x640. Two triggers, one ladder:
-                        # a hard CUDA OOM (Linux, or a too-big single allocation), and the
-                        # slow-step abort (Windows paging never raises — the callback bails
-                        # after the first crawling step instead). The cap sticks for later
-                        # epochs. At the floor there is nothing left to give back — re-raise
-                        # into the trainer's usual preview handling (the abort never fires at
-                        # the floor by construction).
+                        # the run. Two triggers, one ladder: a hard CUDA OOM (Linux, or a
+                        # too-big single allocation), and the slow-step abort (Windows paging
+                        # never raises — the callback bails after the first crawling step
+                        # instead). FRAMES give back first (Peter): a 56-frame clip retries at
+                        # 22 frames before touching 768x768, because a shorter clip is still a
+                        # clip while below 768 the model leaves its training regime. Only with
+                        # frames at their clip floor does resolution start walking down
+                        # (768x640 -> 640x640 -> ... -> 512x512). Both caps stick for later
+                        # epochs. At the floor of BOTH there is nothing left to give back —
+                        # re-raise into the trainer's usual preview handling (the abort never
+                        # fires there by construction).
+                        _nf = clip_fallback_frames(_frames) if _frames > 1 else 1
+                        if _nf > 1:
+                            gc.collect()
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                            logger.warning(f"[preview] OOM at {_frames} frames — retrying "
+                                           f"this sample at {_nf} frames ({_w}x{_h} kept)")
+                            _frames = _nf
+                            _clip_state["frames"] = _nf
+                            continue
                         _nw, _nh = next_preview_res(_w, _h)
                         if (_nw, _nh) == (_w, _h):
                             raise
@@ -2977,9 +3034,7 @@ def train_minimax(
             if _audio_dec_state["dec"] is not None:
                 _audio_dec_state["dec"].to("cpu")     # ~0.45 GB back off the card
             if _base_parked:
-                dit.to(device)
-                if n_swap > 0:
-                    dit.enable_block_swap(n_swap)     # restore the parked-block split
+                restore_parked_dit(dit, device, n_swap)   # swap-aware: never the whole base
                 gc.collect()
                 torch.cuda.empty_cache()
                 _base_parked = False
@@ -3005,9 +3060,7 @@ def train_minimax(
                 # An exception mid-decode left the 21 GB base on CPU — the next training step
                 # would die with "mat2 is on cpu". Restore residency (and the swap split)
                 # before anything else runs.
-                dit.to(device)
-                if n_swap > 0:
-                    dit.enable_block_swap(n_swap)
+                restore_parked_dit(dit, device, n_swap)
             if was_training:
                 dit.train()
             gc.collect()

@@ -9956,7 +9956,9 @@ class LoRATrainerGUI:
         self.sample_frames_combo = ttk.Combobox(
             prompt_card, textvariable=self.sample_frames_var, state="readonly", width=34,
             values=["Still (1 frame)", "22 frames (~1s)", "56 frames (~2.3s)",
-                    "124 frames (~5s — trained minimum)", "141 frames (~6s)"])
+                    "124 frames (~5s — trained minimum)", "141 frames (~6s)",
+                    "56 frames with sound (~2.3s)",
+                    "124 frames with sound (~5s)"])
         self.sample_frames_combo.grid(row=8, column=1, columnspan=2, sticky=tk.W, pady=4)
         self.sample_frames_var.trace_add("write", lambda *a: self._save_last_used_paths())
         self._sample_frames_hint = tk.Label(prompt_card,
@@ -10828,6 +10830,7 @@ class LoRATrainerGUI:
         .badge { position: absolute; top: 10px; left: 10px; padding: 6px 12px; border-radius: 4px; font-weight: bold; font-size: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); }
         .epoch-badge { background-color: #27AE60; color: white; }
         .clip-badge { background-color: #8E44AD; color: white; right: 8px; left: auto; }
+        .sound-badge { background-color: #16A085; color: white; right: 8px; left: auto; top: 34px; }
         #lb-scrub-wrap { display: none; width: min(80vw, 640px); margin-top: 10px; text-align: center; }
         #lb-scrub-wrap.active { display: block; }
         #lb-scrub { width: 100%; }
@@ -10954,6 +10957,10 @@ class LoRATrainerGUI:
             <input type="range" id="lb-scrub" min="0" max="0" value="0"
                    oninput="lbScrub(parseInt(this.value))">
             <div id="lb-scrub-label"></div>
+        </div>
+        <div id="lb-audio-wrap" style="display:none; margin-top:8px; text-align:center;">
+            <audio id="lb-audio" controls preload="none"
+                   style="width:min(80vw,640px);"></audio>
         </div>
         <div class="image-details">
             <div class="image-name" id="lightbox-name"></div>
@@ -11103,6 +11110,11 @@ class LoRATrainerGUI:
                         const cj = await fetch('clips.json?t=' + Date.now());
                         if (cj.ok) { const cm = await cj.json(); images.forEach(im => { if (cm[im.filename]) im.clip = cm[im.filename]; }); }
                     } catch (e) {}
+                    // Sample sound (previews with audio): filename -> wav. Never autoplays.
+                    try {
+                        const sj = await fetch('sounds.json?t=' + Date.now());
+                        if (sj.ok) { const sm = await sj.json(); images.forEach(im => { if (sm[im.filename]) im.sound = sm[im.filename]; }); }
+                    } catch (e) {}
                     await loadLikeness();
                     renderGallery();
                     renderLikenessChart();
@@ -11159,6 +11171,7 @@ class LoRATrainerGUI:
                         <span class="badge epoch-badge">Epoch ${img.epoch}</span>
                         ${likBadge(img)}
                         ${img.clip ? `<span class="badge clip-badge">🎞 scrub</span>` : ''}
+                        ${img.sound ? `<span class="badge sound-badge">🔊 sound</span>` : ''}
                     </div>
                     <div class="image-info">
                         <div class="lora-name">${img.loraName}</div>
@@ -11532,6 +11545,13 @@ class LoRATrainerGUI:
         function showLightbox(img) {
             const wrap = document.getElementById('lb-scrub-wrap');
             const slider = document.getElementById('lb-scrub');
+            // The sample's generated sound, when it has one. A play CONTROL, never autoplay —
+            // scrubbing stays silent and the audio is there when you ask for it.
+            const aw = document.getElementById('lb-audio-wrap');
+            const au = document.getElementById('lb-audio');
+            au.pause();
+            if (img.sound) { au.src = img.sound; aw.style.display = 'block'; }
+            else { au.removeAttribute('src'); aw.style.display = 'none'; }
             lbClip = img.clip || null;
             if (lbClip) {
                 // Preload on OPEN, not up front — a 60-epoch gallery would otherwise pull
@@ -11553,6 +11573,7 @@ class LoRATrainerGUI:
         }
 
         function closeLightbox() {
+            document.getElementById('lb-audio').pause();
             document.getElementById('lightbox').classList.remove('active');
             document.body.style.overflow = '';
         }
@@ -11642,6 +11663,12 @@ class LoRATrainerGUI:
                         clips[f[:-len(".clip")] + ".png"] = [f + "/" + x for x in frames]
             with open(os.path.join(samples_dir, "clips.json"), 'w', encoding='utf-8') as f:
                 json.dump(clips, f)
+            # Sample sound (previews with audio): <stem>.wav beside the contract PNG. Its own
+            # map so clips.json keeps its shape for older galleries.
+            sounds = {f[:-4] + ".png": f for f in os.listdir(samples_dir)
+                      if f.lower().endswith(".wav")}
+            with open(os.path.join(samples_dir, "sounds.json"), 'w', encoding='utf-8') as f:
+                json.dump(sounds, f)
         except Exception:
             pass
 
@@ -24349,9 +24376,20 @@ class LoRATrainerGUI:
                 ]
                 # Sample length: "124 frames (~5s — trained minimum)" -> 124. Always sent so
                 # the launched command records whether a run previewed stills or clips.
-                _sf = str(getattr(self, "sample_frames_var", None)
-                          and self.sample_frames_var.get() or "").split(" ")[0]
+                _sf_raw = str(getattr(self, "sample_frames_var", None)
+                              and self.sample_frames_var.get() or "")
+                _sf = _sf_raw.split(" ")[0]
                 cmd += ["--sample_frames", _sf if _sf.isdigit() else "1"]
+                # "with sound" variants: the samples also carry their generated audio,
+                # decoded through the audio VAE — same file the caching pass uses.
+                if "with sound" in _sf_raw.lower():
+                    _avae = self._krea2_pref("minimax_audio_vae")
+                    if _avae:
+                        cmd += ["--sample_audio", "--audio_vae", _avae]
+                    else:
+                        self.update_console("[samples] 'with sound' needs the Audio VAE path "
+                                            "— set it in Preferences. Samples render "
+                                            "silent.\n")
                 # The Turbo LoRA (Preferences) takes over the preview pace when set: its own
                 # steps + strength from the Samples tab (6 @ 75% recommended), nothing else
                 # changed. Without it, the ordinary Steps box applies as before.

@@ -205,6 +205,13 @@ def setup_parser() -> argparse.ArgumentParser:
                         "training step. Pair with --sample_steps 6.")
     p.add_argument("--turbo_lora_strength", type=float, default=0.75,
                    help="Preview strength for --turbo_lora_path (0.75 recommended)")
+    p.add_argument("--sample_audio", action="store_true",
+                   help="Clip previews carry their generated SOUND: the jointly-denoised "
+                        "audio rows are decoded to a .wav beside each sample. Needs "
+                        "--audio_vae. Stills are unaffected.")
+    p.add_argument("--audio_vae", default=None,
+                   help="H3 audio VAE (minimax_h3_audio_vae_fp32.safetensors) — its decoder "
+                        "half, for --sample_audio")
     p.add_argument("--text_encoder", default=None,
                    help="Qwen3-VL-32B TE — needed only to pre-encode preview prompts")
     p.add_argument("--vae", default=None, help="H3 video VAE (reserved for the full decoder)")
@@ -299,6 +306,8 @@ def main():
         sample_seed=args.sample_seed,
         turbo_lora_path=args.turbo_lora_path,
         turbo_lora_strength=args.turbo_lora_strength,
+        sample_audio=args.sample_audio,
+        audio_vae_path=args.audio_vae,
     )
 
 

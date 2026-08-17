@@ -626,6 +626,17 @@ def compute_loss(model, latent: torch.Tensor, text_embeds: torch.Tensor, *,
     return v_loss + audio_weight * a_loss, sigma_v
 
 
+def write_wav(path, wav, sample_rate=32000):
+    """[2, L] float waveform in [-1, 1] -> 16-bit interleaved stereo wav. Stdlib only."""
+    import wave as _wave
+    data = (wav.detach().float().clamp(-1, 1) * 32767.0).to(torch.int16)
+    with _wave.open(path, "wb") as f:
+        f.setnchannels(int(data.shape[0]))
+        f.setsampwidth(2)
+        f.setframerate(int(sample_rate))
+        f.writeframes(data.t().contiguous().numpy().tobytes())
+
+
 def load_preview_turbo(dit, path, strength):
     """The Turbo LoRA, wired for previews: applied ONCE to the live DiT with every module
     DISABLED, weights parked on CPU. The preview phase flips `enabled` on and moves the
@@ -1714,6 +1725,10 @@ def train_minimax(
     # the sampling phase, off again after. The training math never sees it.
     turbo_lora_path: str = None,
     turbo_lora_strength: float = 0.75,
+    # Previews with sound: decode the jointly-denoised audio rows to a .wav beside each clip
+    # sample. Needs the audio VAE (its decoder half); silently off without it.
+    sample_audio: bool = False,
+    audio_vae_path: str = None,
     # Output metadata (recorded in the saved LoRA).
     metadata_title: str = None,
     metadata_author: str = None,
@@ -2064,6 +2079,29 @@ def train_minimax(
             logger.warning(f"[turbo] previews fall back to the standard pass: {sample_steps} "
                            f"steps was the Turbo pace — using 20 instead")
             sample_steps = 20
+
+    # Previews with sound: the audio VAE's DECODER half, loaded once on first use and parked
+    # on CPU (~0.45 GB RAM) between previews. Any failure means silent samples, never a dead
+    # run.
+    _audio_dec_state = {"dec": None, "tried": False}
+
+    def _get_audio_decoder():
+        if _audio_dec_state["tried"]:
+            return _audio_dec_state["dec"]
+        _audio_dec_state["tried"] = True
+        if not (audio_vae_path and os.path.isfile(audio_vae_path)):
+            logger.warning("[preview] sound requested but the audio VAE path is not set — "
+                           "samples render silent (Preferences → Audio VAE)")
+            return None
+        try:
+            from fizgig.minimax.audio_vae import load_minimax_h3_audio_vae_decoder
+            _audio_dec_state["dec"] = load_minimax_h3_audio_vae_decoder(
+                audio_vae_path, device="cpu")
+            logger.info("[preview] audio decoder loaded — clip samples carry a .wav")
+        except Exception as _ae:
+            logger.warning(f"[preview] audio decoder failed to load "
+                           f"({type(_ae).__name__}: {_ae}) — samples render silent")
+        return _audio_dec_state["dec"]
 
     params = list(network.get_trainable_params())
 
@@ -2606,21 +2644,25 @@ def train_minimax(
                     _tm.enabled = True
                 logger.info(f"[preview] Turbo LoRA on — {sample_steps} steps at "
                             f"{turbo_lora_strength:g}")
+            _want_audio = bool(sample_audio and _frames > 1)
             _rendered = []
             for i, txt in enumerate(_prompts):
                 print(f"[preview] epoch {epoch}: prompt {i + 1}/{len(_prompts)} "
                       f"({_w}x{_h}, {_frames} frame(s), seed {_seed + i})", flush=True)
-                lat = sampling.sample_image(
+                lat, _arows = sampling.sample_image(
                     dit, txt.to(device, dtype),
                     width=_w, height=_h, steps=sample_steps,
                     cfg_scale=sample_cfg_scale,
                     uncond_embeds=(encoded_negative.to(device, dtype)
                                    if encoded_negative is not None else None),
                     seed=_seed + i, device=device, dtype=dtype, log_steps=True,
-                    num_frames=_frames, on_slow_step=_slow_step_notice)
+                    num_frames=_frames, on_slow_step=_slow_step_notice,
+                    return_audio=True)
                 _rendered.append((f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}",
-                                  lat.to("cpu")))
-                del lat
+                                  lat.to("cpu"),
+                                  _arows.to("cpu") if (_want_audio and _arows is not None)
+                                  else None))
+                del lat, _arows
 
             if turbo_net is not None:
                 for _tm in turbo_net.unet_loras:
@@ -2652,7 +2694,7 @@ def train_minimax(
                         torch.cuda.empty_cache()
                         _base_parked = True
                 decoder = decoder.to(device)
-            for stem, lat in _rendered:
+            for stem, lat, _arows in _rendered:
                 lat = lat.to(device)
                 if lat.shape[2] > 1 and decoder is not None:
                     # Clip: decode every frame, store EVERY 2ND frame as JPEG in a sibling
@@ -2686,8 +2728,28 @@ def train_minimax(
                     arr = sampling.latent_to_rgb(lat)
                     img = Image.fromarray(arr).resize((_w, _h), Image.NEAREST)
                     print(f"[preview] decoded {_w}x{_h}", flush=True)
+                # The wav is written BEFORE the contract PNG on purpose: the gallery's
+                # settle guard treats the PNG as "this sample is finished", so everything
+                # belonging to the sample must already be on disk when it lands.
+                if _arows is not None:
+                    _adec = _get_audio_decoder()
+                    if _adec is not None:
+                        try:
+                            from fizgig.minimax.audio_vae import unpack_audio
+                            _adec.to(device)
+                            _wave = _adec.decode(
+                                unpack_audio(_arows).to(device, torch.float32))
+                            write_wav(os.path.join(sample_dir, stem + ".wav"),
+                                      _wave[0].cpu())
+                            print(f"[preview] wrote sound: {stem}.wav", flush=True)
+                        except Exception as _we:
+                            logger.warning(f"[preview] audio decode failed "
+                                           f"({type(_we).__name__}: {_we}) — this sample "
+                                           f"renders silent")
                 img.save(os.path.join(sample_dir, stem + ".png"))
                 del lat
+            if _audio_dec_state["dec"] is not None:
+                _audio_dec_state["dec"].to("cpu")     # ~0.45 GB back off the card
             if _base_parked:
                 dit.to(device)
                 if n_swap > 0:
@@ -2699,6 +2761,8 @@ def train_minimax(
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
             del decoder                                  # free the ~4.85 GB decoder immediately
+            if _audio_dec_state["dec"] is not None:
+                _audio_dec_state["dec"].to("cpu")        # idempotent; covers a mid-decode raise
             if turbo_net is not None:
                 # Idempotent, and NON-NEGOTIABLE on an exception mid-sample: a Turbo left
                 # enabled would ride every subsequent TRAINING step at 0.75.

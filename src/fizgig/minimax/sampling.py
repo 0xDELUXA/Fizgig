@@ -139,7 +139,7 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                  dtype=torch.bfloat16, latent_channels=24, spatial=16, log_steps=False,
                  sampler="res_multistep", schedule_mode="comfy",
                  ref_latents=None, text_token_tags=None, num_frames: int = 1,
-                 on_slow_step=None, slow_step_s: float = 120.0):
+                 on_slow_step=None, slow_step_s: float = 120.0, return_audio=False):
     """Denoise one image OR clip and return its LATENT [1, 24, T, H/16, W/16].
 
     num_frames is PIXEL frames on the model's 17n+5 grid (5, 22, ..., 124, 141); off-grid
@@ -276,6 +276,11 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                     on_slow_step(_elapsed, i + 1, n_eval)
                 except Exception:       # a notice must never take the preview down with it
                     pass
+    if return_audio:
+        # The fully-denoised audio rows ([2*T, 32], channel-major, same layout the cache
+        # uses) — they were always computed for the joint denoise; this just stops
+        # discarding them. None for stills or a model without packed audio.
+        return x, (audio_rows if joint_audio and latent_t > 1 else None)
     return x
 
 

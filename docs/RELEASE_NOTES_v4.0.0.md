@@ -207,9 +207,9 @@ audio-only.
   family it's talking about.
 - **Widescreen previews no longer crop in the gallery grid** — cards letterbox the whole
   frame, so composition reads honestly at a glance.
-- **The slow-preview notice now gives ordered advice** — Turbo LoRA first, then Sample
-  length, then resolution — for the Windows case where an oversized preview pages to system
-  RAM instead of erroring.
+- **A preview still crawling at the ladder floor gets plain advice** — set the Turbo LoRA,
+  or switch to a still — instead of a mystery slowdown. (Above the floor, the crawl triggers
+  the ladder itself; see Previews with sound.)
 - **Using the Turbo LoRA in ComfyUI? Skip its custom sampler** — current ComfyUI samples H3
   audio cleanly with stock Euler, and the community consensus is 8 steps. Details in the
   README.

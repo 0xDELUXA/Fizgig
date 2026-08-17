@@ -4199,7 +4199,7 @@ class GizmoRecorder:
         tk.Label(inner, text="Hold the button (or the R key), read the sentence, let go. Each "
                              "take opens in the editor below with its caption already written "
                              "— listen if you like, press Add to queue when it's a keeper, "
-                             "then record the next one. The mic stays on until Done.",
+                             "then record the next one.",
                  font=(FONT_FAMILY, 9), justify=tk.LEFT, wraplength=900,
                  bg=S, fg=COLORS["text_explain"]).pack(anchor="w", pady=(2, 8))
 

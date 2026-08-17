@@ -3364,6 +3364,13 @@ class Gizmo:
             return (t - v0) / vd * W
 
         if self.audio_src and self.audio_dur:
+            # The world margins, visibly NOT audio: a segment stops at the file's edge, and
+            # without the colour change you wonder why it won't stretch further (Peter).
+            xz, xe = to_x(0.0), to_x(self.audio_dur)
+            if xz > 0:
+                c.create_rectangle(0, 0, xz, H, fill="#12161D", outline="")
+            if xe < W:
+                c.create_rectangle(xe, 0, W, H, fill="#12161D", outline="")
             span = self._audio_span()
             self.audio_pos = max(0.0, min(self.audio_pos, max(0.0, self.audio_dur - span)))
             x0 = max(0, to_x(self.audio_pos))
@@ -3381,6 +3388,11 @@ class Gizmo:
                 c.create_text(W / 2, mid - 14, text="reading the waveform…",
                               fill=COLORS["text_muted"], font=(FONT_FAMILY, 10))
         if self.audio_src and self.audio_dur:
+            # The file's own ends, drawn ON TOP of the waveform: the wall a segment edge
+            # stops at, made visible.
+            for xb in (to_x(0.0), to_x(self.audio_dur)):
+                if 0 <= xb <= W:
+                    c.create_line(xb, 0, xb, H, fill=COLORS["border"])
             span = self._audio_span()
             x0, x1 = to_x(self.audio_pos), to_x(self.audio_pos + span)
             if x1 > 0 and x0 < W:

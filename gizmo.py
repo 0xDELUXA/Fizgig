@@ -624,7 +624,7 @@ def pick_sentence(frames, rng=None):
 # --- persisted settings (mic + default whisper language) ----------------------------------------
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gizmo_settings.json")
 SETTINGS_DEFAULTS = {"microphone": "", "whisper_language": "Auto detect",
-                     "random_delivery": True, "trim_takes": True}
+                     "random_delivery": True, "trim_takes": True, "trigger_word": ""}
 
 
 def load_settings():
@@ -2855,14 +2855,29 @@ class Gizmo:
         trow.pack(fill=tk.X)
         tk.Label(trow, text="Trigger word:", font=(FONT_FAMILY, 10),
                  bg=COLORS["bg_surface"], fg=COLORS["text_primary"]).pack(side=tk.LEFT)
-        self.audio_trigger_var = tk.StringVar(value="")
+        # Remembered across sessions (Peter): a voice dataset is usually built over several
+        # sittings, and retyping the same trigger word every open is pure friction. Saved on
+        # a short debounce so typing doesn't hammer the settings file.
+        self.audio_trigger_var = tk.StringVar(value=self.settings.get("trigger_word", ""))
+        self._trigger_save_job = None
+
+        def _remember_trigger(*_a):
+            if self._trigger_save_job is not None:
+                self.root.after_cancel(self._trigger_save_job)
+
+            def save():
+                self._trigger_save_job = None
+                self.settings["trigger_word"] = self.audio_trigger_var.get().strip()
+                save_settings(self.settings)
+            self._trigger_save_job = self.root.after(400, save)
+        self.audio_trigger_var.trace_add("write", _remember_trigger)
         trig = tk.Entry(trow, textvariable=self.audio_trigger_var, width=24,
                         bg=COLORS["bg_hover"], fg=COLORS["text_primary"],
                         insertbackground=COLORS["text_primary"], relief=tk.FLAT)
         trig.pack(side=tk.LEFT, padx=(8, 0), ipady=4)
         self._shield_from_hotkeys(trig)
         ToolTip(trig, "Leads every caption, exactly like the Captions tab's Qwen tool: "
-                      "\"<trigger>, <description> saying …\". Set it once per recording.")
+                      "\"<trigger>, <description> saying …\". Remembered between sessions.")
         self.audio_whisper_btn = self._button(
             trow, "🎤 Transcribe", self.audio_transcribe,
             tip="Listen to the marked segment with Whisper (a small speech-recognition model, "

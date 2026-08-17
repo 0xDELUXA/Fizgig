@@ -165,8 +165,9 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 Quick answers; the two sections below carry the detail.
 
-**…train on video clips?** Cut them with **Gizmo** — it exports clips already on H3's spec —
-then drop them into the training folder next to your images, and caption them on the
+**…train on video clips?** Cut them with **Gizmo** (launch it from the Image Prep tab, or the
+*Launch Gizmo* .bat in Fizgig's folder) — it exports clips already on H3's spec — then drop
+them into the training folder next to your images, and caption them on the
 **Captions tab** exactly like a photo (each clip shows a frame from its middle there).
 **Photos, clips and voice recordings all train together in the same folder** — no settings, no
 separate runs.

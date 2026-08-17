@@ -2,8 +2,9 @@
 
 MiniMax H3 is an omni model — it generates video and audio together — and until now Fizgig
 could only feed it photographs. This release completes the picture. Train on **short video
-clips**, on **their sound**, on **voice recordings alone** — and crucially, **all of it at
-once: photos, clips and voice recordings in one folder train one LoRA in one run.**
+clips**, on **their sound**, on **voice recordings alone** (plain audio files — wav, mp3,
+flac, m4a) — and crucially, **all of it at once: photos, clips and voice recordings in one
+folder train one LoRA in one run.**
 
 The strict part — clips and voice segments have to be exactly on H3's spec — is handled by
 **Gizmo**, a new prep tool that ships with Fizgig. It cuts clips from any footage, cuts voice
@@ -16,8 +17,9 @@ accurate int8 base instead of 4-bit**, thanks to a redesign of block swap contri
 
 ## How do I…
 
-**…train on video clips?** Cut them with **Gizmo** — it exports clips already on H3's spec —
-then drop them into the training folder next to your images, and caption them on Fizgig's
+**…train on video clips?** Cut them with **Gizmo** (launch it from the Image Prep tab, or the
+*Launch Gizmo* .bat in Fizgig's folder) — it exports clips already on H3's spec — then drop
+them into the training folder next to your images, and caption them on Fizgig's
 **Captions tab** exactly like a photo (each clip shows a frame from its middle there).
 **Photos, clips and voice recordings all train together in the same folder** — no settings, no
 separate runs. (Clips from elsewhere work too, if they're exactly on spec: 24 fps, one of

@@ -4196,9 +4196,10 @@ class GizmoRecorder:
                     tip="Stop the microphone and put the Source recording card back. Your "
                         "takes are kept — press Record again and they are still "
                         "here.").pack(side=tk.RIGHT)
-        tk.Label(inner, text="Hold and read; every release lands in Takes and loads straight "
-                             "into the editor below — queue it with Ctrl+S, then hold for the "
-                             "next one. The mic stays live until Done.",
+        tk.Label(inner, text="Hold the button (or the R key), read the sentence, let go. Each "
+                             "take opens in the editor below with its caption already written "
+                             "— listen if you like, press Add to queue when it's a keeper, "
+                             "then record the next one. The mic stays on until Done.",
                  font=(FONT_FAMILY, 9), justify=tk.LEFT, wraplength=900,
                  bg=S, fg=COLORS["text_explain"]).pack(anchor="w", pady=(2, 8))
 
@@ -4266,10 +4267,11 @@ class GizmoRecorder:
                                     selectbackground=COLORS["accent"])
         self.takes_box.pack(fill=tk.X)
         self.takes_box.bind("<Double-Button-1>", lambda _e: self.use_selected())
-        ToolTip(self.takes_box, "Every release lands here. The newest take loads into the "
-                                "editor automatically, caption written for you — listen, "
-                                "Ctrl+S to queue, come back and hold for the next one. The "
-                                "list survives Done: takes are only ever added.")
+        ToolTip(self.takes_box, "Every release lands here, and the newest take loads into the "
+                                "editor automatically with its caption written for you. "
+                                "Listen, press Add to queue (Ctrl+S) to keep it, and hold for "
+                                "the next one. The list survives Done: takes are only ever "
+                                "added.")
 
         self.new_sentence()
 

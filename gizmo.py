@@ -279,6 +279,80 @@ def trim_take_silence(chunk, margin_lead_s=0.15, margin_tail_s=0.2):
     return chunk[a:b], lead, total_s - end
 
 
+TAKE_CONTEXT = 0.75                  # seconds of extra session audio read around a take
+
+
+def cut_take_to_slot(raw_path, press_s, release_s, out_wav, ffmpeg):
+    """Cut a take that is EXACTLY one grid slot long, fitted around its speech.
+
+    Trimming down to the speech left takes just under a slot, and the editor's auto-pick
+    then snapped DOWN and cut words (Peter). This goes the other way: find the speech, pick
+    the smallest slot that HOLDS it (with margins), and widen the cut to exactly that length
+    using the real room tone around the words — the mic rolls continuously, so that context
+    exists on both sides of the hold. Only when the session itself runs out is the tail
+    zero-padded. The take that lands in the editor is slot-exact: the auto-picked length
+    always fits the words, and the export re-fits nothing. Returns the duration in seconds.
+    """
+    size = os.path.getsize(raw_path)
+    frame = CAPTURE_CHANNELS * 2
+    a0 = max(0, int((press_s - TAKE_PRE_ROLL - TAKE_CONTEXT) * CAPTURE_BPS)) // frame * frame
+    b0 = min(size, int((release_s + TAKE_POST_ROLL + TAKE_CONTEXT)
+                       * CAPTURE_BPS)) // frame * frame
+    if b0 <= a0:
+        return 0.0
+    with open(raw_path, "rb") as f:
+        f.seek(a0)
+        chunk = f.read(b0 - a0)
+    chunk_s = len(chunk) / CAPTURE_BPS
+
+    window_s = 0.01
+    bounds = find_speech_bounds(take_envelope(chunk, window_s), window_s)
+    base_s = a0 / CAPTURE_BPS                  # where the chunk sits in session time
+    if bounds is None:
+        # nothing sustained — fall back to the plain press/release cut, untrimmed
+        sa = max(0.0, press_s - TAKE_PRE_ROLL - base_s)
+        sb = min(chunk_s, release_s + TAKE_POST_ROLL - base_s)
+    else:
+        sa = max(0.0, bounds[0] * window_s - 0.15)
+        sb = min(chunk_s, bounds[1] * window_s + 0.2)
+    speech_s = max(0.05, sb - sa)
+
+    slot = next((f for f in AUDIO_GRID_FRAMES
+                 if hop_exact_samples(f) / CAPTURE_RATE >= speech_s - 0.01),
+                AUDIO_GRID_FRAMES[-1])
+    need_bytes = hop_exact_samples(slot) * frame
+    need_s = need_bytes / CAPTURE_BPS
+
+    extra = need_s - speech_s
+    if extra >= 0:
+        # widen around the speech with real context, favouring whichever side has room
+        left = min(extra / 2, sa)
+        right = min(extra - left, chunk_s - sb)
+        left = min(extra - right, sa)
+        start_s = sa - left
+    else:
+        start_s = sa - extra / 2               # speech longer than the biggest slot: centre
+    a = max(0, int(start_s * CAPTURE_BPS)) // frame * frame
+    piece = chunk[a: a + need_bytes]
+    if len(piece) < need_bytes:
+        piece += b"\x00" * (need_bytes - len(piece))
+
+    tmp = out_wav + ".raw"
+    with open(tmp, "wb") as f:
+        f.write(piece)
+    p = _run([ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+              "-f", "s16le", "-ar", str(CAPTURE_RATE), "-ac", str(CAPTURE_CHANNELS),
+              "-i", tmp, "-c:a", "pcm_s16le", out_wav])
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    if p.returncode != 0 or not os.path.exists(out_wav):
+        raise RuntimeError((p.stderr or b"").decode("utf-8", "replace")[-200:]
+                           or "could not write the take")
+    return need_s
+
+
 def wait_for_capture(raw_path, until_s, timeout=6.0, poll=0.05):
     """Block until the session raw file actually CONTAINS audio up to `until_s` seconds.
 
@@ -3060,10 +3134,20 @@ class Gizmo:
                 self._audio_refresh()
         self.root.after(0, done)
 
+    def _audio_world(self):
+        """(start_s, length_s) of the scrollable WORLD: the file plus a margin either side.
+
+        The view is always allowed to be wider than the audio, because a segment that fills
+        the whole file otherwise has its edge grips pinned to the canvas edges where they
+        cannot be grabbed (Peter) — the margin is dead air on screen, and grabbing room in
+        the hand."""
+        m = max(0.4, self.audio_dur * 0.06)
+        return -m, max(self.audio_dur, 1e-6) + 2 * m
+
     def _audio_view_bounds(self):
-        """(start_s, dur_s) of what the canvas shows — the whole file unless zoomed."""
+        """(start_s, dur_s) of what the canvas shows — the whole world unless zoomed."""
         if self.audio_view is None:
-            return 0.0, max(self.audio_dur, 1e-6)
+            return self._audio_world()
         return self.audio_view
 
     def _audio_slice_peaks(self):
@@ -3077,15 +3161,19 @@ class Gizmo:
             return
         s = self._audio_samples
         r = self._AUDIO_PEAK_RATE
-        lo_i = max(0, int(v0 * r))
+        # lo_i may be NEGATIVE now the view can start before the file (the world margin);
+        # columns outside the audio draw flat, and a negative python slice must never wrap.
+        lo_i = int(v0 * r)
         n = max(1, int(vd * r))
         n_cols = self.AUDIO_WAVE_W
         step = max(1, n // n_cols)
         peaks = []
         for i in range(n_cols):
-            chunk = s[lo_i + i * step: lo_i + (i + 1) * step]
+            a = lo_i + i * step
+            b = a + step
+            chunk = s[max(0, a): max(0, b)] if b > 0 else []
             peaks.append((min(chunk) / self._audio_peak_scale,
-                          max(chunk) / self._audio_peak_scale) if chunk else (0.0, 0.0))
+                          max(chunk) / self._audio_peak_scale) if len(chunk) else (0.0, 0.0))
         self.audio_peaks = peaks
         self._audio_peaks_key = key
 
@@ -3103,7 +3191,8 @@ class Gizmo:
         if self.audio_view is not None and not getattr(self, "_audio_dragging", False):
             v0, vd = self.audio_view
             if not (v0 <= self.audio_pos <= v0 + vd * 0.95):
-                v0 = max(0.0, min(self.audio_pos - vd * 0.2, self.audio_dur - vd))
+                w0, wl = self._audio_world()
+                v0 = max(w0, min(self.audio_pos - vd * 0.2, w0 + wl - vd))
                 self.audio_view = (v0, vd)
         self._audio_refresh()
         self._audio_arm_rescrub()
@@ -3210,7 +3299,8 @@ class Gizmo:
         if self.audio_view is None:
             return
         v0, vd = self.audio_view
-        self.audio_view = (max(0.0, min(v0 + frac * vd, self.audio_dur - vd)), vd)
+        w0, wl = self._audio_world()
+        self.audio_view = (max(w0, min(v0 + frac * vd, w0 + wl - vd)), vd)
         self._audio_refresh()
 
     def _audio_xview(self, *args):
@@ -3218,13 +3308,14 @@ class Gizmo:
         if self.audio_view is None or not self.audio_dur:
             return
         v0, vd = self.audio_view
+        w0, wl = self._audio_world()
         if args and args[0] == "moveto":
-            n0 = float(args[1]) * self.audio_dur
+            n0 = w0 + float(args[1]) * wl
         elif args and args[0] == "scroll":
             n0 = v0 + int(args[1]) * vd * (0.1 if args[2] == "units" else 0.9)
         else:
             return
-        self.audio_view = (max(0.0, min(n0, self.audio_dur - vd)), vd)
+        self.audio_view = (max(w0, min(n0, w0 + wl - vd)), vd)
         self._audio_refresh()
 
     def _audio_hover(self, event):
@@ -3245,15 +3336,16 @@ class Gizmo:
             self.audio_view = None
         else:
             v0, vd = self._audio_view_bounds()
+            w0, wl = self._audio_world()
             anchor = self.audio_pos if focus_t is None else max(0.0, min(focus_t, self.audio_dur))
-            nd = max(0.5, min(self.audio_dur, vd / factor))
-            if nd >= self.audio_dur:
+            nd = max(0.5, min(wl, vd / factor))
+            if nd >= wl:
                 self.audio_view = None
             else:
                 # The anchor keeps its screen position: same fraction of the window.
                 frac = (anchor - v0) / vd if vd else 0.5
                 frac = max(0.0, min(1.0, frac))
-                n0 = max(0.0, min(anchor - frac * nd, self.audio_dur - nd))
+                n0 = max(w0, min(anchor - frac * nd, w0 + wl - nd))
                 self.audio_view = (n0, nd)
         self._audio_refresh()
 
@@ -3307,11 +3399,11 @@ class Gizmo:
         else:
             self.audio_pos_label.configure(text="")
         # The nav bar mirrors the view: thumb position and size are the window's place in the
-        # whole recording. Unzoomed it fills the trough and there is nothing to drag.
+        # WORLD (file + margins). Unzoomed it fills the trough and there is nothing to drag.
         if hasattr(self, "audio_scroll"):
             if self.audio_dur:
-                self.audio_scroll.set(v0 / max(self.audio_dur, 1e-9),
-                                      (v0 + vd) / max(self.audio_dur, 1e-9))
+                w0, wl = self._audio_world()
+                self.audio_scroll.set((v0 - w0) / wl, (v0 + vd - w0) / wl)
             else:
                 self.audio_scroll.set(0.0, 1.0)
         self._audio_refresh_planned_name()
@@ -4631,7 +4723,11 @@ class GizmoRecorder:
             self._root_binds.append((f"<KeyRelease-{sym}>",
                                      self.app.root.bind(f"<KeyRelease-{sym}>",
                                                         self._root_release, add="+")))
-        self.rec_btn.configure(state=tk.NORMAL)
+        # DISABLED until the mic is actually live: the device takes a moment to open, and an
+        # armed-looking button invites speaking into a mic that is not capturing yet — which
+        # is how the first words of a session's first take went missing (Peter). The press
+        # buffer below stays as the belt for the R key.
+        self.rec_btn.configure(state=tk.DISABLED, text="⏳  the mic is starting…")
         self.status.configure(text="starting the microphone…", fg=COLORS["text_secondary"])
         self.maybe_roll_delivery()
         self._start_capture()
@@ -4740,6 +4836,8 @@ class GizmoRecorder:
                 self.status.configure(
                     text=f"live: {getattr(self, '_device', 'microphone')} — hold and speak",
                     fg=COLORS["success"])
+                self.rec_btn.configure(state=tk.NORMAL,
+                                       text="🎙  HOLD to record  (or hold R)")
                 if self._pending_press is not None:
                     # A press arrived while the device was opening. It was buffered, not
                     # dropped — convert it now, clamped to the start of what was captured.
@@ -4826,11 +4924,13 @@ class GizmoRecorder:
             path = os.path.join(self.takes_dir, f"take_{len(self.takes) + 1:03d}.wav")
             try:
                 # The writer runs behind the microphone; slice only once the file actually
-                # holds the release point, or the take loses its tail to the flush lag.
-                wait_for_capture(self.raw, release + TAKE_POST_ROLL)
-                dur = slice_take(self.raw, press, release, path, self.app.ffmpeg,
-                                 trim_silence=bool(
-                                     self.app.settings.get("trim_takes", True)))
+                # holds the tail context, or the take loses its end to the flush lag.
+                if bool(self.app.settings.get("trim_takes", True)):
+                    wait_for_capture(self.raw, release + TAKE_POST_ROLL + TAKE_CONTEXT)
+                    dur = cut_take_to_slot(self.raw, press, release, path, self.app.ffmpeg)
+                else:
+                    wait_for_capture(self.raw, release + TAKE_POST_ROLL)
+                    dur = slice_take(self.raw, press, release, path, self.app.ffmpeg)
             except Exception as exc:
                 self.app.root.after(0, lambda: self.status.configure(
                     text=f"take failed: {exc}", fg=COLORS["error"]))

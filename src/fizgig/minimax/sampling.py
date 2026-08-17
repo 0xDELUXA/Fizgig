@@ -243,10 +243,16 @@ def sample_image(model, text_embeds, *, width=512, height=512, steps=8, cfg_scal
                 out = out_u.float() + cfg_scale * (out - out_u.float())
                 if a_raw is not None and a_raw_u is not None:
                     a_raw = a_raw_u.float() + cfg_scale * (a_raw.float() - a_raw_u.float())
-            # d/d(sigma_v) of the carried variable — the reference model's own transform
+            # The carried variable's exact velocity, in OUR convention (out = x0-noise, so
+            # denoised = x + sigma*out). Comfy's formula is written for theirs (out = noise-x0):
+            # the velocity term flips twice and keeps its sign, the latent term flips ONCE —
+            # so their (1-scale)*x_a becomes (scale-1)*x_a here. Sanity anchor: substituting
+            # x_a = (1-sa)*x0 + sa*n and v = x0-n reduces this to exactly 4*x0 - n, the flow
+            # velocity of y = (1-sv)*(4*x0) + sv*n. The first transcription kept comfy's sign
+            # and produced garbage audio at every step count (Peter's ears caught it).
             a_out = None
             if a_raw is not None:
-                a_out = ((1.0 - _ascale) * a_in.float()
+                a_out = ((_ascale - 1.0) * a_in.float()
                          + (1.0 + (_ascale - 1.0) * _sa) * a_raw.float())
         else:
             a_out = None

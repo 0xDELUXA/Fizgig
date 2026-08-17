@@ -829,8 +829,9 @@ MINIMAX_BUILT_IN_PRESETS = {
     "✨ MiniMax H3 Defaults (LoRA 16, 0.25 MP)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": 8,
-        # Flat 2e-4, same as Fast — with the ramp off this IS the rate, not a ceiling.
-        "LEARNING_RATE": 2e-4,
+        # Flat 1e-4 (Peter, 17 Aug). With the ramp off this IS the rate — and rank 16 wants
+        # half of what the rank-8 Fast preset runs at (which keeps its flat 2e-4).
+        "LEARNING_RATE": 1e-4,
         # Ships OFF (Peter, 17 Aug — reversing 11 Aug): the slow build spent the early epochs
         # crawling and the flat 2e-4 runs have been the ones delivering. The ramp stays a
         # dropdown away for anyone who wants the held-ratio start.

@@ -154,7 +154,7 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`, flat 2e-4 (Adapter-relative LR available in Other Options) |
+| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`, flat 1e-4 (Adapter-relative LR available in Other Options) |
 | **✨ MiniMax H3 Fast** | The same, at **rank 8 for 40 epochs** with a **flat 2e-4** (no Adapter-relative LR). Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible — it has no room to memorise your backgrounds and framing, so it encodes the subject instead. |
 
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.

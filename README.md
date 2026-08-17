@@ -425,7 +425,6 @@ The learning rate is yours to set — there's no automatic throttle on top of it
 **When do changes apply?** Settings are read when a run launches — changing them mid-run does nothing. Pause → Resume relaunches with your current settings, so these *can* be changed at a pause. Dataset and caption changes need a fresh run (Resume says no re-caching).
 
 **Current caveats:**
-- **Audio isn't rendered in previews.** Preview clips are silent — H3 generates a soundtrack alongside the video, and Fizgig denoises it so the picture is conditioned correctly, but only the frames are saved. Judge a voice by loading the LoRA checkpoint in ComfyUI.
 - **Training only.** The workbench tools (Repair Studio, Explorer, Royale, Profiler, Extract) don't support H3 yet, and Context LoRA isn't wired for it. Pause/Resume and resumable state saving work as on the other families.
 - **Batch size 1**, and the Training tab hides the controls that don't apply — what you see is what's wired.
 

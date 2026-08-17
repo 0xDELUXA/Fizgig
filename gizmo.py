@@ -188,8 +188,11 @@ def build_capture_command(ffmpeg, device, out_raw):
     if os.name == "nt":
         if not device:
             return None                       # dshow needs a real device name
+        # audio_buffer_size 50 ms: dshow's default buffers ~half a second before delivering,
+        # which is half a second of write lag between the microphone and the raw file — the
+        # lag every timestamp-to-byte mapping then has to survive. Small buffer, small lag.
         return [ffmpeg, "-hide_banner", "-loglevel", "error",
-                "-f", "dshow", "-i", f"audio={device}"] + tail
+                "-f", "dshow", "-audio_buffer_size", "50", "-i", f"audio={device}"] + tail
     import shutil
     if shutil.which("pactl") or (device and device != "alsa-default"):
         return [ffmpeg, "-hide_banner", "-loglevel", "error",
@@ -198,6 +201,26 @@ def build_capture_command(ffmpeg, device, out_raw):
         return [ffmpeg, "-hide_banner", "-loglevel", "error",
                 "-f", "alsa", "-i", "default"] + tail
     return None
+
+
+def wait_for_capture(raw_path, until_s, timeout=2.5, poll=0.05):
+    """Block until the session raw file actually CONTAINS audio up to `until_s` seconds.
+
+    ffmpeg writes a few hundred milliseconds behind the microphone, so a take sliced at the
+    instant of release is clamped at the current file size and loses its tail — which is what
+    made short sentences read as "too short" and the auto-picked length cut endings off
+    (Peter). Returns True when the bytes arrived, False on timeout (slice what exists)."""
+    import time as _time
+    need = int(until_s * CAPTURE_BPS)
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        try:
+            if os.path.getsize(raw_path) >= need:
+                return True
+        except OSError:
+            pass
+        _time.sleep(poll)
+    return False
 
 
 def slice_take(raw_path, press_s, release_s, out_wav, ffmpeg):
@@ -4561,9 +4584,17 @@ class GizmoRecorder:
             self.rec_btn.configure(state=tk.DISABLED)
             return
         try:
-            if os.path.getsize(self.raw) > 0:
+            size = os.path.getsize(self.raw)
+            if size > 0:
                 import time as _time
-                self.t0 = _time.monotonic()
+                # NOT "now": by the time the file first shows bytes, ffmpeg has flushed a
+                # buffered burst, so the file already holds audio from BEFORE this moment.
+                # Backing now off by the audio the file contains lands t0 on the capture's
+                # true start — stamping now instead shifted every press/release mapping
+                # early by the burst, which is what put takes out of sync with the thumb
+                # (short measured durations, clipped endings). Refined further by the
+                # running minimum in _level_tick.
+                self.t0 = _time.monotonic() - size / CAPTURE_BPS
                 self.status.configure(text="mic is live — hold and speak",
                                       fg=COLORS["success"])
                 self._level_tick()
@@ -4581,6 +4612,12 @@ class GizmoRecorder:
             return
         try:
             size = os.path.getsize(self.raw)
+            # The clock rides the bytes: (now - size/BPS) equals the capture's true start
+            # plus however far the writer is lagging right now, so its running MINIMUM
+            # converges on the true start. That is what keeps press/release timestamps
+            # mapped to the right bytes for the whole session, whatever the buffering does.
+            import time as _time
+            self.t0 = min(self.t0, _time.monotonic() - size / CAPTURE_BPS)
             window = int(0.1 * CAPTURE_BPS) // 4 * 4
             with open(self.raw, "rb") as f:
                 f.seek(max(0, size - window))
@@ -4619,6 +4656,9 @@ class GizmoRecorder:
         def worker():
             path = os.path.join(self.takes_dir, f"take_{len(self.takes) + 1:03d}.wav")
             try:
+                # The writer runs behind the microphone; slice only once the file actually
+                # holds the release point, or the take loses its tail to the flush lag.
+                wait_for_capture(self.raw, release + TAKE_POST_ROLL)
                 dur = slice_take(self.raw, press, release, path, self.app.ffmpeg)
             except Exception as exc:
                 self.app.root.after(0, lambda: self.status.configure(

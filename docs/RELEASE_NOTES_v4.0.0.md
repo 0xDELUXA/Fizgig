@@ -11,14 +11,15 @@ segments from any recording, and includes a push-to-record studio that builds a 
 from nothing but a microphone and ten minutes of reading.
 
 There's a second release hiding underneath: **16 GB and 24 GB cards now train H3 on the
-accurate int8 base instead of 4-bit**, thanks to a contributed redesign of block swap that
-makes it several times faster.
+accurate int8 base instead of 4-bit**, thanks to a redesign of block swap contributed by
+[@rintic-13](https://github.com/rintic-13) that makes it several times faster.
 
 ## How do I…
 
-**…train on video clips?** Drop `.mp4` clips into the training folder next to your images and
-caption them like everything else — no settings, mixing is fine. Clips must be on H3's spec
-(24 fps, one of eight lengths, /32 dimensions, 32 kHz audio); anything Gizmo exports passes.
+**…train on video clips?** Cut them with **Gizmo** — it exports clips already on H3's spec —
+then drop them into the training folder next to your images and caption them like everything
+else. Mixing stills and clips is fine, no settings. (Clips from elsewhere work too, if they're
+exactly on spec: 24 fps, one of eight lengths, /32 dimensions, 32 kHz audio.)
 
 **…make clips from my footage?** Open Gizmo (from the Image Prep tab, or the *Launch Gizmo*
 .bat), drop a video on it, scrub to a moment, pick a length, *Add to queue* — repeat for every

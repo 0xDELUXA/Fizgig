@@ -165,9 +165,9 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 Quick answers; the two sections below carry the detail.
 
-**…train on video clips?** Drop `.mp4` clips into the training folder next to your images and
-caption them like everything else — no settings, mixing is fine. Clips must be on H3's spec;
-anything Gizmo exports passes.
+**…train on video clips?** Cut them with **Gizmo** — it exports clips already on H3's spec —
+then drop them into the training folder next to your images and caption them like everything
+else. Mixing stills and clips is fine, no settings.
 
 **…make clips from my footage?** Open Gizmo (Image Prep tab, or the *Launch Gizmo* .bat), drop
 a video on it, scrub to a moment, pick a length, *Add to queue* — repeat, then *Export queue*.

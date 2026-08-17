@@ -61,6 +61,11 @@ render in **6 steps** with the Turbo applied at **75%** on top of your training 
 same pairing fast ComfyUI inference uses. Previews only — your saved LoRA never contains it.
 Steps and strength are adjustable on the Samples tab.
 
+**…hear what it's generating while training?** Pick a **"with sound"** Sample length on the
+Samples tab (56 or 124 frames). Each preview denoises its soundtrack along with the picture,
+and the gallery opens it as a **real playable clip** — click play, never autoplay. This is
+how you hear a voice LoRA converge without leaving Fizgig.
+
 **…set it up?** One extra model file for sound: the **audio VAE** (~605 MB), on its own
 Preferences row with a download link. Leave it blank and clips simply train silent; it's
 required only once the folder contains voice recordings. If your H3 paths are already set,
@@ -144,6 +149,20 @@ weights on the pruned base, so it is re-injected at render time through the full
 silu(t\_emb) grid (bundled, Apache-2.0, credit @larryvrh) — and removed with everything else
 before training resumes.
 
+## Previews with sound
+
+Pick a **"with sound"** Sample length and each clip preview carries the model's **generated
+audio**: the soundtrack it denoises alongside the picture is decoded (the audio VAE's decoder
+half, newly ported from the reference) and muxed with every frame into a playable mp4. In the
+gallery those samples wear a 🎬 badge and open as a **real video player** — click play, never
+autoplay; scrub-only clips keep the frame slider as before. Pairs with the Turbo for 6-step
+picture-and-sound previews, which is how a voice LoRA gets judged without leaving Fizgig.
+Needs the audio VAE in Preferences — the same file voice training uses.
+
+Previews default to **768×768 stills** (H3's native short edge); clips and sound are a
+dropdown away, and a preview that runs out of VRAM steps itself down a resolution ladder
+(768×640, then 640×640) with a note that below 768 the model is outside its training canvas.
+
 ## Finish one category early
 
 Mixed datasets are rarely balanced — thirty photos and two hundred voice takes, or the
@@ -181,6 +200,11 @@ audio-only.
   renamed clips are detected and skipped, per file, with a console note.
 - **Preferences model-path sections fold up**, and the missing-paths badge says which model
   family it's talking about.
+- **Widescreen previews no longer crop in the gallery grid** — cards letterbox the whole
+  frame, so composition reads honestly at a glance.
+- **The slow-preview notice now gives ordered advice** — Turbo LoRA first, then Sample
+  length, then resolution — for the Windows case where an oversized preview pages to system
+  RAM instead of erroring.
 - **Using the Turbo LoRA in ComfyUI? Skip its custom sampler** — current ComfyUI samples H3
   audio cleanly with stock Euler, and the community consensus is 8 steps. Details in the
   README.

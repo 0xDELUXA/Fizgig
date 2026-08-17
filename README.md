@@ -159,7 +159,7 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
 
-**Previews are 768×768 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch. Set the **Turbo LoRA** in Preferences and previews render in **6 steps instead of 20**, with the Turbo applied at 75% on top of your training LoRA for the render only — previews only, never the saved LoRA; steps and strength are adjustable on the Samples tab.
+**Previews are 768×768 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch. Pick a **"with sound"** length and each preview also carries the model's generated audio, muxed into a playable clip the gallery opens as a real video player (click play, never autoplay) — how you hear a voice LoRA converge without leaving Fizgig. Set the **Turbo LoRA** in Preferences and previews render in **6 steps instead of 20**, with the Turbo applied at 75% on top of your training LoRA for the render only — previews only, never the saved LoRA; steps and strength are adjustable on the Samples tab. A preview that runs out of VRAM steps itself down a resolution ladder (768×640, then 640×640) rather than dying, with a note that below 768 the model is outside its training canvas.
 
 ### Video and sound: how do I…
 
@@ -198,6 +198,10 @@ lets it finish at a chosen epoch while the rest trains on.
 **…get fast previews while training?** Set the **Turbo LoRA** (~780 MB, its own Preferences
 row): previews render in 6 steps with the Turbo at 75% on top of your training LoRA —
 previews only, never the saved file. Adjustable on the Samples tab.
+
+**…hear what it's generating while training?** Pick a **"with sound"** Sample length on the
+Samples tab. Each preview carries its generated soundtrack, and the gallery opens it as a
+playable clip — click play, never autoplay.
 
 **…set it up?** One extra model file for sound: the **audio VAE** (~605 MB), on its own
 Preferences row. Blank = clips train silent; required only once the folder has voice

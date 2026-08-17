@@ -2862,6 +2862,11 @@ def train_minimax(
                         logger.warning(_msg)
                         _w, _h = _nw, _nh
                         _res_cap["wh"] = (_w, _h)
+                        # A stable marker the GUI watches for: it writes this resolution back
+                        # into the Samples tab, so the NEXT run starts where this one settled
+                        # instead of re-walking the ladder. Printed per downgrade; the last
+                        # one wins.
+                        print(f"[preview] resolution settled: {_w}x{_h}", flush=True)
                 _rendered.append((f"{output_name}_e{epoch:06d}_{i:02d}_{ts}_{_seed + i}",
                                   lat.to("cpu"),
                                   _arows.to("cpu") if (_want_audio and _arows is not None)

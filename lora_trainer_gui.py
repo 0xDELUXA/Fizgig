@@ -22641,6 +22641,20 @@ class LoRATrainerGUI:
         # frees far more than swap); otherwise suggest more block swap. (Preview OOMs are caught in
         # the trainer, auto-disable previews, and don't print this literal — so this only fires on a
         # genuine training-step OOM.)
+        # The preview resolution ladder settled somewhere (trainer prints this per
+        # downgrade): write it back into the Samples tab so the NEXT run starts at the size
+        # that fit, instead of re-walking the ladder from the configured resolution. It
+        # persists exactly like a hand edit of Width/Height.
+        if "[preview] resolution settled:" in line:
+            import re as _re_res
+            _m = _re_res.search(r"resolution settled: (\d+)x(\d+)", line)
+            if _m and hasattr(self, "sample_width_var"):
+                self.sample_width_var.set(_m.group(1))
+                self.sample_height_var.set(_m.group(2))
+                self.update_console(f"[samples] preview resolution saved as the new "
+                                    f"default: {_m.group(1)}x{_m.group(2)} — future runs "
+                                    f"start there.\n")
+
         if "CUDA out of memory" in line or "OutOfMemoryError" in line:
             if not getattr(self, "_oom_warning_shown", False):
                 self._oom_warning_shown = True

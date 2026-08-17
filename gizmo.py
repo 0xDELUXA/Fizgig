@@ -945,6 +945,70 @@ def count_frames(ffmpeg, path):
     return int(hits[-1]) if hits else None
 
 
+# --- auto-chop (scene detection) ----------------------------------------------------------------
+# ffmpeg's scene filter scores every frame 0-1 on how different it looks from the one before;
+# a score over the threshold is a cut. Segments are then planned BETWEEN the cuts, so no clip
+# ever straddles one — a clip that crosses a cut trains the cut as if it were motion.
+
+SCENE_SENSITIVITIES = (
+    ("Normal — most footage", 0.30),
+    ("More cuts — fast-cut or handheld footage", 0.22),
+    ("Fewer cuts — slow or static footage", 0.40),
+)
+AUTOCHOP_MAX_SEGMENTS = 400          # a review grid past this stops being a review
+
+
+def build_scene_scan_command(ffmpeg, src, threshold):
+    """The detection pass. Frames are shrunk before scoring because the score only needs the
+    broad strokes of the picture — scoring 4K frames buys nothing and slows the scan. showinfo
+    prints each selected frame's pts_time to stderr, which is how the cut list comes back
+    without ffprobe (imageio-ffmpeg does not bundle ffprobe). The comma in gt() is escaped
+    because ffmpeg's filtergraph parser splits on commas without respecting parentheses."""
+    vf = f"scale=320:-2:flags=bilinear,select=gt(scene\\,{threshold:g}),showinfo"
+    return [ffmpeg, "-hide_banner", "-i", src, "-vf", vf, "-an", "-f", "null", "-"]
+
+
+_SHOWINFO_TIME = re.compile(r"pts_time:\s*([0-9]+(?:\.[0-9]+)?)")
+_PROGRESS_TIME = re.compile(r"\btime=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def parse_scene_time(stderr_line):
+    """The cut timestamp out of a showinfo line, or None for any other stderr line."""
+    if "pts_time" not in stderr_line:
+        return None
+    m = _SHOWINFO_TIME.search(stderr_line)
+    return float(m.group(1)) if m else None
+
+
+def parse_progress_time(stderr_line):
+    """How far through the file ffmpeg's periodic stats line says the scan is, or None."""
+    m = _PROGRESS_TIME.search(stderr_line)
+    if not m:
+        return None
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+
+
+def plan_autochop(cut_times, duration, span_s, fill=True):
+    """Clip start times from a cut list. Scenes are the spans between consecutive cuts (plus
+    the start and end of the file); each scene yields clips of span_s seconds that stay inside
+    it. fill=True packs a long scene with back-to-back clips; False takes one from the top of
+    each scene. Scenes shorter than one clip are dropped rather than padded — micro-scenes
+    from a fast dissolve disappear here on their own."""
+    bounds = [0.0] + sorted(t for t in cut_times if 0.0 < t < duration) + [duration]
+    starts = []
+    for a, b in zip(bounds, bounds[1:]):
+        if b - a + 1e-6 < span_s:
+            continue
+        if fill:
+            t = a
+            while t + span_s <= b + 1e-6:
+                starts.append(t)
+                t += span_s
+        else:
+            starts.append(a)
+    return starts
+
+
 # --- the app -----------------------------------------------------------------------------------
 
 class ToolTip:
@@ -1018,6 +1082,10 @@ class Gizmo:
         self._busy = False
         self._motion_keep = [None]    # parallel to the Motion dropdown; see _keep_every
         self.queue = []               # marked clips, exported in one go — see add_to_queue
+        self._chop_win = None         # the auto-chop review window, or None
+        self._chop_proc = None        # the running scene-scan ffmpeg, for Cancel
+        self._chop_alive = False      # workers check this and stop when the window closes
+        self._chop_cands = []         # [{"start", "keep", "photo", ...}] in the review grid
         self.crop = None              # (x, y, w, h) in the source's DISPLAY pixels, or None
         self._crop_anchor = None
         self._radios = []             # every radio button, armed together once a video is open
@@ -1577,6 +1645,13 @@ class Gizmo:
             tip="Remember this clip — where it starts, how long, its size, its sound.  (Ctrl+S)"
                 "\n\nNothing is written yet, so adding is instant and you can carry on marking.")
         self.add_btn.pack(side=tk.LEFT)
+        self.chop_btn = self._button(
+            row, "✂ Auto-chop…", self.open_autochop,
+            tip="Find the cuts in the whole source and offer every segment between them as a "
+                "thumbnail — untick the ones you don't want, and the rest join the queue.\n\n"
+                "Each kept segment is queued exactly as if you had pressed Add there, with the "
+                "settings as they are now.")
+        self.chop_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.export_btn = self._button(
             row, "Export queue", self.export_queue,
             tip="Encode everything in the queue, one after another.\n\nA second or two per clip. "
@@ -1651,8 +1726,8 @@ class Gizmo:
 
     def _set_enabled(self, on):
         state = tk.NORMAL if on else tk.DISABLED
-        for w in (self.add_btn, self.export_btn, self.scale, self.open_btn, self.pos_entry,
-                  self.crop_clear_btn, *self._radios):
+        for w in (self.add_btn, self.chop_btn, self.export_btn, self.scale, self.open_btn,
+                  self.pos_entry, self.crop_clear_btn, *self._radios):
             w.configure(state=state)
         for box in (self.len_box, self.motion_box, self.shape_box):
             box.configure(state="readonly" if on else tk.DISABLED)
@@ -1801,6 +1876,8 @@ class Gizmo:
         """Everything opening a video does, with no dialog in the way — so it can be tested."""
         info = probe_source(self.ffmpeg, path)
         self._stop_audio()
+        # An open auto-chop review belongs to the video it scanned, and this is a new one.
+        self._autochop_close()
         # A crop belongs to the frame it was drawn on, and a new video is a new frame.
         self.crop = None
         self.crop_var.set(False)
@@ -3474,8 +3551,9 @@ class Gizmo:
         this two clips added before either is exported would both be handed _01."""
         return {os.path.basename(j["dst"]) for j in self.queue}
 
-    def _planned_job(self):
-        """The job Add would create right now, or None if there isn't one."""
+    def _planned_job(self, start_frame=None):
+        """The job Add would create right now, or None if there isn't one. start_frame overrides
+        the playhead — auto-chop queues jobs at its own positions with everything else as set."""
         out_dir = self.out_var.get().strip()
         if not self.src or not out_dir:
             return None
@@ -3483,9 +3561,10 @@ class Gizmo:
         if not w:
             return None
         muted = bool(self.mute_var.get())
+        sf = self.frame_pos if start_frame is None else start_frame
         return {
             "src": self.src, "dst": output_name(self.src, out_dir, muted, self._claimed_names()),
-            "start_frame": self.frame_pos, "start": self.frame_pos / self.info["fps"],
+            "start_frame": sf, "start": sf / self.info["fps"],
             "frames": self._frames(), "w": w, "h": h,
             "keep_every": self._keep_every(), "muted": muted,
             "crop": self.crop, "sar": self.info["sar"],
@@ -3594,6 +3673,334 @@ class Gizmo:
         self.queue = [j for j in self.queue if j["done"]]
         self._refresh_queue_box()
         self._refresh_planned_name()
+
+    # -- auto-chop ---------------------------------------------------------------------------------
+    # The alternative to scrubbing an hour of footage by hand: detect the cuts once, offer every
+    # segment as a thumbnail, and let keep-or-skip be a click instead of a scrub-mark-repeat
+    # loop. Everything kept lands in the ordinary queue as an ordinary job — auto-chop has no
+    # export path of its own, so whatever the queue learns, this inherits.
+
+    _CHOP_THUMB = (200, 112)
+
+    def open_autochop(self):
+        if not self.src or not self.ffmpeg:
+            return
+        if self._chop_win is not None and self._chop_win.winfo_exists():
+            self._chop_win.lift()
+            return
+        if not self.out_var.get().strip():
+            messagebox.showwarning("Gizmo", "Choose a folder to save the clips into first.")
+            return
+
+        win = tk.Toplevel(self.root)
+        self._chop_win = win
+        self._chop_alive = True
+        self._chop_cancelled = False
+        self._chop_cands = []
+        self._chop_blank = tk.PhotoImage(width=self._CHOP_THUMB[0],
+                                         height=self._CHOP_THUMB[1])
+        win.title(f"Auto-chop — {os.path.basename(self.src)}")
+        win.configure(bg=COLORS["bg_deep"])
+        win.geometry("920x700")
+        win.minsize(760, 480)
+        win.protocol("WM_DELETE_WINDOW", self._autochop_close)
+
+        top = tk.Frame(win, bg=COLORS["bg_deep"])
+        top.pack(fill=tk.X, padx=14, pady=(12, 4))
+        tk.Label(top, text="Auto-chop", font=(FONT_FAMILY, 13, "bold"),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_primary"]).pack(anchor="w")
+        tk.Label(top, wraplength=860, justify=tk.LEFT, font=(FONT_FAMILY, 9),
+                 bg=COLORS["bg_deep"], fg=COLORS["text_explain"],
+                 text="Scan finds the cuts, then every segment that fits a clip appears below. "
+                      "Click a segment to keep or skip it; double-click to jump the main window "
+                      "there for a closer look. Kept segments are queued exactly as if you had "
+                      "pressed Add at each one — same Length, Motion, Crop and Sound as the "
+                      "settings card, so set those first.").pack(anchor="w", pady=(2, 0))
+
+        ctl = tk.Frame(win, bg=COLORS["bg_deep"])
+        ctl.pack(fill=tk.X, padx=14, pady=(6, 4))
+        tk.Label(ctl, text="Cut detection", font=(FONT_FAMILY, 9), bg=COLORS["bg_deep"],
+                 fg=COLORS["text_muted"]).pack(side=tk.LEFT)
+        self._chop_sense = ttk.Combobox(ctl, state="readonly", style="G.TCombobox", width=36,
+                                        values=[name for name, _ in SCENE_SENSITIVITIES])
+        self._chop_sense.current(0)
+        self._chop_sense.pack(side=tk.LEFT, padx=(6, 16))
+        ToolTip(self._chop_sense,
+                "How different two frames have to look before it counts as a cut.\n\n"
+                "Normal suits most footage. If the grid comes back with scenes visibly glued "
+                "together, scan again with More cuts; if one real scene arrives as confetti, "
+                "Fewer cuts.")
+        self._chop_fill_var = tk.BooleanVar(value=True)
+        fill_cb = tk.Checkbutton(ctl, text="Several clips from long scenes",
+                                 variable=self._chop_fill_var, bg=COLORS["bg_deep"],
+                                 fg=COLORS["text_primary"], selectcolor=COLORS["bg_surface"],
+                                 activebackground=COLORS["bg_deep"],
+                                 activeforeground=COLORS["text_primary"],
+                                 font=(FONT_FAMILY, 10), highlightthickness=0, bd=0,
+                                 cursor="hand2")
+        fill_cb.pack(side=tk.LEFT, padx=(0, 16))
+        ToolTip(fill_cb,
+                "On: a scene longer than one clip yields back-to-back clips through its whole "
+                "length — the entire video gets offered, and you cull.\n\n"
+                "Off: one clip from the top of each scene — a quick sampler of the footage.")
+        self._chop_scan_btn = self._button(ctl, "Scan", self._autochop_scan, "accent", pad=16,
+                                           tip="Decode the source once and find its cuts. A few "
+                                               "seconds per minute of footage.")
+        self._chop_scan_btn.pack(side=tk.LEFT)
+        self._chop_cancel_btn = self._button(ctl, "Cancel scan", self._autochop_cancel_scan,
+                                             pad=10, tip="Stop the scan.")
+
+        self._chop_status = tk.Label(win, text="", font=(FONT_FAMILY, 10), anchor="w",
+                                     bg=COLORS["bg_deep"], fg=COLORS["text_secondary"])
+        self._chop_status.pack(fill=tk.X, padx=14)
+
+        body = tk.Frame(win, bg=COLORS["bg_deep"])
+        body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(4, 0))
+        self._chop_canvas = tk.Canvas(body, bg=COLORS["bg_deep"], highlightthickness=0)
+        sb = ttk.Scrollbar(body, orient=tk.VERTICAL, command=self._chop_canvas.yview)
+        self._chop_canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._chop_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._chop_grid = tk.Frame(self._chop_canvas, bg=COLORS["bg_deep"])
+        self._chop_canvas.create_window((0, 0), window=self._chop_grid, anchor="nw")
+        self._chop_grid.bind("<Configure>", lambda _e: self._chop_canvas.configure(
+            scrollregion=self._chop_canvas.bbox("all")))
+        # Bound on the Toplevel, not bind_all: events from the cards bubble up to their own
+        # toplevel, and the main window's wheel stays the main window's.
+        win.bind("<MouseWheel>", lambda e: self._chop_canvas.yview_scroll(
+            -1 if e.delta > 0 else 1, "units"))
+        win.bind("<Button-4>", lambda _e: self._chop_canvas.yview_scroll(-1, "units"))
+        win.bind("<Button-5>", lambda _e: self._chop_canvas.yview_scroll(1, "units"))
+
+        foot = tk.Frame(win, bg=COLORS["bg_deep"])
+        foot.pack(fill=tk.X, padx=14, pady=10)
+        self._chop_keep_all = self._button(foot, "Keep all", lambda: self._autochop_set_all(True),
+                                           pad=10, tip="Mark every segment as a keeper.")
+        self._chop_keep_all.pack(side=tk.LEFT)
+        self._chop_skip_all = self._button(foot, "Skip all", lambda: self._autochop_set_all(False),
+                                           pad=10, tip="Unmark everything — then click just the "
+                                                       "ones you want.")
+        self._chop_skip_all.pack(side=tk.LEFT, padx=(8, 0))
+        self._chop_count = tk.Label(foot, text="", font=(FONT_FAMILY, 10),
+                                    bg=COLORS["bg_deep"], fg=COLORS["text_secondary"])
+        self._chop_count.pack(side=tk.LEFT, padx=14)
+        self._button(foot, "Close", self._autochop_close, pad=12,
+                     tip="Close without queueing. Nothing has been written either "
+                         "way.").pack(side=tk.RIGHT)
+        self._chop_add_btn = self._button(foot, "➕  Queue the kept segments",
+                                          self._autochop_add_kept, "accent",
+                                          tip="Add every kept segment to the queue, then export "
+                                              "from the main window as usual.")
+        self._chop_add_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        for w in (self._chop_keep_all, self._chop_skip_all, self._chop_add_btn):
+            w.configure(state=tk.DISABLED)
+        self._chop_status.configure(text="Press Scan to find the cuts.")
+
+    def _autochop_close(self):
+        self._chop_alive = False
+        if self._chop_proc is not None:
+            try:
+                self._chop_proc.terminate()
+            except Exception:
+                pass
+            self._chop_proc = None
+        if self._chop_win is not None:
+            try:
+                self._chop_win.destroy()
+            except Exception:
+                pass
+            self._chop_win = None
+        self._chop_cands = []
+
+    def _autochop_cancel_scan(self):
+        self._chop_cancelled = True
+        if self._chop_proc is not None:
+            try:
+                self._chop_proc.terminate()
+            except Exception:
+                pass
+
+    def _chop_after(self, fn, *args):
+        """Marshal a worker result to the GUI thread, dropped silently if the window has gone —
+        a scan finishing after Close must not raise into a dead Toplevel."""
+        def run():
+            if self._chop_alive and self._chop_win is not None and self._chop_win.winfo_exists():
+                fn(*args)
+        self.root.after(0, run)
+
+    def _chop_span(self):
+        """One clip's span in SOURCE seconds — the same arithmetic add_to_queue guards with:
+        slow motion consumes keep_every source frames per output frame."""
+        k = self._keep_every()
+        return (self._frames() * k / self.info["fps"]) if k else self._frames() / FPS
+
+    def _autochop_scan(self):
+        if self._chop_proc is not None:
+            return
+        thr = SCENE_SENSITIVITIES[self._chop_sense.current()][1]
+        self._chop_cancelled = False
+        for w in self._chop_grid.winfo_children():
+            w.destroy()
+        self._chop_cands = []
+        self._autochop_refresh_count()
+        for w in (self._chop_keep_all, self._chop_skip_all, self._chop_add_btn):
+            w.configure(state=tk.DISABLED)
+        self._chop_scan_btn.configure(state=tk.DISABLED)
+        self._chop_cancel_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._chop_status.configure(text="Scanning…", fg=COLORS["text_secondary"])
+        threading.Thread(target=self._autochop_scan_worker,
+                         args=(self.src, thr, self.info["duration"] or 0.0), daemon=True).start()
+
+    def _autochop_scan_worker(self, src, threshold, duration):
+        cuts, err = [], None
+        try:
+            cmd = build_scene_scan_command(self.ffmpeg, src, threshold)
+            self._chop_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                               stderr=subprocess.PIPE, text=True,
+                                               errors="replace", creationflags=_NO_WINDOW)
+            last_shown = -5.0
+            for line in self._chop_proc.stderr:
+                t = parse_scene_time(line)
+                if t is not None:
+                    cuts.append(t)
+                p = t if t is not None else parse_progress_time(line)
+                if p is not None and p - last_shown >= 2.0 and duration:
+                    last_shown = p
+                    self._chop_after(self._chop_status.configure,
+                                     {"text": f"Scanning…  {p / duration:4.0%} — "
+                                              f"{len(cuts)} cuts so far"})
+            rc = self._chop_proc.wait()
+            # A terminated scan comes back non-zero with a partial cut list — that is a
+            # cancellation, not a failure. -f null runs to EOF and exits 0 on success.
+            if rc != 0 and not self._chop_cancelled:
+                err = "ffmpeg could not scan this file"
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+        finally:
+            self._chop_proc = None
+        self._chop_after(self._autochop_scanned, cuts, err, self._chop_cancelled)
+
+    def _autochop_scanned(self, cuts, err, cancelled=False):
+        self._chop_cancel_btn.pack_forget()
+        self._chop_scan_btn.configure(state=tk.NORMAL)
+        if cancelled:
+            self._chop_status.configure(text="Scan stopped.", fg=COLORS["text_secondary"])
+            return
+        if err:
+            self._chop_status.configure(text=f"Scan failed — {err}", fg=COLORS["error"])
+            return
+        duration = self.info["duration"] or 0.0
+        span = self._chop_span()
+        starts = plan_autochop(cuts, duration, span, fill=bool(self._chop_fill_var.get()))
+        note = ""
+        if len(starts) > AUTOCHOP_MAX_SEGMENTS:
+            note = (f"  (showing the first {AUTOCHOP_MAX_SEGMENTS} of {len(starts)} — a longer "
+                    f"Length or Fewer cuts would bring the rest into reach)")
+            starts = starts[:AUTOCHOP_MAX_SEGMENTS]
+        if not starts:
+            self._chop_status.configure(
+                text=f"{len(cuts)} cuts found, but every scene is shorter than one "
+                     f"{self._frames()}-frame clip ({span:.1f} s). A shorter Length on the "
+                     f"settings card would fit more of them.", fg=COLORS["warning"])
+            return
+        self._chop_status.configure(
+            text=f"{len(cuts)} cuts — {len(starts)} segments fit a {self._frames()}-frame "
+                 f"clip{note}", fg=COLORS["text_secondary"])
+
+        fps = self.info["fps"]
+        cols = 4
+        for i, s in enumerate(starts):
+            cand = {"start": s, "keep": True, "photo": None}
+            card = tk.Frame(self._chop_grid, bg=COLORS["bg_surface"], highlightthickness=2,
+                            highlightbackground=COLORS["success"])
+            card.grid(row=i // cols, column=i % cols, padx=5, pady=5)
+            # A Label sizes in TEXT units until it holds an image, so every card starts with a
+            # shared blank at thumbnail size — the grid lays out correctly before any real
+            # frame arrives, and the reference on self keeps Tk from collecting it.
+            thumb = tk.Label(card, bg="#000000", image=self._chop_blank)
+            thumb.pack()
+            mins, secs = divmod(s, 60.0)
+            cap = tk.Label(card, text=f"at {int(mins)}:{secs:04.1f}  ·  {span:.1f} s",
+                           font=(FONT_FAMILY, 9), bg=COLORS["bg_surface"],
+                           fg=COLORS["text_secondary"])
+            cap.pack(fill=tk.X)
+            state = tk.Label(card, text="✓ keep", font=(FONT_FAMILY, 9, "bold"),
+                             bg=COLORS["bg_surface"], fg=COLORS["success"])
+            state.pack(fill=tk.X, pady=(0, 3))
+            cand.update(card=card, thumb=thumb, state=state)
+            for w in (card, thumb, cap, state):
+                w.bind("<Button-1>", lambda _e, c=cand: self._autochop_toggle(c))
+                w.bind("<Double-Button-1>",
+                       lambda _e, sf=int(round(s * fps)): self._autochop_seek(sf))
+            self._chop_cands.append(cand)
+        for w in (self._chop_keep_all, self._chop_skip_all, self._chop_add_btn):
+            w.configure(state=tk.NORMAL)
+        self._autochop_refresh_count()
+        threading.Thread(target=self._autochop_thumb_worker,
+                         args=(list(self._chop_cands), self.src,
+                               (self.info["display_width"], self.info["display_height"]), span),
+                         daemon=True).start()
+
+    def _autochop_thumb_worker(self, cands, src, src_size, span):
+        """One frame from the MIDDLE of each segment — the first frame of a scene is where the
+        transition lives, and the middle is what the segment is actually of."""
+        for cand in cands:
+            if not self._chop_alive:
+                return
+            img = grab_frame(self.ffmpeg, src, cand["start"] + span / 2.0,
+                             box=self._CHOP_THUMB, src_size=src_size)
+            if img is not None:
+                self._chop_after(self._autochop_set_thumb, cand, img)
+
+    def _autochop_set_thumb(self, cand, img):
+        if not cand["thumb"].winfo_exists():
+            return
+        cand["photo"] = ImageTk.PhotoImage(img)     # held on the cand, or Tk collects it
+        cand["thumb"].configure(image=cand["photo"], width=img.width, height=img.height)
+
+    def _autochop_toggle(self, cand):
+        cand["keep"] = not cand["keep"]
+        keep = cand["keep"]
+        cand["card"].configure(
+            highlightbackground=COLORS["success"] if keep else COLORS["border"])
+        cand["state"].configure(text="✓ keep" if keep else "— skipped",
+                                fg=COLORS["success"] if keep else COLORS["text_muted"])
+        self._autochop_refresh_count()
+
+    def _autochop_set_all(self, keep):
+        for cand in self._chop_cands:
+            if cand["keep"] != keep:
+                self._autochop_toggle(cand)
+
+    def _autochop_refresh_count(self):
+        kept = sum(1 for c in self._chop_cands if c["keep"])
+        self._chop_count.configure(
+            text=f"{kept} of {len(self._chop_cands)} kept" if self._chop_cands else "")
+
+    def _autochop_seek(self, start_frame):
+        """Double-click: put the main playhead at the segment so it can be scrubbed, listened
+        to, or fine-tuned by hand. The review window stays open."""
+        self.scale.set(start_frame)
+
+    def _autochop_add_kept(self):
+        kept = [c for c in self._chop_cands if c["keep"]]
+        if not kept:
+            messagebox.showinfo("Gizmo", "Nothing is marked keep.")
+            return
+        fps = self.info["fps"]
+        added = 0
+        for cand in kept:
+            job = self._planned_job(start_frame=int(round(cand["start"] * fps)))
+            if job is None:
+                break
+            self.queue.append(job)
+            added += 1
+        self._refresh_queue_box()
+        self._refresh_planned_name()
+        self.status.configure(text=f"Queued {added} auto-chopped clip"
+                                   f"{'' if added == 1 else 's'}",
+                              fg=COLORS["text_secondary"])
+        self._autochop_close()
 
     # -- exporting ---------------------------------------------------------------------------------
     def export_queue(self):

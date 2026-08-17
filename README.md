@@ -159,7 +159,7 @@ Two built-in presets ship. **Defaults** is applied the moment you pick the famil
 
 **0.25 MP is the default, and it holds up.** It's four times cheaper per step than 1 MP and the extra resolution has not paid for itself in testing — including on wider-framed sets, where you might expect it to. H3's canvas is 768 on the short edge, but that governs what it *renders*, not what it can be *trained* on. Raise it if a specific dataset asks for it; don't assume it needs raising.
 
-**Previews are 1024×1024 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch.
+**Previews are 1024×1024 stills by default**, which render in seconds. H3 is a video model, so the **Sample length** dropdown can also give you a short clip you can scrub in the gallery — useful when motion is what you need to check, but a clip costs minutes rather than seconds, so set **Generate every N epochs** to match if you switch. Set the **Turbo LoRA** in Preferences and previews render in **6 steps instead of 20**, with the Turbo applied at 75% on top of your training LoRA for the render only — previews only, never the saved LoRA; steps and strength are adjustable on the Samples tab.
 
 ### Video and sound: how do I…
 
@@ -195,8 +195,13 @@ reversible by renaming. The video still trains.
 any mix. If one category is much smaller, **Finish one category early** on the Training tab
 lets it finish at a chosen epoch while the rest trains on.
 
-**…set it up?** One extra model file: the **audio VAE** (~605 MB), on its own Preferences row.
-Blank = clips train silent; required only once the folder has voice recordings.
+**…get fast previews while training?** Set the **Turbo LoRA** (~780 MB, its own Preferences
+row): previews render in 6 steps with the Turbo at 75% on top of your training LoRA —
+previews only, never the saved file. Adjustable on the Samples tab.
+
+**…set it up?** One extra model file for sound: the **audio VAE** (~605 MB), on its own
+Preferences row. Blank = clips train silent; required only once the folder has voice
+recordings. Fizgig points out both new files once at startup if your H3 paths are set.
 
 ### Training on video clips — and on their sound
 
@@ -301,15 +306,17 @@ trains on, or it's refused with a message saying which lengths those are:
 **Or record the dataset right inside Gizmo.** The Voice tab's **🎙 Record** button swaps in a
 record card: Gizmo prompts a sentence to read (pangrams, classic lines, deliberately
 ridiculous ones that make you smile — a smile audibly changes a voice — and darker lines for
-range, rotating tone take by take, sized to your segment length) and **rolls a random delivery
-style for each take** — cheerfully, wearily, quietly — visible in a dropdown you can override,
-or switch off in settings. You **hold the button or the R key while you speak and release when
-done** — the mic is already rolling, so nothing clips, and the silence either side is trimmed
-to a quarter-second. Each take drops straight into the editor **with its caption already
-written** (the prompted sentence *is* the transcript — no Whisper needed), ready to Add to
-queue. Your takes survive leaving record mode and coming back. A usable voice dataset takes
-about ten minutes and zero source files. Pick your microphone (and a default Whisper language)
-in Gizmo's **⚙ settings**.
+range, rotating tone take by take, and cycling every length from a quick interjection to a
+line that fills the 5.2 s slot) and **rolls a random delivery style for each take** —
+cheerfully, wearily, quietly — visible in a dropdown you can override, or switch off in
+settings. You **hold the button or the R key while you speak and release when done** — the
+mic is already rolling, so nothing clips, and every take is cleaned up for you: the silence
+at both ends and the key click itself are trimmed, and the cut is widened to exactly the grid
+length that holds your words, so the auto-picked length always fits what you said. Each take
+drops straight into the editor **with its caption already written** (the prompted sentence
+*is* the transcript — no Whisper needed), ready to Add to queue. Your takes survive leaving
+record mode and coming back. A usable voice dataset takes about ten minutes and zero source
+files. Pick your microphone (and a default Whisper language) in Gizmo's **⚙ settings**.
 
 **Gizmo's Voice / audio tab cuts them for you** — that's the whole point of the strict rule.
 Open a recording (or a **video**, to use just its audio track — you scrub the waveform, nothing
@@ -344,6 +351,7 @@ recordings in the dataset.
 | Qwen3-VL-32B text encoder | ~15.7 GB | The **nvfp4** file — the same one ComfyUI uses, so you may already have it. The bf16 file (~51.5 GB) also works; the *int8_convrot* variant is not supported |
 | Video VAE | ~4.9 GB | Used while caching your images, and to decode previews |
 | Audio VAE *(optional)* | ~605 MB | For training on sound: optional for video clips (blank = clips train silent), **required** the moment the folder contains voice recordings. Loaded only while caching |
+| Turbo LoRA *(optional)* | ~780 MB | Fast in-training previews: 6 steps with the community Turbo at 75% on top of your training LoRA — previews only, never the saved LoRA. `minimax_h3_turbo_v4_step600.safetensors` from larryvrh/MiniMax-H3-Turbo-Lora; you may already have it in ComfyUI's loras folder |
 | DiT — reference *(optional)* | ~21 GB | Only for reference distillation. `minimax_h3_ref2va_pruned_int8_convrot.safetensors` — a different fine-tune, and the only H3 build that accepts reference images. You may already have it if you use ComfyUI's r2v workflow. **Download models for me** leaves it out unless you tick **Include the reference DiT** beside the button. Leave blank for ordinary training |
 
 The text encoder is loaded for the one-time caching pass then freed — it never shares VRAM with training.

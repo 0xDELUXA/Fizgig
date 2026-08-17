@@ -55,9 +55,17 @@ trigger word, one run, any mix. If one side of the dataset is much smaller than 
 new **Finish one category early** row on the Training tab lets voice (or photos & clips)
 finish at a chosen epoch while the rest trains on.
 
-**…set it up?** One extra model file: the **audio VAE** (~605 MB), on its own Preferences row
-with a download link. Leave it blank and clips simply train silent; it's required only once
-the folder contains voice recordings.
+**…get fast previews while training?** Set the **Turbo LoRA** (~780 MB, its own Preferences
+row with a download link — you may already have it in ComfyUI's loras folder): previews then
+render in **6 steps** with the Turbo applied at **75%** on top of your training LoRA, the
+same pairing fast ComfyUI inference uses. Previews only — your saved LoRA never contains it.
+Steps and strength are adjustable on the Samples tab.
+
+**…set it up?** One extra model file for sound: the **audio VAE** (~605 MB), on its own
+Preferences row with a download link. Leave it blank and clips simply train silent; it's
+required only once the folder contains voice recordings. If your H3 paths are already set,
+Fizgig points out the new files (audio VAE, Turbo LoRA) once at startup — download or
+dismiss.
 
 ## Gizmo — the clip and voice prep tool
 
@@ -67,23 +75,31 @@ separate app (it opens in under a second — no torch, no CUDA) that turns whate
 into files Fizgig accepts.
 
 **Video clips:** open any footage — any format, frame rate or size — and cut to-spec clips
-from it. First-and-last-frame previews before you commit, frame-accurate stepping, crop to the
-subject with shape locks (1:1, 16:9, 9:16…), per-clip sound-or-mute, real-time or slow-motion
-from high-frame-rate sources, and a mark-everything-then-export-once queue. The preview
-follows the playhead live while you drag. Gizmo also tells you which clip lengths your card
-can actually train, at which megapixels, before you cut anything.
+from it. A **▶ Play** button plays the marked clip exactly as it will export — same span,
+same pace, slow motion included, sound and crop overlay along for the ride. First-and-last-
+frame previews before you commit, frame-accurate stepping, crop to the subject with shape
+locks (1:1, 16:9, 9:16…), per-clip sound-or-mute, and a mark-everything-then-export-once
+queue. The preview follows the playhead live while you drag, and Gizmo tells you which clip
+lengths your card can actually train, at which megapixels, before you cut anything.
 
 **Voice segments:** a waveform editor for cutting training segments out of any recording.
 Zoom rides the mouse wheel, segments snap to H3's allowed lengths, space and J-K-L work like
 an edit suite, and Whisper transcription (one-time ~150 MB download) appends the spoken words
-to your caption. Exports are sample-exact — the trainer's strict duration check always passes.
+to your caption. The timeline always extends a little past the audio, so a segment that fills
+the whole file keeps its edge grips reachable. Exports are sample-exact — the trainer's
+strict duration check always passes. The trigger word and both save folders are remembered
+between sessions.
 
-**The recorder:** push-to-record, in a card on the Voice tab — your takes survive leaving and
-re-entering record mode. Prompted sentences span short interjections to lines that fill the
-longest slot, rotating between plain, pangram, literary, silly and dark; the delivery style
-(cheerfully, wearily, quietly…) rolls at random after every take, visible in a dropdown you
-can override — or switch off in ⚙ settings. The mic rolls continuously, so push-to-record
-clips nothing: a quarter-second before your press is already in the take.
+**The recorder:** push-to-record (hold the button or the **R** key), in a card on the Voice
+tab — your takes survive leaving and re-entering record mode. Every take is cleaned up for
+you: the silence at both ends and the key click itself are trimmed off, and the cut is
+widened to exactly the grid length that holds your words, using the real room tone around
+them — so the auto-picked length always fits what you said. Prompted sentences rotate
+through every length from a quick interjection to a line that fills the 5.2 s slot, and
+across five tonal flavours; the delivery style (cheerfully, wearily, quietly…) rolls at
+random after every take, visible in a dropdown you can override — or switch off in ⚙
+settings, along with the trimming. The mic rolls continuously, so push-to-record clips
+nothing.
 
 ## 16 GB and 24 GB cards: int8, streamed
 
@@ -112,6 +128,16 @@ dequantization was rebuilt to run in bounded chunks, removing the out-of-memory 
 "caching appears frozen" symptom) that 16 GB users hit at the start of a run. Both paths were
 validated end-to-end on a hard-capped 16 GB budget, through full runs with previews cycling.
 
+## Turbo previews
+
+Set the **Turbo LoRA** in Preferences (~780 MB) and in-training previews render in **6 steps
+instead of 20** — the Turbo is applied at 75% on top of your training LoRA for the render
+only, then removed before the next training step. Your saved LoRA never contains it, training
+math never sees it, and a failed load falls back to the standard 20-step pass with a console
+note rather than rendering 6-step mush. Steps and strength are adjustable on the Samples tab;
+6 at 75% is the tested recommendation. If your H3 paths are set but the Turbo (or the audio
+VAE) isn't, Fizgig mentions it once at startup.
+
 ## Finish one category early
 
 Mixed datasets are rarely balanced — thirty photos and two hundred voice takes, or the
@@ -130,6 +156,16 @@ audio-only.
 
 ## Also in this release
 
+- **Resuming a paused H3 run now rebuilds the checkpoint's own network** — rank, alpha and
+  LoRA-vs-LoKR are read from the saved state and override whatever the Training tab shows,
+  with a console note. Settings that moved on since the pause used to crash the relaunch.
+- **The built-in H3 presets are now two genuinely different recipes**: Defaults runs rank 16
+  at a flat 1e-4, Fast runs rank 8 at a flat 2e-4 — Adapter-relative LR ships off in both
+  and stays available in Other Options.
+- **The Captions tab no longer freezes on a folder with clips** — clip thumbnails come from
+  a single seeked frame (cached) instead of decoding every frame of every clip on the way in.
+- **Clips with sound cache correctly at every length** — 5-, 56- and 107-frame clips were
+  refused by an audio rounding mismatch; the fit is now sample-exact for all eight lengths.
 - **LoRA names that can't become filenames are refused before the run starts**, with a plain
   message, instead of failing at the first save — reported by
   [@ioritree](https://github.com/ioritree) ([#70](https://github.com/shootthesound/Fizgig/issues/70)).
@@ -146,5 +182,6 @@ audio-only.
 ## Upgrading
 
 Nothing to do — model paths, datasets, caches and presets are untouched. If you want sound:
-add the audio VAE (~605 MB) on its new Preferences row. Everything else is optional too;
-stills-only training works exactly as before.
+add the audio VAE (~605 MB) on its new Preferences row. If you want fast previews: the Turbo
+LoRA (~780 MB) likewise — Fizgig will point both out once at startup if your H3 paths are
+set. Everything else is optional too; stills-only training works exactly as before.

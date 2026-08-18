@@ -15034,22 +15034,27 @@ class LoRATrainerGUI:
             outer,
             "Extract",
             "Distill an existing LoRA down to a lower rank. Klein: block + timestep targeting, optional "
-            "activation-weighted SVD. Krea 2: pure weight SVD over all blocks (no block map yet).",
+            "activation-weighted SVD. Krea 2 and MiniMax H3: pure weight SVD over all blocks (no block map yet).",
         )
 
-        # Model family selector. Krea 2 = pure weight SVD over all blocks (no pipeline / prompt /
-        # timesteps / block presets), so those cards are hidden in Krea 2 mode.
-        _efam = "krea2" if str(self.last_used.get("extract_family", "klein")) == "krea2" else "klein"
+        # Model family selector. Krea 2 / MiniMax H3 = pure weight SVD over all blocks (no pipeline /
+        # prompt / timesteps / block presets), so those cards are hidden for both.
+        _efam = str(self.last_used.get("extract_family", "klein"))
+        if _efam not in ("klein", "krea2", "minimax"):
+            _efam = "klein"
         self.extract_family_var = tk.StringVar(value=_efam)
         efam_card = self._start_section_card(
             outer, "Model Family",
-            "Klein 9B (full extractor) or Krea 2 (weight-only SVD; block-targeting presets come once the block map exists).",
+            "Klein 9B (full extractor), Krea 2 or MiniMax H3 (weight-only SVD; block-targeting presets "
+            "come once each block map exists). Browsing a LoRA auto-switches to its family.",
         )
         _ef = tk.Frame(efam_card, bg=COLORS["bg_surface"])
         _ef.pack(anchor=tk.W)
         ttk.Radiobutton(_ef, text="Klein 9B", variable=self.extract_family_var, value="klein",
                         command=self._on_extract_family_changed).pack(side=tk.LEFT, padx=(0, 20))
         ttk.Radiobutton(_ef, text="Krea 2", variable=self.extract_family_var, value="krea2",
+                        command=self._on_extract_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_ef, text="MiniMax H3", variable=self.extract_family_var, value="minimax",
                         command=self._on_extract_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Source & Output
@@ -15446,6 +15451,16 @@ class LoRATrainerGUI:
         if filepath:
             self.extract_source_var.set(filepath)
             self._update_extract_output_name()
+            # Header-only family sniff — picking a LoRA from the wrong family auto-switches
+            # instead of erroring at run time (same as Explorer / Profiler).
+            try:
+                from fizgig.networks.lora import lora_family_from_file
+                fam = lora_family_from_file(filepath)
+                if fam in ("klein", "krea2", "minimax") and fam != self.extract_family_var.get():
+                    self.extract_family_var.set(fam)
+                    self._on_extract_family_changed()
+            except Exception:
+                pass
 
     def _extract_log(self, text):
         """Append to extract log (preserves user scroll position). Marshals to the main
@@ -15464,8 +15479,8 @@ class LoRATrainerGUI:
 
     def _run_extract(self):
         """Start extraction in a background thread."""
-        if str(self.extract_family_var.get()) == "krea2":
-            self._run_extract_krea2()
+        if str(self.extract_family_var.get()) in ("krea2", "minimax"):
+            self._run_extract_krea2()      # weight-only path; model-agnostic, serves H3 too
             return
 
         source = self.extract_source_var.get()
@@ -15666,15 +15681,18 @@ class LoRATrainerGUI:
     # --- Krea 2 extract (weight-only SVD over all blocks; no pipeline / prompt / block map) ---
 
     def _on_extract_family_changed(self):
-        fam = "krea2" if str(self.extract_family_var.get()) == "krea2" else "klein"
+        fam = str(self.extract_family_var.get())
+        if fam not in ("klein", "krea2", "minimax"):
+            fam = "klein"
         self.last_used["extract_family"] = fam
         self._save_last_used_paths()
-        self._apply_extract_family_ui(fam == "krea2")
+        self._apply_extract_family_ui(fam != "klein")
 
     def _apply_extract_family_ui(self, is_krea2):
-        """Krea 2 mode: pure weight SVD over all blocks. Hide the block-preset, custom-block,
-        prompt and activation-probe (timesteps + forward passes) controls — only Target Rank
-        plus Source/Output/Run remain. Klein mode restores everything."""
+        """Krea 2 / MiniMax H3 mode: pure weight SVD over all blocks. Hide the block-preset,
+        custom-block, prompt and activation-probe (timesteps + forward passes) controls — only
+        Target Rank plus Source/Output/Run remain. Klein mode restores everything.
+        (`is_krea2` is historical naming: True means any weight-only family.)"""
         # (widget, original padx) — restored verbatim so the klein branch is idempotent.
         probe_widgets = [
             (getattr(self, "_extract_timesteps_label", None), (0, 6)),
@@ -15695,6 +15713,13 @@ class LoRATrainerGUI:
             # Force weight-only all-blocks regardless of stale Klein selections.
             self.extract_samples_var.set("0")
             self.extract_timesteps_var.set("all")
+            if str(self.extract_family_var.get()) == "minimax":
+                self.extract_time_note_var.set(
+                    "MiniMax H3 is a 33B model - weight SVD runs over every trained module "
+                    "(208+ Linears, up to 5376 wide). Expect several minutes on a free GPU. "
+                    "If the GPU is busy (a training run, ComfyUI, another preview), each SVD "
+                    "falls back to the CPU and runs much slower - free up VRAM first.")
+                return
             self.extract_time_note_var.set(
                 "⏱ Krea 2 is a 12.9B model — weight SVD runs over all 264 modules, several of "
                 "them very large (e.g. 36864×6144). Expect roughly 5–10 minutes on a free GPU. "
@@ -15784,8 +15809,10 @@ class LoRATrainerGUI:
             def progress(stage, current, total):
                 self.master.after(0, lambda: self.extract_progress_var.set(f"{stage}: {current+1}/{total}"))
 
+            _fam_label = ("MiniMax H3" if str(self.extract_family_var.get()) == "minimax"
+                          else "Krea 2")
             self.master.after(0, lambda: self._extract_log(
-                f"Krea 2 weight-only SVD (all blocks), rank={rank}\n"))
+                f"{_fam_label} weight-only SVD (all blocks), rank={rank}\n"))
             result = LoRAExtractor.extract_weight_only(config, progress_callback=progress)
 
             # Empty artifact = failure, not success (same rule as the Klein worker).
@@ -17207,23 +17234,28 @@ class LoRATrainerGUI:
             outer,
             "Profiler",
             "Analyze a LoRA's per-block signature. Klein: full activation profile (5-bucket report). "
-            "Krea 2: weight-only profile (flat per-block — no block-role map yet). Both write a sidecar "
-            "the Repair Studio reads inline.",
+            "Krea 2 and MiniMax H3: weight-only profile (flat per-block — no block-role map yet). "
+            "All write a sidecar the Repair Studio reads inline.",
         )
 
-        # Model family selector (Klein 9B / Krea 2). Krea 2 is a weight-only profile — no pipeline,
-        # prompt, resolution or stages — so those cards are hidden in Krea 2 mode.
-        _pfam = "krea2" if str(self.last_used.get("profiler_family", "klein")) == "krea2" else "klein"
+        # Model family selector. Krea 2 and MiniMax H3 are weight-only profiles — no pipeline,
+        # prompt, resolution or stages — so those cards are hidden for both.
+        _pfam = str(self.last_used.get("profiler_family", "klein"))
+        if _pfam not in ("klein", "krea2", "minimax"):
+            _pfam = "klein"
         self.profiler_family_var = tk.StringVar(value=_pfam)
         fam_card = self._start_section_card(
             outer, "Model Family",
-            "Klein 9B (activation profile) or Krea 2 (weight-only — the instrument to discover Krea 2's block roles).",
+            "Klein 9B (activation profile), Krea 2 or MiniMax H3 (weight-only — the instrument to "
+            "discover each family's block roles). Browsing a LoRA auto-switches to its family.",
         )
         _pf = tk.Frame(fam_card, bg=COLORS["bg_surface"])
         _pf.pack(anchor=tk.W)
         ttk.Radiobutton(_pf, text="Klein 9B", variable=self.profiler_family_var, value="klein",
                         command=self._on_profiler_family_changed).pack(side=tk.LEFT, padx=(0, 20))
         ttk.Radiobutton(_pf, text="Krea 2", variable=self.profiler_family_var, value="krea2",
+                        command=self._on_profiler_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_pf, text="MiniMax H3", variable=self.profiler_family_var, value="minimax",
                         command=self._on_profiler_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Model selection
@@ -17319,9 +17351,10 @@ class LoRATrainerGUI:
         self._apply_profiler_family_ui()
 
     def _apply_profiler_family_ui(self):
-        """Krea 2 profiling is weight-only — hide the activation-probe cards (Model/Prompt/Options).
-        Re-show (Klein) uses before= anchors so the cards land back in their canonical order."""
-        krea2 = (self.profiler_family_var.get() == "krea2")
+        """Krea 2 / MiniMax H3 profiling is weight-only — hide the activation-probe cards
+        (Model/Prompt/Options). Re-show (Klein) uses before= anchors so the cards land back
+        in their canonical order."""
+        krea2 = (self.profiler_family_var.get() in ("krea2", "minimax"))
 
         def _show(cont, before):
             try:
@@ -17364,6 +17397,16 @@ class LoRATrainerGUI:
         )
         if filepath:
             self.profiler_lora_var.set(filepath)
+            # Same auto-switch the Explorer does: a header-only sniff, so picking a LoRA from
+            # the wrong family Just Works instead of erroring at run time.
+            try:
+                from fizgig.networks.lora import lora_family_from_file
+                fam = lora_family_from_file(filepath)
+                if fam in ("klein", "krea2", "minimax") and fam != self.profiler_family_var.get():
+                    self.profiler_family_var.set(fam)
+                    self._on_profiler_family_changed()
+            except Exception:
+                pass
 
     def _browse_profiler_file(self, var):
         filepath = filedialog.askopenfilename(
@@ -17397,6 +17440,8 @@ class LoRATrainerGUI:
 
         if self.profiler_family_var.get() == "krea2":
             return self._run_profiler_krea2(lora_path)
+        if self.profiler_family_var.get() == "minimax":
+            return self._run_profiler_h3(lora_path)
 
         prompt = self.profiler_prompt_var.get().strip()
         if not prompt:
@@ -17476,6 +17521,56 @@ class LoRATrainerGUI:
                     self.profiler_run_btn.configure(state="normal")
                 self.master.after(0, _fail)
         threading.Thread(target=worker, daemon=True).start()
+
+    def _run_profiler_h3(self, lora_path):
+        """MiniMax H3 weight-only profile — no pipeline, fast. Runs in a thread."""
+        import threading
+        self.profiler_run_btn.configure(state="disabled")
+        self.profiler_open_btn.configure(state="disabled")
+        self.profiler_results.configure(state="normal")
+        self.profiler_results.delete(1.0, tk.END)
+        self.profiler_results.configure(state="disabled")
+        self.profiler_progress_var.set("Profiling (MiniMax H3, weight-only)…")
+
+        def worker():
+            try:
+                import sys
+                sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+                from fizgig.profiler.h3_profile import profile_h3_weight_only
+                profiles_dir = (self.prefs_vars["profiles_dir"].get() if "profiles_dir" in self.prefs_vars
+                                else os.path.join(OUTPUT_LORAS_DIR, "profiles"))
+                os.makedirs(profiles_dir, exist_ok=True)
+                stem = os.path.splitext(os.path.basename(lora_path))[0]
+                out_html = os.path.join(profiles_dir, f"{stem}_h3_profile.html")
+                html, sidecar = profile_h3_weight_only(lora_path, out_html, profiles_dir=profiles_dir)
+                self._profiler_report_path = html
+                self.master.after(0, lambda: self._profiler_h3_done(html, sidecar))
+            except Exception:
+                import traceback
+                err = traceback.format_exc()
+                def _fail():
+                    self._profiler_log(err + "\n")
+                    self.profiler_progress_var.set("Error — see results.")
+                    self.profiler_run_btn.configure(state="normal")
+                self.master.after(0, _fail)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _profiler_h3_done(self, html, sidecar):
+        try:
+            import json as _json
+            d = _json.load(open(sidecar, encoding="utf-8"))
+            lines = ["MiniMax H3 weight-only profile complete.\n",
+                     f"Report: {html}\n\nTop blocks by weight:\n"]
+            for b in d.get("top_active_blocks", []):
+                lines.append(f"  {b['name']:<12} {b['pct']:.1f}%\n")
+            lines.append("\nH3's 50 block roles aren't mapped yet — this is the weight signature "
+                         "to discover them. Found a pattern? Share it on GitHub Issues.\n")
+            self._profiler_log("".join(lines))
+        except Exception:
+            self._profiler_log(f"Profile complete: {html}\n")
+        self.profiler_progress_var.set("Done.")
+        self.profiler_run_btn.configure(state="normal")
+        self.profiler_open_btn.configure(state="normal")
 
     def _profiler_krea2_done(self, html, sidecar):
         try:

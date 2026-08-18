@@ -13859,18 +13859,23 @@ class LoRATrainerGUI:
 
         # Model family selector. Krea 2 explores on the fp8 Turbo (always) and has no ref-strength
         # dial (vision-path reference), so the DiT radio + ref Strength are hidden in Krea 2 mode.
-        _xfam = "krea2" if str(self.last_used.get("explorer_family", "klein")) == "krea2" else "klein"
+        _xfam = str(self.last_used.get("explorer_family", "klein"))
+        if _xfam not in ("klein", "krea2", "minimax"):
+            _xfam = "klein"
         self.explorer_family_var = tk.StringVar(value=_xfam)
         xfam_card = self._start_section_card(
             outer, "Model Family",
-            "Klein 9B (Distilled/Base) or Krea 2 (fp8 Turbo, 8-step). Block roles are mapped for Klein; "
-            "Krea 2 explores its 32 blocks generically.",
+            "Klein 9B (Distilled/Base), Krea 2 (fp8 Turbo, 8-step) or MiniMax H3 (22-frame clip "
+            "previews, middle frame shown). Block roles are mapped for Klein; the other two "
+            "explore their blocks generically.",
         )
         _xf = tk.Frame(xfam_card, bg=COLORS["bg_surface"])
         _xf.pack(anchor=tk.W)
         ttk.Radiobutton(_xf, text="Klein 9B", variable=self.explorer_family_var, value="klein",
                         command=self._on_explorer_family_changed).pack(side=tk.LEFT, padx=(0, 20))
         ttk.Radiobutton(_xf, text="Krea 2", variable=self.explorer_family_var, value="krea2",
+                        command=self._on_explorer_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_xf, text="MiniMax H3", variable=self.explorer_family_var, value="minimax",
                         command=self._on_explorer_family_changed).pack(side=tk.LEFT)
 
         # Card 1: Setup
@@ -14142,26 +14147,39 @@ class LoRATrainerGUI:
     # Explorer actions
     # ------------------------------------------------------------------
 
+    def _explorer_family(self):
+        fam = str(getattr(self, "explorer_family_var", None) and self.explorer_family_var.get())
+        return fam if fam in ("klein", "krea2", "minimax") else "klein"
+
     def _explorer_is_krea2(self):
-        return str(getattr(self, "explorer_family_var", None) and self.explorer_family_var.get()) == "krea2"
+        return self._explorer_family() == "krea2"
+
+    def _explorer_default_state(self):
+        from fizgig.repair_studio.state import SliderState
+        fam = self._explorer_family()
+        return (SliderState.default_krea2() if fam == "krea2"
+                else SliderState.default_h3() if fam == "minimax"
+                else SliderState.default_klein9b())
 
     def _explorer_anchor_block(self):
         """The structural-composition anchor block — never locked/disabled, only inverted/pushed.
-        Klein: double_0. Krea 2: block_0 (its first single-stream block)."""
-        return "block_0" if self._explorer_is_krea2() else "double_0"
+        Klein: double_0. Krea 2: block_0. MiniMax H3: h3blk_0 (each family's first block)."""
+        fam = self._explorer_family()
+        return {"krea2": "block_0", "minimax": "h3blk_0"}.get(fam, "double_0")
 
     def _on_explorer_family_changed(self):
-        fam = "krea2" if str(self.explorer_family_var.get()) == "krea2" else "klein"
+        fam = self._explorer_family()
         self.last_used["explorer_family"] = fam
         self._save_last_used_paths()
         # Switching family is a hard reset — the engine + loaded LoRA belong to the old family.
         if self._explorer_engine is not None or self._explorer_baseline_state is not None:
             self._explorer_full_reset()
-        self._apply_explorer_family_ui(fam == "krea2")
+        self._apply_explorer_family_ui(fam != "klein")
 
     def _apply_explorer_family_ui(self, is_krea2):
-        """Krea 2: hide the Distilled/Base DiT radio (always Turbo) and the ref Strength control
-        (vision-path reference has no strength). Klein restores both."""
+        """Krea 2 / MiniMax H3: hide the Distilled/Base DiT radio (Krea 2 is always Turbo; H3
+        auto-plans) and the ref Strength control (no reference-latent strength). Klein
+        restores both. (`is_krea2` is historical naming: True = any non-Klein family.)"""
         dit_label = getattr(self, "_explorer_dit_label", None)
         dit_frame = getattr(self, "_explorer_dit_frame", None)
         strength_lbl = getattr(self, "_explorer_ref_strength_label", None)
@@ -14190,6 +14208,8 @@ class LoRATrainerGUI:
 
         if self._explorer_is_krea2():
             return self._explorer_ensure_engine_krea2()
+        if self._explorer_family() == "minimax":
+            return self._explorer_ensure_engine_h3()
 
         dit_choice = self.explorer_dit_var.get()
         dit_pref_key = "base_dit" if dit_choice == "base" else "distilled_dit"
@@ -14263,6 +14283,41 @@ class LoRATrainerGUI:
             self.explorer_status_var.set("Error loading models.")
             return False
 
+    def _explorer_ensure_engine_h3(self):
+        """Lazy-load the MiniMax H3 engine for the Explorer — same auto-planned base + Turbo
+        LoRA + prompt disk cache as the Repair Studio (see _ensure_repair_engine_h3)."""
+        dit_path = self.prefs_vars.get("minimax_dit", tk.StringVar()).get()
+        vae_path = self.prefs_vars.get("minimax_vae", tk.StringVar()).get()
+        te_path = self.prefs_vars.get("minimax_text_encoder", tk.StringVar()).get()
+        for label, p in (("MiniMax H3 DiT", dit_path), ("MiniMax H3 video VAE", vae_path),
+                         ("Qwen3-VL-32B text encoder", te_path)):
+            if not p or not os.path.exists(p):
+                messagebox.showerror("Error", f"{label} path not set or not found.\nConfigure on Preferences tab.")
+                return False
+        turbo_path = self.prefs_vars.get("minimax_turbo_lora", tk.StringVar()).get().strip()
+        cache_dir = self.prefs_vars.get("cache_dir", tk.StringVar()).get().strip()
+        te_cache = os.path.join(cache_dir, "te_prompts") if cache_dir else ""
+
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.h3_engine import H3RepairEngine
+        if self._explorer_engine is None or not isinstance(self._explorer_engine, H3RepairEngine):
+            self._explorer_engine = H3RepairEngine()
+        try:
+            self.explorer_status_var.set("Loading MiniMax H3 (the 33B base takes a minute)…")
+            self.master.update_idletasks()
+            self._explorer_engine.ensure_pipeline(
+                dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+                device="cuda", turbo_lora_path=turbo_path,
+                turbo_lora_strength=0.75, te_cache_dir=te_cache)
+            self.explorer_status_var.set("Models loaded.")
+            return True
+        except Exception:
+            import traceback
+            messagebox.showerror("Error", f"Failed to load MiniMax H3 models:\n{traceback.format_exc()}")
+            self.explorer_status_var.set("Error loading models.")
+            return False
+
     def _explorer_load_lora(self):
         # Never tear down an engine a worker thread is mid-forward through (hard-hangs the app).
         if getattr(self, "_explorer_generating", False):
@@ -14278,17 +14333,14 @@ class LoRATrainerGUI:
         # the generic error below, same as before.
         from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES
         detected = lora_family_from_file(path)
-        # Families THIS tab has radios + an engine for. Phase D of the H3-workbench branch
-        # adds "minimax" here; until then setting the var to it leaves both radios blank
-        # (issue #62) and the engine ternary falls back to whatever it likes.
-        _tab_families = ("klein", "krea2")
-        if detected is not None and detected not in _tab_families:
+        from fizgig.networks.lora import INFERENCE_FAMILIES
+        if detected is not None and detected not in INFERENCE_FAMILIES:
             messagebox.showerror(
                 "Unsupported family",
                 f"{os.path.basename(path)} was trained for {FAMILY_DISPLAY_NAMES.get(detected, detected)}, "
                 f"but the Explorer doesn't support {FAMILY_DISPLAY_NAMES.get(detected, detected)} LoRAs yet.")
             return
-        selected = "krea2" if self._explorer_is_krea2() else "klein"
+        selected = self._explorer_family()
         if detected is not None and detected != selected:
             self.explorer_family_var.set(detected)
             self._on_explorer_family_changed()
@@ -14310,12 +14362,12 @@ class LoRATrainerGUI:
             n_active = len(self._explorer_engine.primary_block_ids)
             # LyCORIS loads and saves natively — nothing to announce on open; the save
             # dialog states the format.
-            self.explorer_status_var.set(
-                f"Loaded: {os.path.basename(path)} ({n_active}/32 blocks). Click Re-roll to start exploring.")
             # Initialize baseline state with user-specified LoRA strength
-            from fizgig.repair_studio.state import SliderState
-            self._explorer_baseline_state = (SliderState.default_krea2() if self._explorer_is_krea2()
-                                             else SliderState.default_klein9b())
+            self._explorer_baseline_state = self._explorer_default_state()
+            self.explorer_status_var.set(
+                f"Loaded: {os.path.basename(path)} "
+                f"({n_active}/{len(self._explorer_baseline_state.blocks)} blocks). "
+                f"Click Re-roll to start exploring.")
             try:
                 base_strength = float(self.explorer_strength_var.get())
             except ValueError:
@@ -14745,9 +14797,7 @@ class LoRATrainerGUI:
 
         if choice:
             # Yes = reset to default values
-            from fizgig.repair_studio.state import SliderState
-            self._explorer_baseline_state = (SliderState.default_krea2() if self._explorer_is_krea2()
-                                             else SliderState.default_klein9b())
+            self._explorer_baseline_state = self._explorer_default_state()
             try:
                 base_strength = float(self.explorer_strength_var.get())
             except ValueError:
@@ -14967,7 +15017,8 @@ class LoRATrainerGUI:
             n_active = len(self.repair_engine.primary_block_ids)
             self._find_repair_profile_match()
             self.repair_status_var.set(
-                f"Loaded from Explorer: {os.path.basename(lora_path)} ({n_active}/32 blocks). "
+                f"Loaded from Explorer: {os.path.basename(lora_path)} "
+                f"({n_active}/{len(self.repair_state.blocks)} blocks). "
                 f"Sliders set to Explorer baseline. Generating preview...")
             self._schedule_preview(force=True)
         except Exception:
@@ -18875,17 +18926,22 @@ class LoRATrainerGUI:
         # 8-step. Seed/prompt/strength travel work for both; Krea 2 travel morphs come from the
         # seed slerp / prompt interpolation with the vision-path image as the per-frame anchor
         # (no Klein reference-latent chaining).
-        _rfam = "krea2" if str(self.last_used.get("royale_family", "klein")) == "krea2" else "klein"
+        _rfam = str(self.last_used.get("royale_family", "klein"))
+        if _rfam not in ("klein", "krea2", "minimax"):
+            _rfam = "klein"
         self.royale_family_var = tk.StringVar(value=_rfam)
         rfam_card = self._start_section_card(
             outer, "Model Family",
-            "Klein 9B (Distilled previews) or Krea 2 (fp8 Turbo previews). Epoch comparison + all "
-            "three travel modes work for both families.")
+            "Klein 9B (Distilled previews), Krea 2 (fp8 Turbo previews) or MiniMax H3 (22-frame "
+            "clip previews, middle frame shown — slower per epoch). Epoch comparison works for "
+            "all three; the travel modes are Klein and Krea 2.")
         _rf = tk.Frame(rfam_card, bg=COLORS["bg_surface"])
         _rf.pack(anchor=tk.W)
         ttk.Radiobutton(_rf, text="Klein 9B", variable=self.royale_family_var, value="klein",
                         command=self._on_royale_family_changed).pack(side=tk.LEFT, padx=(0, 20))
         ttk.Radiobutton(_rf, text="Krea 2", variable=self.royale_family_var, value="krea2",
+                        command=self._on_royale_family_changed).pack(side=tk.LEFT, padx=(0, 20))
+        ttk.Radiobutton(_rf, text="MiniMax H3", variable=self.royale_family_var, value="minimax",
                         command=self._on_royale_family_changed).pack(side=tk.LEFT)
 
         setup = self._start_section_card(outer, "Setup",
@@ -20036,28 +20092,37 @@ class LoRATrainerGUI:
         else:
             self.royale_scan_var.set("No .safetensors checkpoints found in this folder.")
 
+    def _royale_family(self):
+        fam = str(getattr(self, "royale_family_var", None) and self.royale_family_var.get())
+        return fam if fam in ("klein", "krea2", "minimax") else "klein"
+
     def _royale_is_krea2(self):
-        return str(getattr(self, "royale_family_var", None) and self.royale_family_var.get()) == "krea2"
+        return self._royale_family() == "krea2"
 
     def _royale_default_state(self):
-        """A default SliderState for the active family (block ids differ: Klein double/single vs
-        Krea 2 block_/txt_)."""
+        """A default SliderState for the active family (block ids differ: Klein double/single,
+        Krea 2 block_/txt_, H3 h3blk_/h3_rf_)."""
         from fizgig.repair_studio.state import SliderState
-        return SliderState.default_krea2() if self._royale_is_krea2() else SliderState.default_klein9b()
+        fam = self._royale_family()
+        return (SliderState.default_krea2() if fam == "krea2"
+                else SliderState.default_h3() if fam == "minimax"
+                else SliderState.default_klein9b())
 
     def _on_royale_family_changed(self):
         """Family toggle: the engine type changes, so unload any loaded engine + clear rendered
-        frames, then persist. Klein renders on the Distilled; Krea 2 on the fp8 Turbo."""
-        fam = "krea2" if str(self.royale_family_var.get()) == "krea2" else "klein"
+        frames, then persist."""
+        fam = self._royale_family()
         self.last_used["royale_family"] = fam
         self._save_last_used_paths()
         if self._royale_is_busy():
             return
         self._royale_unload()
         self.royale_engine = None
-        self._apply_royale_family_ui(fam == "krea2")
+        self._apply_royale_family_ui(fam != "klein")
+        _names = {"krea2": "Krea 2 (Turbo previews)",
+                  "minimax": "MiniMax H3 (22-frame clip previews)"}
         self.royale_status_var.set(
-            f"Switched to {'Krea 2 (Turbo previews)' if fam == 'krea2' else 'Klein 9B (Distilled previews)'}. "
+            f"Switched to {_names.get(fam, 'Klein 9B (Distilled previews)')}. "
             f"Pick a source and render.")
 
     def _apply_royale_family_ui(self, is_krea2):
@@ -20111,6 +20176,8 @@ class LoRATrainerGUI:
         False on a missing path."""
         if self._royale_is_krea2():
             return self._royale_validate_models_krea2()
+        if self._royale_family() == "minimax":
+            return self._royale_validate_models_h3()
         dit_path = self.prefs_vars["distilled_dit"].get() if "distilled_dit" in self.prefs_vars else ""
         vae_path = self._get_path("VAE_MODEL")
         te_path = self._get_path("TEXT_ENCODER")
@@ -20121,7 +20188,7 @@ class LoRATrainerGUI:
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.repair_studio.engine import RepairEngine
-        if self.royale_engine is None or self._royale_is_krea2_engine():
+        if not isinstance(self.royale_engine, RepairEngine):
             self.royale_engine = RepairEngine()      # cheap constructor — no model load
         is_fp8 = "fp8" in os.path.basename(dit_path).lower()
         # Stash kwargs so the worker thread can load (and rebuild after reset() on a
@@ -20148,13 +20215,39 @@ class LoRATrainerGUI:
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
         from fizgig.repair_studio.krea2_engine import Krea2RepairEngine
-        if self.royale_engine is None or not self._royale_is_krea2_engine():
+        if not isinstance(self.royale_engine, Krea2RepairEngine):
             self.royale_engine = Krea2RepairEngine()
         self._royale_pipeline_kwargs = dict(
             turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
             device="cuda", model_kind="turbo",
             blocks_to_swap=self._auto_krea2_inference_blocks_swap(),
             int8=self._get_inference_int8())
+        return True
+
+    def _royale_validate_models_h3(self):
+        """MiniMax H3 pre-flight: the H3 DiT + video VAE + Qwen3-VL-32B TE from Preferences,
+        an H3RepairEngine, and H3-shaped pipeline kwargs (auto-planned base + Turbo LoRA +
+        prompt disk cache — same recipe as the Repair Studio). Epoch previews render a
+        22-frame clip's middle frame."""
+        dit_path = self.prefs_vars.get("minimax_dit", tk.StringVar()).get()
+        vae_path = self.prefs_vars.get("minimax_vae", tk.StringVar()).get()
+        te_path = self.prefs_vars.get("minimax_text_encoder", tk.StringVar()).get()
+        for label, p in (("MiniMax H3 DiT", dit_path), ("MiniMax H3 video VAE", vae_path),
+                         ("Qwen3-VL-32B text encoder", te_path)):
+            if not p or not os.path.exists(p):
+                messagebox.showerror("Error", f"{label} path not set or not found.\nConfigure on Preferences tab.")
+                return False
+        turbo_path = self.prefs_vars.get("minimax_turbo_lora", tk.StringVar()).get().strip()
+        cache_dir = self.prefs_vars.get("cache_dir", tk.StringVar()).get().strip()
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+        from fizgig.repair_studio.h3_engine import H3RepairEngine
+        if not isinstance(self.royale_engine, H3RepairEngine):
+            self.royale_engine = H3RepairEngine()
+        self._royale_pipeline_kwargs = dict(
+            dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+            device="cuda", turbo_lora_path=turbo_path, turbo_lora_strength=0.75,
+            te_cache_dir=os.path.join(cache_dir, "te_prompts") if cache_dir else "")
         return True
 
     def _royale_is_krea2_engine(self):
@@ -20205,10 +20298,8 @@ class LoRATrainerGUI:
                     f"but this selection also includes {FAMILY_DISPLAY_NAMES.get(target, target)} files "
                     f"(e.g. {os.path.basename(target_path)}). Pick LoRAs from a single family.")
                 return False
-        # Families THIS tab has radios + an engine for. Phase D of the H3-workbench branch
-        # adds "minimax"; until then setting the var to it leaves both radios blank and
-        # silently falls back to Klein internally (issue #62 review, shootthesound).
-        if target not in ("klein", "krea2"):
+        from fizgig.networks.lora import INFERENCE_FAMILIES
+        if target not in INFERENCE_FAMILIES:
             messagebox.showerror(
                 "Unsupported family",
                 f"{os.path.basename(target_path)} was trained for "
@@ -22290,7 +22381,8 @@ class LoRATrainerGUI:
 
             n_active = len(self._explorer_engine.primary_block_ids)
             self.explorer_status_var.set(
-                f"Loaded from Repair Studio: {os.path.basename(lora_path)} ({n_active}/32 blocks). "
+                f"Loaded from Repair Studio: {os.path.basename(lora_path)} "
+                f"({n_active}/{len(self._explorer_baseline_state.blocks) if self._explorer_baseline_state else 32} blocks). "
                 f"Refining with low intensity. Generating variants...")
             self._explorer_generate_baseline_and_roll()
 

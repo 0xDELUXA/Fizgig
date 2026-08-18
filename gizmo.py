@@ -298,6 +298,14 @@ def cut_take_to_slot(raw_path, press_s, release_s, out_wav, ffmpeg):
     used to be centred into one 5.2 s slot, which destroyed it; there is no length limit
     on a recording, only on what the editor exports per segment.)
     """
+    # A hold much longer than the biggest slot is a long take by INTENT, whatever the speech
+    # detector would say — its noise floor rides the take's 20th percentile, and once speech
+    # dominates a minutes-long hold that percentile IS speech, so the detected bounds collapse
+    # to the loudest stretch and the slot fit truncates the take (Peter's 1-minute recording
+    # came back as 5.2 s). Hold length is the honest signal: keep the whole thing, verbatim.
+    if (release_s - press_s) > hop_exact_samples(AUDIO_GRID_FRAMES[-1]) / CAPTURE_RATE + 2.0:
+        return slice_take(raw_path, press_s, release_s, out_wav, ffmpeg)
+
     size = os.path.getsize(raw_path)
     frame = CAPTURE_CHANNELS * 2
     a0 = max(0, int((press_s - TAKE_PRE_ROLL - TAKE_CONTEXT) * CAPTURE_BPS)) // frame * frame
@@ -632,8 +640,8 @@ def pick_sentence(frames, rng=None):
 # --- persisted settings (mic + default whisper language) ----------------------------------------
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gizmo_settings.json")
 SETTINGS_DEFAULTS = {"microphone": "", "whisper_language": "Auto detect",
-                     "random_delivery": True, "trim_takes": True, "trigger_word": "",
-                     "clip_out_dir": "", "voice_out_dir": ""}
+                     "random_delivery": True, "trim_takes": True, "free_speech": False,
+                     "trigger_word": "", "clip_out_dir": "", "voice_out_dir": ""}
 
 
 def load_settings():
@@ -4754,6 +4762,23 @@ class GizmoRecorder:
                         "at random after every take so the range arrives on its own; pick one "
                         "here to override the next take, or turn the rolling off in ⚙ "
                         "settings.")
+        self.free_var = tk.BooleanVar(value=bool(app.settings.get("free_speech", False)))
+
+        def _save_free():
+            app.settings["free_speech"] = bool(self.free_var.get())
+            save_settings(app.settings)
+
+        free_cb = tk.Checkbutton(srow, text="Free speech", variable=self.free_var,
+                                 command=_save_free, bg=S, fg=COLORS["text_primary"],
+                                 selectcolor=COLORS["bg_deep"], activebackground=S,
+                                 activeforeground=COLORS["text_primary"],
+                                 font=(FONT_FAMILY, 10), highlightthickness=0, bd=0,
+                                 takefocus=0)
+        free_cb.pack(side=tk.RIGHT)
+        ToolTip(free_cb, "Ignore the prompts and just talk — hold as long as you like "
+                         "(minutes are fine) and the whole recording drops into the editor "
+                         "untouched: no auto-fit, no trimming. Mark each bit you want on the "
+                         "waveform, caption it (Transcribe helps), Add to queue, repeat.")
 
         # 2. the hold button. Press/release bindings, NOT command — and NOT app._button,
         # whose focus-return wrapper would fight the hold.
@@ -5031,12 +5056,19 @@ class GizmoRecorder:
                                text="🎙  HOLD to record  (or hold R)")
         sentence, delivery = self.sentence_var.get(), self.delivery_var.get()
 
+        free = bool(self.free_var.get()) if hasattr(self, "free_var") else False
+
         def worker():
             path = os.path.join(self.takes_dir, f"take_{len(self.takes) + 1:03d}.wav")
             try:
                 # The writer runs behind the microphone; slice only once the file actually
                 # holds the tail context, or the take loses its end to the flush lag.
-                if bool(self.app.settings.get("trim_takes", True)):
+                if free:
+                    # Free speech: the whole hold, verbatim — no slot fit, no trimming, no
+                    # heuristics. The editor is where it gets carved into segments.
+                    wait_for_capture(self.raw, release + TAKE_POST_ROLL)
+                    dur = slice_take(self.raw, press, release, path, self.app.ffmpeg)
+                elif bool(self.app.settings.get("trim_takes", True)):
                     wait_for_capture(self.raw, release + TAKE_POST_ROLL + TAKE_CONTEXT)
                     dur = cut_take_to_slot(self.raw, press, release, path, self.app.ffmpeg)
                 else:
@@ -5046,23 +5078,26 @@ class GizmoRecorder:
                 self.app.root.after(0, lambda: self.status.configure(
                     text=f"take failed: {exc}", fg=COLORS["error"]))
                 return
-            self.app.root.after(0, self._take_done, path, dur, sentence, delivery)
+            self.app.root.after(0, self._take_done, path, dur, sentence, delivery, free)
         threading.Thread(target=worker, daemon=True).start()
 
-    def _take_done(self, path, dur, sentence, delivery):
+    def _take_done(self, path, dur, sentence, delivery, free=False):
         if not self.alive():
             return
         min_dur = hop_exact_samples(AUDIO_GRID_FRAMES[0]) / AUDIO_SAMPLE_RATE
-        if dur < min_dur:
+        if dur < min_dur and not free:
             self.status.configure(
                 text=f"too short ({dur:.2f} s) — the smallest slot is {min_dur:.1f} s",
                 fg=COLORS["warning"])
             return
         max_slot = hop_exact_samples(AUDIO_GRID_FRAMES[-1]) / AUDIO_SAMPLE_RATE
-        is_long = dur > max_slot + 0.05
+        # Free-speech takes are long-style whatever their length: no prompt was read, so the
+        # prompt must never become their caption.
+        is_long = free or dur > max_slot + 0.05
         self.takes.append({"path": path, "dur": dur, "sentence": sentence,
                            "delivery": delivery, "long": is_long})
-        label = ("(long take — carve it up in the editor)" if is_long
+        label = (("(free speech — carve it up in the editor)" if free
+                  else "(long take — carve it up in the editor)") if is_long
                  else (sentence if len(sentence) <= 40 else sentence[:39] + "…"))
         self.takes_box.insert(tk.END, f"{dur:4.1f}s  {label}")
         self.takes_box.see(tk.END)

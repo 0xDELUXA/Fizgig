@@ -22752,7 +22752,13 @@ class LoRATrainerGUI:
     }
 
     def _repair_preset_dir(self) -> str:
-        d = os.path.join(os.path.dirname(__file__), "presets", "repair_studio")
+        """Per-family folder — a preset is a set of per-block sliders, and block ids only mean
+        anything on the family they were saved from (a Klein 32-block state applied to H3's 52
+        sliders matches nothing and silently does nothing). Separate folders keep each family's
+        dropdown honest."""
+        fam = (self.repair_family_var.get()
+               if getattr(self, "repair_family_var", None) is not None else "klein")
+        d = os.path.join(os.path.dirname(__file__), "presets", "repair_studio", fam)
         os.makedirs(d, exist_ok=True)
         return d
 
@@ -22855,7 +22861,13 @@ class LoRATrainerGUI:
                 pass
             with open(path, "w", encoding="utf-8") as f:
                 import json as _json
-                _json.dump(self.repair_state.to_json(), f, indent=2)
+                _d = self.repair_state.to_json()
+                # Self-describing: which family's block ids these are. The folder already
+                # scopes the dropdown; this makes a shared/copied file readable on its own.
+                _d["family"] = (self.repair_family_var.get()
+                                if getattr(self, "repair_family_var", None) is not None
+                                else "klein")
+                _json.dump(_d, f, indent=2)
             self._refresh_repair_preset_combo()
             self.repair_preset_var.set(name)
             messagebox.showinfo("Saved", f"Saved preset: {name}")

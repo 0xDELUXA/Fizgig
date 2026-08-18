@@ -5371,6 +5371,12 @@ class LoRATrainerGUI:
             # the same reasoning the training queue uses when it stores the architecture beside
             # its snapshot. Namespaced so _apply_preset_values ignores it as an unknown key.
             snapshot["__architecture__"] = self.architecture_var.get()
+            # Training Base is preset-immune (outside self.entries, never collected) but
+            # "restore my last launch" plainly includes which base it ran on — same reasoning
+            # as the architecture above. Namespaced so _apply_preset_values ignores it.
+            if hasattr(self, "minimax_train_base_var"):
+                snapshot["__minimax_train_base__"] = minimax_train_base(
+                    self.minimax_train_base_var.get())
             with open(LAST_TRAIN_FILE, "w", encoding="utf-8") as f:
                 json.dump(snapshot, f, indent=2, default=str)
         except Exception as e:
@@ -5398,7 +5404,13 @@ class LoRATrainerGUI:
                 self.architecture_var.set(_arch)
                 self.on_architecture_changed()
                 _switched = f"\n\nSwitched the Base Model back to {_arch}."
+            # Training Base rides beside the preset, not in it (preset-immune by design) —
+            # pop before applying so _apply_preset_values never sees it even by accident.
+            _base = snapshot.pop("__minimax_train_base__", None)
             self._apply_preset_values(snapshot)
+            if _base and hasattr(self, "minimax_train_base_var"):
+                self.minimax_train_base_var.set(MINIMAX_TRAIN_BASE_OPTIONS[
+                    1 if minimax_train_base(_base) == "ref2va" else 0])
             messagebox.showinfo("Loaded",
                                 f"Restored settings from your last training launch.{_switched}")
         except Exception as e:
@@ -5500,6 +5512,11 @@ class LoRATrainerGUI:
                                 getattr(self, "_concept_folder_vars", [])],
             "preset": self._collect_preset_values(),
             "samples": samples,
+            # Training Base rides beside the preset, not in it (preset-immune by design) — a
+            # queued ref2va run would otherwise silently launch on fl2va.
+            "minimax_train_base": minimax_train_base(
+                getattr(self, "minimax_train_base_var", None)
+                and self.minimax_train_base_var.get()),
         }
 
     def _apply_queue_item(self, item):
@@ -5512,6 +5529,12 @@ class LoRATrainerGUI:
             except Exception as e:
                 self.update_console(f"[queue] arch switch to {arch!r} failed: {e}\n")
         self._apply_preset_values(item.get("preset", {}))
+        # Items queued before the Training Base dropdown existed carry no key — leave the
+        # dropdown as it stands rather than forcing a default onto an old queue file.
+        _base = item.get("minimax_train_base")
+        if _base and hasattr(self, "minimax_train_base_var"):
+            self.minimax_train_base_var.set(MINIMAX_TRAIN_BASE_OPTIONS[
+                1 if minimax_train_base(_base) == "ref2va" else 0])
         folder = str(item.get("image_folder") or "").strip()
         if folder:
             self.image_folder_var.set(folder)   # traces regenerate Fizgig_train.toml
@@ -5541,7 +5564,8 @@ class LoRATrainerGUI:
         """What makes two queue entries THE SAME RUN: everything except id/queued_at."""
         try:
             return json.dumps({k: item.get(k) for k in
-                               ("architecture", "image_folder", "preset", "samples")},
+                               ("architecture", "image_folder", "preset", "samples",
+                                "minimax_train_base")},
                               sort_keys=True, default=str)
         except Exception:
             return repr(item)
@@ -22915,8 +22939,11 @@ class LoRATrainerGUI:
                     and minimax_train_base(self.minimax_train_base_var.get()) == "ref2va"
                     and not self._krea2_pref("minimax_ref_dit")):
                 errors.append("Training Base is set to Reference (ref2va) but 'DiT (reference)' "
-                              "is empty on the Preferences tab — set it, or switch Training "
-                              "Base back to First/last frame.")
+                              "is empty on the Preferences tab. Easiest fix: on the Preferences "
+                              "tab tick 'Include the reference DiT (+21 GB)' and hit "
+                              "'⬇ Download models for me' — it fetches the model and fills the "
+                              "path in for you. Or switch Training Base back to First/last "
+                              "frame.")
             # Reference distillation needs the ref2va model and a real reference photo.
             if getattr(self, "minimax_distill_var", None) and self.minimax_distill_var.get():
                 if not self._krea2_pref("minimax_ref_dit"):

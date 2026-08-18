@@ -341,12 +341,47 @@ class H3RepairEngine:
         def _abort_check(_seconds, _step, _total):
             return True if self._cancel_event.is_set() else None
 
-        with torch.no_grad():
-            lat = sampling.sample_image(
-                self.dit, emb.to(self.device, self.dtype),
-                width=width, height=height, steps=steps, cfg_scale=1.0,
-                seed=int(seed), device=self.device, dtype=self.dtype,
-                num_frames=frames, on_slow_step=_abort_check, slow_step_s=0.0)
+        # Activation-cache resume — OFF by default and NOT exposed in the H3 GUI. Measured on
+        # the real 33B (18 Aug): the resume is 3-4x faster (3-4s vs 12.5s) but a resumed
+        # render retains only ~6% of a block tweak's visible effect — on a 50-block model
+        # most of the effect comes from the perturbation re-entering the EARLY blocks on
+        # later steps, which a per-step resume never re-runs (Krea 2 hit the same wall at 28
+        # blocks / 8 steps). Kept for programmatic use and as the base for a future
+        # multi-step-aware cache; _turbo_enabled stays False for previews.
+        cache_key = (self.primary_path, self.donor_path, int(seed), prompt,
+                     width, height, frames)
+        ctx = None
+        if self._turbo_enabled and override_ctx is None and seed_b is None:
+            resume = None
+            if self._act_cache_key == cache_key and self._act_cache:
+                resume = self._resume_from_diff(state)
+            ctx = sampling.BlockCacheContext(
+                entries=self._act_cache if self._act_cache_key == cache_key else {},
+                resume_from=resume, cache_device="cpu")
+
+        def _render(block_cache):
+            with torch.no_grad():
+                return sampling.sample_image(
+                    self.dit, emb.to(self.device, self.dtype),
+                    width=width, height=height, steps=steps, cfg_scale=1.0,
+                    seed=int(seed), device=self.device, dtype=self.dtype,
+                    num_frames=frames, on_slow_step=_abort_check, slow_step_s=0.0,
+                    block_cache=block_cache)
+
+        if ctx is not None:
+            try:
+                lat = _render(ctx)
+                self._act_cache = ctx.new_entries
+                self._act_cache_key = cache_key
+                self._act_cache_state = state.copy()
+            except sampling.PreviewAborted:
+                raise
+            except Exception:
+                logger.exception("Turbo Preview failed — falling back to a full forward")
+                self._invalidate_activation_cache()
+                lat = _render(None)
+        else:
+            lat = _render(None)
 
         dec = self._ensure_decoder().to(self.device)
         try:
@@ -418,7 +453,26 @@ class H3RepairEngine:
         self._act_cache_state = None
 
     def mark_blocks_changed(self, blocks) -> None:
-        pass          # resume point (Phase C) derives from a state diff at render time
+        pass          # the resume point derives from a state diff at render time (race-free)
+
+    @staticmethod
+    def _block_index(block_id):
+        return int(block_id.split("_")[1]) if str(block_id).startswith("h3blk_") else None
+
+    def _resume_from_diff(self, state):
+        """Earliest main-block index whose primary/donor differs from the cached state, or
+        None (full recompute) if a refiner block changed (it feeds block 0) or there is no
+        cached state. Diffing the FULL state guarantees no edit made during an in-flight
+        render is ever missed."""
+        if self._act_cache_state is None:
+            return None
+        changed = state.diff_blocks(self._act_cache_state)
+        if not changed:
+            return None
+        idxs = [self._block_index(b) for b in changed]
+        if any(i is None for i in idxs):     # h3_rf_* changed -> full pass
+            return None
+        return min(idxs)
 
     # ----- teardown ----------------------------------------------------------
     def reset(self) -> None:

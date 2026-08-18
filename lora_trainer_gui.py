@@ -17862,7 +17862,11 @@ class LoRATrainerGUI:
                                                    before=self._repair_sliders_container)
         except Exception:
             pass
-        # Turbo Preview (activation cache) is Klein-only — krea always does the full forward.
+        # Turbo Preview (activation cache) is Klein-only. Krea 2 and H3 always full-forward:
+        # the per-step resume compounds across a multi-step chain, and on H3 it was MEASURED
+        # (18 Aug, real 33B): a resumed render retains ~6% of a block tweak's visible effect —
+        # a preview that lies about the bake. forward_cached stays on the model as the
+        # building block for a future multi-step-aware cache.
         try:
             if krea2:
                 self._repair_turbo_chk.pack_forget()
@@ -18824,6 +18828,8 @@ class LoRATrainerGUI:
         from fizgig.repair_studio.h3_engine import H3RepairEngine
         if self.repair_engine is None or not isinstance(self.repair_engine, H3RepairEngine):
             self.repair_engine = H3RepairEngine()
+        # _turbo_enabled stays False: the activation-cache resume was measured to under-apply
+        # tweaks ~16x on H3 (see _apply_repair_family_ui) — previews always full-forward.
         try:
             self.repair_status_var.set("Loading MiniMax H3 (the 33B base takes a minute)…")
             self.master.update_idletasks()

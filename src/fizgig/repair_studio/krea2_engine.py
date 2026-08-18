@@ -94,6 +94,9 @@ class Krea2RepairEngine:
         # Cooperative cancellation: set to abort an in-flight render so a new edit restarts it
         # immediately instead of queueing behind the full 8-step pass.
         self._cancel_event = threading.Event()
+        # Optional progress hook: called (step_done, total_steps) once per denoising step,
+        # from the render thread. The GUI sets it to drive a determinate progress bar.
+        self.on_step = None
         # Baseline render cache (LoRA at original strengths; slider tweaks don't invalidate it).
         self._baseline_cache_key = None
         self._baseline_cache_image: Optional[Image.Image] = None
@@ -330,11 +333,25 @@ class Krea2RepairEngine:
                            self._seed_noise(seed_b, width, height))
 
         from fizgig.krea2 import sampling
+        # should_abort is polled once per step, so counting its calls IS the step counter —
+        # the sampler itself has no progress callback to thread through.
+        _done = [0]
+
+        def _abort_and_count():
+            cb = self.on_step
+            if cb is not None:
+                try:
+                    cb(_done[0], steps)
+                except Exception:
+                    pass
+            _done[0] += 1
+            return self._cancel_event.is_set()
+
         with torch.no_grad():
             imgs = sampling.sample(self.turbo, self.ae, txt, txtmask, untxt=None, untxtmask=None,
                                    device=self.device, dtype=self.dtype, width=width, height=height,
                                    steps=steps, cfg_scale=1.0, mu=1.15, seed=seed,
-                                   should_abort=self._cancel_event.is_set, noise=noise)
+                                   should_abort=_abort_and_count, noise=noise)
         return imgs[0]
 
     def _seed_noise(self, seed, width, height):

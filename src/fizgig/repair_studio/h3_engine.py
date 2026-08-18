@@ -89,6 +89,9 @@ class H3RepairEngine:
         self._prompt_cache = None      # CPU [1, L, 5120]
         self._te_cache_dir = None
         self._cancel_event = threading.Event()
+        # Optional progress hook: called (step_done, total_steps) once per denoising step,
+        # from the render thread. The GUI sets it to drive a determinate progress bar.
+        self.on_step = None
         self._baseline_cache_key = None
         self._baseline_cache_image: Optional[Image.Image] = None
         self._last_frame_latent = None   # Klein-only chain; kept None for Royale's workers
@@ -339,6 +342,12 @@ class H3RepairEngine:
             emb = emb[0]
 
         def _abort_check(_seconds, _step, _total):
+            cb = self.on_step
+            if cb is not None:
+                try:
+                    cb(_step, _total)
+                except Exception:
+                    pass
             return True if self._cancel_event.is_set() else None
 
         # Activation-cache resume — OFF by default and NOT exposed in the H3 GUI. Measured on

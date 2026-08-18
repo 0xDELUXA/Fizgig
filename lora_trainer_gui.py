@@ -18268,6 +18268,15 @@ class LoRATrainerGUI:
             relief="flat", bd=0, padx=24, pady=6, cursor="hand2",
             command=self._repair_start)
         self._repair_start_btn.pack(side=tk.RIGHT)
+        # Reset All up here too — the Actions card has one, but it sits below the full slider
+        # panel, which on a 50-block family is a long scroll away from where you tweak.
+        ttk.Button(status_row, text="Reset All Sliders",
+                   command=self._reset_repair_sliders).pack(side=tk.RIGHT, padx=(0, 12))
+        # Render progress. H3 and Krea 2 report real denoising steps (determinate); Klein's
+        # denoise loop has no hook, so the bar sweeps as a marquee there — and everywhere
+        # until the first step lands, so model loads and TE encodes still show life.
+        self._repair_progress = ttk.Progressbar(status_row, mode="indeterminate", length=200)
+        self._repair_progress_det = False
         r += 1
 
     def _build_repair_preview_panel(self, parent):
@@ -22125,12 +22134,57 @@ class LoRATrainerGUI:
         print(f"[repair] run_async: starting worker w={snapshot.preview_width} "
               f"h={snapshot.preview_height} seed={snapshot.seed} prompt={snapshot.prompt!r}")
         self.repair_status_var.set("Generating preview…")
+        self._repair_progress_begin()
         import threading
         thread = threading.Thread(target=self._repair_preview_worker, args=(snapshot,), daemon=True)
         thread.start()
 
+    def _repair_progress_begin(self):
+        """Show the render progress bar. Starts as a marquee; the first on_step report from a
+        determinate engine (H3/Krea 2) flips it to real step counting."""
+        bar = self._repair_progress
+        self._repair_progress_det = False
+        if not bar.winfo_manager():
+            bar.pack(side=tk.RIGHT, padx=(12, 12))
+        bar.configure(mode="indeterminate")
+        bar.start(60)
+        eng = self.repair_engine
+        if eng is not None:
+            try:
+                eng.on_step = self._repair_progress_step
+            except Exception:
+                pass
+
+    def _repair_progress_step(self, done, total):
+        """Engine progress hook — called from the render thread, once per denoising step."""
+        def _apply():
+            if not self._repair_preview_in_flight:
+                return
+            bar = self._repair_progress
+            if not self._repair_progress_det:
+                bar.stop()
+                bar.configure(mode="determinate")
+                self._repair_progress_det = True
+            bar.configure(maximum=max(int(total), 1), value=int(done))
+        try:
+            self.master.after(0, _apply)
+        except Exception:
+            pass
+
+    def _repair_progress_end(self):
+        bar = getattr(self, "_repair_progress", None)
+        if bar is None:
+            return
+        try:
+            bar.stop()
+        except Exception:
+            pass
+        if bar.winfo_manager():
+            bar.pack_forget()
+
     def _repair_preview_worker(self, snapshot):
         from fizgig.krea2.sampling import SampleAborted
+        from fizgig.minimax.sampling import PreviewAborted
         try:
             if self.repair_engine is None:
                 self._repair_preview_in_flight = False
@@ -22147,10 +22201,11 @@ class LoRATrainerGUI:
             tweaked = self.repair_engine.generate_preview(snapshot)
             print(f"[repair] worker: tweaked done, size={tweaked.size}")
             self.master.after(0, lambda: self._set_repair_preview_images(baseline, tweaked))
-        except SampleAborted:
+        except (SampleAborted, PreviewAborted):
             # Cancelled mid-pass by a newer edit — quietly re-fire with the latest state.
             print("[repair] worker: aborted; re-firing with newest state")
             def _refire():
+                self._repair_progress_end()
                 self._repair_preview_in_flight = False
                 self._repair_preview_dirty = False
                 self._schedule_preview(force=True)
@@ -22159,6 +22214,7 @@ class LoRATrainerGUI:
             import traceback
             err = traceback.format_exc()
             def _show():
+                self._repair_progress_end()
                 self.repair_status_var.set("Preview error — see console.")
                 print(err)
                 self._repair_preview_in_flight = False
@@ -22179,6 +22235,7 @@ class LoRATrainerGUI:
             self.repair_status_var.set("Ready.")
             print(f"[repair] preview displayed: baseline={baseline_img.size} tweaked={tweaked_img.size}")
         finally:
+            self._repair_progress_end()
             self._repair_preview_in_flight = False
             # Dirty flag was set during the in-flight preview → re-fire with
             # fresh state (pulls newest res/seed/prompt/slider values).

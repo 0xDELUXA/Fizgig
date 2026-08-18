@@ -15073,15 +15073,9 @@ class LoRATrainerGUI:
         # Switch to Repair Studio tab
         self.notebook.select(self.repair_studio_tab)
 
-        # Load the LoRA in Repair Studio
-        if not self._ensure_repair_engine():
-            return
-        try:
-            self.repair_status_var.set("Loading LoRA from Explorer baseline...")
-            self.master.update_idletasks()
-            self.repair_engine.load_primary(lora_path)
-            self._refresh_block_slider_activity()
-
+        # Load the LoRA in Repair Studio — through the async loader (the pipeline load is a
+        # 10-20 GB affair; it used to run right here on the Tk thread and freeze the GUI).
+        def _push_baseline():
             # Push the Explorer baseline slider values into Repair Studio
             self._repair_master_mutating = True
             try:
@@ -15104,15 +15098,13 @@ class LoRATrainerGUI:
                 self.repair_ref_strength_var.set(self.explorer_ref_strength_var.get())
 
             n_active = len(self.repair_engine.primary_block_ids)
-            self._find_repair_profile_match()
             self.repair_status_var.set(
                 f"Loaded from Explorer: {os.path.basename(lora_path)} "
                 f"({n_active}/{len(self.repair_state.blocks)} blocks). "
                 f"Sliders set to Explorer baseline. Generating preview...")
             self._schedule_preview(force=True)
-        except Exception:
-            import traceback
-            messagebox.showerror("Error", f"Failed to load in Repair Studio:\n{traceback.format_exc()}")
+
+        self._load_repair_primary(on_done=_push_baseline)
 
     def _explorer_save(self):
         """Save the current baseline as a baked LoRA."""
@@ -18863,15 +18855,20 @@ class LoRATrainerGUI:
         if filepath:
             var.set(filepath)
 
-    def _ensure_repair_engine(self):
-        """Lazy-load the engine + pipeline. Returns True on success, False on failure."""
+    def _repair_engine_plan(self):
+        """Main-thread half of the engine load: validate paths (messageboxes live here),
+        construct the right engine class, and return the ensure_pipeline kwargs for a worker
+        thread to run. Returns {} when the pipeline is already loaded (nothing to do) and
+        None on a validation failure (already shown to the user). Split this way because
+        ensure_pipeline loads a 10-20+ GB DiT — running it on the Tk thread froze the whole
+        GUI for the duration (Peter hit it loading a Krea 2 LoRA)."""
         if self.repair_engine is not None and self.repair_engine.pipeline is not None and self.repair_engine.pipeline.is_loaded:
-            return True
+            return {}
 
         if self.repair_family_var.get() == "krea2":
-            return self._ensure_repair_engine_krea2()
+            return self._repair_engine_plan_krea2()
         if self.repair_family_var.get() == "minimax":
-            return self._ensure_repair_engine_h3()
+            return self._repair_engine_plan_h3()
 
         dit_choice = self.repair_dit_choice_var.get()
         dit_pref_key = "base_dit" if dit_choice == "base" else "distilled_dit"
@@ -18901,25 +18898,16 @@ class LoRATrainerGUI:
         dit_basename = os.path.basename(dit_path).lower()
         model_version = "klein-base-9b" if "base" in dit_basename else "klein-9b"
         is_fp8_model = "fp8" in dit_basename
-        try:
-            self.repair_status_var.set(f"Loading models ({model_version})…")
-            self.master.update_idletasks()
-            self.repair_engine.ensure_pipeline(
-                dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
-                model_version=model_version, device="cuda",
-                fp8_scaled=False if is_fp8_model else True,
-                blocks_to_swap=self._get_inference_blocks_to_swap(),
-                int8=self._get_inference_int8(),
-            )
-            self.repair_status_var.set("Models loaded.")
-            return True
-        except Exception:
-            import traceback
-            messagebox.showerror("Error", f"Failed to load models:\n{traceback.format_exc()}")
-            self.repair_status_var.set("Error loading models.")
-            return False
+        self.repair_status_var.set(f"Loading models ({model_version})…")
+        return dict(
+            dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+            model_version=model_version, device="cuda",
+            fp8_scaled=False if is_fp8_model else True,
+            blocks_to_swap=self._get_inference_blocks_to_swap(),
+            int8=self._get_inference_int8(),
+        )
 
-    def _ensure_repair_engine_krea2(self):
+    def _repair_engine_plan_krea2(self):
         """Lazy-load the Krea 2 Repair engine. Turbo (8-step, default) or RAW (slow). The DiT
         radio's distilled/base values map to turbo/raw here."""
         dit_choice = self.repair_dit_choice_var.get()  # 'distilled'->turbo, 'base'->raw
@@ -18939,23 +18927,14 @@ class LoRATrainerGUI:
         from fizgig.repair_studio.krea2_engine import Krea2RepairEngine
         if self.repair_engine is None or not isinstance(self.repair_engine, Krea2RepairEngine):
             self.repair_engine = Krea2RepairEngine()
-        try:
-            self.repair_status_var.set(f"Loading Krea 2 models ({'RAW' if is_raw else 'Turbo'})…")
-            self.master.update_idletasks()
-            self.repair_engine.ensure_pipeline(
-                turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
-                device="cuda", model_kind="raw" if is_raw else "turbo",
-                blocks_to_swap=self._auto_krea2_inference_blocks_swap(),
-                int8=self._get_inference_int8())
-            self.repair_status_var.set("Models loaded.")
-            return True
-        except Exception:
-            import traceback
-            messagebox.showerror("Error", f"Failed to load Krea 2 models:\n{traceback.format_exc()}")
-            self.repair_status_var.set("Error loading models.")
-            return False
+        self.repair_status_var.set(f"Loading Krea 2 models ({'RAW' if is_raw else 'Turbo'})…")
+        return dict(
+            turbo_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+            device="cuda", model_kind="raw" if is_raw else "turbo",
+            blocks_to_swap=self._auto_krea2_inference_blocks_swap(),
+            int8=self._get_inference_int8())
 
-    def _ensure_repair_engine_h3(self):
+    def _repair_engine_plan_h3(self):
         """Lazy-load the MiniMax H3 Repair engine. No DiT choice: base precision is planned
         from free VRAM inside the engine (int8 on big cards, NF4-of-pruned otherwise, never
         swapped), and the Turbo LoRA (6-step @ 75%) applies whenever it's set in Preferences.
@@ -18979,20 +18958,11 @@ class LoRATrainerGUI:
             self.repair_engine = H3RepairEngine()
         # _turbo_enabled stays False: the activation-cache resume was measured to under-apply
         # tweaks ~16x on H3 (see _apply_repair_family_ui) — previews always full-forward.
-        try:
-            self.repair_status_var.set("Loading MiniMax H3 (the 33B base takes a minute)…")
-            self.master.update_idletasks()
-            self.repair_engine.ensure_pipeline(
-                dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
-                device="cuda", turbo_lora_path=turbo_path,
-                turbo_lora_strength=0.75, te_cache_dir=te_cache)
-            self.repair_status_var.set("Models loaded.")
-            return True
-        except Exception:
-            import traceback
-            messagebox.showerror("Error", f"Failed to load MiniMax H3 models:\n{traceback.format_exc()}")
-            self.repair_status_var.set("Error loading models.")
-            return False
+        self.repair_status_var.set("Loading MiniMax H3 (the 33B base takes a minute)…")
+        return dict(
+            dit_path=dit_path, vae_path=vae_path, text_encoder_path=te_path,
+            device="cuda", turbo_lora_path=turbo_path,
+            turbo_lora_strength=0.75, te_cache_dir=te_cache)
 
     # ------------------------------------------------------------------
     # LoRA Royale — render every epoch on one seed, crossfade to the sweet spot
@@ -21801,9 +21771,22 @@ class LoRATrainerGUI:
             messagebox.showerror("Error", f"Primary LoRA not found:\n{primary_path}")
             return
 
-        # Check if primary needs loading or swapping
+        if getattr(self, "_repair_loading", False):
+            return   # a load is already in flight
+
+        # The loads run on worker threads (a 10-20 GB pipeline load froze the UI here), so
+        # the primary → donor → preview order is kept by chaining completions rather than by
+        # falling through this function.
         current_primary = self.repair_engine.primary_path if self.repair_engine else None
-        if current_primary != primary_path:
+
+        def _then_donor_then_preview():
+            if donor_path and os.path.exists(donor_path):
+                self._load_repair_donor(on_done=lambda: self._schedule_preview(force=True))
+            else:
+                self._schedule_preview(force=True)
+
+        if current_primary != primary_path or self.repair_engine is None \
+                or self.repair_engine.primary_network is None:
             # New or changed primary — reset and reload
             if self.repair_engine is not None and self.repair_engine.primary_network is not None:
                 self._reset_repair_session()
@@ -21811,33 +21794,32 @@ class LoRATrainerGUI:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
-            self._load_repair_primary()
-        elif self.repair_engine is None or self.repair_engine.primary_network is None:
-            self._load_repair_primary()
-
-        # Check if donor needs loading or swapping
-        if donor_path and os.path.exists(donor_path):
-            current_donor = self.repair_engine.donor_path if self.repair_engine else None
-            if current_donor != donor_path:
-                if self.repair_engine and self.repair_engine.donor_network is not None:
+            self._load_repair_primary(on_done=_then_donor_then_preview)
+        else:
+            # Primary unchanged — swap the donor if it changed, then regenerate.
+            current_donor = self.repair_engine.donor_path
+            if donor_path and os.path.exists(donor_path) and current_donor != donor_path:
+                if self.repair_engine.donor_network is not None:
                     self._unload_repair_donor()
-                self._load_repair_donor()
-
-        # If everything is already loaded and nothing changed, just regenerate
-        if (self.repair_engine is not None and self.repair_engine.primary_network is not None
-                and current_primary == primary_path):
-            self._force_regenerate_preview()
+                self._load_repair_donor(on_done=self._force_regenerate_preview)
+            else:
+                self._force_regenerate_preview()
 
         # Reset button text back to Start
         self._repair_reset_start_button()
 
-    def _load_repair_primary(self):
+    def _load_repair_primary(self, on_done=None):
+        """Load (or reload) the primary LoRA. The heavy work — ensure_pipeline's 10-20+ GB
+        DiT load plus the LoRA network build — runs on a worker thread so the UI never
+        freezes; completion (slider refresh, profile match, preview) lands back on the Tk
+        thread. on_done, when given, replaces the default schedule-preview completion so a
+        caller can chain a donor load first."""
         path = self.repair_primary_var.get().strip()
         if not path or not os.path.exists(path):
             messagebox.showerror("Error", "Pick a valid primary LoRA file first.")
             return
         # Auto-follow the file's family (issue #62 nice-to-have): detected from the header
-        # alone, microseconds, so do it BEFORE _ensure_repair_engine() commits to loading the
+        # alone, microseconds, so do it BEFORE _repair_engine_plan() commits to loading the
         # wrong family's DiT/VAE/TE. Only a genuinely unrecognized file falls through to the
         # generic error below, same as before.
         from fizgig.networks.lora import lora_family_from_file, FAMILY_DISPLAY_NAMES, INFERENCE_FAMILIES
@@ -21860,14 +21842,48 @@ class LoRATrainerGUI:
             self.repair_status_var.set(
                 f"Switched family selector to {FAMILY_DISPLAY_NAMES.get(detected, detected)} "
                 f"to match {os.path.basename(path)}.")
-        if not self._ensure_repair_engine():
+        plan = self._repair_engine_plan()
+        if plan is None:
             return
-        try:
+        if getattr(self, "_repair_loading", False):
+            return   # a load is already in flight — ignore the double-click
+        self._repair_loading = True
+        self._repair_start_btn.configure(state="disabled")
+        self._repair_progress_marquee_on()
+        if self.repair_engine.pipeline is None or not getattr(self.repair_engine.pipeline,
+                                                              "is_loaded", False):
+            pass   # status already set by the plan builder ("Loading … models")
+        else:
             self.repair_status_var.set("Loading primary LoRA…")
-            self.master.update_idletasks()
-            self.repair_engine.load_primary(path)
+        engine = self.repair_engine
+
+        def _work():
+            try:
+                if plan:
+                    engine.ensure_pipeline(**plan)
+                engine.load_primary(path)
+                err = None
+            except Exception as ex:
+                import traceback
+                err = (ex, traceback.format_exc())
+            self.master.after(0, lambda: _finish(err))
+
+        def _finish(err):
+            self._repair_loading = False
+            self._repair_start_btn.configure(state="normal")
+            self._repair_progress_end()
+            if err is not None:
+                from fizgig.networks.lora import UnsupportedLoRAFormat
+                ex, tb = err
+                if isinstance(ex, UnsupportedLoRAFormat):
+                    messagebox.showerror("Unsupported LoRA format", str(ex))
+                    self.repair_status_var.set(f"Unsupported format: {os.path.basename(path)}.")
+                else:
+                    messagebox.showerror("Error", f"Failed to load primary:\n{tb}")
+                    self.repair_status_var.set("Error loading primary.")
+                return
             self._refresh_block_slider_activity()
-            n_active = len(self.repair_engine.primary_block_ids)
+            n_active = len(engine.primary_block_ids)
             # LyCORIS loads and saves natively — no popup on open; the save dialog
             # states the format (and the donor-blend SVD case warns at donor load).
             # Look up a matching Profiler sidecar by content hash and render
@@ -21876,18 +21892,17 @@ class LoRATrainerGUI:
             self.repair_status_var.set(
                 f"Primary loaded: {os.path.basename(path)} "
                 f"({n_active}/{len(self.repair_state.blocks)} blocks). Generating preview…")
-            self._schedule_preview(force=True)
-        except Exception as ex:
-            from fizgig.networks.lora import UnsupportedLoRAFormat
-            if isinstance(ex, UnsupportedLoRAFormat):
-                messagebox.showerror("Unsupported LoRA format", str(ex))
-                self.repair_status_var.set(f"Unsupported format: {os.path.basename(path)}.")
+            if on_done is not None:
+                on_done()          # a chained donor load schedules the preview itself
             else:
-                import traceback
-                messagebox.showerror("Error", f"Failed to load primary:\n{traceback.format_exc()}")
-                self.repair_status_var.set("Error loading primary.")
+                self._schedule_preview(force=True)
 
-    def _load_repair_donor(self):
+        import threading
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _load_repair_donor(self, on_done=None):
+        """Async like _load_repair_primary — the donor's LoRA network build runs off the Tk
+        thread. Requires the primary (and thus the pipeline) to be loaded already."""
         path = self.repair_donor_var.get().strip()
         if not path or not os.path.exists(path):
             messagebox.showerror("Error", "Pick a valid donor LoRA file first.")
@@ -21895,10 +21910,37 @@ class LoRATrainerGUI:
         if self.repair_engine is None or self.repair_engine.primary_network is None:
             messagebox.showerror("Error", "Load a primary LoRA before adding a donor.")
             return
-        try:
-            self.repair_status_var.set("Loading donor LoRA…")
-            self.master.update_idletasks()
-            self.repair_engine.load_donor(path)
+        if getattr(self, "_repair_loading", False):
+            return
+        self._repair_loading = True
+        self._repair_start_btn.configure(state="disabled")
+        self._repair_progress_marquee_on()
+        self.repair_status_var.set("Loading donor LoRA…")
+        engine = self.repair_engine
+
+        def _work():
+            try:
+                engine.load_donor(path)
+                err = None
+            except Exception as ex:
+                import traceback
+                err = (ex, traceback.format_exc())
+            self.master.after(0, lambda: _finish(err))
+
+        def _finish(err):
+            self._repair_loading = False
+            self._repair_start_btn.configure(state="normal")
+            self._repair_progress_end()
+            if err is not None:
+                from fizgig.networks.lora import UnsupportedLoRAFormat
+                ex, tb = err
+                if isinstance(ex, UnsupportedLoRAFormat):
+                    messagebox.showerror("Unsupported LoRA format", str(ex))
+                    self.repair_status_var.set(f"Unsupported format: {os.path.basename(path)}.")
+                else:
+                    messagebox.showerror("Error", f"Failed to load donor:\n{tb}")
+                    self.repair_status_var.set("Error loading donor.")
+                return
             # No popup on open (LyCORIS donors save natively; only blended blocks SVD, and
             # the save dialog reports exactly how many were).
             self._repair_donor_loaded = True
@@ -21909,19 +21951,15 @@ class LoRATrainerGUI:
             for cat in self.repair_donor_category_vars:
                 self.repair_donor_category_vars[cat].set(False)
             self._refresh_block_slider_activity()
-            n_donor = len(self.repair_engine.donor_block_ids)
+            n_donor = len(engine.donor_block_ids)
             self.repair_status_var.set(
                 f"Donor loaded: {os.path.basename(path)} "
                 f"({n_donor}/{len(self.repair_state.blocks)} blocks). Enable per-block to mix in.")
-        except Exception as ex:
-            from fizgig.networks.lora import UnsupportedLoRAFormat
-            if isinstance(ex, UnsupportedLoRAFormat):
-                messagebox.showerror("Unsupported LoRA format", str(ex))
-                self.repair_status_var.set(f"Unsupported format: {os.path.basename(path)}.")
-            else:
-                import traceback
-                messagebox.showerror("Error", f"Failed to load donor:\n{traceback.format_exc()}")
-                self.repair_status_var.set("Error loading donor.")
+            if on_done is not None:
+                on_done()
+
+        import threading
+        threading.Thread(target=_work, daemon=True).start()
 
     def _repair_mark_update_needed(self):
         """Prompt or seed changed — show 'Update' on the Start button instead of auto-regenerating."""
@@ -21948,6 +21986,8 @@ class LoRATrainerGUI:
             return  # not loaded yet — user will click Start
         # Path changed — auto-swap
         if self.repair_engine.primary_path != path:
+            if getattr(self, "_repair_loading", False):
+                return
             # Remember donor path before reset clears it
             donor_path = self.repair_donor_var.get().strip()
             self._reset_repair_session()
@@ -21956,13 +21996,19 @@ class LoRATrainerGUI:
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            self._load_repair_primary()
-            # Reload donor if one was set
+
+            # Loads run on worker threads — chain donor (if one was set) behind the primary,
+            # and only then refresh the master sliders + schedule the preview.
+            def _after_all():
+                self._on_master_target_changed()
+                self._repair_reset_start_button()
+                self._schedule_preview(force=True)
+
             if donor_path and os.path.exists(donor_path):
-                self._load_repair_donor()
-            # Refresh master slider display to match reloaded state
-            self._on_master_target_changed()
-            self._repair_reset_start_button()
+                self._load_repair_primary(
+                    on_done=lambda: self._load_repair_donor(on_done=_after_all))
+            else:
+                self._load_repair_primary(on_done=_after_all)
 
     def _browse_and_load_donor(self):
         """Browse for a donor LoRA, and auto-load if primary is loaded."""
@@ -22170,6 +22216,15 @@ class LoRATrainerGUI:
             self.master.after(0, _apply)
         except Exception:
             pass
+
+    def _repair_progress_marquee_on(self):
+        """Bare marquee for model/LoRA loads — no step reports, just visible life."""
+        bar = self._repair_progress
+        self._repair_progress_det = False
+        if not bar.winfo_manager():
+            bar.pack(side=tk.RIGHT, padx=(12, 12))
+        bar.configure(mode="indeterminate")
+        bar.start(60)
 
     def _repair_progress_end(self):
         bar = getattr(self, "_repair_progress", None)

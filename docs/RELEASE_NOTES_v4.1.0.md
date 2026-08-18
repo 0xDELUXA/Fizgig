@@ -2,7 +2,8 @@
 
 ## Train on the MiniMax model you deploy on
 
-A new **Training Base** dropdown sits at the top of the MiniMax section on the Training tab.
+A new **Training Base** dropdown sits right under the Base Model selector at the top of the
+Training tab.
 **First/last frame (fl2va)** — the standard model most workflows run — stays the default;
 pick **Reference (ref2va)** if your LoRA's home is the Reference-to-Video workflow. A LoRA is
 most faithful on the base it trained against, so now you train on the one you'll actually use.

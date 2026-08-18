@@ -3828,6 +3828,38 @@ class LoRATrainerGUI:
             arch_combo.bind("<<ComboboxSelected>>", self._on_architecture_selected)
             ToolTip(arch_combo, "Model family to train (Klein 9B, Krea 2 or MiniMax H3)")
 
+            # Training Base (MiniMax only) — which H3 fine-tune the run trains against, right
+            # where the family was just chosen. A dedicated var kept OUT of self.entries and
+            # never collected, so presets can't flip it; last-train and the queue carry it
+            # explicitly. Shown/hidden by _apply_training_arch_visibility alongside the note.
+            self.minimax_train_base_var = tk.StringVar(
+                value=MINIMAX_TRAIN_BASE_OPTIONS[
+                    1 if minimax_train_base(self.settings.get("MINIMAX_TRAIN_BASE")) == "ref2va"
+                    else 0])
+            self._minimax_base_frame = tk.Frame(model_card, bg=COLORS["bg_surface"])
+            tk.Label(
+                self._minimax_base_frame, text="Training Base:",
+                font=(FONT_FAMILY, 10), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+            ).pack(side=tk.LEFT, padx=(0, 8))
+            self._minimax_base_combo = ttk.Combobox(
+                self._minimax_base_frame, textvariable=self.minimax_train_base_var,
+                values=list(MINIMAX_TRAIN_BASE_OPTIONS), state="readonly", width=36)
+            self._minimax_base_combo.pack(side=tk.LEFT)
+            self._minimax_base_hint = tk.Label(
+                model_card,
+                text="Pick the H3 model you deploy on. First/last frame (fl2va) is the standard "
+                     "model most workflows run. Reference (ref2va) is the Reference-to-Video "
+                     "fine-tune — choose it if your LoRA's home is the r2v workflow (needs 'DiT "
+                     "(reference)' set in Preferences). Presets never change this; reference "
+                     "distillation always trains on ref2va regardless.",
+                font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
+                bg=COLORS["bg_surface"], wraplength=760, justify=tk.LEFT)
+            self._minimax_base_frame.pack(anchor=tk.W, pady=(10, 0))
+            self._minimax_base_hint.pack(anchor=tk.W, pady=(2, 0))
+            if not self._is_minimax_arch():
+                self._minimax_base_frame.pack_forget()
+                self._minimax_base_hint.pack_forget()
+
             # Previews track likeness honestly but are not the place to compare quality — say
             # so where the family is chosen, along with the Pause/Resume route that makes
             # judging in ComfyUI practical on one GPU.
@@ -6437,41 +6469,11 @@ class LoRATrainerGUI:
     def _build_minimax_structure_row(self, parent):
         """Training Structure — the MiniMax timestep density, named.
 
-        Rows 20-26 of Training Parameters, under Network Type (Training Base tops the cluster
-        at rows 20-21; the structure rows follow). The structure dropdown is a VIEW of
+        Rows 22-26 of Training Parameters, under Network Type. The structure dropdown is a VIEW of
         MINIMAX_LOWNOISE_PCT rather than a setting of its own, so every existing preset and saved
         run keeps working with no migration: 60 shows Face likeness, anything unrecognised shows
         Custom and reveals the box it came from.
         """
-        # --- Training Base (MiniMax only, tops the family's cluster) -----------------------
-        # A dedicated var kept OUT of self.entries and never _grab'd, so neither presets nor
-        # Load Settings From Last Train touch it — like a model path, it's a deployment choice,
-        # not a recipe ingredient. Distillation overrides it: the teacher only exists on ref2va.
-        self._minimax_base_label = ttk.Label(parent, text="Training Base:")
-        self._minimax_base_label.grid(row=20, column=0, sticky=tk.W, padx=5, pady=(8, 2))
-        self.minimax_train_base_var = tk.StringVar(
-            value=MINIMAX_TRAIN_BASE_OPTIONS[
-                1 if minimax_train_base(self.settings.get("MINIMAX_TRAIN_BASE")) == "ref2va"
-                else 0])
-        self._minimax_base_frame = ttk.Frame(parent)
-        self._minimax_base_frame.grid(row=20, column=1, columnspan=2, sticky=tk.W,
-                                      padx=5, pady=(8, 2))
-        self._minimax_base_combo = ttk.Combobox(
-            self._minimax_base_frame, textvariable=self.minimax_train_base_var,
-            values=list(MINIMAX_TRAIN_BASE_OPTIONS), state="readonly", width=36)
-        self._minimax_base_combo.pack(side=tk.LEFT)
-        self._minimax_base_hint = tk.Label(
-            parent,
-            text="Which H3 model the LoRA trains against — pick the one you deploy on. "
-                 "First/last frame (fl2va) is the standard model most workflows run. Reference "
-                 "(ref2va) is the Reference-to-Video fine-tune — choose it if your LoRA's home "
-                 "is the r2v workflow (needs 'DiT (reference)' set in Preferences). Presets "
-                 "never change this. Reference distillation always trains on ref2va regardless.",
-            font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
-            justify=tk.LEFT, wraplength=700)
-        self._minimax_base_hint.grid(row=21, column=0, columnspan=3, sticky=tk.W,
-                                     padx=(12, 5), pady=(0, 4))
-
         self._minimax_structure_label = ttk.Label(parent, text="Training Structure:")
         self._minimax_structure_label.grid(row=22, column=0, sticky=tk.W, padx=5, pady=(8, 2))
         self.minimax_structure_var = tk.StringVar(value=MINIMAX_STRUCTURE_DEFAULT)
@@ -6771,6 +6773,20 @@ class LoRATrainerGUI:
                     _note.pack(anchor=tk.W, pady=(10, 0))
             elif _note.winfo_manager():
                 _note.pack_forget()
+        # Training Base rides in the same card, above the note (before= keeps the order when
+        # the note is already on screen).
+        _brow = getattr(self, "_minimax_base_frame", None)
+        if _brow is not None:
+            _bhint = self._minimax_base_hint
+            if is_minimax:
+                if not _brow.winfo_manager():
+                    _kw = {"before": _note} if (_note is not None
+                                                and _note.winfo_manager()) else {}
+                    _brow.pack(anchor=tk.W, pady=(10, 0), **_kw)
+                    _bhint.pack(anchor=tk.W, pady=(2, 0), **_kw)
+            elif _brow.winfo_manager():
+                _brow.pack_forget()
+                _bhint.pack_forget()
 
         # The live-override REFERENCE image is a Klein edit-model feature. Neither native family
         # is an edit model, and their trainers ignore the field — so hide the picker rather than
@@ -6843,8 +6859,7 @@ class LoRATrainerGUI:
 
         # Detail Focus is the inverse: MiniMax ONLY. Klein and Krea 2 already derive their shift
         # from the sample's token count, so there is nothing to dial there.
-        for w in (self._minimax_base_label, self._minimax_base_frame, self._minimax_base_hint,
-                  self._minimax_structure_label, self._minimax_structure_combo,
+        for w in (self._minimax_structure_label, self._minimax_structure_combo,
                   self._minimax_structure_desc,
                   self._minimax_hnlr_label, self._minimax_hnlr_frame, self._minimax_hnlr_hint,
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,

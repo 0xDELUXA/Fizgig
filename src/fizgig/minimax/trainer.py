@@ -138,6 +138,7 @@ def park_dit_partial(dit, need_gb=None):
         dit._park_arena = arena
     freed = 0.0
     target = float("inf") if need_gb is None else max(0.0, float(need_gb)) * 1e9
+    _alloc0 = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
 
     def _park_module(mod, prefix):
         nonlocal freed
@@ -151,20 +152,40 @@ def park_dit_partial(dit, need_gb=None):
                 arena[name] = slot
             slot.copy_(t.data)
             t.data = slot
-            freed += t.data.numel() * t.data.element_size()
+            freed += slot.numel() * slot.element_size()
 
-    for i in range(len(dit.blocks) - 1, -1, -1):
-        if freed >= target:
-            return
-        _park_module(dit.blocks[i], f"blocks.{i}")
-    if freed < target:
-        for cname, child in dit.named_children():
-            if cname == "blocks":
-                continue
+    def _walk():
+        for i in range(len(dit.blocks) - 1, -1, -1):
             if freed >= target:
                 return
-            _park_module(child, cname)
-        _park_module(dit, "")          # any direct params/buffers on the root
+            _park_module(dit.blocks[i], f"blocks.{i}")
+        if freed < target:
+            for cname, child in dit.named_children():
+                if cname == "blocks":
+                    continue
+                if freed >= target:
+                    return
+                _park_module(child, cname)
+            _park_module(dit, "")      # any direct params/buffers on the root
+
+    _walk()
+    # The verdict: evicting a weight only frees its VRAM if nothing else references the old
+    # tensor. Field case (16 GB 4090): the epoch-1 park evicted 6.3 GB and allocated fell
+    # 0.11 — the restore then uploaded DUPLICATES and the run drowned. When that happens,
+    # census the stale tensors (they are module-orphans now) and name their holders.
+    if torch.cuda.is_available() and freed > 1e9:
+        gc.collect()
+        torch.cuda.empty_cache()
+        _dropped = _alloc0 - torch.cuda.memory_allocated()
+        if _dropped < freed * 0.5:
+            logger.warning(f"[park] evicted {freed/1e9:.2f} GB of weights but allocated only "
+                           f"fell {max(_dropped, 0)/1e9:.2f} GB — something still references "
+                           f"the old GPU tensors. Census:")
+            try:
+                from fizgig.utils.device import report_cuda_leak
+                report_cuda_leak("park-failed", threshold_gb=0.0, orphan_min_mb=24)
+            except Exception:
+                pass
 
 
 def restore_parked_dit(dit, device, n_swap: int):

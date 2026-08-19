@@ -272,7 +272,8 @@ def flush_reserved_vram(tag: str = "", threshold_gb: float = 1.0) -> None:
               + " <- ".join(chain), flush=True)
 
 
-def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> float:
+def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5,
+                     orphan_min_mb: int = 128) -> float:
     """After an unload SHOULD have freed everything: if allocated VRAM is still above the
     threshold, name the holders. Walks gc for the largest live CUDA tensors and prints each
     one's referrer chain (a few levels of type names, dict keys, and owning nn.Module classes)
@@ -377,7 +378,7 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> flo
     for obj in _gc.get_objects():
         try:
             if (torch.is_tensor(obj) and obj.is_cuda and id(obj) not in owned
-                    and obj.numel() * obj.element_size() >= 2**27):     # >=128 MB
+                    and obj.numel() * obj.element_size() >= orphan_min_mb * 2**20):
                 orphans.append((obj.numel() * obj.element_size(), obj))
         except Exception:
             continue

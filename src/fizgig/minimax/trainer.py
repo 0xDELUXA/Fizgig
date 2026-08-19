@@ -397,13 +397,38 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
     _scale = max(0.25, float(mp)) / 0.25
     _need = _base + _ACT_GB_CKPT * _scale + _RESERVE_GB + _H2D_TRANSIENT_GB
     _h2d_swap = int((_need - free_gb) / _H2D_PER_BLOCK_GB + 0.999)
+    # H2D staging lives in SYSTEM RAM — and on Windows so does the GPU itself: WDDM backs
+    # GPU allocations with commit charge, so exhausting RAM makes the driver refuse even
+    # tiny VRAM allocations ("CUDA error: out of memory" with headroom on the card). Field
+    # case (16 GB 4090, 32 GB RAM): 31 staged blocks (~12 GB) + a preview decode parking
+    # the whole base to CPU pegged RAM at 32 GB — pinning failed, then the first training
+    # step died at latent.float(). The 5090's simulated-16GB validation never saw this
+    # because that machine has RAM to spare. So the staging plus a working margin (parked-
+    # base transient ~8 GB + WDDM commit headroom) must genuinely fit in AVAILABLE RAM, or
+    # the accurate-base argument loses to the machine falling over: NF4 keeps everything on
+    # the card and stages nothing.
+    _stage_gb = _h2d_swap * _H2D_PER_BLOCK_GB
+    _avail_ram = None
+    _ram_short = False
     if 0 < _h2d_swap <= 40:
-        return ("int8", _h2d_swap, True,
-                f"int8 with {_h2d_swap} blocks streamed H2D-only — the accurate base, and "
-                f"streaming (not parking) keeps the swap cheap")
+        try:
+            import psutil
+            _avail_ram = psutil.virtual_memory().available / 1e9
+            _ram_short = _avail_ram < _stage_gb + 14.0
+        except Exception:
+            _ram_short = False
+        if not _ram_short:
+            return ("int8", _h2d_swap, True,
+                    f"int8 with {_h2d_swap} blocks streamed H2D-only — the accurate base, and "
+                    f"streaming (not parking) keeps the swap cheap")
 
     n_swap, n_ckpt = plan_vram(free_gb, mp=mp, resident_gb=_RESIDENT_PRUNED_GB,
                                adapter_gb=adapter_gb)
+    if _ram_short:
+        return ("nf4", n_swap, n_ckpt,
+                f"int8 would stage {_stage_gb:.0f} GB of blocks in system RAM with only "
+                f"{_avail_ram:.0f} GB available — Windows backs GPU memory with RAM commit, "
+                f"so that starves the whole machine. 4-bit (~10.5 GB) stays on the card")
     return ("nf4", n_swap, n_ckpt,
             f"too tight even for streamed int8 — 4-bit parks {n_swap} blocks against "
             f"int8's {i_swap}")

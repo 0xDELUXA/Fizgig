@@ -1395,6 +1395,17 @@ def _check_for_update():
     has_obj = _git_ok("cat-file", "-e", f"{sha}^{{commit}}")
     is_anc = has_obj and _git_ok("merge-base", "--is-ancestor", sha, "HEAD")
     status = _update_status_from(latest, has_obj, is_anc)
+    if status == "update_available":
+        # Shallow-clone truth (pods clone --depth 1): the tag's commit isn't in the local
+        # object store even when HEAD is AHEAD of it, so ancestry can't clear us — but being
+        # exactly the remote tip can. Without this, every pod born after any post-release
+        # commit showed a FALSE Update Available banner on perfectly current code (the 19 Aug
+        # "old pods" saga — three images, all current, all nagging). A genuinely stale pod
+        # is neither on the tag nor at the tip, so real updates still flag.
+        remote_head = (_git("ls-remote", "origin", "HEAD", timeout=15) or "").split()
+        local_head = _git("rev-parse", "HEAD")
+        if remote_head and local_head and remote_head[0] == local_head:
+            status = "up_to_date"
     return status, (tag if status == "update_available" else _git_describe_version())
 
 

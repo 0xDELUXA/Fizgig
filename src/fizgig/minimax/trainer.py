@@ -667,6 +667,24 @@ def is_pruned_checkpoint(path: str) -> bool:
         return False
 
 
+def cap_preview_res_small_card(w, h):
+    """The 16 GB-class preview resolution cap, orientation-preserving: long side <= 768,
+    short side <= 640 (a full 768 square ran a real 16 GB 4090 at 15.9/16 — one bad frame
+    from the OOM ladder). Applied to the Samples-tab values at startup AND to the live
+    sample override every time it's read — the override box must not be a way around the
+    cap. Returns (w, h[, changed])-style: the clamped pair. H3-only by construction."""
+    try:
+        if torch.cuda.get_device_properties(0).total_memory / 1e9 >= 20.0:
+            return w, h
+    except Exception:
+        return w, h
+    _long, _short = max(w, h), min(w, h)
+    if _long <= 768 and _short <= 640:
+        return w, h
+    _nl, _ns = min(_long, 768), min(_short, 640)
+    return (_nl, _ns) if w >= h else (_ns, _nl)
+
+
 def read_sample_override(output_dir):
     """Live sample override written by the GUI to <output_dir>/.sample_override.json.
 
@@ -2322,13 +2340,10 @@ def train_minimax(
             if int(sample_frames or 1) > 22:
                 _clamped.append(f"{sample_frames} frames -> 22")
                 sample_frames = 22
-            # 768x640 not 768x768: a full 768 square ran the card at 15.9/16 GB — one bad
-            # frame from the ladder. The smaller side gives back the headroom; orientation
-            # is preserved (a portrait pick clamps to 640x768).
-            _long, _short = max(sample_width, sample_height), min(sample_width, sample_height)
-            if _long > 768 or _short > 640:
-                _nl, _ns = min(_long, 768), min(_short, 640)
-                _new = (_nl, _ns) if sample_width >= sample_height else (_ns, _nl)
+            # Resolution rule lives in cap_preview_res_small_card — shared with the live
+            # sample override so neither path can exceed the other.
+            _new = cap_preview_res_small_card(sample_width, sample_height)
+            if _new != (sample_width, sample_height):
                 _clamped.append(f"{sample_width}x{sample_height} -> {_new[0]}x{_new[1]}")
                 sample_width, sample_height = _new
             if _clamped:
@@ -3069,6 +3084,13 @@ def train_minimax(
                         _ov = None
             if _ov:
                 _prompts, _w, _h, _seed = _ov_state["enc"], _ov["width"], _ov["height"], _ov["seed"]
+                # The override obeys the same 16 GB resolution cap as the Samples tab —
+                # typing 1024x1024 into the box must not become a way around it.
+                _cw, _ch = cap_preview_res_small_card(_w, _h)
+                if (_cw, _ch) != (_w, _h):
+                    logger.info(f"[sample override] {_w}x{_h} exceeds this card's preview cap "
+                                f"— rendering {_cw}x{_ch}")
+                    _w, _h = _cw, _ch
                 logger.info(f"[sample override] active — '{_ov['prompt'][:60]}' "
                             f"seed={_seed} {_w}x{_h}")
 

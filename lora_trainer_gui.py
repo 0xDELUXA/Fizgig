@@ -22236,6 +22236,67 @@ class LoRATrainerGUI:
         except Exception:
             pass
 
+    def _print_gpu_process_breakdown(self):
+        """One console line saying who holds the GPU right now, per process. Settles the
+        'unload freed torch but the status bar still shows N GB' question with data instead
+        of guesses — the status bar reads the WHOLE card, so this names our share vs
+        everyone else's."""
+        try:
+            import re
+            import subprocess
+            me = os.getpid()
+            mine, others = 0.0, {}
+            if sys.platform == "win32":
+                # WDDM hides per-process memory from nvidia-smi ([N/A]); the OS performance
+                # counters carry it, instance names like "pid_1234_luid_...".
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     "(Get-Counter '\\GPU Process Memory(*)\\Dedicated Usage')"
+                     ".CounterSamples | ForEach-Object "
+                     "{ $_.InstanceName + '|' + $_.CookedValue }"],
+                    capture_output=True, text=True, timeout=15).stdout
+                for ln in out.splitlines():
+                    m = re.match(r"pid_(\d+)_.*\|(\d+)", ln.strip())
+                    if not m:
+                        continue
+                    pid, b = int(m.group(1)), float(m.group(2))
+                    if b <= 0:
+                        continue
+                    if pid == me:
+                        mine += b
+                    else:
+                        others[pid] = others.get(pid, 0.0) + b
+            else:
+                out = subprocess.run(
+                    ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5).stdout
+                for ln in out.splitlines():
+                    parts = [p.strip() for p in ln.split(",")]
+                    try:
+                        pid, mb = int(parts[0]), float(parts[-1])
+                    except (ValueError, IndexError):
+                        continue
+                    if pid == me:
+                        mine += mb * 2**20
+                    else:
+                        others[pid] = others.get(pid, 0.0) + mb * 2**20
+
+            def _name(pid):
+                try:
+                    import psutil
+                    return psutil.Process(pid).name()
+                except Exception:
+                    return f"pid {pid}"
+
+            top = sorted(others.items(), key=lambda kv: -kv[1])[:3]
+            oth = ", ".join(f"{_name(p)} {b/2**30:.1f} GB" for p, b in top if b > 100 * 2**20)
+            print(f"[repair] GPU by process: this app {mine/2**30:.2f} GB"
+                  + (f" — others: {oth}" if oth else " — nothing sizeable elsewhere"),
+                  flush=True)
+        except Exception:
+            pass
+
     def _repair_progress_marquee_on(self):
         """Bare marquee for model/LoRA loads — no step reports, just visible life."""
         bar = self._repair_progress
@@ -22680,6 +22741,7 @@ class LoRATrainerGUI:
                     print(f"[repair] reset session done — "
                           f"{_t.cuda.memory_allocated()/2**30:.2f} GB still allocated",
                           flush=True)
+                self._print_gpu_process_breakdown()
             except Exception:
                 pass
         self.repair_engine = None

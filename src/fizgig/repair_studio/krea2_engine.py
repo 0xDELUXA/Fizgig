@@ -538,6 +538,11 @@ class Krea2RepairEngine:
                     pass
         self.primary_network = None
         self.donor_network = None
+        # Same defense as the H3 engine: if anything outside the engine pins the module
+        # graph, dropping our reference leaks the VRAM — strip the storages first.
+        from fizgig.utils.device import release_module_tensors
+        release_module_tensors(self.turbo)
+        release_module_tensors(self.ae)
         self.turbo = None
         self.ae = None
         self.pipeline = None

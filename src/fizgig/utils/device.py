@@ -145,6 +145,47 @@ def synchronize_device(device: Optional[Union[str, torch.device]]):
         torch.mps.synchronize()
 
 
+def release_module_tensors(module: "torch.nn.Module") -> None:
+    """Forcibly free a module's GPU memory even if the module object itself is leaked.
+
+    An unload can null every owning reference and still not get the VRAM back if something
+    outside the owner pins the module graph (seen in the field: a Repair Studio reset left
+    the whole 21 GB DiT alive). The module object being pinned doesn't mean its STORAGE has
+    to stay: replace every parameter/buffer with an empty tensor, drop known quant-side
+    attrs (ConvRot qdata/scales), and pop instance-level `forward` patches (LoRA/AdaLN
+    closures assigned as instance attrs — popping restores the class method and releases the
+    closure's captured tensors). A leaked holder that later calls forward will crash loudly
+    on the empty weights — strictly better than silently holding 21 GB."""
+    if module is None:
+        return
+    try:
+        for p in module.parameters():
+            try:
+                p.data = p.data.new_empty(0)
+                if p.grad is not None:
+                    p.grad = None
+            except Exception:
+                pass
+        for b in module.buffers():
+            try:
+                b.data = b.data.new_empty(0)
+            except Exception:
+                pass
+        for sub in module.modules():
+            for attr in ("qdata", "scales", "weight_scale", "input_scale"):
+                v = getattr(sub, attr, None)
+                if v is not None and torch.is_tensor(v):
+                    try:
+                        setattr(sub, attr, None)
+                    except Exception:
+                        pass
+            # Instance-level forward patches (LoRA chains, turbo AdaLN injection) capture
+            # weight tensors in their closures — pop them so those release too.
+            sub.__dict__.pop("forward", None)
+    except Exception:
+        logger.exception("release_module_tensors: partial release only")
+
+
 def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> float:
     """After an unload SHOULD have freed everything: if allocated VRAM is still above the
     threshold, name the holders. Walks gc for the largest live CUDA tensors and prints each
@@ -174,34 +215,61 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> flo
     print(f"[vram-leak:{tag}] {len(tensors)} live CUDA tensors, "
           f"{sum(s for s, _ in tensors)/2**30:.2f} GB gc-visible", flush=True)
 
+    # Tensor-level chains proved useless in the field (every param is "held" by its module's
+    # _parameters dict). The question is which ROOT MODULE is alive and WHO holds *it* — so
+    # find every nn.Module that no other module contains, rank by resident CUDA bytes, and
+    # print the roots' non-structural referrers.
+    modules = [o for o in _gc.get_objects() if isinstance(o, torch.nn.Module)]
+    children = set()
+    for m in modules:
+        for c in m._modules.values():
+            if c is not None:
+                children.add(id(c))
+
+    def _cuda_bytes(mod):
+        total = 0
+        try:
+            for p in mod.parameters():
+                if p.is_cuda:
+                    total += p.numel() * p.element_size()
+            for b in mod.buffers():
+                if b.is_cuda:
+                    total += b.numel() * b.element_size()
+            for sub in mod.modules():         # ConvRot int8 keeps qdata as a plain attr
+                q = getattr(sub, "qdata", None)
+                if q is not None and torch.is_tensor(q) and q.is_cuda:
+                    total += q.numel() * q.element_size()
+        except Exception:
+            pass
+        return total
+
+    roots = sorted(((_cuda_bytes(m), m) for m in modules if id(m) not in children),
+                   key=lambda t: -t[0])
+
     def _describe(holder, target):
         d = type(holder).__name__
         try:
             if isinstance(holder, dict):
-                keys = [k for k, v in holder.items() if v is target][:3]
-                d += f" keys={keys}"
+                keys = [k for k, v in holder.items() if v is target][:4]
+                owners = [o for o in _gc.get_referrers(holder)
+                          if not isinstance(o, dict) and type(o).__name__ != "frame"]
+                own = f" of {type(owners[0]).__name__}" if owners else ""
+                d = f"dict{own} keys={keys}"
             elif isinstance(holder, (list, tuple, set)):
                 d += f" len={len(holder)}"
-            elif isinstance(holder, torch.nn.Module):
-                d = f"Module:{type(holder).__name__}"
         except Exception:
             pass
         return d
 
-    for size, t in tensors[:top_n]:
-        line = f"[vram-leak:{tag}]  {size/2**30:.2f} GB {tuple(t.shape)} {t.dtype}"
-        node = t
-        chain = []
-        for _level in range(4):
-            refs = [r for r in _gc.get_referrers(node)
-                    if not isinstance(r, type) and r is not tensors
-                    and not (isinstance(r, tuple) and len(r) == 2 and r[1] is node)
-                    and type(r).__name__ not in ("frame", "FrameType", "list_iterator")]
-            if not refs:
-                break
-            holder = refs[0]
-            chain.append(_describe(holder, node))
-            node = holder
-        print(line + ("  held via: " + " <- ".join(chain) if chain else "  (no gc referrers — "
-              "held from C++/extension side)"), flush=True)
+    shown = 0
+    for size, mod in roots:
+        if size < 2**28 or shown >= top_n:      # only roots holding >=256 MB
+            break
+        shown += 1
+        refs = [r for r in _gc.get_referrers(mod)
+                if type(r).__name__ not in ("frame", "FrameType", "list_iterator")]
+        descs = [_describe(r, mod) for r in refs[:6]]
+        print(f"[vram-leak:{tag}]  ROOT {type(mod).__name__}: {size/2**30:.2f} GB resident"
+              f"  held by: {' | '.join(descs) if descs else '(no python referrers)'}",
+              flush=True)
     return allocated

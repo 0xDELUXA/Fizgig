@@ -504,6 +504,12 @@ class H3RepairEngine:
         self.donor_network = None
         self._turbo_net = None
         self._turbo_adaln = []
+        # Field leak (19 Aug): the whole DiT survived reset, pinned from outside the engine
+        # (~1657 params alive, 20 GB). Dropping our reference isn't enough for a pinned
+        # module — strip its storages so the VRAM comes back regardless of the holder.
+        from fizgig.utils.device import release_module_tensors
+        release_module_tensors(self.dit)
+        release_module_tensors(self.decoder)
         self.dit = None
         self.decoder = None
         self.pipeline = None

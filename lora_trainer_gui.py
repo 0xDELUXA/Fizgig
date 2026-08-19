@@ -1333,8 +1333,16 @@ def _git(*args, timeout=8) -> str:
 
 def _git_describe_version() -> str:
     """Human version of the running checkout: 'v3.1.1' exactly on a tag,
-    'v3.1.1-2-gee3a7fa' in between, or the bare short SHA if tags aren't local."""
-    return _git("describe", "--tags", "--always") or _app_commit()
+    'v3.1.1-2-gee3a7fa' in between. Pods clone --depth 1 (no tags), so describe falls back
+    to a bare short SHA — which read as a mystery build number in the field ('Version
+    37c0c2f' was current master, taken for an old app). Name the branch so a tagless
+    checkout says what it is: 'master @ 37c0c2f'."""
+    v = _git("describe", "--tags", "--always") or _app_commit()
+    if v and "v" not in v.split("-")[0]:
+        branch = _git("rev-parse", "--abbrev-ref", "HEAD")
+        if branch and branch != "HEAD":
+            return f"{branch} @ {v}"
+    return v
 
 
 def _latest_release_tag():

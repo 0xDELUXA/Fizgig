@@ -2251,6 +2251,7 @@ class LoRATrainerGUI:
         ("repair_ref_path_var", "repair_ref_path"),
         ("repair_ref_mp_var", "repair_ref_mp"),
         ("repair_ref_strength_var", "repair_ref_strength"),
+        ("repair_metrics_ref_var", "repair_metrics_ref"),
         ("explorer_lora_var", "explorer_lora"),
         ("explorer_prompt_var", "explorer_prompt"),
         ("explorer_ref_path_var", "explorer_ref_path"),
@@ -13221,6 +13222,39 @@ class LoRATrainerGUI:
                         self._ff_embed_cache[key] = None
         return self._ff_embed_cache[key]
 
+    def _repair_embed_pil(self, pil):
+        """(embedding, bbox) for the largest face in an IN-MEMORY render — FaceEmbedder.embed
+        is path-only, and the pop-out metrics score renders that never touch disk. Same lock
+        and same lazily-created embedder as _ff_embed_cached, so the model loads once app-wide.
+
+        The unpadded detection gives both the embedding and a usable bbox. The pad-retry
+        fallback (frame-filling faces) returns coordinates in padded-image space, so it
+        contributes the embedding only — texture then measures the whole frame."""
+        if FaceEmbedder is None:
+            return None, None
+        try:
+            import cv2
+            import numpy as np
+            bgr = cv2.cvtColor(np.array(pil.convert("RGB")), cv2.COLOR_RGB2BGR)
+            with self._ff_lock:
+                if getattr(self, "_ff_embedder", None) is None:
+                    self._ff_embedder = FaceEmbedder()
+                self._ff_embedder._ensure_loaded()
+                faces = self._ff_embedder._app.get(bgr)
+                if faces:
+                    f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+                    x1, y1, x2, y2 = (int(v) for v in f.bbox)
+                    h, w = bgr.shape[:2]
+                    bbox = (max(0, x1), max(0, y1), min(w, x2), min(h, y2))
+                    return np.asarray(f.normed_embedding, dtype=np.float32), bbox
+                faces = self._ff_embedder._detect_with_pad_retry(bgr)
+                if faces:
+                    f = max(faces, key=lambda x: (x.bbox[2] - x.bbox[0]) * (x.bbox[3] - x.bbox[1]))
+                    return np.asarray(f.normed_embedding, dtype=np.float32), None
+        except Exception:
+            pass
+        return None, None
+
     def _ff_scan(self):
         if self._ff_busy:
             return
@@ -18562,6 +18596,12 @@ class LoRATrainerGUI:
         self._repair_popout_window = None
         self._repair_popout_label = None
         self._repair_popout_tk_img = None
+        # Metrics strip state: reference photo for likeness scoring (remembered via the
+        # workbench table), chip labels, and a generation counter so a slow ArcFace pass
+        # can never paint a stale result over a newer render's numbers.
+        self.repair_metrics_ref_var = tk.StringVar(value="")
+        self._repair_popout_metric_lbls = {}
+        self._repair_metrics_gen = 0
 
         # Redraw on resize. Debounced so a drag doesn't spam Lanczos.
         def _mk_config_cb(which):
@@ -22623,6 +22663,7 @@ class LoRATrainerGUI:
             self._repair_redraw_preview("baseline")
             self._repair_redraw_preview("tweaked")
             self._repair_update_popout()
+            self._repair_metrics_refresh()
             self.repair_status_var.set("Ready.")
             print(f"[repair] preview displayed: baseline={baseline_img.size} tweaked={tweaked_img.size}")
         finally:
@@ -22679,6 +22720,32 @@ class LoRATrainerGUI:
         win.geometry(f"{_w}x{_h}")
         win.minsize(128, 128)
 
+        # Metrics strip along the bottom — packed FIRST so the image label can never
+        # squeeze it out; the fit math below sizes from the LABEL so the image never
+        # overflows behind it.
+        bar = tk.Frame(win, bg=COLORS["bg_deep"])
+        bar.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Button(bar, text="📷 Reference…", font=(FONT_FAMILY, 9),
+                  bg=COLORS["bg_surface"], fg=COLORS["text_primary"],
+                  activebackground=COLORS["bg_hover"], activeforeground=COLORS["text_primary"],
+                  relief="flat", bd=0, padx=8, pady=2, cursor="hand2",
+                  command=self._browse_repair_metrics_ref).pack(side=tk.LEFT, padx=(8, 2), pady=4)
+        self._repair_popout_ref_lbl = tk.Label(bar, text="", font=(FONT_FAMILY, 9),
+                                               fg=COLORS["text_explain"], bg=COLORS["bg_deep"])
+        self._repair_popout_ref_lbl.pack(side=tk.LEFT, padx=(0, 2))
+        tk.Button(bar, text="✕", font=(FONT_FAMILY, 9), bg=COLORS["bg_deep"],
+                  fg=COLORS["text_muted"], activebackground=COLORS["bg_deep"],
+                  activeforeground=COLORS["text_primary"], relief="flat", bd=0,
+                  padx=4, pady=0, cursor="hand2",
+                  command=self._clear_repair_metrics_ref).pack(side=tk.LEFT, padx=(0, 10))
+        self._repair_popout_metric_lbls = {}
+        for key in ("likeness", "grid", "texture", "clip", "sat"):
+            c = tk.Label(bar, text="", font=(FONT_FAMILY, 9),
+                         fg=COLORS["text_explain"], bg=COLORS["bg_deep"])
+            c.pack(side=tk.LEFT, padx=(0, 14), pady=4)
+            self._repair_popout_metric_lbls[key] = c
+        self._repair_popout_refresh_ref_label()
+
         lbl = tk.Label(win, bg="#000000")
         lbl.pack(fill=tk.BOTH, expand=True)
 
@@ -22689,6 +22756,7 @@ class LoRATrainerGUI:
             self._repair_popout_window = None
             self._repair_popout_label = None
             self._repair_popout_tk_img = None
+            self._repair_popout_metric_lbls = {}
             win.destroy()
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
@@ -22699,6 +22767,7 @@ class LoRATrainerGUI:
 
         win.bind("<Configure>", _on_resize)
         self._repair_update_popout()
+        self._repair_metrics_refresh()
 
     def _repair_update_popout(self):
         """Push the current baseline+tweaked pair to the pop-out window, scaled to fit."""
@@ -22717,8 +22786,10 @@ class LoRATrainerGUI:
             return
 
         from PIL import ImageTk
-        w = self._repair_popout_window.winfo_width()
-        h = self._repair_popout_window.winfo_height()
+        # Size from the LABEL, not the Toplevel — the metrics bar owns part of the window
+        # height, and window-based math scaled the image to overflow behind it.
+        w = self._repair_popout_label.winfo_width()
+        h = self._repair_popout_label.winfo_height()
         if w < 10 or h < 10:
             return
 
@@ -22730,6 +22801,132 @@ class LoRATrainerGUI:
         resized = pil_img.resize((new_w, new_h), resample=3)  # LANCZOS=3
         self._repair_popout_tk_img = ImageTk.PhotoImage(resized)
         self._repair_popout_label.configure(image=self._repair_popout_tk_img)
+
+    # ----- pop-out metrics strip ---------------------------------------------------------
+    # Overbake instrumentation for the side-by-side view: likeness against a user-chosen
+    # reference photo (ArcFace, the app's shared embedder), plus the paired metrics from
+    # repair_studio.metrics (patch grid, face texture, clipping/saturation). Paired deltas
+    # on a same-seed pair are the one honest use of no-reference image metrics.
+
+    def _browse_repair_metrics_ref(self):
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Reference photo for likeness scoring",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All files", "*.*")],
+            initialdir=self._pref_initialdir("input_ref_dir"))
+        if path:
+            self.repair_metrics_ref_var.set(path)
+            self._repair_popout_refresh_ref_label()
+            self._repair_metrics_refresh()
+
+    def _clear_repair_metrics_ref(self):
+        self.repair_metrics_ref_var.set("")
+        self._repair_popout_refresh_ref_label()
+        self._repair_metrics_refresh()
+
+    def _repair_popout_refresh_ref_label(self):
+        lbl = getattr(self, "_repair_popout_ref_lbl", None)
+        if lbl is None or not lbl.winfo_exists():
+            return
+        p = self.repair_metrics_ref_var.get().strip()
+        lbl.config(text=os.path.basename(p) if p else "(none)")
+
+    def _repair_metrics_refresh(self):
+        """Kick the metrics worker for the current image pair, if the pop-out is open."""
+        win = self._repair_popout_window
+        try:
+            if win is None or not win.winfo_exists() or not self._repair_popout_metric_lbls:
+                return
+        except Exception:
+            return
+        base = self.repair_pil_images.get("baseline")
+        tweak = self.repair_pil_images.get("tweaked")
+        if base is None or tweak is None:
+            return
+        self._repair_metrics_gen += 1
+        gen = self._repair_metrics_gen
+        for c in self._repair_popout_metric_lbls.values():
+            c.config(text="…", fg=COLORS["text_muted"])
+        fam = (self.repair_family_var.get()
+               if getattr(self, "repair_family_var", None) is not None else "klein")
+        ref = self.repair_metrics_ref_var.get().strip()
+        threading.Thread(target=self._repair_metrics_worker,
+                         args=(base.copy(), tweak.copy(), fam, ref, gen),
+                         daemon=True).start()
+
+    def _repair_metrics_worker(self, base, tweak, fam, ref_path, gen):
+        try:
+            import numpy as np
+            from fizgig.repair_studio.metrics import PATCH_PITCH, compare
+            base_emb, base_bbox = self._repair_embed_pil(base)
+            tweak_emb, tweak_bbox = self._repair_embed_pil(tweak)
+            ref_emb = (self._ff_embed_cached(ref_path)
+                       if ref_path and os.path.isfile(ref_path) else None)
+            m = compare(np.array(base.convert("RGB")), np.array(tweak.convert("RGB")),
+                        PATCH_PITCH.get(fam, 16), base_bbox, tweak_bbox)
+            m["ref_set"] = bool(ref_path)
+            m["ref_face"] = ref_emb is not None
+            m["like_base"] = (float(np.dot(ref_emb, base_emb))
+                              if ref_emb is not None and base_emb is not None else None)
+            m["like_tweak"] = (float(np.dot(ref_emb, tweak_emb))
+                               if ref_emb is not None and tweak_emb is not None else None)
+        except Exception as e:
+            m = {"error": f"{type(e).__name__}: {e}"}
+        try:
+            self.master.after(0, lambda: self._repair_metrics_apply(m, gen))
+        except Exception:
+            pass    # app shutting down mid-computation — nowhere to paint, nothing to do
+
+    def _repair_metrics_apply(self, m, gen):
+        """Paint the chips — only if these numbers still describe the images on screen."""
+        if gen != self._repair_metrics_gen:
+            return
+        lbls = self._repair_popout_metric_lbls
+        try:
+            if not lbls or not self._repair_popout_window.winfo_exists():
+                return
+        except Exception:
+            return
+        GOOD, BAD, WARM, DIM = "#2ECC71", "#E74C3C", "#F39C12", COLORS["text_explain"]
+        if "error" in m:
+            lbls["likeness"].config(text=f"metrics failed: {m['error'][:60]}", fg=BAD)
+            for k in ("grid", "texture", "clip", "sat"):
+                lbls[k].config(text="", fg=DIM)
+            return
+        # Likeness vs the reference photo
+        if not m["ref_set"]:
+            lbls["likeness"].config(text="Likeness: set a reference photo →", fg=DIM)
+        elif not m["ref_face"]:
+            lbls["likeness"].config(text="Likeness: no face in reference", fg=BAD)
+        elif m["like_base"] is None or m["like_tweak"] is None:
+            lbls["likeness"].config(text="Likeness: no face in render", fg=DIM)
+        else:
+            lb, lt = m["like_base"] * 100, m["like_tweak"] * 100
+            d = lt - lb
+            arrow = "▲" if d > 0.5 else ("▼" if d < -0.5 else "→")
+            lbls["likeness"].config(
+                text=f"Likeness {lb:.0f}% {arrow} {lt:.0f}%",
+                fg=GOOD if d > 0.5 else (BAD if d < -0.5 else DIM))
+        # Patch grid: rising = the model's lattice is showing through (bad)
+        gd = m["grid_delta"]
+        lbls["grid"].config(
+            text=f"Grid {m['grid_base']:.2f} → {m['grid_tweak']:.2f}",
+            fg=BAD if gd > 0.05 else (GOOD if gd < -0.05 else DIM))
+        # Face texture: direction is information, not verdict (plastic vs fried)
+        tb, tt = m["texture_base"], m["texture_tweak"]
+        td = (tt - tb) / max(tb, 1e-6)
+        lbls["texture"].config(
+            text=f"Detail {tb:.0f} → {tt:.0f}",
+            fg=WARM if abs(td) > 0.10 else DIM)
+        # Clipping: blown pixels appearing is the earliest overbake tell
+        cd = m["clip_delta"]
+        lbls["clip"].config(
+            text=f"Clipped {m['clip_base']:.1f}% → {m['clip_tweak']:.1f}%",
+            fg=BAD if cd > 0.2 else (GOOD if cd < -0.2 else DIM))
+        sd = m["sat_delta"]
+        lbls["sat"].config(
+            text=f"Sat {m['sat_base']:.0f} → {m['sat_tweak']:.0f}",
+            fg=WARM if abs(sd) > 12 else DIM)
 
     def _save_repaired_lora_action(self):
         if self.repair_engine is None or self.repair_engine.primary_network is None:

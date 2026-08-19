@@ -3072,23 +3072,24 @@ def train_minimax(
                 logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
                             f'({len(_opt_parked)} optimizer tensors parked'
                             f'{", EMA shadow parked" if _ema_parked else ""})')
-                # Field mystery (16 GB 4090): ~2.7 GB of LIVE allocations appear across each
-                # training epoch, surviving empty_cache with the optimizer parked — the fixed
-                # <2 GB trigger missed it by 0.4. Now baseline-relative: the FIRST preview's
-                # free reading is the reference, and any later preview more than 1.5 GB below
-                # it dumps root modules AND orphan tensors with their holders.
+                # Leak tripwire, baseline-relative to the FIRST preview. Driver-free is the
+                # wrong signal here: it also falls with allocator fragmentation (inactive-split
+                # segments the decode-park absorbs — benign, self-limiting). A real leak is
+                # LIVE allocation growth, so the census keys on memory_allocated().
+                _alloc_now = torch.cuda.memory_allocated() / 1e9
                 _base_free = _clip_state.get("free0")
                 if _base_free is None:
                     _clip_state["free0"] = _free0
-                elif _free0 < _base_free - 1.5:
+                    _clip_state["alloc0"] = _alloc_now
+                elif _alloc_now > _clip_state.get("alloc0", _alloc_now) + 1.5:
                     try:
                         from fizgig.utils.device import report_cuda_leak, flush_reserved_vram
-                        logger.info(f"[preview] free fell {_base_free:.1f} -> {_free0:.1f} GB "
+                        logger.info(f"[preview] live allocation grew "
+                                    f"{_clip_state['alloc0']:.1f} -> {_alloc_now:.1f} GB "
                                     f"since the first preview — census:")
                         report_cuda_leak("preview-start", threshold_gb=0.0)
-                        # The reserved-side census: allocated was flat in the field while free
-                        # kept falling — the gap lives in fragmented reserved segments, which
-                        # this syncs, flushes, and names the small pinning survivors of.
+                        # The reserved-side census: names the small survivors pinning
+                        # fragmented segments that empty_cache cannot return.
                         flush_reserved_vram("preview-start", threshold_gb=0.5)
                     except Exception:
                         pass

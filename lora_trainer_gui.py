@@ -8950,11 +8950,12 @@ class LoRATrainerGUI:
             state["speech_busy"] = True
             path = state["path"]
             import gizmo as _gz
-            speech_btn.configure(state=tk.DISABLED, text="⏳ Listening…")
+            speech_btn.configure(state=tk.DISABLED, text="⏳ Transcribing…")
             _warm = _gz.local_whisper_dir() or hasattr(self, "_caption_whisper_pipe")
             status.config(fg=COLORS["text_explain"],
-                          text="Listening…" if _warm else
-                               "Listening — first use downloads Whisper (~300 MB), please wait…")
+                          text="Transcribing…" if _warm else
+                               "Transcribing — first use downloads Whisper (~300 MB), "
+                               "please wait…")
 
             def worker():
                 text, err = None, None
@@ -9014,7 +9015,7 @@ class LoRATrainerGUI:
                 state["speech_busy"] = False
                 if not dialog.winfo_exists():
                     return
-                speech_btn.configure(state=tk.NORMAL, text="🎤 Append Speech")
+                speech_btn.configure(state=tk.NORMAL, text="🎤 Append Transcription")
                 if state["path"] != for_path:
                     status.config(fg=COLORS["text_explain"],
                                   text="Transcript arrived after you moved on — discarded.")
@@ -9039,7 +9040,7 @@ class LoRATrainerGUI:
         ttk.Button(btn_frame, text="◀ Prev", command=lambda: _nav(-1)).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Next ▶", command=lambda: _nav(+1)).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Regenerate (AI)", command=regenerate).pack(side=tk.LEFT, padx=(20, 5))
-        speech_btn = ttk.Button(btn_frame, text="🎤 Append Speech", command=_append_speech)
+        speech_btn = ttk.Button(btn_frame, text="🎤 Append Transcription", command=_append_speech)
         close_btn = ttk.Button(btn_frame, text="Close", command=_close)
         close_btn.pack(side=tk.LEFT, padx=5)
         # Ctrl+arrows so plain arrows keep moving the text cursor while typing.

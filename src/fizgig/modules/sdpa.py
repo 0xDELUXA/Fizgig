@@ -99,25 +99,6 @@ def consider_training_backend(steps_remaining: int):
         return None
     if os.environ.get("FIZGIG_SDPA_BACKEND", "auto").lower() in ("default", "off", "none"):
         return None       # explicitly overridden — do not second-guess the user
-    # The payback arithmetic below weighs TIME only. cuDNN also keeps a per-shape execution
-    # plan in DRIVER memory (~130 MB x shapes x fwd/bwd here) that nothing ever releases —
-    # invisible to torch's allocator and to empty_cache. On a 16 GB 4090 that ~2 GB was the
-    # straw that tipped training into permanent WDDM spill: post-flip steps ran 4-5x slower,
-    # losing far more than the backend won. Small cards keep the default backend.
-    try:
-        if (torch.cuda.is_available()
-                and torch.cuda.get_device_properties(0).total_memory < 20e9):
-            global _small_card_logged
-            if not globals().get("_small_card_logged"):
-                _small_card_logged = True
-                logger.info(
-                    "[attention] staying on the default backend on this card: cuDNN's "
-                    "per-shape plans hold ~130 MB each of driver memory that never frees, "
-                    "and with %d shape(s) that headroom matters more here than its "
-                    "step-time win.", len(_seen_shapes))
-            return None
-    except Exception:
-        pass
     needed = len(_seen_shapes) * _STEPS_PER_SHAPE * _MARGIN
     if steps_remaining >= needed:
         _training_cudnn = True

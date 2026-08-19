@@ -397,13 +397,38 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
     _scale = max(0.25, float(mp)) / 0.25
     _need = _base + _ACT_GB_CKPT * _scale + _RESERVE_GB + _H2D_TRANSIENT_GB
     _h2d_swap = int((_need - free_gb) / _H2D_PER_BLOCK_GB + 0.999)
+    # H2D staging lives in SYSTEM RAM — and on Windows so does the GPU itself: WDDM backs
+    # GPU allocations with commit charge, so exhausting RAM makes the driver refuse even
+    # tiny VRAM allocations ("CUDA error: out of memory" with headroom on the card). Field
+    # case (16 GB 4090, 32 GB RAM): 31 staged blocks (~12 GB) + a preview decode parking
+    # the whole base to CPU pegged RAM at 32 GB — pinning failed, then the first training
+    # step died at latent.float(). The 5090's simulated-16GB validation never saw this
+    # because that machine has RAM to spare. So the staging plus a working margin (parked-
+    # base transient ~8 GB + WDDM commit headroom) must genuinely fit in AVAILABLE RAM, or
+    # the accurate-base argument loses to the machine falling over: NF4 keeps everything on
+    # the card and stages nothing.
+    _stage_gb = _h2d_swap * _H2D_PER_BLOCK_GB
+    _avail_ram = None
+    _ram_short = False
     if 0 < _h2d_swap <= 40:
-        return ("int8", _h2d_swap, True,
-                f"int8 with {_h2d_swap} blocks streamed H2D-only — the accurate base, and "
-                f"streaming (not parking) keeps the swap cheap")
+        try:
+            import psutil
+            _avail_ram = psutil.virtual_memory().available / 1e9
+            _ram_short = _avail_ram < _stage_gb + 14.0
+        except Exception:
+            _ram_short = False
+        if not _ram_short:
+            return ("int8", _h2d_swap, True,
+                    f"int8 with {_h2d_swap} blocks streamed H2D-only — the accurate base, and "
+                    f"streaming (not parking) keeps the swap cheap")
 
     n_swap, n_ckpt = plan_vram(free_gb, mp=mp, resident_gb=_RESIDENT_PRUNED_GB,
                                adapter_gb=adapter_gb)
+    if _ram_short:
+        return ("nf4", n_swap, n_ckpt,
+                f"int8 would stage {_stage_gb:.0f} GB of blocks in system RAM with only "
+                f"{_avail_ram:.0f} GB available — Windows backs GPU memory with RAM commit, "
+                f"so that starves the whole machine. 4-bit (~10.5 GB) stays on the card")
     return ("nf4", n_swap, n_ckpt,
             f"too tight even for streamed int8 — 4-bit parks {n_swap} blocks against "
             f"int8's {i_swap}")
@@ -2103,6 +2128,32 @@ def train_minimax(
         from fizgig.minimax.sampling import encode_sample_prompts
         logger.info(f"[preview] pre-encoding {len(sample_prompts)} sample prompt(s) "
                     f"(the text encoder is freed before the DiT loads)...")
+        # 16 GB-class cards: previews hard-cap at 768x768 and 22 frames (sound untouched —
+        # it's a separate flag and ~4% of the sequence). The Samples menu still offers the
+        # longer clips; here they clamp rather than crash-and-ladder: a 56-frame clip's
+        # sampling tokens plus its chunked decode is exactly what pushed a real 16 GB 4090
+        # into the paging/OOM spiral (Peter, 19 Aug). Clamp, say so once, move on.
+        try:
+            _total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        except Exception:
+            _total_gb = 99.0
+        if _total_gb < 20.0:
+            _clamped = []
+            if int(sample_frames or 1) > 22:
+                _clamped.append(f"{sample_frames} frames -> 22")
+                sample_frames = 22
+            # 768x640 not 768x768: a full 768 square ran the card at 15.9/16 GB — one bad
+            # frame from the ladder. The smaller side gives back the headroom; orientation
+            # is preserved (a portrait pick clamps to 640x768).
+            _long, _short = max(sample_width, sample_height), min(sample_width, sample_height)
+            if _long > 768 or _short > 640:
+                _nl, _ns = min(_long, 768), min(_short, 640)
+                _new = (_nl, _ns) if sample_width >= sample_height else (_ns, _nl)
+                _clamped.append(f"{sample_width}x{sample_height} -> {_new[0]}x{_new[1]}")
+                sample_width, sample_height = _new
+            if _clamped:
+                logger.info(f"[preview] 16 GB card: {'; '.join(_clamped)} — previews cap at "
+                            f"768x640 / 22 frames on this class of GPU (sound kept)")
         try:
             encoded_prompts = encode_sample_prompts(te_path, sample_prompts, device=device,
                                                     quantize=quantize)
@@ -2147,8 +2198,12 @@ def train_minimax(
         _use_h2d = (_base_mode == "int8")
         n_swap = dit.enable_block_swap(n_swap, h2d_only=_use_h2d, ring_size=2)
         if _use_h2d:
+            _staging = ("pinned in RAM"
+                        if not getattr(getattr(dit, "_h2d_offloader", None),
+                                       "_pin_failed", False)
+                        else "staged in ordinary RAM — OS pin limit, copies synchronous")
             logger.info(f"[vram] block swap active: last {n_swap} blocks streamed H2D-only "
-                        f"(int8, ring 2, ~{n_swap * 0.39:.1f} GB pinned in RAM) — no "
+                        f"(int8, ring 2, ~{n_swap * 0.39:.1f} GB {_staging}) — no "
                         f"writeback, prefetch overlaps compute")
         else:
             logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "
@@ -2880,7 +2935,13 @@ def train_minimax(
                             num_frames=_frames, on_slow_step=_slow_step_notice,
                             return_audio=True)
                         break
-                    except (torch.cuda.OutOfMemoryError, sampling.PreviewAborted):
+                    except (torch.cuda.OutOfMemoryError,
+                            getattr(torch, "AcceleratorError", torch.cuda.OutOfMemoryError),
+                            sampling.PreviewAborted):
+                        # AcceleratorError: driver-level "CUDA error: out of memory" (seen on
+                        # a 16 GB 4090 at the epoch-0 preview) arrives as this type, NOT as
+                        # the allocator's OutOfMemoryError — without it here the ladder never
+                        # ran and the preview was simply skipped.
                         # Downgrade one ladder rung and retry rather than losing previews for
                         # the run. Two triggers, one ladder: a hard CUDA OOM (Linux, or a
                         # too-big single allocation), and the slow-step abort (Windows paging

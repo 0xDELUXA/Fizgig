@@ -2147,8 +2147,12 @@ def train_minimax(
         _use_h2d = (_base_mode == "int8")
         n_swap = dit.enable_block_swap(n_swap, h2d_only=_use_h2d, ring_size=2)
         if _use_h2d:
+            _staging = ("pinned in RAM"
+                        if not getattr(getattr(dit, "_h2d_offloader", None),
+                                       "_pin_failed", False)
+                        else "staged in ordinary RAM — OS pin limit, copies synchronous")
             logger.info(f"[vram] block swap active: last {n_swap} blocks streamed H2D-only "
-                        f"(int8, ring 2, ~{n_swap * 0.39:.1f} GB pinned in RAM) — no "
+                        f"(int8, ring 2, ~{n_swap * 0.39:.1f} GB {_staging}) — no "
                         f"writeback, prefetch overlaps compute")
         else:
             logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "
@@ -2880,7 +2884,13 @@ def train_minimax(
                             num_frames=_frames, on_slow_step=_slow_step_notice,
                             return_audio=True)
                         break
-                    except (torch.cuda.OutOfMemoryError, sampling.PreviewAborted):
+                    except (torch.cuda.OutOfMemoryError,
+                            getattr(torch, "AcceleratorError", torch.cuda.OutOfMemoryError),
+                            sampling.PreviewAborted):
+                        # AcceleratorError: driver-level "CUDA error: out of memory" (seen on
+                        # a 16 GB 4090 at the epoch-0 preview) arrives as this type, NOT as
+                        # the allocator's OutOfMemoryError — without it here the ladder never
+                        # ran and the preview was simply skipped.
                         # Downgrade one ladder rung and retry rather than losing previews for
                         # the run. Two triggers, one ladder: a hard CUDA OOM (Linux, or a
                         # too-big single allocation), and the slow-step abort (Windows paging

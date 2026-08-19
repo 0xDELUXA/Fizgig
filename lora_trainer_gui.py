@@ -6727,9 +6727,10 @@ class LoRATrainerGUI:
     # handler can swap them without duplicating the strings inline.
     _MINIMAX_BLOCKS_HINT = ("Train only a subset of the 50 blocks. Type ranges and single "
                             "blocks, comma-separated, like 3-12, 22, 31-33 (blocks 0-49). "
-                            "Measured answers: 27, 29-49 for likeness — sharper, more "
-                            "prompt-responsive, better sound, faster to converge — and "
-                            "0-3, 6-47 for style (the Style preset sets it). Full write-up "
+                            "Measured answers: 20-49 for likeness — sharper, more "
+                            "prompt-responsive, better sound, faster and smoother to converge "
+                            "(Optimised Likeness Learning applies it to photos automatically) — "
+                            "and 0-3, 6-47 for style (the Style preset sets it). Full write-up "
                             "in the README.")
     _MINIMAX_BLOCKS_HINT_LOCKED = ("Disabled by Optimised Likeness Learning above — untick it "
                                    "to hand-pick blocks. While it's on, photos train "

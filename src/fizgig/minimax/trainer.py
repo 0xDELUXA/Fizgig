@@ -89,6 +89,24 @@ def clip_fallback_frames(frames: int) -> int:
     return half - (half - 5) % 17      # largest 17n+5 value <= half
 
 
+def vram_line(tag: str):
+    """One honest line of VRAM accounting. `allocated` is live tensors; `reserved` is what
+    torch's allocator holds from the driver (the gap is fragmentation — inactive-split is the
+    pinned part empty_cache cannot return); driver free is what everyone else sees. The
+    16 GB hunt kept stalling because each theory only ever saw ONE of these numbers."""
+    if not torch.cuda.is_available():
+        return
+    try:
+        s = torch.cuda.memory_stats()
+        free, total = torch.cuda.mem_get_info()
+        logger.info(f"[vram:{tag}] allocated {torch.cuda.memory_allocated()/2**30:.2f} / "
+                    f"reserved {torch.cuda.memory_reserved()/2**30:.2f} GB "
+                    f"(inactive-split {s.get('inactive_split_bytes.all.current', 0)/2**30:.2f}), "
+                    f"driver free {free/2**30:.2f} of {total/2**30:.2f} GB")
+    except Exception:
+        pass
+
+
 def park_dit_to_cpu(dit):
     """Whole-DiT park that REUSES its CPU arena across cycles.
 
@@ -2985,12 +3003,17 @@ def train_minimax(
                     _clip_state["free0"] = _free0
                 elif _free0 < _base_free - 1.5:
                     try:
-                        from fizgig.utils.device import report_cuda_leak
+                        from fizgig.utils.device import report_cuda_leak, flush_reserved_vram
                         logger.info(f"[preview] free fell {_base_free:.1f} -> {_free0:.1f} GB "
                                     f"since the first preview — census:")
                         report_cuda_leak("preview-start", threshold_gb=0.0)
+                        # The reserved-side census: allocated was flat in the field while free
+                        # kept falling — the gap lives in fragmented reserved segments, which
+                        # this syncs, flushes, and names the small pinning survivors of.
+                        flush_reserved_vram("preview-start", threshold_gb=0.5)
                     except Exception:
                         pass
+                vram_line("preview-start")
             if turbo_net is not None:
                 # On for the sampling phase only: weights to the GPU (~0.8 GB), modules
                 # enabled at their strength, AdaLN injected. Off + back to CPU before decode.
@@ -3099,6 +3122,7 @@ def train_minimax(
                     torch.cuda.empty_cache()
                     from fizgig.utils.device import plannable_free_vram as _pfv
                     _free = _pfv()
+                    vram_line("pre-decode")
                     if _frames > 1 and _free < 7.5:
                         _need = (7.5 - _free) + 1.0
                         logger.info(f"[preview] {_free:.1f} GB free is too tight for clip "
@@ -3490,6 +3514,7 @@ def train_minimax(
                     ema.swap_in()
                 try:
                     _render_previews(epoch + 1)
+                    vram_line("post-preview")
                 finally:
                     if ema is not None:
                         ema.swap_out()

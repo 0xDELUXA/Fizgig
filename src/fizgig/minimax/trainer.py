@@ -89,12 +89,30 @@ def clip_fallback_frames(frames: int) -> int:
     return half - (half - 5) % 17      # largest 17n+5 value <= half
 
 
+_VRAM_LOG = None            # decided on first call: small cards log, big cards stay quiet
+
+
 def vram_line(tag: str):
     """One honest line of VRAM accounting. `allocated` is live tensors; `reserved` is what
     torch's allocator holds from the driver (the gap is fragmentation — inactive-split is the
     pinned part empty_cache cannot return); driver free is what everyone else sees. The
-    16 GB hunt kept stalling because each theory only ever saw ONE of these numbers."""
+    16 GB hunt kept stalling because each theory only ever saw ONE of these numbers.
+
+    Logs on cards under 20 GB (where the numbers are the diagnosis when a report comes in);
+    quiet on bigger cards. FIZGIG_VRAM_LOG=1/0 forces it on/off anywhere."""
+    global _VRAM_LOG
     if not torch.cuda.is_available():
+        return
+    if _VRAM_LOG is None:
+        _env = os.environ.get("FIZGIG_VRAM_LOG", "").strip()
+        if _env in ("1", "0"):
+            _VRAM_LOG = _env == "1"
+        else:
+            try:
+                _VRAM_LOG = torch.cuda.mem_get_info()[1] / 2**30 < 20.0
+            except Exception:
+                _VRAM_LOG = False
+    if not _VRAM_LOG:
         return
     try:
         s = torch.cuda.memory_stats()

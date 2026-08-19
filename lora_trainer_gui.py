@@ -22637,8 +22637,25 @@ class LoRATrainerGUI:
                 print("[repair] dirty flag set during preview — refiring")
                 self._schedule_preview(force=True)
 
+    def _repair_popout_compose(self):
+        """Baseline and tweaked side by side on one canvas \u2014 same left/right order as the
+        main panel, 8 px seam. Falls back to whichever image exists alone."""
+        base = self.repair_pil_images.get("baseline")
+        tweak = self.repair_pil_images.get("tweaked")
+        if base is None and tweak is None:
+            return None
+        if base is None or tweak is None:
+            return tweak or base
+        from PIL import Image as _Image
+        gap = 8
+        h = max(base.height, tweak.height)
+        canvas = _Image.new("RGB", (base.width + gap + tweak.width, h), (0, 0, 0))
+        canvas.paste(base, (0, (h - base.height) // 2))
+        canvas.paste(tweak, (base.width + gap, (h - tweak.height) // 2))
+        return canvas
+
     def _repair_popout_preview(self):
-        """Open (or raise) a resizable pop-out window showing the tweaked preview."""
+        """Open (or raise) a resizable pop-out showing baseline and tweaked side by side."""
         if self._repair_popout_window is not None:
             try:
                 if self._repair_popout_window.winfo_exists():
@@ -22649,14 +22666,17 @@ class LoRATrainerGUI:
                 pass
             self._repair_popout_window = None
 
-        pil_img = self.repair_pil_images.get("tweaked")
+        pil_img = self._repair_popout_compose()
         if pil_img is None:
             return
 
         win = tk.Toplevel(self.master)
-        win.title("Repair Studio \u2014 Tweaked Preview")
+        win.title("Repair Studio \u2014 Baseline vs Tweaked")
         win.configure(bg="#000000")
-        win.geometry(f"{pil_img.width}x{pil_img.height}")
+        # Native size, capped to the screen so a 768 pair doesn't open off-monitor.
+        _w = min(pil_img.width, max(640, int(win.winfo_screenwidth() * 0.9)))
+        _h = min(pil_img.height, max(360, int(win.winfo_screenheight() * 0.85)))
+        win.geometry(f"{_w}x{_h}")
         win.minsize(128, 128)
 
         lbl = tk.Label(win, bg="#000000")
@@ -22681,7 +22701,7 @@ class LoRATrainerGUI:
         self._repair_update_popout()
 
     def _repair_update_popout(self):
-        """Push the current tweaked PIL image to the pop-out window, scaled to fit."""
+        """Push the current baseline+tweaked pair to the pop-out window, scaled to fit."""
         if self._repair_popout_window is None or self._repair_popout_label is None:
             return
         try:
@@ -22692,7 +22712,7 @@ class LoRATrainerGUI:
             self._repair_popout_window = None
             return
 
-        pil_img = self.repair_pil_images.get("tweaked")
+        pil_img = self._repair_popout_compose()
         if pil_img is None:
             return
 

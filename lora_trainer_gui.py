@@ -22282,6 +22282,8 @@ class LoRATrainerGUI:
                 self._repair_progress_end()
                 self._repair_preview_in_flight = False
                 self._repair_preview_dirty = False
+                if getattr(self, "_repair_unload_wanted", False):
+                    return   # the abort came from a pending tab-switch unload — don't re-fire
                 self._schedule_preview(force=True)
             self.master.after(0, _refire)
         except Exception:
@@ -22313,7 +22315,9 @@ class LoRATrainerGUI:
             self._repair_preview_in_flight = False
             # Dirty flag was set during the in-flight preview → re-fire with
             # fresh state (pulls newest res/seed/prompt/slider values).
-            if self._repair_preview_dirty:
+            if getattr(self, "_repair_unload_wanted", False):
+                self._repair_preview_dirty = False   # unload pending — nothing to re-fire for
+            elif self._repair_preview_dirty:
                 self._repair_preview_dirty = False
                 print("[repair] dirty flag set during preview — refiring")
                 self._schedule_preview(force=True)
@@ -22481,8 +22485,31 @@ class LoRATrainerGUI:
         rebuilds the pipeline from scratch.
         """
         # Internal guard (all call sites): resetting under a live CUDA worker hard-hangs.
-        if getattr(self, "_repair_preview_in_flight", False):
+        # But a silent bail here LEAKED the whole pipeline (Peter: 22.6 GB held until app
+        # quit) — an H3 preview runs ~12s, plenty of time to switch tabs mid-render, and
+        # nothing ever retried the unload. Now: cancel the render and retry until the worker
+        # lands, then unload for real.
+        if (getattr(self, "_repair_preview_in_flight", False)
+                or getattr(self, "_repair_loading", False)):
+            self._repair_unload_wanted = True     # stops the abort path re-firing a preview
+            eng = self.repair_engine
+            if eng is not None and hasattr(eng, "request_cancel"):
+                try:
+                    eng.request_cancel()
+                except Exception:
+                    pass
+            tries = getattr(self, "_repair_unload_tries", 0) + 1
+            self._repair_unload_tries = tries
+            if tries <= 120:                      # 60 s of patience, then give up loudly
+                self.master.after(500, self._unload_repair_studio_models)
+            else:
+                self._repair_unload_tries = 0
+                self._repair_unload_wanted = False
+                print("[repair] unload gave up waiting for the render worker — "
+                      "models are still loaded")
             return
+        self._repair_unload_tries = 0
+        self._repair_unload_wanted = False
         if self.repair_engine is not None and self.repair_engine.pipeline is not None:
             try:
                 self.repair_engine.reset()

@@ -333,6 +333,19 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5,
     roots = sorted(((_cuda_bytes(m), m) for m in modules if id(m) not in children),
                    key=lambda t: -t[0])
 
+    def _cell_owner(cell):
+        """A closure-cell's function is reached through the function's __closure__ TUPLE —
+        walkers that skip tuples (as ours did) can see the cell but never name the code."""
+        try:
+            for t in _gc.get_referrers(cell):
+                if isinstance(t, tuple):
+                    for f in _gc.get_referrers(t):
+                        if callable(f) and getattr(f, "__closure__", None) is t:
+                            return getattr(f, "__qualname__", repr(f))
+        except Exception:
+            pass
+        return None
+
     def _describe(holder, target):
         d = type(holder).__name__
         try:
@@ -342,6 +355,9 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5,
                           if not isinstance(o, dict) and type(o).__name__ != "frame"]
                 own = f" of {type(owners[0]).__name__}" if owners else ""
                 d = f"dict{own} keys={keys}"
+            elif type(holder).__name__ == "cell":
+                fn = _cell_owner(holder)
+                d = f"closure-cell of {fn}" if fn else "closure-cell"
             elif isinstance(holder, (list, tuple, set)):
                 d += f" len={len(holder)}"
         except Exception:
@@ -391,16 +407,19 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5,
                     and not (isinstance(r, tuple) and any(x is node for x in r))]
             if not refs:
                 break
-            r = refs[0]
+            # Prefer a CELL referrer when one exists — it leads to a nameable function,
+            # where refs[0] is often gc-listing noise.
+            r = next((x for x in refs if type(x).__name__ == "cell"), refs[0])
             tn = type(r).__name__
             if isinstance(r, dict):
                 keys = [k for k, v in r.items() if v is node][:3]
                 owners = [o for o in _gc.get_referrers(r) if type(o).__name__ != "frame"]
                 tn = f"dict{'' if not owners else ' of ' + type(owners[0]).__name__} keys={keys}"
             elif tn == "cell":
-                fns = [o for o in _gc.get_referrers(r) if callable(o)]
-                tn = ("closure-cell"
-                      + (f" of {getattr(fns[0], '__qualname__', '?')}" if fns else ""))
+                fn = _cell_owner(r)
+                tn = f"closure-cell of {fn}" if fn else "closure-cell"
+                chain.append(tn)
+                break                      # the function name IS the answer — stop here
             chain.append(tn)
             node = r
         print(f"[vram-leak:{tag}]  ORPHAN {size/2**30:.2f} GB {tuple(t.shape)} {t.dtype}"

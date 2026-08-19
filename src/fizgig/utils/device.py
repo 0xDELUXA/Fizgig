@@ -186,6 +186,50 @@ def release_module_tensors(module: "torch.nn.Module") -> None:
         logger.exception("release_module_tensors: partial release only")
 
 
+def flush_reserved_vram(tag: str = "", threshold_gb: float = 1.0) -> None:
+    """Return cached-but-unallocated VRAM to the driver, and when segments stay pinned,
+    census the stragglers pinning them.
+
+    Field case (19 Aug): after a Repair Studio unload, allocated=0.01 GB but reserved=6.07 GB
+    — a handful of tiny surviving tensors scattered inside big segments pinned ~6 GB of
+    allocator cache. Steps: synchronize (blocks freed on side streams — the model loaders
+    stream weights — are only returnable once their stream events settle), empty_cache, and
+    if a gap remains, print EVERY surviving CUDA tensor with its shape so the pinning
+    tensors can be identified and eliminated at the source."""
+    import gc as _gc
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.synchronize()
+    except Exception:
+        pass
+    _gc.collect()
+    torch.cuda.empty_cache()
+    allocated = torch.cuda.memory_allocated() / 2**30
+    reserved = torch.cuda.memory_reserved() / 2**30
+    if reserved - allocated < threshold_gb:
+        return
+    print(f"[vram-pin:{tag}] {reserved:.2f} GB reserved vs {allocated:.2f} GB allocated after "
+          f"sync+flush — segments pinned by these survivors:", flush=True)
+    count = 0
+    for obj in _gc.get_objects():
+        try:
+            if torch.is_tensor(obj) and obj.is_cuda and obj.numel() > 0:
+                count += 1
+                if count <= 40:
+                    print(f"[vram-pin:{tag}]   {obj.numel()*obj.element_size()/2**20:9.3f} MB"
+                          f"  {tuple(obj.shape)}  {obj.dtype}"
+                          f"  {'grad' if obj.requires_grad else ''}", flush=True)
+        except Exception:
+            continue
+    if count > 40:
+        print(f"[vram-pin:{tag}]   … and {count - 40} more", flush=True)
+    stats = torch.cuda.memory_stats()
+    print(f"[vram-pin:{tag}] segments={stats.get('segment.all.current', '?')} "
+          f"inactive_split={stats.get('inactive_split_bytes.all.current', 0)/2**30:.2f} GB",
+          flush=True)
+
+
 def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> float:
     """After an unload SHOULD have freed everything: if allocated VRAM is still above the
     threshold, name the holders. Walks gc for the largest live CUDA tensors and prints each

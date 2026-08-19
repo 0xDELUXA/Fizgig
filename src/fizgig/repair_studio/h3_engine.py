@@ -528,5 +528,7 @@ class H3RepairEngine:
             torch.cuda.empty_cache()
         # Field leak (19 Aug): ~21 GB survived a reset with every attribute above nulled —
         # the holder was OUTSIDE the engine. If that happens again, name it in the console.
-        from fizgig.utils.device import report_cuda_leak
+        from fizgig.utils.device import report_cuda_leak, flush_reserved_vram
         report_cuda_leak("h3-repair-reset")
+        # Second field case: allocated 0.01 GB but 6 GB reserved — pinned allocator segments.
+        flush_reserved_vram("h3-repair-reset")

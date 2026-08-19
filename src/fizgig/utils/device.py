@@ -334,14 +334,24 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5,
                    key=lambda t: -t[0])
 
     def _cell_owner(cell):
-        """A closure-cell's function is reached through the function's __closure__ TUPLE —
-        walkers that skip tuples (as ours did) can see the cell but never name the code."""
+        """Name the code that owns a closure-cell. Two routes: a live FUNCTION reaches its
+        cells through its __closure__ tuple; a SUSPENDED FRAME (generators — non-reentrant
+        gradient checkpointing lives on these) holds cells directly and has no function
+        object to find, so the frame's code name is the answer there."""
         try:
             for t in _gc.get_referrers(cell):
                 if isinstance(t, tuple):
                     for f in _gc.get_referrers(t):
                         if callable(f) and getattr(f, "__closure__", None) is t:
-                            return getattr(f, "__qualname__", repr(f))
+                            return "fn " + getattr(f, "__qualname__", repr(f))
+                elif type(t).__name__ == "frame":
+                    code = t.f_code
+                    return (f"frame {getattr(code, 'co_qualname', code.co_name)} "
+                            f"({code.co_filename.rsplit(chr(92), 1)[-1]}:{t.f_lineno})")
+            # Neither a function nor a frame — say what species DOES hold it, so the next
+            # log narrows the search instead of printing another bare "closure-cell".
+            kinds = [type(t).__name__ for t in _gc.get_referrers(cell)][:5]
+            return f"?held-by {kinds}" if kinds else None
         except Exception:
             pass
         return None

@@ -151,7 +151,19 @@ def park_dit_partial(dit, need_gb=None):
                 slot = torch.empty_like(t.data, device="cpu")
                 arena[name] = slot
             slot.copy_(t.data)
+            # Free the STORAGE, not just our reference: after a training epoch something
+            # (unnamed — not autograd-saved, not a python-visible holder; found only as
+            # census orphans) still references the old weight tensors, so `t.data = slot`
+            # alone freed nothing and the restore then uploaded duplicates. resize_(0)
+            # releases the bytes under every tensor sharing the storage — phantom holders
+            # keep a zero-byte husk. The model itself never touches the old storage again:
+            # its params now point at the arena, and restore allocates fresh.
+            _storage = t.data.untyped_storage()
             t.data = slot
+            try:
+                _storage.resize_(0)
+            except Exception:
+                pass
             freed += slot.numel() * slot.element_size()
 
     def _walk():
@@ -186,6 +198,18 @@ def park_dit_partial(dit, need_gb=None):
                 report_cuda_leak("park-failed", threshold_gb=0.0, orphan_min_mb=24)
             except Exception:
                 pass
+            _reg = globals().get("_SAVED_TENSOR_REG")
+            if _reg:
+                from collections import Counter
+                _tot = sum(b for _, b, _ in _reg.values())
+                logger.warning(f"[audit] {len(_reg)} saved tensors still live "
+                               f"({_tot/2**30:.2f} GB cuda) — top save sites:")
+                _c = Counter()
+                for shape, b, stk in _reg.values():
+                    if b:
+                        _c[stk] += b
+                for stk, b in _c.most_common(6):
+                    logger.warning(f"[audit]   {b/2**30:.2f} GB saved at {stk or '(small)'}")
 
 
 def restore_parked_dit(dit, device, n_swap: int):
@@ -2090,6 +2114,40 @@ def train_minimax(
     if group.num_train_items == 0:
         raise RuntimeError("No training items — run minimax_cache_latents then minimax_cache_text first.")
     logger.info(f"MiniMax H3 training: {group.num_train_items} items, {max_train_epochs} epochs")
+
+    # FIZGIG_SAVED_TENSOR_AUDIT=1: account every tensor autograd saves for backward, with the
+    # stack that saved it. Holders unregister on free, so whatever remains at a failed park is
+    # the live graph — named by file:line. Diagnostic for the 16 GB weight-retention hunt.
+    if os.environ.get("FIZGIG_SAVED_TENSOR_AUDIT"):
+        import traceback as _tb
+        import torch.autograd.graph as _ag
+        _SAVED_REG = {}
+        globals()["_SAVED_TENSOR_REG"] = _SAVED_REG
+
+        class _SavedHold:
+            __slots__ = ("t", "k")
+
+            def __init__(self, t):
+                self.t = t
+                self.k = id(self)
+                try:
+                    if t.is_cuda and t.numel() * t.element_size() > 8 * 2**20:
+                        stk = "|".join(f"{f.filename.rsplit(chr(92), 1)[-1]}:{f.lineno}"
+                                       for f in _tb.extract_stack(limit=8)[:-2][-4:])
+                    else:
+                        stk = ""
+                    _SAVED_REG[self.k] = (tuple(t.shape),
+                                          t.numel() * t.element_size() if t.is_cuda else 0,
+                                          stk)
+                except Exception:
+                    pass
+
+            def __del__(self):
+                _SAVED_REG.pop(self.k, None)
+
+        _audit_ctx = _ag.saved_tensors_hooks(lambda t: _SavedHold(t), lambda h: h.t)
+        _audit_ctx.__enter__()
+        logger.warning("[audit] saved-tensor accounting ON — expect slower steps")
     if shift is None:
         logger.info("[timesteps] shift-12 uniform map (median sigma ~0.92) — H3's own training "
                     "density, matching the reference trainer")

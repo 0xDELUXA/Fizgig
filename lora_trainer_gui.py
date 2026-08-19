@@ -22738,9 +22738,11 @@ class LoRATrainerGUI:
             try:
                 import torch as _t
                 if _t.cuda.is_available():
+                    _free, _total = _t.cuda.mem_get_info()
                     print(f"[repair] reset session done — "
-                          f"{_t.cuda.memory_allocated()/2**30:.2f} GB still allocated",
-                          flush=True)
+                          f"allocated {_t.cuda.memory_allocated()/2**30:.2f} GB, "
+                          f"reserved {_t.cuda.memory_reserved()/2**30:.2f} GB, "
+                          f"whole GPU in use {(_total-_free)/2**30:.2f} GB", flush=True)
                 self._print_gpu_process_breakdown()
             except Exception:
                 pass

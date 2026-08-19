@@ -123,6 +123,8 @@ Three built-in presets ship; **Defaults** applies the moment you pick the family
 | **✨ MiniMax H3 Fast** | The same at **rank 8, 40 epochs, flat 2e-4**. Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible |
 | **✨ MiniMax H3 Style** | Fast with blocks `0-3, 6-47` and a gentler flat 1e-4 — style lives almost everywhere in H3, and the early blocks it needs want small, consistent updates |
 
+<p align="center"><img src="assets/optimised_likeness.png" alt="Optimised Likeness Learning — the default-on Training-tab checkbox" width="713"></p>
+
 **Optimised Likeness Learning** ships ticked (Defaults and Fast; Style unticks it): photo steps
 train only the identity blocks (**20-49**) while video and audio clips train the full model.
 Measured against full-model photo training: sharper, much better prompt following, better sound,

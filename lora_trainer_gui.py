@@ -22246,6 +22246,10 @@ class LoRATrainerGUI:
             import subprocess
             me = os.getpid()
             mine, others = 0.0, {}
+            # No console flash: a GUI (pythonw) process spawning powershell/nvidia-smi pops
+            # a black window without this.
+            _nowin = ({"creationflags": subprocess.CREATE_NO_WINDOW}
+                      if sys.platform == "win32" else {})
             if sys.platform == "win32":
                 # WDDM hides per-process memory from nvidia-smi ([N/A]); the OS performance
                 # counters carry it, instance names like "pid_1234_luid_...".
@@ -22254,7 +22258,7 @@ class LoRATrainerGUI:
                      "(Get-Counter '\\GPU Process Memory(*)\\Dedicated Usage')"
                      ".CounterSamples | ForEach-Object "
                      "{ $_.InstanceName + '|' + $_.CookedValue }"],
-                    capture_output=True, text=True, timeout=15).stdout
+                    capture_output=True, text=True, timeout=15, **_nowin).stdout
                 for ln in out.splitlines():
                     m = re.match(r"pid_(\d+)_.*\|(\d+)", ln.strip())
                     if not m:
@@ -22270,7 +22274,7 @@ class LoRATrainerGUI:
                 out = subprocess.run(
                     ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
                      "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=5).stdout
+                    capture_output=True, text=True, timeout=5, **_nowin).stdout
                 for ln in out.splitlines():
                     parts = [p.strip() for p in ln.split(",")]
                     try:

@@ -102,19 +102,51 @@ def park_dit_to_cpu(dit):
     packed and quant_state never moves (it's small and the parked weights are never computed
     with). Restore stays ``restore_parked_dit`` — Module.to(device) repoints ``.data`` at a
     fresh CUDA copy while the arena keeps its CPU tensor for the next park."""
+    park_dit_partial(dit, need_gb=None)
+
+
+def park_dit_partial(dit, need_gb=None):
+    """Arena park, tail-blocks-first, stopping once ``need_gb`` has been freed.
+
+    Parking the WHOLE base to fit a ~7 GB decode frees ~9.6 GB when ~3 were missing — and on
+    a WDDM card every unnecessary gigabyte moved is more driver paging churn and a slower
+    restore (field: post-preview steps fell from 1.0 to 24.7 s/it on the 16 GB 4090). Blocks
+    park from the tail (matching the swap order — under swap they are already on CPU and are
+    skipped as not-cuda); the non-block modules go last and only if the blocks were not
+    enough. need_gb=None parks everything (the fit-the-text-encoder case)."""
     arena = getattr(dit, "_park_arena", None)
     if arena is None:
         arena = {}
         dit._park_arena = arena
-    for name, t in list(dit.named_parameters()) + list(dit.named_buffers()):
-        if not t.data.is_cuda:
-            continue
-        slot = arena.get(name)
-        if slot is None or slot.shape != t.data.shape or slot.dtype != t.data.dtype:
-            slot = torch.empty_like(t.data, device="cpu")
-            arena[name] = slot
-        slot.copy_(t.data)
-        t.data = slot
+    freed = 0.0
+    target = float("inf") if need_gb is None else max(0.0, float(need_gb)) * 1e9
+
+    def _park_module(mod, prefix):
+        nonlocal freed
+        for name, t in (list(mod.named_parameters(prefix=prefix))
+                        + list(mod.named_buffers(prefix=prefix))):
+            if not t.data.is_cuda:
+                continue
+            slot = arena.get(name)
+            if slot is None or slot.shape != t.data.shape or slot.dtype != t.data.dtype:
+                slot = torch.empty_like(t.data, device="cpu")
+                arena[name] = slot
+            slot.copy_(t.data)
+            t.data = slot
+            freed += t.data.numel() * t.data.element_size()
+
+    for i in range(len(dit.blocks) - 1, -1, -1):
+        if freed >= target:
+            return
+        _park_module(dit.blocks[i], f"blocks.{i}")
+    if freed < target:
+        for cname, child in dit.named_children():
+            if cname == "blocks":
+                continue
+            if freed >= target:
+                return
+            _park_module(child, cname)
+        _park_module(dit, "")          # any direct params/buffers on the root
 
 
 def restore_parked_dit(dit, device, n_swap: int):
@@ -2943,6 +2975,17 @@ def train_minimax(
                 logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
                             f'({len(_opt_parked)} optimizer tensors parked'
                             f'{", EMA shadow parked" if _ema_parked else ""})')
+                # Field mystery (16 GB 4090): free fell 4.7 -> 0.0 between the epoch-0 and
+                # epoch-1 previews — ~5 GB of LIVE allocations appearing during one training
+                # epoch, surviving empty_cache with the optimizer parked. If it happens, name
+                # the holders in the console: normal here is the ~10 GB base, so anything
+                # above 12 lists every root module and who holds it.
+                if _free0 < 2.0:
+                    try:
+                        from fizgig.utils.device import report_cuda_leak
+                        report_cuda_leak("preview-start", threshold_gb=12.0)
+                    except Exception:
+                        pass
             if turbo_net is not None:
                 # On for the sampling phase only: weights to the GPU (~0.8 GB), modules
                 # enabled at their strength, AdaLN injected. Off + back to CPU before decode.
@@ -3052,9 +3095,11 @@ def train_minimax(
                     from fizgig.utils.device import plannable_free_vram as _pfv
                     _free = _pfv()
                     if _frames > 1 and _free < 7.5:
+                        _need = (7.5 - _free) + 1.0
                         logger.info(f"[preview] {_free:.1f} GB free is too tight for clip "
-                                    f"decode — parking the base on CPU for this decode pass.")
-                        park_dit_to_cpu(dit)
+                                    f"decode — parking ~{_need:.1f} GB of tail blocks for "
+                                    f"this decode pass.")
+                        park_dit_partial(dit, need_gb=_need)
                         gc.collect()
                         torch.cuda.empty_cache()
                         _base_parked = True

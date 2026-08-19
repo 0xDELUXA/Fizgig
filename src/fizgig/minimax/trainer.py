@@ -2975,15 +2975,20 @@ def train_minimax(
                 logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
                             f'({len(_opt_parked)} optimizer tensors parked'
                             f'{", EMA shadow parked" if _ema_parked else ""})')
-                # Field mystery (16 GB 4090): free fell 4.7 -> 0.0 between the epoch-0 and
-                # epoch-1 previews — ~5 GB of LIVE allocations appearing during one training
-                # epoch, surviving empty_cache with the optimizer parked. If it happens, name
-                # the holders in the console: normal here is the ~10 GB base, so anything
-                # above 12 lists every root module and who holds it.
-                if _free0 < 2.0:
+                # Field mystery (16 GB 4090): ~2.7 GB of LIVE allocations appear across each
+                # training epoch, surviving empty_cache with the optimizer parked — the fixed
+                # <2 GB trigger missed it by 0.4. Now baseline-relative: the FIRST preview's
+                # free reading is the reference, and any later preview more than 1.5 GB below
+                # it dumps root modules AND orphan tensors with their holders.
+                _base_free = _clip_state.get("free0")
+                if _base_free is None:
+                    _clip_state["free0"] = _free0
+                elif _free0 < _base_free - 1.5:
                     try:
                         from fizgig.utils.device import report_cuda_leak
-                        report_cuda_leak("preview-start", threshold_gb=12.0)
+                        logger.info(f"[preview] free fell {_base_free:.1f} -> {_free0:.1f} GB "
+                                    f"since the first preview — census:")
+                        report_cuda_leak("preview-start", threshold_gb=0.0)
                     except Exception:
                         pass
             if turbo_net is not None:

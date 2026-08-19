@@ -2363,6 +2363,11 @@ def train_minimax(
     # on CPU (~0.45 GB RAM) between previews. Any failure means silent samples, never a dead
     # run.
     _audio_dec_state = {"dec": None, "tried": False}
+    # The video decoder gets the same load-once lifecycle: reloading its ~4.85 GB from disk
+    # into fresh CPU tensors every preview and del-ing it after left the freed pages in the
+    # Windows heap — ~6 GB of RSS growth PER PREVIEW on a 16 GB 4090 (RAM 25 -> 31.6 across
+    # one epoch). Loaded once, parked on CPU between previews, moved to GPU only for decode.
+    _video_dec_state = {"dec": None, "tried": False}
 
     def _get_audio_decoder():
         if _audio_dec_state["tried"]:
@@ -2828,9 +2833,10 @@ def train_minimax(
         _ema_parked = False         # set in phase 1; ditto for the parked fp32 EMA shadow
         try:
             dit.eval()
-            if vae_path:
-                # Loaded per preview and freed in the finally: the ViT3D decoder is ~4.85 GB and
-                # would otherwise sit on top of the resident base for the whole run.
+            if vae_path and _video_dec_state["dec"] is None and not _video_dec_state["tried"]:
+                # Loaded ONCE per run (see _video_dec_state above) — it lives on CPU between
+                # previews and only rides to the GPU for the decode phase.
+                _video_dec_state["tried"] = True
                 from safetensors import safe_open as _safe_open
                 from fizgig.minimax.vae import MiniMaxH3VideoVAEDecoder
                 decoder = MiniMaxH3VideoVAEDecoder()
@@ -2851,6 +2857,9 @@ def train_minimax(
                 # headroom it never used — harmless for a 256-token still, an OOM for a 124-frame
                 # clip whose forward is ~30x the tokens (real 32 GB-card failure, 8 Aug).
                 decoder = decoder.to(torch.float16).eval()
+                _video_dec_state["dec"] = decoder
+            elif vae_path:
+                decoder = _video_dec_state["dec"]
             # Live override from the GUI, re-read every epoch so it can be turned on, changed or
             # switched off mid-run without touching the paused/resume path.
             _prompts, _w, _h = encoded_prompts, sample_width, sample_height
@@ -3130,7 +3139,10 @@ def train_minimax(
             logger.info(f"[preview] epoch {epoch}: wrote {len(_prompts)} sample(s) "
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
-            del decoder                                  # free the ~4.85 GB decoder immediately
+            if decoder is not None:
+                decoder.to("cpu")                        # park, don't free — reloading 4.85 GB
+                if torch.cuda.is_available():            # per preview is what leaked the heap
+                    torch.cuda.empty_cache()
             if _audio_dec_state["dec"] is not None:
                 _audio_dec_state["dec"].to("cpu")        # idempotent; covers a mid-decode raise
             if turbo_net is not None:

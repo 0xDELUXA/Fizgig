@@ -4899,9 +4899,11 @@ class LoRATrainerGUI:
             "<<ComboboxSelected>>", lambda _e: self._refresh_minimax_blocks_count())
         self._minimax_blocks_hint = ttk.Label(
             scheduler_content,
-            text="EXPERIMENT — train only a subset of the 50 blocks. Type ranges and single "
-                 "blocks, comma-separated, like 3-12, 22, 31-33 (blocks 0-49). No recommended "
-                 "answer yet. Full write-up in the README.",
+            text="Train only a subset of the 50 blocks. Type ranges and single blocks, "
+                 "comma-separated, like 3-12, 22, 31-33 (blocks 0-49). Measured answers: "
+                 "27, 29-49 for likeness — sharper, more prompt-responsive, better sound, "
+                 "faster to converge — and 0-3, 6-47 for style (the Style preset sets it). "
+                 "Full write-up in the README.",
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_blocks_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()

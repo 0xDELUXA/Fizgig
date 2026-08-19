@@ -3995,7 +3995,7 @@ class LoRATrainerGUI:
                        "probes UP on steady loss descent; reduces DOWN on loss plateau, heavy gradient clipping, "
                        "or runaway weight-norm growth (with a rollback to the previous epoch's weights on "
                        "stability events).",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._adaptive_desc_label.grid(row=4, column=0, columnspan=2, sticky=tk.W, padx=(20, 5), pady=(0, 6))
         self._on_adaptive_lr_toggle()  # sync initial enabled/disabled state
 
@@ -4072,7 +4072,7 @@ class LoRATrainerGUI:
         self._modelarea_combo = training_preset_combo
         self._modelarea_desc_label = ttk.Label(training_content,
                   text="Identity = single 1-16  |  Style = style+comp blocks @ late ts (0-400)  |  Style+Composition = double 0-7 + single 0-1  |  Details = single 12-23",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"))
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"))
         self._modelarea_desc_label.grid(row=11, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # Custom block picker panel (hidden unless preset == Custom)
@@ -4124,7 +4124,7 @@ class LoRATrainerGUI:
 
         ttk.Label(self._training_custom_frame,
                   text="double + single 0-1 = style+composition  |  single 1-16 = identity (overlaps at 1 and 12-16)  |  single 12-23 = details  |  edit MIN/MAX_TIMESTEP on Advanced tab",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).pack(anchor=tk.W, pady=(4, 0))
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic")).pack(anchor=tk.W, pady=(4, 0))
 
         self._training_custom_frame.grid_remove()  # hidden until preset == Custom
 
@@ -4145,12 +4145,12 @@ class LoRATrainerGUI:
         self._contextlora_desc_label = ttk.Label(training_content,
                   text="Train this LoRA with an existing LoRA already active on the base model. "
                        "Pair with same context+strength at inference.",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"))
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"))
         self._contextlora_desc_label.grid(row=14, column=0, columnspan=2, sticky=tk.W, padx=5)
         self._contextlora_warn_label = ttk.Label(training_content,
                   text="⚠ Context LoRAs usually look better in ComfyUI than in training samples — "
                        "don't worry if previews look rough, test the output LoRA in ComfyUI.",
-                  foreground="#E67E22", font=(FONT_FAMILY, 8, "italic"))
+                  foreground="#E67E22", font=(FONT_FAMILY, 9, "italic"))
         self._contextlora_warn_label.grid(row=15, column=0, columnspan=2, sticky=tk.W, padx=5)
 
         # Target Megapixels (training resolution) — moved here from Other Options
@@ -4168,7 +4168,7 @@ class LoRATrainerGUI:
         ttk.Label(mp_frame,
                   text="MP  (0.25 ≈ 512², 1.0 ≈ 1024², 2.4 ≈ 1536², 4.2 ≈ 2048²)   "
                        "example: 512² = 512×512 pixels, or any other width × height with a similar pixel area",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 9), wraplength=620,
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9), wraplength=620,
                   justify=tk.LEFT).pack(side=tk.LEFT)
         ttk.Label(training_content,
                   text="Images are automatically resized to fit this target area — no need to resize your dataset "
@@ -4176,7 +4176,7 @@ class LoRATrainerGUI:
                        "aspect ratio works (bucketing handles mixed shapes). Higher = more detail, but more VRAM per "
                        "step: 4.2 MP is 4x the pixels of 1.0 and realistically wants 24-32 GB (or heavy block swap) — "
                        "a 16 GB card will OOM well before it.",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720).grid(
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720).grid(
             row=17, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Per-image loss watch (Krea 2 only for now — hidden under Klein via
@@ -4246,7 +4246,7 @@ class LoRATrainerGUI:
                        "so they refine the identity instead of fighting it while it forms; released early the "
                        "moment they start improving. Run the Look Filter (scan with 3 baselines) first — it saves "
                        "the scores with your dataset. Batch size 1.",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._krea2_losswatch_hint.grid(row=24, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Per-step movement clip (MiniMax only) -----------------------------------------
@@ -4277,7 +4277,7 @@ class LoRATrainerGUI:
             text="STRONGLY RECOMMENDED ON — stops any single block overshooting in a step, the "
                  "classic source of distortion. Only the offending step is shortened, so it "
                  "costs nothing that was already learned. Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_limiter_hint.grid(row=38, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Reference distillation (MiniMax only, experimental) ---------------------------
@@ -4330,7 +4330,7 @@ class LoRATrainerGUI:
                  "the way H3 does when shown a photo, using your own dataset as the "
                  "references. Needs the ref2va model in Preferences. Full write-up in the "
                  "README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_distill_hint.grid(row=36, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
 
@@ -4377,7 +4377,7 @@ class LoRATrainerGUI:
                  "this box is training-only. Ticking the mode also sets the settings that suit "
                  "it (identity-learn on, 4 references, identity-first 2 epochs, dropout 0.10, "
                  "adapter-relative LR off) — all still yours to change.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT,
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT,
             wraplength=720)
         self._minimax_mc_hint.grid(row=51, column=0, columnspan=2, sticky=tk.W, padx=5,
                                    pady=(0, 4))
@@ -4386,7 +4386,7 @@ class LoRATrainerGUI:
             training_content,
             text="Identity-learn is off, so the reference steering that keeps two subjects "
                  "apart is not running — separation rests on your trigger words alone.",
-            foreground=COLORS["warning"], font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT,
+            foreground=COLORS["warning"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT,
             wraplength=720)
         self._minimax_mc_nodistill_hint.grid(row=52, column=0, columnspan=2, sticky=tk.W,
                                              padx=5, pady=(0, 4))
@@ -4425,7 +4425,7 @@ class LoRATrainerGUI:
                  "fifth the rate. Same syntax as Blocks to Train, and only blocks you're actually "
                  "training count. Adaptive LR still works — it moves both rates together and "
                  "keeps the ratio.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_slow_hint.grid(row=34, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Train AdaLN (MiniMax only, experimental) --------------------------------------
@@ -4446,7 +4446,7 @@ class LoRATrainerGUI:
                  "that do see the image. It may sharpen likeness, or it may cost you the timing "
                  "control that makes the rest work — run it both ways on the same dataset. Only "
                  "applies to the pruned int8 base; the bf16 one never trains AdaLN anyway.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_adaln_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # Optimised Likeness Learning — photo steps train the identity blocks only; clips train
@@ -4465,7 +4465,7 @@ class LoRATrainerGUI:
                  "video and audio clips always train the full model. Measured result: sharper, "
                  "more prompt-responsive, better sound, faster to converge. Untick for style or "
                  "scene training (the Style preset does).",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_likeness_hint.grid(row=40, column=0, columnspan=2, sticky=tk.W,
                                          padx=5, pady=(0, 4))
         # trace, not command=: preset loads set the var programmatically and must re-grey too.
@@ -4478,7 +4478,7 @@ class LoRATrainerGUI:
                        "them mid-run does nothing. Pause → Resume relaunches with your current "
                        "settings, so these can be changed at a pause. Dataset/caption changes "
                        "need a fresh run (Resume skips re-caching).",
-                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 8, "italic"),
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"),
                   justify=tk.LEFT, wraplength=720).grid(
             row=30, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 6))
 
@@ -4831,7 +4831,7 @@ class LoRATrainerGUI:
             text="Auto reads your FREE VRAM at launch and picks the base precision and block "
                  "swap together — int8 is the most accurate, 4-bit fits smaller cards. Full "
                  "write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_quant_hint.grid(row=17, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Weight averaging (MiniMax only): EMA ------------------------------------------
@@ -4861,7 +4861,7 @@ class LoRATrainerGUI:
             scheduler_content,
             text="Saves a smoothed average of the weights, so checkpoints come out crisper "
                  "when you push the LR hard. Costs no speed. Full write-up in the README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_smooth_hint.grid(row=26, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Adapter-relative LR ramp (MiniMax only, EXPERIMENT, default Off) ---------------
@@ -4886,7 +4886,7 @@ class LoRATrainerGUI:
             text="Makes the Learning Rate box a CEILING the run climbs toward instead of a rate "
                  "it starts at, so set the LR to where you want to end up. Full write-up in the "
                  "README.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_ramp_hint.grid(row=28, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
         # --- Caption dropout (MiniMax only) -------------------------------------------------
@@ -4911,7 +4911,7 @@ class LoRATrainerGUI:
             scheduler_content,
             text="Trains a few percent of steps with no caption, so the LoRA does not lean "
                  "entirely on the trigger word.",
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_capdrop_hint.grid(row=30, column=0, columnspan=2, sticky=tk.W, padx=5,
                                         pady=(0, 4))
 
@@ -4939,7 +4939,7 @@ class LoRATrainerGUI:
         self._minimax_blocks_hint = ttk.Label(
             scheduler_content,
             text=self._MINIMAX_BLOCKS_HINT,
-            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+            foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_blocks_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
 
@@ -6596,7 +6596,7 @@ class LoRATrainerGUI:
                          "holding its quality against drift from the still-training category, "
                          "with its epoch report staying live as the drift alarm. Stop skips "
                          "its steps entirely: faster epochs, but that category goes unwatched.",
-            font=(FONT_FAMILY, 8, "italic"), fg="#95A5A6", bg=COLORS["bg_surface"],
+            font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
             justify=tk.LEFT, wraplength=720)
 
         # The raw share, revealed only under Custom — the named options are the point.
@@ -8189,7 +8189,7 @@ class LoRATrainerGUI:
         row += 1
         ttk.Label(parent, text="sdpa works on all GPUs. flash3 requires pip install flash-attn and an "
                   "NVIDIA Hopper/Blackwell GPU (H100, RTX 5090, etc.).",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic")).grid(
             row=row, column=0, columnspan=3, sticky=tk.W, padx=5)
         row += 1
 
@@ -8247,7 +8247,7 @@ class LoRATrainerGUI:
         self.entries["METADATA_TRIGGER_PHRASE"].grid(row=row, column=1, sticky=tk.EW, padx=5, pady=2)
         row += 1
         ttk.Label(parent, text="Blank uses the Captions tab's trigger word.",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic")).grid(
             row=row, column=0, columnspan=3, sticky=tk.W, padx=5)
         row += 1
 
@@ -8257,7 +8257,7 @@ class LoRATrainerGUI:
         ttk.Button(parent, text="Browse", command=lambda: self.browse_file("METADATA_THUMBNAIL", "file")).grid(row=row, column=2, sticky=tk.W, padx=5)
         row += 1
         ttk.Label(parent, text="Blank auto-embeds the latest sample preview; type 'off' to disable.",
-                  foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic")).grid(
+                  foreground=COLORS["text_explain"], font=(FONT_FAMILY, 9, "italic")).grid(
             row=row, column=0, columnspan=3, sticky=tk.W, padx=5)
         row += 1
 
@@ -10381,7 +10381,7 @@ class LoRATrainerGUI:
                       "re-read from disk every sample (~3–4 s/epoch saved). auto = only when free RAM is "
                       "comfortable; off = reload each time. Only applies when sampling isn't block-swapping the "
                       "Distilled — i.e. 24 GB+ cards, where the sample peaks around ~18 GB).",
-                 font=(FONT_FAMILY, 8, "italic"), fg=COLORS["text_muted"], bg=COLORS["bg_surface"],
+                 font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"], bg=COLORS["bg_surface"],
                  wraplength=600, justify=tk.LEFT)
         self.cache_sample_model_note.grid(row=5, column=0, columnspan=3, sticky=tk.W, pady=(0, 4))
 

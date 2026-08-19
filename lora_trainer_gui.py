@@ -22266,11 +22266,12 @@ class LoRATrainerGUI:
                 torch.cuda.empty_cache()
 
             # Loads run on worker threads — chain donor (if one was set) behind the primary,
-            # and only then refresh the master sliders + schedule the preview.
+            # then refresh the master sliders. Deliberately NO auto-render (Peter, 19 Aug):
+            # after a LoRA swap the user usually wants to set sliders/seed first, so the
+            # button flips to Update and the render waits for their click.
             def _after_all():
                 self._on_master_target_changed()
-                self._repair_reset_start_button()
-                self._schedule_preview(force=True)
+                self._repair_mark_update_needed()
 
             if donor_path and os.path.exists(donor_path):
                 self._load_repair_primary(

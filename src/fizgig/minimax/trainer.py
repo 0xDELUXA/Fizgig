@@ -2128,6 +2128,28 @@ def train_minimax(
         from fizgig.minimax.sampling import encode_sample_prompts
         logger.info(f"[preview] pre-encoding {len(sample_prompts)} sample prompt(s) "
                     f"(the text encoder is freed before the DiT loads)...")
+        # 16 GB-class cards: previews hard-cap at 768x768 and 22 frames (sound untouched —
+        # it's a separate flag and ~4% of the sequence). The Samples menu still offers the
+        # longer clips; here they clamp rather than crash-and-ladder: a 56-frame clip's
+        # sampling tokens plus its chunked decode is exactly what pushed a real 16 GB 4090
+        # into the paging/OOM spiral (Peter, 19 Aug). Clamp, say so once, move on.
+        try:
+            _total_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        except Exception:
+            _total_gb = 99.0
+        if _total_gb < 20.0:
+            _clamped = []
+            if int(sample_frames or 1) > 22:
+                _clamped.append(f"{sample_frames} frames -> 22")
+                sample_frames = 22
+            if sample_width > 768 or sample_height > 768:
+                _clamped.append(f"{sample_width}x{sample_height} -> "
+                                f"{min(sample_width, 768)}x{min(sample_height, 768)}")
+                sample_width = min(sample_width, 768)
+                sample_height = min(sample_height, 768)
+            if _clamped:
+                logger.info(f"[preview] 16 GB card: {'; '.join(_clamped)} — previews cap at "
+                            f"768x768 / 22 frames on this class of GPU (sound kept)")
         try:
             encoded_prompts = encode_sample_prompts(te_path, sample_prompts, device=device,
                                                     quantize=quantize)

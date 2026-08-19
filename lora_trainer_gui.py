@@ -10070,6 +10070,7 @@ class LoRATrainerGUI:
             prompt_card, textvariable=self.sample_frames_var, state="readonly", width=34,
             values=["Still (1 frame)", "22 frames (~1s)", "56 frames (~2.3s)",
                     "124 frames (~5s — trained minimum)", "141 frames (~6s)",
+                    "22 frames with sound (~1s)",
                     "56 frames with sound (~2.3s)",
                     "124 frames with sound (~5s)"])
         self.sample_frames_combo.grid(row=8, column=1, columnspan=2, sticky=tk.W, pady=4)
@@ -10077,7 +10078,9 @@ class LoRATrainerGUI:
         self._sample_frames_hint = tk.Label(prompt_card,
                  text="Samples render as short clips you can scrub in the gallery — the regime "
                       "H3 was trained in. Longer clips cost minutes each, so set the cadence "
-                      "with 'Generate every N epochs'. Full write-up in the README.",
+                      "with 'Generate every N epochs'. On 16 GB cards previews cap at 768×768 "
+                      "and 22 frames (sound kept) — longer or larger picks clamp automatically. "
+                      "Full write-up in the README.",
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],
                  bg=COLORS["bg_surface"], wraplength=560, justify=tk.LEFT)
         self._sample_frames_hint.grid(row=9, column=1, columnspan=2, sticky=tk.W, pady=(0, 4))

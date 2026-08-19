@@ -2142,14 +2142,18 @@ def train_minimax(
             if int(sample_frames or 1) > 22:
                 _clamped.append(f"{sample_frames} frames -> 22")
                 sample_frames = 22
-            if sample_width > 768 or sample_height > 768:
-                _clamped.append(f"{sample_width}x{sample_height} -> "
-                                f"{min(sample_width, 768)}x{min(sample_height, 768)}")
-                sample_width = min(sample_width, 768)
-                sample_height = min(sample_height, 768)
+            # 768x640 not 768x768: a full 768 square ran the card at 15.9/16 GB — one bad
+            # frame from the ladder. The smaller side gives back the headroom; orientation
+            # is preserved (a portrait pick clamps to 640x768).
+            _long, _short = max(sample_width, sample_height), min(sample_width, sample_height)
+            if _long > 768 or _short > 640:
+                _nl, _ns = min(_long, 768), min(_short, 640)
+                _new = (_nl, _ns) if sample_width >= sample_height else (_ns, _nl)
+                _clamped.append(f"{sample_width}x{sample_height} -> {_new[0]}x{_new[1]}")
+                sample_width, sample_height = _new
             if _clamped:
                 logger.info(f"[preview] 16 GB card: {'; '.join(_clamped)} — previews cap at "
-                            f"768x768 / 22 frames on this class of GPU (sound kept)")
+                            f"768x640 / 22 frames on this class of GPU (sound kept)")
         try:
             encoded_prompts = encode_sample_prompts(te_path, sample_prompts, device=device,
                                                     quantize=quantize)

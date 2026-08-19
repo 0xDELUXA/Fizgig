@@ -10078,7 +10078,7 @@ class LoRATrainerGUI:
         self._sample_frames_hint = tk.Label(prompt_card,
                  text="Samples render as short clips you can scrub in the gallery — the regime "
                       "H3 was trained in. Longer clips cost minutes each, so set the cadence "
-                      "with 'Generate every N epochs'. On 16 GB cards previews cap at 768×768 "
+                      "with 'Generate every N epochs'. On 16 GB cards previews cap at 768×640 "
                       "and 22 frames (sound kept) — longer or larger picks clamp automatically. "
                       "Full write-up in the README.",
                  font=(FONT_FAMILY, 9, "italic"), fg=COLORS["text_explain"],

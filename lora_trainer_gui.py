@@ -619,6 +619,12 @@ MINIMAX_BLOCK_OPTIONS = [
 
 MINIMAX_NUM_BLOCKS = 50          # H3's DiT block count (MiniMaxH3Config.num_layers)
 
+# Optimised Likeness Learning — the block set photo steps train when the checkbox is on (clips
+# always train the full model). 20-49 is the measured recipe (19 Aug): the visual-exclusive band
+# 20-26 adds pose/likeness stability, identity lives 27-49, and the front trunk 0-19 is where
+# photo gradients deform anatomy. One place to tweak as the add-back ladder refines the figures.
+MINIMAX_LIKENESS_BLOCKS = "20-49"
+
 # Base Precision — the label the user sees, and the --base_quant value it sends. Auto plans the
 # quantisation and the block-swap count together (see plan_base_quant in minimax/trainer.py);
 # an explicit pick is never overridden, the swap plan is built around it instead.
@@ -876,6 +882,10 @@ MINIMAX_BUILT_IN_PRESETS = {
         #                       _teref cache built, so defaulting it on would break a fresh run)
         "MINIMAX_BLOCKS": "all", "MINIMAX_BASE_QUANT": MINIMAX_BASE_QUANT_OPTIONS[0],
         "MINIMAX_TRAIN_ADALN": False,
+        # Optimised Likeness Learning ships ON: photos train the identity blocks (20-49) only,
+        # clips train the full model. The one measured exception is style — the Style preset
+        # turns it off (style needs the early blocks).
+        "MINIMAX_LIKENESS_OPT": True,
         "MINIMAX_SLOW_BLOCKS": "", "MINIMAX_SLOW_LR_SCALE": "0.2",
         # The one experiment that graduated: the limiter ships ON. Validated on a real A/B
         # (8 Aug) — the last trained block always hogs 2-4x the median block's movement and
@@ -930,6 +940,9 @@ MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Style (LoRA 8, gentle LR)"] = {
     **MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"],
     "LEARNING_RATE": 1e-4,
     "MINIMAX_BLOCKS": "0-3, 6-47",
+    # MUST be off here: style measurably needs the early blocks the likeness mask freezes, and
+    # with it on the blocks spec above would be ignored outright.
+    "MINIMAX_LIKENESS_OPT": False,
 }
 
 # Directory for dataset configurations
@@ -1666,6 +1679,10 @@ class LoRATrainerGUI:
             # and nothing else — so its adapters cannot tell one subject from another, and on the
             # pruned build they were taking ~45% of all weight movement to do it.
             "MINIMAX_TRAIN_ADALN": False,
+            # Optimised Likeness Learning — photo steps train blocks 20-49 only, clips train
+            # everything. On by default: it is the measured best recipe for the character/voice
+            # work H3 is for. The Style preset turns it OFF (style needs the early blocks).
+            "MINIMAX_LIKENESS_OPT": True,
             "MINIMAX_DISTILL": False,      # off = ordinary training
             # Which H3 base ordinary training runs on ("fl2va"/"ref2va"). NOT in any preset —
             # the Training Base dropdown's var lives outside self.entries by design.
@@ -4432,6 +4449,28 @@ class LoRATrainerGUI:
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_adaln_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
 
+        # Optimised Likeness Learning — photo steps train the identity blocks only; clips train
+        # the full model. BooleanVar in self.entries so presets/queue/last-train carry it free.
+        self.entries["MINIMAX_LIKENESS_OPT"] = tk.BooleanVar(
+            value=bool(self.settings.get("MINIMAX_LIKENESS_OPT", True)))
+        self._minimax_likeness_cb = ttk.Checkbutton(
+            training_content, text="Optimised Likeness Learning",
+            variable=self.entries["MINIMAX_LIKENESS_OPT"])
+        self._minimax_likeness_cb.grid(row=39, column=0, columnspan=2, sticky=tk.W,
+                                       padx=5, pady=(8, 0))
+        self._minimax_likeness_hint = ttk.Label(
+            training_content,
+            text=f"Photos train the identity blocks ({MINIMAX_LIKENESS_BLOCKS}) only — "
+                 "protecting the base model's rendering, anatomy and prompt following — while "
+                 "video and audio clips always train the full model. Measured result: sharper, "
+                 "more prompt-responsive, better sound, faster to converge. Untick for style or "
+                 "scene training (the Style preset does).",
+            foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
+        self._minimax_likeness_hint.grid(row=40, column=0, columnspan=2, sticky=tk.W,
+                                         padx=5, pady=(0, 4))
+        # trace, not command=: preset loads set the var programmatically and must re-grey too.
+        self.entries["MINIMAX_LIKENESS_OPT"].trace_add(
+            "write", lambda *_a: self._sync_minimax_likeness_state())
 
         # Answers "when do changes take effect?" (issue #40) right where people wonder it.
         ttk.Label(training_content,
@@ -4899,11 +4938,7 @@ class LoRATrainerGUI:
             "<<ComboboxSelected>>", lambda _e: self._refresh_minimax_blocks_count())
         self._minimax_blocks_hint = ttk.Label(
             scheduler_content,
-            text="Train only a subset of the 50 blocks. Type ranges and single blocks, "
-                 "comma-separated, like 3-12, 22, 31-33 (blocks 0-49). Measured answers: "
-                 "27, 29-49 for likeness — sharper, more prompt-responsive, better sound, "
-                 "faster to converge — and 0-3, 6-47 for style (the Style preset sets it). "
-                 "Full write-up in the README.",
+            text=self._MINIMAX_BLOCKS_HINT,
             foreground="#95A5A6", font=(FONT_FAMILY, 8, "italic"), justify=tk.LEFT, wraplength=720)
         self._minimax_blocks_hint.grid(row=32, column=0, columnspan=2, sticky=tk.W, padx=5, pady=(0, 4))
         self._refresh_minimax_blocks_count()
@@ -5880,9 +5915,12 @@ class LoRATrainerGUI:
             _hl = str(p.get("MINIMAX_HIGHNOISE_LR_PCT") or "100").strip()
             if _hl and _hl != "100":
                 bits.append(f"high-noise LR {_hl}%")
-            _bl = minimax_block_spec(p.get("MINIMAX_BLOCKS"))
-            if _bl.lower() != "all":
-                bits.append(f"blocks {_bl}")
+            if p.get("MINIMAX_LIKENESS_OPT"):
+                bits.append("likeness-opt")
+            else:
+                _bl = minimax_block_spec(p.get("MINIMAX_BLOCKS"))
+                if _bl.lower() != "all":
+                    bits.append(f"blocks {_bl}")
             if p.get("MINIMAX_TRAIN_ADALN") is False:
                 bits.append("no adaln")
             if p.get("MINIMAX_DISTILL"):
@@ -6685,6 +6723,42 @@ class LoRATrainerGUI:
             return
         lbl.config(text=f"✓ {len(idx)} of {MINIMAX_NUM_BLOCKS} blocks", fg="#27AE60")
 
+    # The Blocks to Train hint in both of its states — module-level truth so the greying
+    # handler can swap them without duplicating the strings inline.
+    _MINIMAX_BLOCKS_HINT = ("Train only a subset of the 50 blocks. Type ranges and single "
+                            "blocks, comma-separated, like 3-12, 22, 31-33 (blocks 0-49). "
+                            "Measured answers: 27, 29-49 for likeness — sharper, more "
+                            "prompt-responsive, better sound, faster to converge — and "
+                            "0-3, 6-47 for style (the Style preset sets it). Full write-up "
+                            "in the README.")
+    _MINIMAX_BLOCKS_HINT_LOCKED = ("Disabled by Optimised Likeness Learning above — untick it "
+                                   "to hand-pick blocks. While it's on, photos train "
+                                   f"{MINIMAX_LIKENESS_BLOCKS} and clips train all 50.")
+
+    def _sync_minimax_likeness_state(self):
+        """Grey Blocks to Train while Optimised Likeness Learning owns the block choice.
+
+        The combobox VALUE is deliberately preserved — a hand-typed spec survives a toggle
+        round-trip; only the widget state and the hint change. Driven by the checkbox trace
+        (fires on preset loads too) and by arch switches."""
+        combo = self.entries.get("MINIMAX_BLOCKS")
+        hint = getattr(self, "_minimax_blocks_hint", None)
+        if combo is None or hint is None or not combo.winfo_exists():
+            return
+        locked = self._is_minimax_arch() and bool(
+            self.entries["MINIMAX_LIKENESS_OPT"].get())
+        if locked:
+            combo.config(state="disabled")
+            hint.config(text=self._MINIMAX_BLOCKS_HINT_LOCKED)
+            lbl = getattr(self, "_minimax_blocks_count", None)
+            if lbl is not None and lbl.winfo_exists():
+                lbl.config(text=f"photos: {MINIMAX_LIKENESS_BLOCKS} · clips: all 50",
+                           fg=COLORS["text_explain"])
+        else:
+            combo.config(state="")               # editable, the widget's natural state
+            hint.config(text=self._MINIMAX_BLOCKS_HINT)
+            self._refresh_minimax_blocks_count()
+
     def _is_krea2_arch(self) -> bool:
         return ARCHITECTURES.get(self.architecture_var.get(), {}).get("is_krea2", False)
 
@@ -6885,6 +6959,7 @@ class LoRATrainerGUI:
                   self._minimax_structure_desc,
                   self._minimax_hnlr_label, self._minimax_hnlr_frame, self._minimax_hnlr_hint,
                   self._minimax_blocks_label, self._minimax_blocks_frame, self._minimax_blocks_hint,
+                  self._minimax_likeness_cb, self._minimax_likeness_hint,
                   self._minimax_distill_frame, self._minimax_distill_hint,
                   self._minimax_quant_label, self._minimax_quant_frame,
                   self._minimax_quant_hint,
@@ -6899,6 +6974,9 @@ class LoRATrainerGUI:
         # The clean-end box answers to BOTH the family and the dropdown: visible only for MiniMax,
         # and only when the structure is Custom.
         self._refresh_minimax_structure_ui()
+        # Blocks to Train greys while Optimised Likeness Learning owns it — arch-dependent, so
+        # re-sync on every family switch (a Klein session must not leave it locked).
+        self._sync_minimax_likeness_state()
         # The Multi Concept sub-rows are owned by its own toggle handler (they are hidden even
         # under MiniMax until the box is ticked), so route them through it rather than the loop.
         if is_minimax:
@@ -23479,6 +23557,10 @@ class LoRATrainerGUI:
         # has streamed in — and a queued run must never fail an hour later on a bad spec.
         if self._is_minimax_arch():
             _spec = minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get())
+            # Likeness mode ignores (and disables) the box — a stale typo in it must not
+            # block the launch.
+            if self.entries["MINIMAX_LIKENESS_OPT"].get():
+                _spec = "all"
             if _spec.lower() != "all":
                 try:
                     from fizgig.minimax.trainer import parse_block_spec
@@ -24015,7 +24097,12 @@ class LoRATrainerGUI:
                 self.entries["MIXED_STOP_EPOCH"].get() or "").strip(),
             "MIXED_STOP_MODE": str(
                 self.entries["MIXED_STOP_MODE"].get() or "").strip(),
-            "MINIMAX_BLOCKS": minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get()),
+            # Likeness mode owns the block choice: the launch dict says "all" so the queue card,
+            # snapshot and builder stay honest, while the combobox keeps the user's typed spec
+            # for when they untick.
+            "MINIMAX_BLOCKS": ("all" if self.entries["MINIMAX_LIKENESS_OPT"].get()
+                               else minimax_block_spec(self.entries["MINIMAX_BLOCKS"].get())),
+            "MINIMAX_LIKENESS_OPT": bool(self.entries["MINIMAX_LIKENESS_OPT"].get()),
             "MINIMAX_TRAIN_ADALN": bool(self.entries["MINIMAX_TRAIN_ADALN"].get()),
             "MINIMAX_DISTILL": bool(self.minimax_distill_var.get()),
             # Canonical key ("fl2va"/"ref2va"), never the display label. Preset-immune by
@@ -25093,6 +25180,11 @@ class LoRATrainerGUI:
         _blocks = minimax_block_spec(self.settings.get("MINIMAX_BLOCKS", "all"))
         if _blocks.lower() != "all":
             cmd += ["--train_blocks", _blocks]
+        # Optimised Likeness Learning — photo steps train the identity blocks only, clips train
+        # everything. The launch dict already forced MINIMAX_BLOCKS to "all" when this is on, so
+        # the two flags never fight.
+        if self.settings.get("MINIMAX_LIKENESS_OPT"):
+            cmd += ["--photo_blocks", MINIMAX_LIKENESS_BLOCKS]
         # Reference distillation. Both flags travel together; the trainer also needs --vae to
         # encode the reference, which the sample block may already have added.
         if self.settings.get("MINIMAX_DISTILL"):

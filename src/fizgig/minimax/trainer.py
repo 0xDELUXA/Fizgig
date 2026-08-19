@@ -2033,6 +2033,11 @@ def train_minimax(
     base_quant: str = "auto",
     include_patterns: list = None,
     train_blocks: str = None,        # "14-37" = train only that block range (experiment)
+    photo_blocks: str = None,        # Optimised Likeness Learning: photo steps update only these
+                                     # blocks (+refiners); video/audio clips update everything.
+                                     # The 20-49 recipe: photo gradients into the front trunk are
+                                     # pure prior damage (deformed previews, eroded prompt
+                                     # following) while identity lives in the back 30 blocks.
     train_adaln: bool = True,        # False = drop adaln_proj from the targets (pruned only)
     distill: bool = False,           # reference distillation (references come from the dataset)
     distill_weight: float = 0.8,     # teacher share of the loss; the rest is the real photo
@@ -2588,6 +2593,32 @@ def train_minimax(
             logger.warning("[lr] slow_blocks %r matched no trained modules — is it outside "
                            "Blocks to Train? Depth-split LR is not active.", slow_blocks)
 
+    # Optimised Likeness Learning: on photo-only optimizer windows, the params of blocks OUTSIDE
+    # photo_blocks get grad=None before the clip — AdamW skips None-grad params entirely (no step,
+    # no momentum, no weight decay), which is exactly "this step never touched them". Their LoRA
+    # deltas stay ACTIVE in the forward; they just don't learn from photos. Refiners and non-block
+    # modules always train (same rule as restrict_patterns_to_blocks — text-side, held constant).
+    _photo_mask_params, _photo_used = [], ""
+    if photo_blocks:
+        _pb_allowed = set(parse_block_spec(photo_blocks, len(dit.blocks)))
+        _mask_ids = set()
+        for _lora in network.unet_loras:
+            _nm = _lora.lora_name
+            if "token_refiner" in _nm:
+                continue
+            _m = re.search(r"blocks_(\d+)_", _nm)
+            if _m and int(_m.group(1)) not in _pb_allowed:
+                _mask_ids.update(id(p) for p in _lora.parameters())
+        _photo_mask_params = [p for p in params if id(p) in _mask_ids]
+        _photo_used = format_block_spec(sorted(_pb_allowed))
+        if _photo_mask_params:
+            logger.info("[likeness] Optimised Likeness Learning ON — photo steps train blocks "
+                        "%s (+refiners, %d of %d tensors frozen on photos); video/audio clips "
+                        "train the full model", _photo_used, len(_photo_mask_params), len(params))
+        else:
+            logger.info("[likeness] photo_blocks %s covers every trained block — nothing to "
+                        "mask (Blocks to Train already inside it?)", _photo_used)
+
     # eps_floor_8bit: H3-only. The 8-bit second moment underflows on this model's most structured
     # tensors and the update degrades to lr*m/eps — measured at ~100x the configured LR, which
     # presented as melted anatomy at epoch 1. The floor caps that. It is passed here and nowhere
@@ -2843,6 +2874,7 @@ def train_minimax(
             "ss_distill": "dataset" if distill else "off",
             "ss_distill_weight": (f"{distill_weight:g}" if distill else "0"),
             "ss_slow_blocks": _slow_used or "none",
+            "ss_photo_blocks": (_photo_used if _photo_mask_params else "off"),
             "ss_block_limit": str(block_limit or 0),
             "ss_gradient_accumulation": str(_accum_n),
             "ss_adapter_ramp": f"{adapter_ramp:g}" if ramp is not None else "0",
@@ -3375,6 +3407,7 @@ def train_minimax(
     _voice_acc = [0.0, 0]               # audio sum, count — audio-only voice items
 
     _pending = [0]                       # backwards accumulated since the last optimizer step
+    _window_photo_only = [True]          # likeness mask: does this window hold ONLY photo steps?
 
     def _boundary_step():
         """The optimizer step at a window boundary — shared by live iterations and by the
@@ -3390,6 +3423,17 @@ def train_minimax(
         """
         if not _pending[0]:
             return
+        # Likeness mask, decided per WINDOW: photo-only windows drop the masked params' grads
+        # before the clip (so the global norm reflects only what actually trains) and before the
+        # step (grad=None params are skipped by AdamW outright — no moment update, no decay).
+        # A window containing any clip/voice step trains the full model — conservative; at the
+        # default accumulation of 1 this is exact per-step masking. StepClipper note: a photo
+        # window shows zero movement for the masked blocks, which would pull its median down if
+        # the limiter were on (it ships retired).
+        if _photo_mask_params and _window_photo_only[0]:
+            for _p in _photo_mask_params:
+                _p.grad = None
+        _window_photo_only[0] = True
         if max_grad_norm and max_grad_norm > 0:
             torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
         _bm = (sum(_band_acc) / len(_band_acc)) if _band_acc else 1.0
@@ -3435,6 +3479,9 @@ def train_minimax(
                         f"at the full {learning_rate:.2e} (phase 1 ran at "
                         f"{learning_rate * _P1_LR_SCALE:.2e}).")
         for i, batch in enumerate(loader):
+            # A still arrives 4-D (1,24,H,W); clips and voice placeholders are 5-D — tested
+            # BEFORE the unsqueeze below erases the difference. Feeds the likeness mask.
+            _is_photo = batch["latents"].dim() == 4
             latents = batch["latents"].to(device, dtype)           # (1, 24, H, W)
             if latents.dim() == 4:
                 latents = latents.unsqueeze(2)                     # -> (1, 24, 1, H, W)
@@ -3442,6 +3489,8 @@ def train_minimax(
             if uncond_text is not None and random.random() < caption_dropout:
                 text = uncond_text.to(device, dtype)               # caption dropout step
             _is_voice = bool(batch.get("audio_only") is not None and batch["audio_only"].any())
+            if not _is_photo or _is_voice:
+                _window_photo_only[0] = False
             # Per-category retirement: past its stop epoch a category is either ANCHORED
             # (trains on at ANCHOR_LR_SCALE — rehearsal against drift on the shared adapters,
             # ledger stays live) or STOPPED (skipped outright — faster epochs, blind).

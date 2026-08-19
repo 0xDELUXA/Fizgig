@@ -23223,7 +23223,9 @@ class LoRATrainerGUI:
         if hasattr(self, "repair_preset_combo"):
             self.repair_preset_combo.configure(values=self._repair_preset_list())
 
-    def _apply_repair_state_to_widgets(self, state):
+    def _apply_repair_blocks_to_widgets(self, state):
+        """Sliders only — the shape user presets restore. Prompt, seed, res, reference and
+        the loaded LoRAs are session context, not part of a block recipe (Peter, 19 Aug)."""
         for bid, bs in state.blocks.items():
             v = self.repair_block_vars.get(bid)
             if v is None:
@@ -23232,6 +23234,9 @@ class LoRATrainerGUI:
             v["primary_strength"].set(bs.primary_strength)
             v["donor_enabled"].set(bs.donor_enabled)
             v["donor_strength"].set(bs.donor_strength)
+
+    def _apply_repair_state_to_widgets(self, state):
+        self._apply_repair_blocks_to_widgets(state)
         self.repair_seed_var.set(str(state.seed))
         self.repair_prompt_var.set(state.prompt)
         self.repair_res_var.set(str(state.preview_width))
@@ -23285,20 +23290,13 @@ class LoRATrainerGUI:
             if not messagebox.askokcancel("Overwrite?", f"Overwrite existing preset '{name}'?"):
                 return
         try:
-            # Sync seed/prompt/res from widgets first
-            try:
-                self.repair_state.seed = int(self.repair_seed_var.get() or "42")
-            except ValueError:
-                self.repair_state.seed = 42
-            self.repair_state.prompt = self.repair_prompt_var.get()
-            try:
-                self.repair_state.preview_width = int(self.repair_res_var.get())
-                self.repair_state.preview_height = self.repair_state.preview_width
-            except ValueError:
-                pass
             with open(path, "w", encoding="utf-8") as f:
                 import json as _json
-                _d = self.repair_state.to_json()
+                # SLIDERS ONLY. A preset is a block recipe — prompt, seed, resolution, the
+                # reference image and the loaded LoRAs are the session it gets applied TO,
+                # and saving them meant loading a preset yanked all of them out from under
+                # the user (Peter, 19 Aug).
+                _d = {"blocks": self.repair_state.to_json()["blocks"]}
                 # Self-describing: which family's block ids these are. The folder already
                 # scopes the dropdown; this makes a shared/copied file readable on its own.
                 _d["family"] = (self.repair_family_var.get()
@@ -23329,7 +23327,9 @@ class LoRATrainerGUI:
             with open(path, "r", encoding="utf-8") as f:
                 d = _json.load(f)
             state = SliderState.from_json(d)
-            self._apply_repair_state_to_widgets(state)
+            # Blocks only — a preset saved by an older build carries prompt/seed/res too;
+            # they are deliberately ignored so loading never disturbs the live session.
+            self._apply_repair_blocks_to_widgets(state)
             self._schedule_preview(force=True)
         except Exception:
             import traceback

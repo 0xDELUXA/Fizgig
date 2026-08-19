@@ -3132,7 +3132,9 @@ def train_minimax(
                         gc.collect()
                         torch.cuda.empty_cache()
                         _base_parked = True
+                        vram_line("post-park")
                 decoder = decoder.to(device)
+                vram_line("decoder-up")
             for stem, lat, _arows in _rendered:
                 _px_mp4 = None                # full frames held only for a with-sound mp4
                 lat = lat.to(device)
@@ -3205,11 +3207,13 @@ def train_minimax(
                 del lat
             if _audio_dec_state["dec"] is not None:
                 _audio_dec_state["dec"].to("cpu")     # ~0.45 GB back off the card
+            vram_line("post-decode")
             if _base_parked:
                 restore_parked_dit(dit, device, n_swap)   # swap-aware: never the whole base
                 gc.collect()
                 torch.cuda.empty_cache()
                 _base_parked = False
+                vram_line("post-restore")
             logger.info(f"[preview] epoch {epoch}: wrote {len(_prompts)} sample(s) "
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
@@ -3241,6 +3245,7 @@ def train_minimax(
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            vram_line("finally-done")
 
     # ---- epoch loop ----
     loss_recorder = LossRecorder()

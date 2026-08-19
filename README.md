@@ -322,7 +322,7 @@ chmod +x run_fizgig.sh
 
 ---
 
-## Model downloads (you provide)
+## Model downloads
 
 Fizgig doesn't bundle weights. You only need the family you're using — and **Preferences has a ⬇ Download models for me button** under each model card that downloads, verifies, and fills in the paths (Klein needs a free HuggingFace token for BFL's licence; Krea 2 needs no account). Every row also has a manual **Download** link. CLI:
 

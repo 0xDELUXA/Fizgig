@@ -18306,6 +18306,7 @@ class LoRATrainerGUI:
         seed_entry = ttk.Entry(params_frame, textvariable=self.repair_seed_var, width=10)
         seed_entry.pack(side=tk.LEFT, padx=(0, 2))
         self.repair_seed_var.trace_add("write", lambda *_: self._repair_mark_update_needed())
+        seed_entry.bind("<Return>", self._repair_seed_committed)
         tk.Button(params_frame, text="\u21bb", font=(FONT_FAMILY, 9),
                   bg=COLORS["bg_deep"], fg=COLORS["text_primary"],
                   activebackground=COLORS["bg_surface"], activeforeground=COLORS["text_primary"],
@@ -22088,10 +22089,22 @@ class LoRATrainerGUI:
             self._repair_start_btn.configure(text="Update")
 
     def _repair_randomize_seed(self):
-        """Randomize seed and mark update needed."""
+        """Randomize seed — and on a live session, regenerate immediately.
+
+        Setting the var flips the button to 'Update' via its trace (only when a primary is
+        loaded); if that's the state we're in, the click's intent is unambiguous and making
+        the user walk to the button is a wasted step. Before Start it just marks, as before."""
         import random
         self.repair_seed_var.set(str(random.randint(1, 99999)))
         self._repair_mark_update_needed()
+        if self._repair_start_btn.cget("text") == "Update":
+            self._on_preview_param_changed()
+
+    def _repair_seed_committed(self, _event=None):
+        """Enter in the seed box = 'go' — same live-session-only rule as the ↻ button.
+        Per-keystroke regen would render every partial number, so typing only marks."""
+        if self._repair_start_btn.cget("text") == "Update":
+            self._on_preview_param_changed()
 
     def _repair_reset_start_button(self):
         """Reset the Start button text back to 'Start'."""

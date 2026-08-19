@@ -8831,7 +8831,8 @@ class LoRATrainerGUI:
                            if os.path.splitext(f)[1].lower() in _exts)
         except Exception:
             files = [os.path.basename(img_path)]
-        state = {"path": img_path, "loaded": "", "dirty_grid": False}
+        state = {"path": img_path, "loaded": "", "dirty_grid": False,
+                 "audio_probe": {}, "speech_busy": False}
 
         dialog = tk.Toplevel(self.master)
         dialog.configure(bg=BG_COLOR)
@@ -8886,6 +8887,7 @@ class LoRATrainerGUI:
             caption_text.delete("1.0", tk.END)
             caption_text.insert("1.0", caption)
             state["loaded"] = caption
+            _speech_refresh()               # video with sound → the Append Speech button shows
 
         def _save():
             """Write the caption if it changed. Silent and inline — never a popup."""
@@ -8924,10 +8926,129 @@ class LoRATrainerGUI:
             dialog.destroy()
             self.caption_single_image(state["path"])
 
+        # --- Append Speech: Whisper the clip's audio into the caption -------------------------
+        # Only for a training VIDEO that actually carries sound (a muted clip has nothing to
+        # hear). Reuses Gizmo's machinery wholesale: its ffmpeg finder + stream probe, its
+        # Whisper model (local-first — the Preferences downloader pre-fetches it; otherwise a
+        # one-time ~300 MB download, exactly like Gizmo), its language preference, and its
+        # hallucination-loop detector. Un-captioned speech is a lie the model must explain
+        # away — this is the one-click fix for clips that never went through Gizmo.
+        def _speech_refresh():
+            path = state["path"]
+            if os.path.splitext(path)[1].lower() not in self.TRAINING_VIDEO_EXTENSIONS:
+                speech_btn.pack_forget()
+                return
+            if path not in state["audio_probe"]:
+                try:
+                    import gizmo as _gz
+                    _ff = _gz.find_ffmpeg()
+                    state["audio_probe"][path] = bool(
+                        _ff and _gz.probe_source(_ff, path).get("has_audio"))
+                except Exception:
+                    state["audio_probe"][path] = False
+            if state["audio_probe"][path]:
+                speech_btn.pack(side=tk.LEFT, padx=5, before=close_btn)
+            else:
+                speech_btn.pack_forget()
+
+        def _append_speech():
+            if state["speech_busy"]:
+                return
+            state["speech_busy"] = True
+            path = state["path"]
+            import gizmo as _gz
+            speech_btn.configure(state=tk.DISABLED, text="⏳ Listening…")
+            _warm = _gz.local_whisper_dir() or hasattr(self, "_caption_whisper_pipe")
+            status.config(fg=COLORS["text_explain"],
+                          text="Listening…" if _warm else
+                               "Listening — first use downloads Whisper (~300 MB), please wait…")
+
+            def worker():
+                text, err = None, None
+                try:
+                    import tempfile
+                    import wave as _wave
+                    import numpy as _np
+                    _ff = _gz.find_ffmpeg()
+                    if not _ff:
+                        raise RuntimeError("ffmpeg not found")
+                    wav = os.path.join(tempfile.gettempdir(), "fizgig_caption_whisper.wav")
+                    p = _gz._run([_ff, "-y", "-hide_banner", "-loglevel", "error", "-i", path,
+                                  "-vn", "-ac", "1", "-ar", "16000", "-t", "120",
+                                  "-c:a", "pcm_s16le", wav])
+                    if p.returncode != 0:
+                        raise RuntimeError("could not extract the clip's audio")
+                    with _wave.open(wav, "rb") as w:
+                        frames = w.readframes(w.getnframes())
+                        span = w.getnframes() / float(w.getframerate() or 16000)
+                    samples = _np.frombuffer(frames, dtype=_np.int16).astype(_np.float32) / 32768.0
+                    if not hasattr(self, "_caption_whisper_pipe"):
+                        from transformers import pipeline
+                        self._caption_whisper_pipe = pipeline(
+                            "automatic-speech-recognition",
+                            model=_gz.local_whisper_dir() or _gz._WHISPER_REPO, device=-1)
+                    # Gizmo's saved language preference; English when the user never chose one —
+                    # auto-detect's wrong guess on a short clip is the classic loop trigger, so
+                    # the unset default here is deliberately NOT auto.
+                    lang = None
+                    try:
+                        with open(_gz.SETTINGS_FILE, encoding="utf-8") as f:
+                            lang = json.load(f).get("whisper_language")
+                    except Exception:
+                        pass
+                    lang = lang or "English"
+                    lang = None if lang == "Auto detect" else lang.lower()
+
+                    def hear(language):
+                        kw = ({"generate_kwargs": {"language": language, "task": "transcribe"}}
+                              if language else {})
+                        return (self._caption_whisper_pipe(
+                            {"array": samples, "sampling_rate": 16000},
+                            chunk_length_s=30, **kw).get("text") or "").strip()
+
+                    text = hear(lang)
+                    if lang is None and _gz.Gizmo._whisper_degenerate(text, span):
+                        text = hear("english")
+                    if _gz.Gizmo._whisper_degenerate(text, span):
+                        text = None
+                        err = ("Whisper looped on this clip — it hallucinated repeating text. "
+                               "Pick the language in Gizmo's ⚙ settings, or type the words.")
+                except Exception as exc:
+                    err = f"Whisper could not run: {exc}"
+                self.master.after(0, lambda: _speech_done(path, text, err))
+
+            def _speech_done(for_path, text, err):
+                state["speech_busy"] = False
+                if not dialog.winfo_exists():
+                    return
+                speech_btn.configure(state=tk.NORMAL, text="🎤 Append Speech")
+                if state["path"] != for_path:
+                    status.config(fg=COLORS["text_explain"],
+                                  text="Transcript arrived after you moved on — discarded.")
+                    return
+                if err:
+                    status.config(fg="#E74C3C", text=err)
+                    return
+                if not text:
+                    status.config(fg=COLORS["text_explain"],
+                                  text="Whisper heard no words in this clip.")
+                    return
+                # Gizmo's caption grammar: <description> saying "…" — the form the trainer's
+                # doctrine expects. The words land in the box for editing; saves on move/close.
+                cap = caption_text.get("1.0", tk.END).strip().rstrip(".")
+                caption_text.delete("1.0", tk.END)
+                caption_text.insert("1.0", (cap + " " if cap else "") + f'saying "{text}"')
+                status.config(fg="#2ECC71",
+                              text="Transcript appended — edit freely; saves when you move on.")
+
+            threading.Thread(target=worker, daemon=True).start()
+
         ttk.Button(btn_frame, text="◀ Prev", command=lambda: _nav(-1)).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Next ▶", command=lambda: _nav(+1)).pack(side=tk.LEFT, padx=5)
         ttk.Button(btn_frame, text="Regenerate (AI)", command=regenerate).pack(side=tk.LEFT, padx=(20, 5))
-        ttk.Button(btn_frame, text="Close", command=_close).pack(side=tk.LEFT, padx=5)
+        speech_btn = ttk.Button(btn_frame, text="🎤 Append Speech", command=_append_speech)
+        close_btn = ttk.Button(btn_frame, text="Close", command=_close)
+        close_btn.pack(side=tk.LEFT, padx=5)
         # Ctrl+arrows so plain arrows keep moving the text cursor while typing.
         dialog.bind("<Control-Left>", lambda e: (_nav(-1), "break")[1])
         dialog.bind("<Control-Right>", lambda e: (_nav(+1), "break")[1])

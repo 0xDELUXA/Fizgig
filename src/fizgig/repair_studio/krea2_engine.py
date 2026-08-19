@@ -528,9 +528,11 @@ class Krea2RepairEngine:
     # ----- teardown ----------------------------------------------------------
     def reset(self) -> None:
         """Full unload — drop networks (break forward-hook ref cycles) then the Turbo + VAE."""
+        from fizgig.utils.device import release_module_tensors as _strip
         for net in (self.primary_network, self.donor_network):
             if net is not None:
                 try:
+                    _strip(net)     # husk the LoRA weights too — see the H3 reset comment
                     for lora in net.unet_loras:
                         lora.org_forward = None
                     net.unet_loras.clear()

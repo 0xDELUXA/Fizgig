@@ -487,9 +487,15 @@ class H3RepairEngine:
     def reset(self) -> None:
         """Full unload — drop networks (break forward-hook ref cycles), unpatch the Turbo's
         AdaLN forwards, then the DiT + decoder."""
+        from fizgig.utils.device import release_module_tensors as _strip
         for net in (self.primary_network, self.donor_network, self._turbo_net):
             if net is not None:
                 try:
+                    # Strip the LoRA weights themselves, not just our references: the field
+                    # census showed a full turbo network (208 x up/down/alpha = 625 tensors)
+                    # surviving reset via externally-held forward closures, its small weights
+                    # pinning ~6 GB of allocator segments. Husks can't pin anything.
+                    _strip(net)
                     for lora in net.unet_loras:
                         lora.org_forward = None
                     net.unet_loras.clear()

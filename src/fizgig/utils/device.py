@@ -172,7 +172,7 @@ def release_module_tensors(module: "torch.nn.Module") -> None:
             except Exception:
                 pass
         for sub in module.modules():
-            for attr in ("qdata", "scales", "weight_scale", "input_scale"):
+            for attr in ("qdata", "scales", "weight_scale", "input_scale", "alpha"):
                 v = getattr(sub, attr, None)
                 if v is not None and torch.is_tensor(v):
                     try:
@@ -228,6 +228,48 @@ def flush_reserved_vram(tag: str = "", threshold_gb: float = 1.0) -> None:
     print(f"[vram-pin:{tag}] segments={stats.get('segment.all.current', '?')} "
           f"inactive_split={stats.get('inactive_split_bytes.all.current', 0)/2**30:.2f} GB",
           flush=True)
+
+    # Name the holder: walk up from the largest survivor, closure-aware — cells and
+    # functions are how a captured forward keeps a whole LoRA alive.
+    biggest = None
+    for obj in _gc.get_objects():
+        try:
+            if torch.is_tensor(obj) and obj.is_cuda and obj.numel() > 0:
+                sz = obj.numel() * obj.element_size()
+                if biggest is None or sz > biggest[0]:
+                    biggest = (sz, obj)
+        except Exception:
+            continue
+    if biggest is not None:
+        node = biggest[1]
+        chain = []
+        for _ in range(8):
+            refs = [r for r in _gc.get_referrers(node)
+                    if type(r).__name__ not in ("frame", "FrameType", "list_iterator")
+                    and not (isinstance(r, tuple) and any(x is node for x in r))]
+            if not refs:
+                chain.append("(top: no python referrers)")
+                break
+            r = refs[0]
+            tn = type(r).__name__
+            if tn == "dict":
+                keys = [k for k, v in r.items() if v is node][:3]
+                owners = [o for o in _gc.get_referrers(r) if type(o).__name__ != "frame"]
+                tn = f"dict{'' if not owners else ' of ' + type(owners[0]).__name__} keys={keys}"
+            elif tn == "cell":
+                fns = [o for o in _gc.get_referrers(r)
+                       if callable(o) or type(o).__name__ == "function"]
+                tn = "closure-cell" + (f" of {getattr(fns[0], '__qualname__', fns[0])}"
+                                       if fns else "")
+            elif tn == "function":
+                tn = f"function {getattr(r, '__qualname__', '?')}"
+            elif isinstance(r, torch.nn.Module):
+                tn = f"Module:{type(r).__name__}"
+            chain.append(tn)
+            node = r
+        print(f"[vram-pin:{tag}] largest survivor "
+              f"({biggest[0]/2**20:.2f} MB {tuple(biggest[1].shape)}) held via: "
+              + " <- ".join(chain), flush=True)
 
 
 def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> float:

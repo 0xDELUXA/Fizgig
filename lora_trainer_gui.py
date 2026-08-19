@@ -16453,7 +16453,8 @@ class LoRATrainerGUI:
             "Fetches the four files above plus the Krea 2 Qwen3-VL captioning text encoder "
             "(~39 GB all in) and fills in these paths for you, plus the small helper models "
             "(Florence-2 captioner, face model for the Look Filter and likeness scoring, EN→ZH "
-            "translator — ~1.6 GB) so nothing stalls to download later. "
+            "translator, Gizmo's Whisper transcriber — ~1.9 GB) so nothing stalls to download "
+            "later and everything works offline. "
             "Black Forest Labs gate their downloads, so you'll need a free HuggingFace token — "
             "Fizgig asks for it and tells you which pages to accept the licence on.")
         next_row += 1
@@ -16509,8 +16510,9 @@ class LoRATrainerGUI:
             krea_card, kr + 1, "krea2",
             "Fetches every file above (~45 GB) and fills in these paths for you, plus the small "
             "helper models (Florence-2 captioner, face model for the Look Filter and likeness "
-            "scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to download later. No "
-            "HuggingFace account needed — none of these are gated.")
+            "scoring, EN→ZH translator, Gizmo's Whisper transcriber — ~1.9 GB) so nothing "
+            "stalls to download later and everything works offline. No HuggingFace account "
+            "needed — none of these are gated.")
         _offline_tip = tk.Label(
             krea_card,
             text="💡 Already have these files for ComfyUI? Filling the paths in by hand works "
@@ -16609,8 +16611,9 @@ class LoRATrainerGUI:
             "Fetches the DiT, text encoder, both VAEs and the Turbo LoRA above, plus the Krea 2 Qwen3-VL captioning "
             "text encoder (~47 GB all in), and fills in these paths for you — plus the small "
             "helper models (Florence-2 captioner, face model for the Look "
-            "Filter and likeness scoring, EN→ZH translator — ~1.6 GB) so nothing stalls to "
-            "download later. No HuggingFace account needed — none of these are gated. The "
+            "Filter and likeness scoring, EN→ZH translator, Gizmo's Whisper transcriber — "
+            "~1.9 GB) so nothing stalls to download later and everything works offline. No "
+            "HuggingFace account needed — none of these are gated. The "
             "reference DiT is left out unless you tick it above: another 21 GB, and it is only "
             "used by identity mode.",
             optional_label="Include the reference DiT (+21 GB)")
@@ -17126,10 +17129,11 @@ class LoRATrainerGUI:
 
         def worker():
             import subprocess
-            # Helper models come first and with BOTH families: they're ~1.6 GB against tens of
+            # Helper models come first and with EVERY family: they're ~1.9 GB against tens of
             # GB of weights, and whichever button you press you'll hit Florence / the face model
-            # / the translator sooner or later. Fetching them up front means the Captions tab and
-            # Look Filter work immediately, and they survive abandoning the big download.
+            # / the translator / Gizmo's Whisper sooner or later. Fetching them up front means
+            # the Captions tab, Look Filter and Transcribe work immediately (and offline), and
+            # they survive abandoning the big download.
             # Re-running is cheap — everything here is a no-op once present.
             cmd = [sys.executable, "-m", "fizgig.scripts.fetch_models", "--progress",
                    "--family", "tools", "--family", family]

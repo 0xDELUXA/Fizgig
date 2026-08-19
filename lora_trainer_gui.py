@@ -918,6 +918,20 @@ MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"] = {
     "ADAPTIVE_LR": False,
 }
 
+# --- MiniMax H3 Style -------------------------------------------------------------------------
+# The 19 Aug style ablation (Repair Studio, same instrument that found the likeness set): a
+# style LoRA's deltas matter across nearly the WHOLE model — droppable only at 4-5 (the dead
+# band / audio-embedder pipe) and 48-49 (subject-specific last-mile work: load-bearing for
+# likeness and voice, silent for style). Hence 0-3, 6-47. Style rides on the gradient-fragile
+# early blocks that likeness training deliberately freezes, so the LR is halved from Fast's
+# 2e-4: style is a broad low-magnitude tilt accumulated over epochs, and gentle everywhere is
+# both the deformation mitigation and good style practice in its own right.
+MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Style (LoRA 8, gentle LR)"] = {
+    **MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"],
+    "LEARNING_RATE": 1e-4,
+    "MINIMAX_BLOCKS": "0-3, 6-47",
+}
+
 # Directory for dataset configurations
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "dataset")
 

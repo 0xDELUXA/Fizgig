@@ -18313,6 +18313,25 @@ class LoRATrainerGUI:
                     _w.pack(side=tk.LEFT, **({"padx": (0, 2)} if _w is self._repair_ref_strength_label else {}))
             except Exception:
                 pass
+        # H3's engine has no reference path at all (r2v conditioning is out of the workbench's
+        # scope) — a visible row the engine ignores is a lie, and editing it forced a re-render
+        # that changed nothing. The WHOLE row hides under MiniMax; Klein and Krea 2 keep it.
+        for _w in (getattr(self, "_repair_ref_label", None),
+                   getattr(self, "_repair_ref_entry", None),
+                   getattr(self, "_repair_ref_params", None)):
+            try:
+                if _w is None:
+                    continue
+                if fam == "minimax":
+                    _w.grid_remove()
+                else:
+                    _w.grid()
+            except Exception:
+                pass
+        if fam == "minimax" and self.repair_ref_path_var.get().strip():
+            # A path carried over from a Klein session must not sit invisibly in the state.
+            self.repair_ref_path_var.set("")
+            self.repair_state.ref_image_path = ""
 
     def _on_repair_family_changed(self):
         """Family toggle: reset any loaded session (engine type changes), reset the slider
@@ -18500,11 +18519,14 @@ class LoRATrainerGUI:
         # real image). Path + MP cap (downscale-only) + strength (1.0 stock,
         # ~0.85 Klein sweet spot, 0 = off). Carried in SliderState so it survives
         # the Explorer ↔ Repair handover.
-        ttk.Label(parent, text="Reference:").grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
+        self._repair_ref_label = ttk.Label(parent, text="Reference:")
+        self._repair_ref_label.grid(row=r, column=0, sticky=tk.W, padx=4, pady=2)
         self.repair_ref_path_var = tk.StringVar(value="")
-        ref_entry = ttk.Entry(parent, textvariable=self.repair_ref_path_var, state="readonly")
-        ref_entry.grid(row=r, column=1, sticky=tk.EW, padx=4, pady=2)
+        self._repair_ref_entry = ttk.Entry(parent, textvariable=self.repair_ref_path_var,
+                                           state="readonly")
+        self._repair_ref_entry.grid(row=r, column=1, sticky=tk.EW, padx=4, pady=2)
         ref_params = ttk.Frame(parent)
+        self._repair_ref_params = ref_params
         ref_params.grid(row=r, column=2, columnspan=2, sticky=tk.EW, padx=4, pady=2)
         ttk.Button(ref_params, text="Browse", command=self._browse_repair_ref).pack(side=tk.LEFT, padx=(0, 2))
         ttk.Button(ref_params, text="Clear", command=self._clear_repair_ref).pack(side=tk.LEFT, padx=(0, 10))

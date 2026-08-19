@@ -89,6 +89,147 @@ def clip_fallback_frames(frames: int) -> int:
     return half - (half - 5) % 17      # largest 17n+5 value <= half
 
 
+_VRAM_LOG = None            # decided on first call: small cards log, big cards stay quiet
+
+
+def vram_line(tag: str):
+    """One honest line of VRAM accounting. `allocated` is live tensors; `reserved` is what
+    torch's allocator holds from the driver (the gap is fragmentation — inactive-split is the
+    pinned part empty_cache cannot return); driver free is what everyone else sees. The
+    16 GB hunt kept stalling because each theory only ever saw ONE of these numbers.
+
+    Logs on cards under 20 GB (where the numbers are the diagnosis when a report comes in);
+    quiet on bigger cards. FIZGIG_VRAM_LOG=1/0 forces it on/off anywhere."""
+    global _VRAM_LOG
+    if not torch.cuda.is_available():
+        return
+    if _VRAM_LOG is None:
+        _env = os.environ.get("FIZGIG_VRAM_LOG", "").strip()
+        if _env in ("1", "0"):
+            _VRAM_LOG = _env == "1"
+        else:
+            try:
+                _VRAM_LOG = torch.cuda.mem_get_info()[1] / 2**30 < 20.0
+            except Exception:
+                _VRAM_LOG = False
+    if not _VRAM_LOG:
+        return
+    try:
+        s = torch.cuda.memory_stats()
+        free, total = torch.cuda.mem_get_info()
+        logger.info(f"[vram:{tag}] allocated {torch.cuda.memory_allocated()/2**30:.2f} / "
+                    f"reserved {torch.cuda.memory_reserved()/2**30:.2f} GB "
+                    f"(inactive-split {s.get('inactive_split_bytes.all.current', 0)/2**30:.2f}), "
+                    f"driver free {free/2**30:.2f} of {total/2**30:.2f} GB")
+    except Exception:
+        pass
+
+
+def park_dit_to_cpu(dit):
+    """Whole-DiT park that REUSES its CPU arena across cycles.
+
+    ``dit.to("cpu")`` allocates ~9 GB of fresh CPU tensors every preview and frees them on
+    restore — and the Windows heap keeps the freed pages, compounding: measured ~5 GB of RSS
+    retained after ONE park/restore cycle with every tensor reference clean (16 GB 4090 field
+    case: RAM locked at 31/32 GB after the first preview, 12.4 GB before it). The arena is
+    allocated once, written into on every park, and deliberately KEPT across restores — the
+    same storage is reused forever, so RSS plateaus at baseline + one packed base instead of
+    climbing. Assigning ``.data`` sidesteps bnb Params4bit's ``.to()`` override, so NF4 stays
+    packed and quant_state never moves (it's small and the parked weights are never computed
+    with). Restore stays ``restore_parked_dit`` — Module.to(device) repoints ``.data`` at a
+    fresh CUDA copy while the arena keeps its CPU tensor for the next park."""
+    park_dit_partial(dit, need_gb=None)
+
+
+def park_dit_partial(dit, need_gb=None):
+    """Arena park, tail-blocks-first, stopping once ``need_gb`` has been freed.
+
+    Parking the WHOLE base to fit a ~7 GB decode frees ~9.6 GB when ~3 were missing — and on
+    a WDDM card every unnecessary gigabyte moved is more driver paging churn and a slower
+    restore (field: post-preview steps fell from 1.0 to 24.7 s/it on the 16 GB 4090). Blocks
+    park from the tail (matching the swap order — under swap they are already on CPU and are
+    skipped as not-cuda); the non-block modules go last and only if the blocks were not
+    enough. need_gb=None parks everything (the fit-the-text-encoder case)."""
+    arena = getattr(dit, "_park_arena", None)
+    if arena is None:
+        arena = {}
+        dit._park_arena = arena
+    freed = 0.0
+    target = float("inf") if need_gb is None else max(0.0, float(need_gb)) * 1e9
+    _alloc0 = torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+
+    def _park_module(mod, prefix):
+        nonlocal freed
+        for name, t in (list(mod.named_parameters(prefix=prefix))
+                        + list(mod.named_buffers(prefix=prefix))):
+            if not t.data.is_cuda:
+                continue
+            slot = arena.get(name)
+            if slot is None or slot.shape != t.data.shape or slot.dtype != t.data.dtype:
+                slot = torch.empty_like(t.data, device="cpu")
+                arena[name] = slot
+            slot.copy_(t.data)
+            # Free the STORAGE, not just our reference: after a training epoch something
+            # (unnamed — not autograd-saved, not a python-visible holder; found only as
+            # census orphans) still references the old weight tensors, so `t.data = slot`
+            # alone freed nothing and the restore then uploaded duplicates. resize_(0)
+            # releases the bytes under every tensor sharing the storage — phantom holders
+            # keep a zero-byte husk. The model itself never touches the old storage again:
+            # its params now point at the arena, and restore allocates fresh.
+            _storage = t.data.untyped_storage()
+            t.data = slot
+            try:
+                _storage.resize_(0)
+            except Exception:
+                pass
+            freed += slot.numel() * slot.element_size()
+
+    def _walk():
+        for i in range(len(dit.blocks) - 1, -1, -1):
+            if freed >= target:
+                return
+            _park_module(dit.blocks[i], f"blocks.{i}")
+        if freed < target:
+            for cname, child in dit.named_children():
+                if cname == "blocks":
+                    continue
+                if freed >= target:
+                    return
+                _park_module(child, cname)
+            _park_module(dit, "")      # any direct params/buffers on the root
+
+    _walk()
+    # The verdict: evicting a weight only frees its VRAM if nothing else references the old
+    # tensor. Field case (16 GB 4090): the epoch-1 park evicted 6.3 GB and allocated fell
+    # 0.11 — the restore then uploaded DUPLICATES and the run drowned. When that happens,
+    # census the stale tensors (they are module-orphans now) and name their holders.
+    if torch.cuda.is_available() and freed > 1e9:
+        gc.collect()
+        torch.cuda.empty_cache()
+        _dropped = _alloc0 - torch.cuda.memory_allocated()
+        if _dropped < freed * 0.5:
+            logger.warning(f"[park] evicted {freed/1e9:.2f} GB of weights but allocated only "
+                           f"fell {max(_dropped, 0)/1e9:.2f} GB — something still references "
+                           f"the old GPU tensors. Census:")
+            try:
+                from fizgig.utils.device import report_cuda_leak
+                report_cuda_leak("park-failed", threshold_gb=0.0, orphan_min_mb=24)
+            except Exception:
+                pass
+            _reg = globals().get("_SAVED_TENSOR_REG")
+            if _reg:
+                from collections import Counter
+                _tot = sum(b for _, b, _ in _reg.values())
+                logger.warning(f"[audit] {len(_reg)} saved tensors still live "
+                               f"({_tot/2**30:.2f} GB cuda) — top save sites:")
+                _c = Counter()
+                for shape, b, stk in _reg.values():
+                    if b:
+                        _c[stk] += b
+                for stk, b in _c.most_common(6):
+                    logger.warning(f"[audit]   {b/2**30:.2f} GB saved at {stk or '(small)'}")
+
+
 def restore_parked_dit(dit, device, n_swap: int):
     """Bring a whole-DiT park (``dit.to("cpu")``) back WITHOUT materializing the full base on
     the GPU.
@@ -1991,6 +2132,40 @@ def train_minimax(
     if group.num_train_items == 0:
         raise RuntimeError("No training items — run minimax_cache_latents then minimax_cache_text first.")
     logger.info(f"MiniMax H3 training: {group.num_train_items} items, {max_train_epochs} epochs")
+
+    # FIZGIG_SAVED_TENSOR_AUDIT=1: account every tensor autograd saves for backward, with the
+    # stack that saved it. Holders unregister on free, so whatever remains at a failed park is
+    # the live graph — named by file:line. Diagnostic for the 16 GB weight-retention hunt.
+    if os.environ.get("FIZGIG_SAVED_TENSOR_AUDIT"):
+        import traceback as _tb
+        import torch.autograd.graph as _ag
+        _SAVED_REG = {}
+        globals()["_SAVED_TENSOR_REG"] = _SAVED_REG
+
+        class _SavedHold:
+            __slots__ = ("t", "k")
+
+            def __init__(self, t):
+                self.t = t
+                self.k = id(self)
+                try:
+                    if t.is_cuda and t.numel() * t.element_size() > 8 * 2**20:
+                        stk = "|".join(f"{f.filename.rsplit(chr(92), 1)[-1]}:{f.lineno}"
+                                       for f in _tb.extract_stack(limit=8)[:-2][-4:])
+                    else:
+                        stk = ""
+                    _SAVED_REG[self.k] = (tuple(t.shape),
+                                          t.numel() * t.element_size() if t.is_cuda else 0,
+                                          stk)
+                except Exception:
+                    pass
+
+            def __del__(self):
+                _SAVED_REG.pop(self.k, None)
+
+        _audit_ctx = _ag.saved_tensors_hooks(lambda t: _SavedHold(t), lambda h: h.t)
+        _audit_ctx.__enter__()
+        logger.warning("[audit] saved-tensor accounting ON — expect slower steps")
     if shift is None:
         logger.info("[timesteps] shift-12 uniform map (median sigma ~0.92) — H3's own training "
                     "density, matching the reference trainer")
@@ -2335,6 +2510,11 @@ def train_minimax(
     # on CPU (~0.45 GB RAM) between previews. Any failure means silent samples, never a dead
     # run.
     _audio_dec_state = {"dec": None, "tried": False}
+    # The video decoder gets the same load-once lifecycle: reloading its ~4.85 GB from disk
+    # into fresh CPU tensors every preview and del-ing it after left the freed pages in the
+    # Windows heap — ~6 GB of RSS growth PER PREVIEW on a 16 GB 4090 (RAM 25 -> 31.6 across
+    # one epoch). Loaded once, parked on CPU between previews, moved to GPU only for decode.
+    _video_dec_state = {"dec": None, "tried": False}
 
     def _get_audio_decoder():
         if _audio_dec_state["tried"]:
@@ -2727,7 +2907,7 @@ def train_minimax(
         if _park:
             logger.info(f"[sample override] parking the base on CPU to fit the text encoder "
                         f"({_free:.1f} GB free) — one-off for this prompt")
-            dit.to("cpu")
+            park_dit_to_cpu(dit)
             gc.collect()
             torch.cuda.empty_cache()
         try:
@@ -2800,9 +2980,10 @@ def train_minimax(
         _ema_parked = False         # set in phase 1; ditto for the parked fp32 EMA shadow
         try:
             dit.eval()
-            if vae_path:
-                # Loaded per preview and freed in the finally: the ViT3D decoder is ~4.85 GB and
-                # would otherwise sit on top of the resident base for the whole run.
+            if vae_path and _video_dec_state["dec"] is None and not _video_dec_state["tried"]:
+                # Loaded ONCE per run (see _video_dec_state above) — it lives on CPU between
+                # previews and only rides to the GPU for the decode phase.
+                _video_dec_state["tried"] = True
                 from safetensors import safe_open as _safe_open
                 from fizgig.minimax.vae import MiniMaxH3VideoVAEDecoder
                 decoder = MiniMaxH3VideoVAEDecoder()
@@ -2823,6 +3004,9 @@ def train_minimax(
                 # headroom it never used — harmless for a 256-token still, an OOM for a 124-frame
                 # clip whose forward is ~30x the tokens (real 32 GB-card failure, 8 Aug).
                 decoder = decoder.to(torch.float16).eval()
+                _video_dec_state["dec"] = decoder
+            elif vae_path:
+                decoder = _video_dec_state["dec"]
             # Live override from the GUI, re-read every epoch so it can be turned on, changed or
             # switched off mid-run without touching the paused/resume path.
             _prompts, _w, _h = encoded_prompts, sample_width, sample_height
@@ -2906,6 +3090,28 @@ def train_minimax(
                 logger.info(f'[preview] clip sampling with {_free0:.1f} GB free '
                             f'({len(_opt_parked)} optimizer tensors parked'
                             f'{", EMA shadow parked" if _ema_parked else ""})')
+                # Leak tripwire, baseline-relative to the FIRST preview. Driver-free is the
+                # wrong signal here: it also falls with allocator fragmentation (inactive-split
+                # segments the decode-park absorbs — benign, self-limiting). A real leak is
+                # LIVE allocation growth, so the census keys on memory_allocated().
+                _alloc_now = torch.cuda.memory_allocated() / 1e9
+                _base_free = _clip_state.get("free0")
+                if _base_free is None:
+                    _clip_state["free0"] = _free0
+                    _clip_state["alloc0"] = _alloc_now
+                elif _alloc_now > _clip_state.get("alloc0", _alloc_now) + 1.5:
+                    try:
+                        from fizgig.utils.device import report_cuda_leak, flush_reserved_vram
+                        logger.info(f"[preview] live allocation grew "
+                                    f"{_clip_state['alloc0']:.1f} -> {_alloc_now:.1f} GB "
+                                    f"since the first preview — census:")
+                        report_cuda_leak("preview-start", threshold_gb=0.0)
+                        # The reserved-side census: names the small survivors pinning
+                        # fragmented segments that empty_cache cannot return.
+                        flush_reserved_vram("preview-start", threshold_gb=0.5)
+                    except Exception:
+                        pass
+                vram_line("preview-start")
             if turbo_net is not None:
                 # On for the sampling phase only: weights to the GPU (~0.8 GB), modules
                 # enabled at their strength, AdaLN injected. Off + back to CPU before decode.
@@ -3014,14 +3220,19 @@ def train_minimax(
                     torch.cuda.empty_cache()
                     from fizgig.utils.device import plannable_free_vram as _pfv
                     _free = _pfv()
+                    vram_line("pre-decode")
                     if _frames > 1 and _free < 7.5:
+                        _need = (7.5 - _free) + 1.0
                         logger.info(f"[preview] {_free:.1f} GB free is too tight for clip "
-                                    f"decode — parking the base on CPU for this decode pass.")
-                        dit.to("cpu")
+                                    f"decode — parking ~{_need:.1f} GB of tail blocks for "
+                                    f"this decode pass.")
+                        park_dit_partial(dit, need_gb=_need)
                         gc.collect()
                         torch.cuda.empty_cache()
                         _base_parked = True
+                        vram_line("post-park")
                 decoder = decoder.to(device)
+                vram_line("decoder-up")
             for stem, lat, _arows in _rendered:
                 _px_mp4 = None                # full frames held only for a with-sound mp4
                 lat = lat.to(device)
@@ -3094,15 +3305,20 @@ def train_minimax(
                 del lat
             if _audio_dec_state["dec"] is not None:
                 _audio_dec_state["dec"].to("cpu")     # ~0.45 GB back off the card
+            vram_line("post-decode")
             if _base_parked:
                 restore_parked_dit(dit, device, n_swap)   # swap-aware: never the whole base
                 gc.collect()
                 torch.cuda.empty_cache()
                 _base_parked = False
+                vram_line("post-restore")
             logger.info(f"[preview] epoch {epoch}: wrote {len(_prompts)} sample(s) "
                         f"({sample_steps} steps, seed {_seed}) to {sample_dir}")
         finally:
-            del decoder                                  # free the ~4.85 GB decoder immediately
+            if decoder is not None:
+                decoder.to("cpu")                        # park, don't free — reloading 4.85 GB
+                if torch.cuda.is_available():            # per preview is what leaked the heap
+                    torch.cuda.empty_cache()
             if _audio_dec_state["dec"] is not None:
                 _audio_dec_state["dec"].to("cpu")        # idempotent; covers a mid-decode raise
             if turbo_net is not None:
@@ -3127,6 +3343,7 @@ def train_minimax(
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            vram_line("finally-done")
 
     # ---- epoch loop ----
     loss_recorder = LossRecorder()
@@ -3400,6 +3617,7 @@ def train_minimax(
                     ema.swap_in()
                 try:
                     _render_previews(epoch + 1)
+                    vram_line("post-preview")
                 finally:
                     if ema is not None:
                         ema.swap_out()

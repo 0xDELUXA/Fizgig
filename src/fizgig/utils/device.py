@@ -272,7 +272,8 @@ def flush_reserved_vram(tag: str = "", threshold_gb: float = 1.0) -> None:
               + " <- ".join(chain), flush=True)
 
 
-def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> float:
+def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5,
+                     orphan_min_mb: int = 128) -> float:
     """After an unload SHOULD have freed everything: if allocated VRAM is still above the
     threshold, name the holders. Walks gc for the largest live CUDA tensors and prints each
     one's referrer chain (a few levels of type names, dict keys, and owning nn.Module classes)
@@ -332,6 +333,29 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> flo
     roots = sorted(((_cuda_bytes(m), m) for m in modules if id(m) not in children),
                    key=lambda t: -t[0])
 
+    def _cell_owner(cell):
+        """Name the code that owns a closure-cell. Two routes: a live FUNCTION reaches its
+        cells through its __closure__ tuple; a SUSPENDED FRAME (generators — non-reentrant
+        gradient checkpointing lives on these) holds cells directly and has no function
+        object to find, so the frame's code name is the answer there."""
+        try:
+            for t in _gc.get_referrers(cell):
+                if isinstance(t, tuple):
+                    for f in _gc.get_referrers(t):
+                        if callable(f) and getattr(f, "__closure__", None) is t:
+                            return "fn " + getattr(f, "__qualname__", repr(f))
+                elif type(t).__name__ == "frame":
+                    code = t.f_code
+                    return (f"frame {getattr(code, 'co_qualname', code.co_name)} "
+                            f"({code.co_filename.rsplit(chr(92), 1)[-1]}:{t.f_lineno})")
+            # Neither a function nor a frame — say what species DOES hold it, so the next
+            # log narrows the search instead of printing another bare "closure-cell".
+            kinds = [type(t).__name__ for t in _gc.get_referrers(cell)][:5]
+            return f"?held-by {kinds}" if kinds else None
+        except Exception:
+            pass
+        return None
+
     def _describe(holder, target):
         d = type(holder).__name__
         try:
@@ -341,6 +365,9 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> flo
                           if not isinstance(o, dict) and type(o).__name__ != "frame"]
                 own = f" of {type(owners[0]).__name__}" if owners else ""
                 d = f"dict{own} keys={keys}"
+            elif type(holder).__name__ == "cell":
+                fn = _cell_owner(holder)
+                d = f"closure-cell of {fn}" if fn else "closure-cell"
             elif isinstance(holder, (list, tuple, set)):
                 d += f" len={len(holder)}"
         except Exception:
@@ -357,5 +384,55 @@ def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> flo
         descs = [_describe(r, mod) for r in refs[:6]]
         print(f"[vram-leak:{tag}]  ROOT {type(mod).__name__}: {size/2**30:.2f} GB resident"
               f"  held by: {' | '.join(descs) if descs else '(no python referrers)'}",
+              flush=True)
+
+    # ORPHANS: big CUDA tensors that belong to NO module — carried sampler state, stashed
+    # activations, workspaces. A leak that isn't a module is invisible to the root scan.
+    owned = set()
+    for m in modules:
+        try:
+            for p in m.parameters(recurse=False):
+                owned.add(id(p))
+            for b in m.buffers(recurse=False):
+                owned.add(id(b))
+            q = getattr(m, "qdata", None)
+            if q is not None:
+                owned.add(id(q))
+        except Exception:
+            pass
+    orphans = []
+    for obj in _gc.get_objects():
+        try:
+            if (torch.is_tensor(obj) and obj.is_cuda and id(obj) not in owned
+                    and obj.numel() * obj.element_size() >= orphan_min_mb * 2**20):
+                orphans.append((obj.numel() * obj.element_size(), obj))
+        except Exception:
+            continue
+    orphans.sort(key=lambda t: -t[0])
+    for size, t in orphans[:top_n]:
+        node, chain = t, []
+        for _ in range(5):
+            refs = [r for r in _gc.get_referrers(node)
+                    if type(r).__name__ not in ("frame", "FrameType", "list_iterator")
+                    and not (isinstance(r, tuple) and any(x is node for x in r))]
+            if not refs:
+                break
+            # Prefer a CELL referrer when one exists — it leads to a nameable function,
+            # where refs[0] is often gc-listing noise.
+            r = next((x for x in refs if type(x).__name__ == "cell"), refs[0])
+            tn = type(r).__name__
+            if isinstance(r, dict):
+                keys = [k for k, v in r.items() if v is node][:3]
+                owners = [o for o in _gc.get_referrers(r) if type(o).__name__ != "frame"]
+                tn = f"dict{'' if not owners else ' of ' + type(owners[0]).__name__} keys={keys}"
+            elif tn == "cell":
+                fn = _cell_owner(r)
+                tn = f"closure-cell of {fn}" if fn else "closure-cell"
+                chain.append(tn)
+                break                      # the function name IS the answer — stop here
+            chain.append(tn)
+            node = r
+        print(f"[vram-leak:{tag}]  ORPHAN {size/2**30:.2f} GB {tuple(t.shape)} {t.dtype}"
+              f"  held via: {' <- '.join(chain) if chain else '(no python referrers)'}",
               flush=True)
     return allocated

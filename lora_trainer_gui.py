@@ -17848,7 +17848,12 @@ class LoRATrainerGUI:
 
     @staticmethod
     def _repair_category_for_block(block_id: str) -> str:
-        kind, idx_s = block_id.split("_")
+        # Klein's 5-bucket map. Non-Klein ids (block_N, h3blk_N, h3_rf_N — the last has THREE
+        # underscore parts, which the old two-way unpack crashed on) get a neutral bucket:
+        # their families have no semantic block map, and their master controls are hidden.
+        kind, _, idx_s = block_id.rpartition("_")
+        if kind not in ("double", "single") or not idx_s.isdigit():
+            return "identity"
         idx = int(idx_s)
         if kind == "double":
             return "style_composition"
@@ -18515,6 +18520,8 @@ class LoRATrainerGUI:
         show the current average per-block strength for the new target. Without
         this, the master sliders would display stale values from the previous
         target and mislead the user."""
+        if self._repair_is_krea2():
+            return   # no-map families: master controls are hidden, nothing to refresh
         target = self.repair_master_target_var.get()
         key = "primary_strength" if target == "primary" else "donor_strength"
         self._repair_master_mutating = True

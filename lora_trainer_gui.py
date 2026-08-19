@@ -2733,6 +2733,12 @@ class LoRATrainerGUI:
         # Surface style for cards/panels
         style.configure("Surface.TFrame", background=COLORS["bg_surface"])
 
+        # Green render-progress bar (Repair Studio) — matches the Start button's green.
+        style.configure("Green.Horizontal.TProgressbar",
+                        background="#2E8B57", troughcolor=COLORS["bg_deep"],
+                        bordercolor=COLORS["bg_deep"],
+                        lightcolor="#2E8B57", darkcolor="#2E8B57")
+
         # Collapsible header style
         style.configure("CollapsibleHeader.TFrame", background=COLORS["bg_header"])
 
@@ -17979,13 +17985,18 @@ class LoRATrainerGUI:
             # Turbo LoRA (6-step) applies whenever it's set in Preferences.
             self._repair_dit_radio_a.configure(text="Auto (int8/NF4 by VRAM + Turbo LoRA)",
                                                state="disabled")
-            self._repair_dit_radio_b.configure(text="—", state="disabled")
+            # H3 has ONE base plan — a second radio labeled "—" reads as a broken control.
+            self._repair_dit_radio_b.pack_forget()
         elif fam == "krea2":
             self._repair_dit_radio_a.configure(text="Turbo (8-step, default)", state="normal")
             self._repair_dit_radio_b.configure(text="RAW (slow, precise)", state="normal")
+            if not self._repair_dit_radio_b.winfo_manager():
+                self._repair_dit_radio_b.pack(side=tk.LEFT)
         else:
             self._repair_dit_radio_a.configure(text="Distilled (4-step, fast)", state="normal")
             self._repair_dit_radio_b.configure(text="Base (20-step, precise but slow)", state="normal")
+            if not self._repair_dit_radio_b.winfo_manager():
+                self._repair_dit_radio_b.pack(side=tk.LEFT)
         try:
             if krea2:
                 self._repair_master_container.pack_forget()
@@ -18267,7 +18278,8 @@ class LoRATrainerGUI:
         # Render progress. H3 and Krea 2 report real denoising steps (determinate); Klein's
         # denoise loop has no hook, so the bar sweeps as a marquee there — and everywhere
         # until the first step lands, so model loads and TE encodes still show life.
-        self._repair_progress = ttk.Progressbar(status_row, mode="indeterminate", length=200)
+        self._repair_progress = ttk.Progressbar(status_row, mode="indeterminate", length=200,
+                                                style="Green.Horizontal.TProgressbar")
         self._repair_progress_det = False
         r += 1
 

@@ -143,3 +143,65 @@ def synchronize_device(device: Optional[Union[str, torch.device]]):
         torch.xpu.synchronize()
     elif device.type == "mps":
         torch.mps.synchronize()
+
+
+def report_cuda_leak(tag: str, threshold_gb: float = 2.0, top_n: int = 5) -> float:
+    """After an unload SHOULD have freed everything: if allocated VRAM is still above the
+    threshold, name the holders. Walks gc for the largest live CUDA tensors and prints each
+    one's referrer chain (a few levels of type names, dict keys, and owning nn.Module classes)
+    so a leak report in a user's console identifies the exact holder instead of just the size.
+
+    Returns the allocated GB either way. Prints nothing when clean. Costs one gc walk, only
+    on the unload path. (Born from a real field leak: ~21 GB survived a Repair Studio reset
+    with every engine attribute nulled — the holder was outside the engine.)"""
+    import gc as _gc
+    if not torch.cuda.is_available():
+        return 0.0
+    allocated = torch.cuda.memory_allocated() / 2**30
+    if allocated < threshold_gb:
+        return allocated
+    print(f"[vram-leak:{tag}] {allocated:.2f} GB still allocated after unload — "
+          f"hunting holders…", flush=True)
+
+    tensors = []
+    for obj in _gc.get_objects():
+        try:
+            if torch.is_tensor(obj) and obj.is_cuda:
+                tensors.append((obj.numel() * obj.element_size(), obj))
+        except Exception:
+            continue
+    tensors.sort(key=lambda t: -t[0])
+    print(f"[vram-leak:{tag}] {len(tensors)} live CUDA tensors, "
+          f"{sum(s for s, _ in tensors)/2**30:.2f} GB gc-visible", flush=True)
+
+    def _describe(holder, target):
+        d = type(holder).__name__
+        try:
+            if isinstance(holder, dict):
+                keys = [k for k, v in holder.items() if v is target][:3]
+                d += f" keys={keys}"
+            elif isinstance(holder, (list, tuple, set)):
+                d += f" len={len(holder)}"
+            elif isinstance(holder, torch.nn.Module):
+                d = f"Module:{type(holder).__name__}"
+        except Exception:
+            pass
+        return d
+
+    for size, t in tensors[:top_n]:
+        line = f"[vram-leak:{tag}]  {size/2**30:.2f} GB {tuple(t.shape)} {t.dtype}"
+        node = t
+        chain = []
+        for _level in range(4):
+            refs = [r for r in _gc.get_referrers(node)
+                    if not isinstance(r, type) and r is not tensors
+                    and not (isinstance(r, tuple) and len(r) == 2 and r[1] is node)
+                    and type(r).__name__ not in ("frame", "FrameType", "list_iterator")]
+            if not refs:
+                break
+            holder = refs[0]
+            chain.append(_describe(holder, node))
+            node = holder
+        print(line + ("  held via: " + " <- ".join(chain) if chain else "  (no gc referrers — "
+              "held from C++/extension side)"), flush=True)
+    return allocated

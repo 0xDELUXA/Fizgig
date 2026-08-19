@@ -556,3 +556,5 @@ class Krea2RepairEngine:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        from fizgig.utils.device import report_cuda_leak
+        report_cuda_leak("krea2-repair-reset")

@@ -520,3 +520,7 @@ class H3RepairEngine:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        # Field leak (19 Aug): ~21 GB survived a reset with every attribute above nulled —
+        # the holder was OUTSIDE the engine. If that happens again, name it in the console.
+        from fizgig.utils.device import report_cuda_leak
+        report_cuda_leak("h3-repair-reset")

@@ -22455,7 +22455,12 @@ class LoRATrainerGUI:
 
     def _reset_repair_sliders(self):
         from fizgig.repair_studio.state import SliderState
-        defaults = SliderState.default_klein9b()
+        # Family-correct layout — the Klein default's block ids match nothing on Krea 2 / H3
+        # panels, making Reset All a silent no-op there (same trap as GitHub #12).
+        _fam = self.repair_family_var.get() if getattr(self, "repair_family_var", None) else "klein"
+        defaults = (SliderState.default_krea2() if _fam == "krea2"
+                    else SliderState.default_h3() if _fam == "minimax"
+                    else SliderState.default_klein9b())
         # Suppress per-block preview spam while bulk-resetting.
         self._repair_master_mutating = True
         try:
@@ -22511,10 +22516,13 @@ class LoRATrainerGUI:
         self._repair_unload_tries = 0
         self._repair_unload_wanted = False
         if self.repair_engine is not None and self.repair_engine.pipeline is not None:
+            print("[repair] tab-switch unload: freeing models…", flush=True)
             try:
                 self.repair_engine.reset()
             except Exception:
-                pass
+                import traceback
+                print("[repair] tab-switch unload: engine reset RAISED —\n"
+                      + traceback.format_exc(), flush=True)
             self.repair_engine = None
             self.repair_status_var.set("Models unloaded (tab switch). Load a LoRA to resume.")
 
@@ -22659,8 +22667,19 @@ class LoRATrainerGUI:
             self._repair_popout_label = None
             self._repair_popout_tk_img = None
         if self.repair_engine is not None:
+            print("[repair] reset session: freeing models…", flush=True)
             try:
                 self.repair_engine.reset()
+            except Exception:
+                import traceback
+                print("[repair] reset session: engine reset RAISED —\n"
+                      + traceback.format_exc(), flush=True)
+            try:
+                import torch as _t
+                if _t.cuda.is_available():
+                    print(f"[repair] reset session done — "
+                          f"{_t.cuda.memory_allocated()/2**30:.2f} GB still allocated",
+                          flush=True)
             except Exception:
                 pass
         self.repair_engine = None

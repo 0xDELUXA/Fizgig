@@ -350,6 +350,8 @@ class RepairEngine:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        from fizgig.utils.device import report_cuda_leak
+        report_cuda_leak("klein-repair-reset")
 
     # ------------------------------------------------------------------
     # Activation cache (v2 Turbo Preview)

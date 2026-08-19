@@ -8831,8 +8831,7 @@ class LoRATrainerGUI:
                            if os.path.splitext(f)[1].lower() in _exts)
         except Exception:
             files = [os.path.basename(img_path)]
-        state = {"path": img_path, "loaded": "", "dirty_grid": False,
-                 "audio_probe": {}, "speech_busy": False}
+        state = {"path": img_path, "loaded": "", "dirty_grid": False, "speech_busy": False}
 
         dialog = tk.Toplevel(self.master)
         dialog.configure(bg=BG_COLOR)
@@ -8927,26 +8926,20 @@ class LoRATrainerGUI:
             self.caption_single_image(state["path"])
 
         # --- Append Speech: Whisper the clip's audio into the caption -------------------------
-        # Only for a training VIDEO that actually carries sound (a muted clip has nothing to
-        # hear). Reuses Gizmo's machinery wholesale: its ffmpeg finder + stream probe, its
-        # Whisper model (local-first — the Preferences downloader pre-fetches it; otherwise a
-        # one-time ~300 MB download, exactly like Gizmo), its language preference, and its
-        # hallucination-loop detector. Un-captioned speech is a lie the model must explain
-        # away — this is the one-click fix for clips that never went through Gizmo.
+        # Only for a training VIDEO that isn't muted — where "muted" is Gizmo's _mute filename
+        # convention, the same one the trainer reads. Reuses Gizmo's machinery wholesale: its
+        # ffmpeg finder, its Whisper model (local-first — the Preferences downloader pre-fetches
+        # it; otherwise a one-time ~300 MB download, exactly like Gizmo), its language
+        # preference, and its hallucination-loop detector. Un-captioned speech is a lie the
+        # model must explain away — this is the one-click fix for clips that never went
+        # through Gizmo.
         def _speech_refresh():
+            # Muted is a FILENAME convention, not a stream probe: Gizmo exports silent clips
+            # as <stem>_NN_mute.mp4 (MUTE_SUFFIX) and that name is the whole contract.
             path = state["path"]
-            if os.path.splitext(path)[1].lower() not in self.TRAINING_VIDEO_EXTENSIONS:
-                speech_btn.pack_forget()
-                return
-            if path not in state["audio_probe"]:
-                try:
-                    import gizmo as _gz
-                    _ff = _gz.find_ffmpeg()
-                    state["audio_probe"][path] = bool(
-                        _ff and _gz.probe_source(_ff, path).get("has_audio"))
-                except Exception:
-                    state["audio_probe"][path] = False
-            if state["audio_probe"][path]:
+            stem = os.path.splitext(os.path.basename(path))[0].lower()
+            if (os.path.splitext(path)[1].lower() in self.TRAINING_VIDEO_EXTENSIONS
+                    and not stem.endswith("_mute")):
                 speech_btn.pack(side=tk.LEFT, padx=5, before=close_btn)
             else:
                 speech_btn.pack_forget()

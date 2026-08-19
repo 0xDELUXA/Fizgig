@@ -18573,6 +18573,10 @@ class LoRATrainerGUI:
         # panel, which on a 50-block family is a long scroll away from where you tweak.
         ttk.Button(status_row, text="Reset All Sliders",
                    command=self._reset_repair_sliders).pack(side=tk.RIGHT, padx=(0, 12))
+        # The pop-out also opens by clicking either preview image, but nothing on screen SAYS
+        # that — a named button is how anyone finds the compare view and its metrics.
+        ttk.Button(status_row, text="⧉ Compare + Metrics",
+                   command=self._repair_popout_preview).pack(side=tk.RIGHT, padx=(0, 12))
         # Render progress. H3 and Krea 2 report real denoising steps (determinate); Klein's
         # denoise loop has no hook, so the bar sweeps as a marquee there — and everywhere
         # until the first step lands, so model loads and TE encodes still show life.
@@ -18606,12 +18610,16 @@ class LoRATrainerGUI:
         tweaked_holder.pack_propagate(False)
 
         self.repair_baseline_label = ttk.Label(base_holder, text="(no baseline yet)",
-                                               anchor=tk.CENTER, background="#1c1c1c")
+                                               anchor=tk.CENTER, background="#1c1c1c",
+                                               cursor="hand2")
         self.repair_baseline_label.pack(fill=tk.BOTH, expand=True)
         self.repair_tweaked_label = ttk.Label(tweaked_holder, text="(no preview yet)",
                                               anchor=tk.CENTER, background="#1c1c1c",
                                               cursor="hand2")
         self.repair_tweaked_label.pack(fill=tk.BOTH, expand=True)
+        # Either image opens the compare pop-out — clicking the baseline should not be a dead
+        # zone when the tweaked side isn't.
+        self.repair_baseline_label.bind("<Button-1>", lambda e: self._repair_popout_preview())
         self.repair_tweaked_label.bind("<Button-1>", lambda e: self._repair_popout_preview())
         self.repair_base_holder = base_holder
         self.repair_tweaked_holder = tweaked_holder
@@ -22788,6 +22796,12 @@ class LoRATrainerGUI:
                 self._repair_update_popout()
 
         win.bind("<Configure>", _on_resize)
+        # The fit math sizes from the LABEL, and at this point the label hasn't been laid out
+        # (winfo 1x1) — without these two lines the pop-out opened BLACK and stayed black
+        # until a manual resize. update_idletasks gives the label its real size for the first
+        # paint, and the label's own <Configure> repaints whenever layout hands it new space.
+        lbl.bind("<Configure>", lambda e: self._repair_update_popout())
+        win.update_idletasks()
         self._repair_update_popout()
         self._repair_metrics_refresh()
 

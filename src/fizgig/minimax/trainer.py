@@ -89,6 +89,34 @@ def clip_fallback_frames(frames: int) -> int:
     return half - (half - 5) % 17      # largest 17n+5 value <= half
 
 
+def park_dit_to_cpu(dit):
+    """Whole-DiT park that REUSES its CPU arena across cycles.
+
+    ``dit.to("cpu")`` allocates ~9 GB of fresh CPU tensors every preview and frees them on
+    restore — and the Windows heap keeps the freed pages, compounding: measured ~5 GB of RSS
+    retained after ONE park/restore cycle with every tensor reference clean (16 GB 4090 field
+    case: RAM locked at 31/32 GB after the first preview, 12.4 GB before it). The arena is
+    allocated once, written into on every park, and deliberately KEPT across restores — the
+    same storage is reused forever, so RSS plateaus at baseline + one packed base instead of
+    climbing. Assigning ``.data`` sidesteps bnb Params4bit's ``.to()`` override, so NF4 stays
+    packed and quant_state never moves (it's small and the parked weights are never computed
+    with). Restore stays ``restore_parked_dit`` — Module.to(device) repoints ``.data`` at a
+    fresh CUDA copy while the arena keeps its CPU tensor for the next park."""
+    arena = getattr(dit, "_park_arena", None)
+    if arena is None:
+        arena = {}
+        dit._park_arena = arena
+    for name, t in list(dit.named_parameters()) + list(dit.named_buffers()):
+        if not t.data.is_cuda:
+            continue
+        slot = arena.get(name)
+        if slot is None or slot.shape != t.data.shape or slot.dtype != t.data.dtype:
+            slot = torch.empty_like(t.data, device="cpu")
+            arena[name] = slot
+        slot.copy_(t.data)
+        t.data = slot
+
+
 def restore_parked_dit(dit, device, n_swap: int):
     """Bring a whole-DiT park (``dit.to("cpu")``) back WITHOUT materializing the full base on
     the GPU.
@@ -2727,7 +2755,7 @@ def train_minimax(
         if _park:
             logger.info(f"[sample override] parking the base on CPU to fit the text encoder "
                         f"({_free:.1f} GB free) — one-off for this prompt")
-            dit.to("cpu")
+            park_dit_to_cpu(dit)
             gc.collect()
             torch.cuda.empty_cache()
         try:
@@ -3017,7 +3045,7 @@ def train_minimax(
                     if _frames > 1 and _free < 7.5:
                         logger.info(f"[preview] {_free:.1f} GB free is too tight for clip "
                                     f"decode — parking the base on CPU for this decode pass.")
-                        dit.to("cpu")
+                        park_dit_to_cpu(dit)
                         gc.collect()
                         torch.cuda.empty_cache()
                         _base_parked = True

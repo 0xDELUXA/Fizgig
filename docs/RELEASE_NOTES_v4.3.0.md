@@ -58,10 +58,14 @@ Also in the Repair Studio this release:
   dropdown: more suitable for larger datasets with longer trains.
 - The Style preset follows Fast's recipe on the measured style blocks, as before.
 
-## Also
+## Fizgig speaks Korean — thanks @ssain3d-lgtm
 
-- **Korean localization** — a community add-on by @ssain3d-lgtm translates the whole UI to
-  Korean without touching a single Fizgig file. Linked in the README under Getting started.
+The first community translation of Fizgig:
+[a full Korean localization](https://github.com/ssain3d-lgtm/Fizgig-Korean-Translated-Ver) of
+the app and Gizmo, around 2,000 UI strings. It's an add-on that doesn't touch a single Fizgig
+file — it survives updates, keeps you on official releases, and uninstalls by deleting one
+file. Beautifully engineered, and genuinely lovely to see Fizgig reaching people in their own
+language. Linked in the README under Getting started.
 
 ## Upgrading
 

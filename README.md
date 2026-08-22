@@ -119,7 +119,7 @@ Three built-in presets ship; **Fast** applies the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Fast** | LoRA dim/alpha **8, 40 epochs, flat 2e-4**, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`. Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible |
+| **✨ MiniMax H3 Fast** | LoRA dim/alpha **8, 50 epochs, flat 2e-4**, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`. Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible |
 | **✨ MiniMax H3 (Lower LR - slower)** | The same at **rank 16, 60 epochs, flat 1e-4** — more suitable for larger datasets with longer trains |
 | **✨ MiniMax H3 Style** | The Fast recipe on the measured style blocks, `0-3, 6-47` — style lives almost everywhere in H3 except the few blocks that only do identity and voice |
 

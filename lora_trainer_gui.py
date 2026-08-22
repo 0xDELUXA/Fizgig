@@ -916,10 +916,10 @@ MINIMAX_BUILT_IN_PRESETS = {
 # retirement. Keyed off the first entry rather than the title, because the title has been
 # renamed twice already.
 _MM_DEFAULTS_KEY = next(iter(MINIMAX_BUILT_IN_PRESETS))
-MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"] = {
+MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 50 epochs)"] = {
     **MINIMAX_BUILT_IN_PRESETS[_MM_DEFAULTS_KEY],
     "NETWORK_DIM": 8, "NETWORK_ALPHA": 8,
-    "MAX_TRAIN_EPOCHS": 40,
+    "MAX_TRAIN_EPOCHS": 50,
     "LEARNING_RATE": 2e-4,
     # Flat, not ramped. The ramp exists to stop a full-size stride landing on a near-zero
     # adapter; at rank 8 there are half as many directions to move, and the measured run that
@@ -936,7 +936,7 @@ MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"] = {
 # real style runs (20 Aug) found the halved 1e-4 unnecessary; drop it manually for an extra-
 # gentle run if a style ever fries.
 MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Style (LoRA 8)"] = {
-    **MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"],
+    **MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 50 epochs)"],
     "LEARNING_RATE": 2e-4,
     "MINIMAX_BLOCKS": "0-3, 6-47",
     # MUST be off here: style measurably needs the early blocks the likeness mask freezes, and
@@ -948,7 +948,7 @@ MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Style (LoRA 8)"] = {
 # fresh start apply, and the rank-8 Fast recipe is where most datasets should begin. The
 # rank-16 recipe stays one dropdown away, flagged in the GUI as the larger-dataset choice.
 # (Re-inserting an existing key keeps its first position, so Fast leads and nothing else moves.)
-_MM_FAST_KEY = "✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"
+_MM_FAST_KEY = "✨ MiniMax H3 Fast (LoRA 8, 50 epochs)"
 MINIMAX_BUILT_IN_PRESETS = {
     _MM_FAST_KEY: MINIMAX_BUILT_IN_PRESETS[_MM_FAST_KEY],
     **MINIMAX_BUILT_IN_PRESETS,

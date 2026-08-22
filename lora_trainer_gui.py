@@ -18611,9 +18611,16 @@ class LoRATrainerGUI:
         ttk.Button(status_row, text="Reset All Sliders",
                    command=self._reset_repair_sliders).pack(side=tk.RIGHT, padx=(0, 12))
         # The pop-out also opens by clicking either preview image, but nothing on screen SAYS
-        # that — a named button is how anyone finds the compare view and its metrics.
-        ttk.Button(status_row, text="⧉ Compare + Metrics",
-                   command=self._repair_popout_preview).pack(side=tk.RIGHT, padx=(0, 12))
+        # that — a named, coloured button plus the caption under the previews is how anyone
+        # finds the compare view and its metrics (Peter, 22 Aug: plain ttk wasn't enough).
+        _cmp_btn = tk.Button(
+            status_row, text="⧉ Compare + Metrics", font=(FONT_FAMILY, 10, "bold"),
+            fg="#FFFFFF", bg="#3B6FA0", activeforeground="#FFFFFF", activebackground="#2E5780",
+            relief="flat", bd=0, padx=16, pady=6, cursor="hand2",
+            command=self._repair_popout_preview)
+        _cmp_btn.pack(side=tk.RIGHT, padx=(0, 12))
+        ToolTip(_cmp_btn, "Full-size side-by-side of baseline vs tweaked, with likeness and "
+                          "quality metrics. Clicking either preview image opens it too.")
         # Render progress. H3 and Krea 2 report real denoising steps (determinate); Klein's
         # denoise loop has no hook, so the bar sweeps as a marquee there — and everywhere
         # until the first step lands, so model loads and TE encodes still show life.
@@ -18658,6 +18665,12 @@ class LoRATrainerGUI:
         # zone when the tweaked side isn't.
         self.repair_baseline_label.bind("<Button-1>", lambda e: self._repair_popout_preview())
         self.repair_tweaked_label.bind("<Button-1>", lambda e: self._repair_popout_preview())
+        # Spell the click affordance out — cursor changes alone weren't discoverable.
+        ttk.Label(parent,
+                  text="🔍 Click either image for the full-size side-by-side compare with "
+                       "likeness + quality metrics",
+                  font=(FONT_FAMILY, 9), foreground=COLORS["text_secondary"],
+                  ).grid(row=2, column=0, columnspan=2, pady=(0, 4))
         self.repair_base_holder = base_holder
         self.repair_tweaked_holder = tweaked_holder
         self._repair_popout_window = None
@@ -22352,56 +22365,28 @@ class LoRATrainerGUI:
         self._repair_start_btn.configure(text="Start")
 
     def _browse_and_load_primary(self):
-        """Browse for a primary LoRA, and auto-swap if one is already loaded."""
+        """Browse for a primary LoRA. Picking a file changes NOTHING — no reload, no render
+        (Peter, 22 Aug: the user may want to set the prompt/seed/sliders first). The Start
+        button arms as Update; its click does the swap-and-render (_repair_start already
+        handles a changed primary with a full reset + reload)."""
         self._browse_repair_lora(self.repair_primary_var)
         path = self.repair_primary_var.get().strip()
         if not path or not os.path.exists(path):
             return
-        if self.repair_engine is None or self.repair_engine.primary_network is None:
-            return  # not loaded yet — user will click Start
-        # Path changed — auto-swap
-        if self.repair_engine.primary_path != path:
-            if getattr(self, "_repair_loading", False):
-                return
-            # Remember donor path before reset clears it
-            donor_path = self.repair_donor_var.get().strip()
-            self._reset_repair_session()
-            # Force GC + CUDA flush between unload and reload to prevent OOM
-            import gc, torch
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            # Loads run on worker threads — chain donor (if one was set) behind the primary,
-            # then refresh the master sliders. Deliberately NO auto-render (Peter, 19 Aug):
-            # after a LoRA swap the user usually wants to set sliders/seed first, so the
-            # button flips to Update and the render waits for their click.
-            def _after_all():
-                self._on_master_target_changed()
-                self._repair_mark_update_needed()
-
-            if donor_path and os.path.exists(donor_path):
-                self._load_repair_primary(
-                    on_done=lambda: self._load_repair_donor(on_done=_after_all))
-            else:
-                self._load_repair_primary(on_done=_after_all)
+        if self.repair_engine is not None and self.repair_engine.primary_network is not None \
+                and self.repair_engine.primary_path != path:
+            self._repair_mark_update_needed()
 
     def _browse_and_load_donor(self):
-        """Browse for a donor LoRA, and auto-load if primary is loaded."""
+        """Browse for a donor LoRA. Same contract as the primary: picking a file only arms
+        the Update button — the swap happens on the user's click."""
         self._browse_repair_lora(self.repair_donor_var)
         path = self.repair_donor_var.get().strip()
         if not path or not os.path.exists(path):
             return
-        if self.repair_engine is None or self.repair_engine.primary_network is None:
-            return
-        # Swap donor if one is already loaded
-        if self.repair_engine.donor_network is not None:
-            current_donor = self.repair_engine.donor_path
-            if current_donor == path:
-                return  # same file, nothing to do
-            self._unload_repair_donor()
-        self._load_repair_donor()
-        self._repair_reset_start_button()
+        if self.repair_engine is not None and self.repair_engine.primary_network is not None \
+                and self.repair_engine.donor_path != path:
+            self._repair_mark_update_needed()
 
     def _unload_repair_donor(self):
         if self.repair_engine is None or self.repair_engine.donor_network is None:

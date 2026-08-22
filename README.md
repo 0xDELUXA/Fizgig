@@ -414,6 +414,8 @@ The unnumbered tabs are the post-training workbench: **Profiler**, **Repair Stud
 
 **Headless?** Everything the trainer does is also available from the command line — see **[docs/CLI.md](docs/CLI.md)**.
 
+**Community translations** — a [Korean localization](https://github.com/ssain3d-lgtm/Fizgig-Korean-Translated-Ver) by @ssain3d-lgtm (unofficial add-on; if you hit a bug while using it, uninstall it and reproduce before reporting here, and take layer-related issues to that repo).
+
 ---
 
 ## Support the project

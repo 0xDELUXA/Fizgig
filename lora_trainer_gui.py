@@ -843,7 +843,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     # were standard LoRA at dim/alpha 16, and LoKR moves ~7-10x further per unit LR — which made
     # the same Learning Rate box mean two very different things depending on the Network Type
     # sitting above it. LoKR stays one dropdown away for anyone who wants it.
-    "✨ MiniMax H3 Defaults (LoRA 16, 0.25 MP)": {
+    "✨ MiniMax H3 (Lower LR - slower)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": 8,
         # Flat 1e-4 (Peter, 17 Aug). With the ramp off this IS the rate — and rank 16 wants
@@ -916,10 +916,10 @@ MINIMAX_BUILT_IN_PRESETS = {
 # retirement. Keyed off the first entry rather than the title, because the title has been
 # renamed twice already.
 _MM_DEFAULTS_KEY = next(iter(MINIMAX_BUILT_IN_PRESETS))
-MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"] = {
+MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 50 epochs)"] = {
     **MINIMAX_BUILT_IN_PRESETS[_MM_DEFAULTS_KEY],
     "NETWORK_DIM": 8, "NETWORK_ALPHA": 8,
-    "MAX_TRAIN_EPOCHS": 40,
+    "MAX_TRAIN_EPOCHS": 50,
     "LEARNING_RATE": 2e-4,
     # Flat, not ramped. The ramp exists to stop a full-size stride landing on a near-zero
     # adapter; at rank 8 there are half as many directions to move, and the measured run that
@@ -932,17 +932,26 @@ MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"] = {
 # The 19 Aug style ablation (Repair Studio, same instrument that found the likeness set): a
 # style LoRA's deltas matter across nearly the WHOLE model — droppable only at 4-5 (the dead
 # band / audio-embedder pipe) and 48-49 (subject-specific last-mile work: load-bearing for
-# likeness and voice, silent for style). Hence 0-3, 6-47. Style rides on the gradient-fragile
-# early blocks that likeness training deliberately freezes, so the LR is halved from Fast's
-# 2e-4: style is a broad low-magnitude tilt accumulated over epochs, and gentle everywhere is
-# both the deformation mitigation and good style practice in its own right.
-MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Style (LoRA 8, gentle LR)"] = {
-    **MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"],
-    "LEARNING_RATE": 1e-4,
+# likeness and voice, silent for style). Hence 0-3, 6-47. LR matches Fast's 2e-4 — Peter's
+# real style runs (20 Aug) found the halved 1e-4 unnecessary; drop it manually for an extra-
+# gentle run if a style ever fries.
+MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Style (LoRA 8)"] = {
+    **MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Fast (LoRA 8, 50 epochs)"],
+    "LEARNING_RATE": 2e-4,
     "MINIMAX_BLOCKS": "0-3, 6-47",
     # MUST be off here: style measurably needs the early blocks the likeness mask freezes, and
     # with it on the blocks spec above would be ignored outright.
     "MINIMAX_LIKENESS_OPT": False,
+}
+
+# Fast is the shipped default (Peter, 22 Aug): the FIRST entry is what a family switch and a
+# fresh start apply, and the rank-8 Fast recipe is where most datasets should begin. The
+# rank-16 recipe stays one dropdown away, flagged in the GUI as the larger-dataset choice.
+# (Re-inserting an existing key keeps its first position, so Fast leads and nothing else moves.)
+_MM_FAST_KEY = "✨ MiniMax H3 Fast (LoRA 8, 50 epochs)"
+MINIMAX_BUILT_IN_PRESETS = {
+    _MM_FAST_KEY: MINIMAX_BUILT_IN_PRESETS[_MM_FAST_KEY],
+    **MINIMAX_BUILT_IN_PRESETS,
 }
 
 # Directory for dataset configurations
@@ -2589,7 +2598,8 @@ class LoRATrainerGUI:
 
     def _read_vram(self):
         """Return (used_bytes, total_bytes) for the GPU training uses, or None. Prefers pynvml
-        (fast); falls back to a one-shot nvidia-smi query."""
+        (fast); falls back to a one-shot nvidia-smi query. AMD ROCm paths are
+        tried only when NVIDIA readers return nothing."""
         try:
             import pynvml
             if not getattr(self, "_nvml_init", False):
@@ -2611,6 +2621,11 @@ class LoRATrainerGUI:
             )
             used, total = out.stdout.strip().splitlines()[0].split(",")
             return int(used) * 1024 * 1024, int(total) * 1024 * 1024
+        except Exception:
+            pass
+        try:
+            from fizgig.utils.vram_monitor import read_amd_gpu_vram
+            return read_amd_gpu_vram()
         except Exception:
             return None
 
@@ -3954,6 +3969,13 @@ class LoRATrainerGUI:
         self.custom_preset_combo.pack(side=tk.LEFT)
         self.custom_preset_combo.bind("<<ComboboxSelected>>", self.load_custom_preset)
         ToolTip(self.custom_preset_combo, "Your saved training presets")
+        # Bracketed nudge for the rank-16 recipe, shown only while the MiniMax Defaults preset
+        # is selected: Fast is the default now, and this says when the bigger one earns its keep.
+        self._preset_hint_label = tk.Label(
+            preset_row1, text="(more suitable for larger datasets with longer trains)",
+            font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+        )
+        self.custom_preset_var.trace_add("write", lambda *_: self._update_preset_hint())
 
         # Row 2: Load Settings From Last Train
         load_last_btn = ttk.Button(preset_card, text="Load Settings From Last Train",
@@ -5223,6 +5245,21 @@ class LoRATrainerGUI:
         if cfg.get("is_minimax"):
             return MINIMAX_BUILT_IN_PRESETS
         return KREA2_BUILT_IN_PRESETS if cfg.get("is_krea2") else BUILT_IN_PRESETS
+
+    def _update_preset_hint(self):
+        """The bracketed note beside Load Preset: visible only while the MiniMax rank-16
+        Defaults preset is the selection — with Fast as the shipped default, this label is
+        what tells the user when the bigger recipe is the right reach."""
+        lbl = getattr(self, "_preset_hint_label", None)
+        if lbl is None:
+            return
+        try:
+            if self._is_minimax_arch() and self.custom_preset_var.get() == _MM_DEFAULTS_KEY:
+                lbl.pack(side=tk.LEFT, padx=(8, 0))
+            else:
+                lbl.pack_forget()
+        except Exception:
+            pass
 
     def refresh_preset_combobox(self):
         """Refresh the preset combobox: built-in presets first, then user-saved presets."""

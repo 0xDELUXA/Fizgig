@@ -2597,7 +2597,8 @@ class LoRATrainerGUI:
 
     def _read_vram(self):
         """Return (used_bytes, total_bytes) for the GPU training uses, or None. Prefers pynvml
-        (fast); falls back to a one-shot nvidia-smi query."""
+        (fast); falls back to a one-shot nvidia-smi query. AMD ROCm paths are
+        tried only when NVIDIA readers return nothing."""
         try:
             import pynvml
             if not getattr(self, "_nvml_init", False):
@@ -2619,6 +2620,11 @@ class LoRATrainerGUI:
             )
             used, total = out.stdout.strip().splitlines()[0].split(",")
             return int(used) * 1024 * 1024, int(total) * 1024 * 1024
+        except Exception:
+            pass
+        try:
+            from fizgig.utils.vram_monitor import read_amd_gpu_vram
+            return read_amd_gpu_vram()
         except Exception:
             return None
 

@@ -944,6 +944,16 @@ MINIMAX_BUILT_IN_PRESETS["✨ MiniMax H3 Style (LoRA 8)"] = {
     "MINIMAX_LIKENESS_OPT": False,
 }
 
+# Fast is the shipped default (Peter, 22 Aug): the FIRST entry is what a family switch and a
+# fresh start apply, and the rank-8 Fast recipe is where most datasets should begin. The
+# rank-16 recipe stays one dropdown away, flagged in the GUI as the larger-dataset choice.
+# (Re-inserting an existing key keeps its first position, so Fast leads and nothing else moves.)
+_MM_FAST_KEY = "✨ MiniMax H3 Fast (LoRA 8, 40 epochs)"
+MINIMAX_BUILT_IN_PRESETS = {
+    _MM_FAST_KEY: MINIMAX_BUILT_IN_PRESETS[_MM_FAST_KEY],
+    **MINIMAX_BUILT_IN_PRESETS,
+}
+
 # Directory for dataset configurations
 DATASET_DIR = os.path.join(os.path.dirname(__file__), "dataset")
 
@@ -3952,6 +3962,13 @@ class LoRATrainerGUI:
         self.custom_preset_combo.pack(side=tk.LEFT)
         self.custom_preset_combo.bind("<<ComboboxSelected>>", self.load_custom_preset)
         ToolTip(self.custom_preset_combo, "Your saved training presets")
+        # Bracketed nudge for the rank-16 recipe, shown only while the MiniMax Defaults preset
+        # is selected: Fast is the default now, and this says when the bigger one earns its keep.
+        self._preset_hint_label = tk.Label(
+            preset_row1, text="(more suitable for larger datasets with longer trains)",
+            font=(FONT_FAMILY, 9), fg=COLORS["text_secondary"], bg=COLORS["bg_surface"],
+        )
+        self.custom_preset_var.trace_add("write", lambda *_: self._update_preset_hint())
 
         # Row 2: Load Settings From Last Train
         load_last_btn = ttk.Button(preset_card, text="Load Settings From Last Train",
@@ -5221,6 +5238,21 @@ class LoRATrainerGUI:
         if cfg.get("is_minimax"):
             return MINIMAX_BUILT_IN_PRESETS
         return KREA2_BUILT_IN_PRESETS if cfg.get("is_krea2") else BUILT_IN_PRESETS
+
+    def _update_preset_hint(self):
+        """The bracketed note beside Load Preset: visible only while the MiniMax rank-16
+        Defaults preset is the selection — with Fast as the shipped default, this label is
+        what tells the user when the bigger recipe is the right reach."""
+        lbl = getattr(self, "_preset_hint_label", None)
+        if lbl is None:
+            return
+        try:
+            if self._is_minimax_arch() and self.custom_preset_var.get() == _MM_DEFAULTS_KEY:
+                lbl.pack(side=tk.LEFT, padx=(8, 0))
+            else:
+                lbl.pack_forget()
+        except Exception:
+            pass
 
     def refresh_preset_combobox(self):
         """Refresh the preset combobox: built-in presets first, then user-saved presets."""

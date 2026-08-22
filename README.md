@@ -115,17 +115,17 @@ Fizgig trains LoRAs for **MiniMax H3**, MiniMax's open-weight ~33B video model, 
 
 int8 is the checkpoint's own storage and the most accurate base (~0.17% error). Block swap **streams one way only** — ~6.4× faster than round-trip swap, which is what lets 16 and 24 GB cards keep the accurate base (design contributed by [@rintic-13](https://github.com/rintic-13), [#73](https://github.com/shootthesound/Fizgig/issues/73)). Hit an OOM anyway? Set Blocks Swap to a number to override the planner.
 
-Three built-in presets ship; **Defaults** applies the moment you pick the family:
+Three built-in presets ship; **Fast** applies the moment you pick the family:
 
 | Preset | Settings |
 |---|---|
-| **✨ MiniMax H3 Defaults** | LoRA dim/alpha 16, 60 epochs, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`, flat 1e-4 |
-| **✨ MiniMax H3 Fast** | The same at **rank 8, 40 epochs, flat 2e-4**. Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible |
+| **✨ MiniMax H3 Fast** | LoRA dim/alpha **8, 40 epochs, flat 2e-4**, **0.25 MP**, Training Structure **Likeness and Style**, `adamw`. Reaches likeness in a few hundred steps, and the lower rank tends to come out more flexible |
+| **✨ MiniMax H3 (Lower LR - slower)** | The same at **rank 16, 60 epochs, flat 1e-4** — more suitable for larger datasets with longer trains |
 | **✨ MiniMax H3 Style** | The Fast recipe on the measured style blocks, `0-3, 6-47` — style lives almost everywhere in H3 except the few blocks that only do identity and voice |
 
 <p align="center"><img src="assets/optimised_likeness.png" alt="Optimised Likeness Learning — the default-on Training-tab checkbox" width="713"></p>
 
-**Optimised Likeness Learning** ships ticked (Defaults and Fast; Style unticks it): photo steps
+**Optimised Likeness Learning** ships ticked (Fast and Lower LR; Style unticks it): photo steps
 train only the identity blocks (**20-49**) while video and audio clips train the full model.
 Measured against full-model photo training: sharper, much better prompt following, better sound,
 fewer epochs — and the occasional deformed preview of full-model photo runs is gone. Untick it

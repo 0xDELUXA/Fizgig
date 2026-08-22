@@ -843,7 +843,7 @@ MINIMAX_BUILT_IN_PRESETS = {
     # were standard LoRA at dim/alpha 16, and LoKR moves ~7-10x further per unit LR — which made
     # the same Learning Rate box mean two very different things depending on the Network Type
     # sitting above it. LoKR stays one dropdown away for anyone who wants it.
-    "✨ MiniMax H3 Defaults (LoRA 16, 0.25 MP)": {
+    "✨ MiniMax H3 (Lower LR - slower)": {
         "NETWORK_DIM": 16, "NETWORK_ALPHA": 16,
         "NETWORK_TYPE": "LoRA (standard)", "LOKR_FACTOR": 8,
         # Flat 1e-4 (Peter, 17 Aug). With the ramp off this IS the rate — and rank 16 wants

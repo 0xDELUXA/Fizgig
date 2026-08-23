@@ -7,7 +7,7 @@ Fizgig is written by [Peter Neill (shootthesound)](https://github.com/shoottheso
 [scryptio](https://github.com/scryptio) built the **AMD ROCm support** that headlines v4.3.0
 ([#53](https://github.com/shootthesound/Fizgig/pull/53)): the Windows and Linux ROCm install
 paths and launchers, GPU architecture detection, cross-platform VRAM monitoring for the status
-bar, and the RDNA4 batched-GEMM workaround — a lot of building and testing on real hardware.
+bar — a lot of building and testing on real hardware.
 Along the way the same investigation pinned down the torch.compile recompile cost on
 ROCm, now handled automatically. The PR thread was a group effort:
 [tsubasasora](https://github.com/tsubasasora) ran repeated from-scratch Linux installs on an

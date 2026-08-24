@@ -9515,7 +9515,7 @@ class LoRATrainerGUI:
                     self._handle_caption_subprocess_line(line.rstrip("\r\n"))
             finally:
                 rc = proc.wait()
-                self.master.after(0, lambda r=rc: self._on_caption_worker_exit(r))
+                self.master.after(0, lambda r=rc, p=proc: self._on_caption_worker_exit(r, p))
 
         threading.Thread(target=reader, daemon=True).start()
 
@@ -9728,7 +9728,14 @@ class LoRATrainerGUI:
             self.update_caption_log("\nCaptioning complete!\n")
         self.refresh_caption_images()
 
-    def _on_caption_worker_exit(self, returncode: int) -> None:
+    def _on_caption_worker_exit(self, returncode: int, proc=None) -> None:
+        # A worker we DELIBERATELY replaced (model switch: _ensure_caption_worker stops the
+        # old one, which nulls caption_process before the exit lands) must not be mistaken
+        # for the current worker dying — that cleared _captioning_running out from under the
+        # brand-new job, whose send then silently no-opped: Qwen loaded and sat idle
+        # (field, first NVIDIA test). Only the CURRENT worker's exit means anything.
+        if proc is not None and proc is not getattr(self, "caption_process", None):
+            return
         was_running = getattr(self, "_captioning_running", False)
         self.caption_process = None
         self._caption_worker_stdin = None

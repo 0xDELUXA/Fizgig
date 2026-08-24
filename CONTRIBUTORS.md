@@ -15,6 +15,14 @@ R9700 that shook out real install bugs, [FNGarvin](https://github.com/FNGarvin) 
 wheel pinning that made the install materially safer, and
 [taisunyoung](https://github.com/taisunyoung) contributed expert ROCm performance diagnostics.
 
+They then diagnosed and fixed the **captioning slowdown**
+([#90](https://github.com/shootthesound/Fizgig/issues/90) →
+[#93](https://github.com/shootthesound/Fizgig/pull/93)): AI captioning held GPU memory inside
+the GUI process, which silently poisoned the next training run's memory planning (measured
+~4x slower steps). Their fix moves captioning into a persistent worker subprocess — the same
+architecture training and caching already use — so the VRAM genuinely returns, with a warm
+worker keeping single-image Regenerate instant. Validated on AMD by them and on NVIDIA here.
+
 ## rintic-13
 
 [rintic-13](https://github.com/rintic-13) designed and prototyped the **async H2D-only int8

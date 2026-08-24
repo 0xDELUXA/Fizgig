@@ -45,6 +45,15 @@ for a preview corrupted the H2D ring buffer's shared slot storage, killing train
 with a misleading CUDA error far from the cause. The instrumented diagnosis was exact and the
 fix minimal — verified and merged the same day.
 
+## mabseyuk
+
+**u/mabseyuk** proved MiniMax H3 LoRA training runs on a **12 GB card** — an RTX 5070 field
+report with instrumented diagnosis of the two crashes in the way, both fixed in v4.3.1
+([#92](https://github.com/shootthesound/Fizgig/issues/92)): the checkpoint-save MemoryError
+in the optional hash metadata (landed with co-author credit, e54b0d3) and the post-preview
+fragmentation OOM. Confirmed training otherwise fully stable at 12 GB — epoch 14 with
+checkpoints throughout when they first reported.
+
 ## FNGarvin
 
 [FNGarvin](https://github.com/FNGarvin) has contributed a string of high-quality features and

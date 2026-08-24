@@ -2226,6 +2226,17 @@ class LoRATrainerGUI:
         if tab_text != "LoRA Royale" and not self._royale_is_busy():
             self._royale_unload()
 
+        # Entering a heavy-engine tab releases the warm caption worker (~8 GB Qwen): those
+        # engines are 10-20 GB each and plan against free VRAM at load. Guarded on a job in
+        # flight, like every other unload here. Elsewhere the worker deliberately stays warm
+        # (fast Regenerate) until Unload / Start Training / app close.
+        if (tab_text in ("Repair Studio", "LoRA the Explorer", "LoRA Royale")
+                and self._caption_worker_alive()
+                and not getattr(self, "_captioning_running", False)):
+            self.update_caption_log("Caption model released (freeing VRAM for "
+                                    f"{tab_text}).\n")
+            self._stop_caption_worker_async(lambda: None, graceful=False)
+
     def remove_focus(self, event):
         """Remove focus from active widget when clicking background"""
         self.master.focus_set()

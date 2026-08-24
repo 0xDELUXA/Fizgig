@@ -19,7 +19,7 @@ Diagnosed, measured, and built by **@scryptio**
 
 ## 12 GB cards: two crash fixes
 
-From a great RTX 5070 field report by **David Maybank**, who proved MiniMax H3 LoRA training
+From a great RTX 5070 field report by **u/mabseyuk**, who proved MiniMax H3 LoRA training
 is otherwise fully stable at 12 GB:
 
 - **Checkpoint saves no longer crash on low memory.** The optional model-hash metadata

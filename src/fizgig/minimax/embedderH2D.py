@@ -1820,7 +1820,13 @@ def qwen3_layerwise_forward(
             attention_mask=causal_masks[decoder_layer.attention_type],
             position_ids=position_ids,
             past_key_values=past_key_values,
-            use_cache=False,
+            # Mirror the stock forward exactly: it runs use_cache=True with a
+            # DynamicCache, and the cache's presence changes attention-kernel selection
+            # — measured on the real 32B checkpoint, use_cache=False drifted the output
+            # max ~2.0 in bf16 (cosine 1.0000: pure kernel noise, the same failure the
+            # VL branch's parity comment documents). With the cache mirrored, streamed
+            # output is bit-for-bit the resident build's.
+            use_cache=past_key_values is not None,
             cache_position=cache_position,
             position_embeddings=position_embeddings,
         )
@@ -2010,15 +2016,20 @@ class MiniMaxH3TextEncoder:
 
             # Text-only (plain Qwen3Model — the caption-caching path, @mabseyuk): no
             # get_rope_index / language_model on this shape; the text twin derives its
-            # positions and masks the way the installed Qwen3 forward does. Parity vs
-            # the resident build is pinned in tests/test_minimax_te_text_stream.py.
+            # positions and masks the way the installed Qwen3 forward does. The
+            # DynamicCache is the same bitwise-parity requirement as the VL branch
+            # above: the stock forward creates one, its presence selects the attention
+            # kernel, and without it the streamed text output drifted max ~2.0 in bf16
+            # against the resident build (measured, real checkpoint).
+            from transformers.cache_utils import DynamicCache
+
             return qwen3_layerwise_forward(
                 self.model,
                 emb,
                 attention_mask=None,
                 position_ids=None,
                 cache_position=None,
-                past_key_values=None,
+                past_key_values=DynamicCache(config=self.model.config),
                 device=self.device,
                 layer_streamer=self.layer_streamer,
             )

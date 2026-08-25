@@ -419,6 +419,12 @@ _SWAP_TRANSIENT_GB = 7.5     # extra backward-time peak whenever swap is active 
 _H2D_PER_BLOCK_GB = 0.39     # one streamed int8 block's VRAM share (checkpoint header: 0.385)
 _H2D_TRANSIENT_GB = 2.0      # ring (2 x 0.39) + margin — validated on a simulated 16 GB card
                              # at BOTH 0.25 MP and 1 MP buckets, swap 40 (~1.85 s/it at 1 MP)
+_MIN_INT8_H2D_FREE_GB = 13.5  # INT8 H2D was validated at ~14.2 GB free (16 GB-class cards).
+                              # A 12 GB card tops out below this and must stay on NF4: letting
+                              # the streaming arithmetic alone approve 38-40 streamed INT8
+                              # blocks made Auto pick a larger base that crashed before step
+                              # one (@mabseyuk's 5070 field report). Explicit int8 remains
+                              # available for anyone benchmarking new floors.
 _RESERVE_GB = 1.5            # display / allocator / fragmentation headroom
 # Skipping checkpointing has to EARN it. Measured on H3, recompute costs ~0.1 s/step and saves
 # ~5 GB — so choosing "no checkpointing" on a thin margin trades five gigabytes of headroom for
@@ -539,6 +545,18 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
                                transient_gb=_INT8_TRANSIENT_GB, adapter_gb=adapter_gb)
     if i_swap == 0:
         return "int8", i_swap, i_ckpt, "int8 fits with no block swap — the most accurate base"
+    # The int8 streaming path has only been validated with 16 GB-class headroom (~14.2 GB
+    # free). Its arithmetic can make a 12 GB card look viable by streaming almost every
+    # block, but the non-streamed residual + ring + CUDA transients leave no reliable
+    # device margin there — @mabseyuk's 5070 crashed before step one on exactly that plan.
+    # Below the tested floor, Auto goes straight to the smaller 4-bit base (which now
+    # streams through its own NF4 ring rather than classic-parking).
+    if free_gb < _MIN_INT8_H2D_FREE_GB:
+        n_swap, n_ckpt = plan_vram(free_gb, mp=mp, resident_gb=_RESIDENT_PRUNED_GB,
+                                   adapter_gb=adapter_gb)
+        return ("nf4", n_swap, n_ckpt,
+                f"{free_gb:.1f} GB free is below the tested int8-streaming floor "
+                f"({_MIN_INT8_H2D_FREE_GB:.1f} GB) — using the smaller 4-bit base")
     # H2D-specific arithmetic — the classic anchors are WRONG for streaming and would refuse
     # cards that measurably work. Classic swap's 7.5 GB backward transient is engine-held
     # recompute segments of physically-moving blocks; H2D blocks never move — the transient is
@@ -2248,6 +2266,12 @@ def train_minimax(
                   else ("int8" if is_pruned_checkpoint(dit_path) else "nf4"))
     if not quantize:
         _base_mode = "none"
+    # Any swap on a quantized base rides an H2D ring now — int8 through rintic-13's
+    # ConvRot ring (#73), NF4 through @mabseyuk's Linear4bit ring. Planner-owned, no
+    # opt-in; FIZGIG_NO_NF4_H2D=1 is the debug kill-switch back to classic parking.
+    _ring_planned = (_base_mode == "int8"
+                     or (_base_mode == "nf4"
+                         and os.environ.get("FIZGIG_NO_NF4_H2D") != "1"))
     if str(blocks_to_swap).lower() == "auto":
         if torch.cuda.is_available() and quantize:
             from fizgig.utils.device import plannable_free_vram
@@ -2301,7 +2325,10 @@ def train_minimax(
                     "inference. To force the accurate base, set Base Precision to int8 — expect "
                     "block swap and a several-times-slower run — or close other GPU apps and "
                     "re-launch.")
-            if n_swap > 0:
+            if n_swap > 0 and not _ring_planned:
+                # Only the CLASSIC parking swap earns the scary line — ring-streamed
+                # blocks (int8 and NF4 alike) cross PCIe one-way with prefetch and cost
+                # a fraction of that. The ring path logs its own line at activation.
                 logger.warning(
                     f"[vram] {n_swap} of 50 blocks will live on CPU and cross PCIe every step, "
                     f"which is several times slower. Lower Target Megapixels, or free VRAM, to "
@@ -2396,20 +2423,24 @@ def train_minimax(
                               adaln_fp32=not train_adaln)
     dit.requires_grad_(False)                                   # frozen base (QLoRA-style)
     if n_swap > 0:
-        # int8 bases stream H2D-only (#73, @rintic-13): the base is frozen, so the classic
-        # swap's writeback half was always waste — a ring buffer + copy stream prefetches
-        # each block while the previous computes. NF4 keeps the classic parking (the
-        # offloader is ConvRot-specific). The later preview-restore calls re-enter
-        # enable_block_swap bare and inherit this mode.
-        _use_h2d = (_base_mode == "int8")
+        # Quantized bases stream H2D-only: the base is frozen, so the classic swap's
+        # writeback half was always waste — a ring buffer + copy stream prefetches each
+        # block while the previous computes. int8 rides rintic-13's ConvRot ring (#73);
+        # NF4 rides @mabseyuk's Linear4bit ring (the tier 12 GB cards land on — his 5070
+        # went from 12-14 s/step parked to ~1 s/step streamed). enable_block_swap
+        # dispatches by module type and falls back to classic parking if a ring can't
+        # build; the later preview-restore calls re-enter it bare and inherit this mode.
+        _use_h2d = _ring_planned
         n_swap = dit.enable_block_swap(n_swap, h2d_only=_use_h2d, ring_size=2)
-        if _use_h2d:
+        _off = getattr(dit, "_h2d_offloader", None)
+        if _off is not None:
             _staging = ("pinned in RAM"
-                        if not getattr(getattr(dit, "_h2d_offloader", None),
-                                       "_pin_failed", False)
+                        if not getattr(_off, "_pin_failed", False)
                         else "staged in ordinary RAM — OS pin limit, copies synchronous")
+            _kind = getattr(_off, "kind", "int8")
+            _gb = getattr(_off, "staged_gb", None) or n_swap * 0.39
             logger.info(f"[vram] block swap active: last {n_swap} blocks streamed H2D-only "
-                        f"(int8, ring 2, ~{n_swap * 0.39:.1f} GB {_staging}) — no "
+                        f"({_kind}, ring 2, ~{_gb:.1f} GB {_staging}) — no "
                         f"writeback, prefetch overlaps compute")
         else:
             logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "

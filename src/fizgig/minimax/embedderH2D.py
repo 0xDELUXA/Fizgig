@@ -1765,6 +1765,71 @@ def qwen3vl_layerwise_forward(
     return hidden_states
 
 
+def qwen3_layerwise_forward(
+    model,
+    hidden_states,
+    attention_mask=None,
+    position_ids=None,
+    cache_position=None,
+    past_key_values=None,
+    device="cuda",
+    layer_streamer=None,
+):
+    """Qwen3Model.forward, executed one decoder layer at a time for H2D streaming.
+
+    Text-only twin of qwen3vl_layerwise_forward above, by @mabseyuk — what unlocks the
+    2-slot ring for caption caching (the common, reference-free path). This deliberately
+    mirrors the installed Transformers implementation instead of routing the text-only
+    model through the Qwen3-VL forward: the two models have different layer ownership
+    (``model.layers`` versus ``model.language_model.layers``), rotary-position and mask
+    APIs.
+    """
+    from transformers.masking_utils import (
+        create_causal_mask,
+        create_sliding_window_causal_mask,
+    )
+
+    if cache_position is None:
+        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_position = torch.arange(
+            past_seen_tokens,
+            past_seen_tokens + hidden_states.shape[1],
+            device=hidden_states.device,
+        )
+    if position_ids is None:
+        position_ids = cache_position.unsqueeze(0)
+
+    mask_kwargs = {
+        "config": model.config,
+        "input_embeds": hidden_states,
+        "attention_mask": attention_mask,
+        "cache_position": cache_position,
+        "past_key_values": past_key_values,
+        "position_ids": position_ids,
+    }
+    causal_masks = {"full_attention": create_causal_mask(**mask_kwargs)}
+    if getattr(model, "has_sliding_layers", False):
+        causal_masks["sliding_attention"] = create_sliding_window_causal_mask(**mask_kwargs)
+
+    position_embeddings = model.rotary_emb(hidden_states, position_ids)
+    for layer_idx, decoder_layer in enumerate(model.layers[:model.config.num_hidden_layers]):
+        if layer_streamer is not None:
+            layer_streamer.begin_layer(layer_idx)
+        hidden_states = decoder_layer(
+            hidden_states,
+            attention_mask=causal_masks[decoder_layer.attention_type],
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=False,
+            cache_position=cache_position,
+            position_embeddings=position_embeddings,
+        )
+        if layer_streamer is not None:
+            layer_streamer.end_layer(layer_idx)
+
+    return model.norm(hidden_states)
+
+
 # ============================================================================
 # TEXT ENCODER
 # ============================================================================
@@ -1905,38 +1970,55 @@ class MiniMaxH3TextEncoder:
                     self.compute_dtype
                 )
 
-            position_ids, _ = (
-                self.model.get_rope_index(
-                    ids_rope,
-                    None,
-                    None,
-                    attention_mask=None,
+            if hasattr(self.model, "language_model"):
+
+                position_ids, _ = (
+                    self.model.get_rope_index(
+                        ids_rope,
+                        None,
+                        None,
+                        attention_mask=None,
+                    )
                 )
-            )
 
-            position_ids = position_ids.to(
-                emb.device
-            )
+                position_ids = position_ids.to(
+                    emb.device
+                )
 
-            from transformers.cache_utils import DynamicCache
+                from transformers.cache_utils import DynamicCache
 
-            # Not an optimization — a bitwise-parity requirement. The stock HF forward
-            # creates a DynamicCache when past_key_values is None, and with a None
-            # attention mask the cache's presence changes attention kernel selection:
-            # without it the streamed text output drifts ~1e0 in bf16 (cosine 1.0,
-            # token 0 exact — pure kernel noise). The reference path is immune (its
-            # explicit ones-mask forces the same kernel either way).
-            pkv = DynamicCache(
-                config=self.model.language_model.config
-            )
+                # Not an optimization — a bitwise-parity requirement. The stock HF forward
+                # creates a DynamicCache when past_key_values is None, and with a None
+                # attention mask the cache's presence changes attention kernel selection:
+                # without it the streamed text output drifts ~1e0 in bf16 (cosine 1.0,
+                # token 0 exact — pure kernel noise). The reference path is immune (its
+                # explicit ones-mask forces the same kernel either way).
+                pkv = DynamicCache(
+                    config=self.model.language_model.config
+                )
 
-            return qwen3vl_layerwise_forward(
+                return qwen3vl_layerwise_forward(
+                    self.model,
+                    emb,
+                    attention_mask=None,
+                    position_ids=position_ids,
+                    cache_position=None,
+                    past_key_values=pkv,
+                    device=self.device,
+                    layer_streamer=self.layer_streamer,
+                )
+
+            # Text-only (plain Qwen3Model — the caption-caching path, @mabseyuk): no
+            # get_rope_index / language_model on this shape; the text twin derives its
+            # positions and masks the way the installed Qwen3 forward does. Parity vs
+            # the resident build is pinned in tests/test_minimax_te_text_stream.py.
+            return qwen3_layerwise_forward(
                 self.model,
                 emb,
                 attention_mask=None,
-                position_ids=position_ids,
+                position_ids=None,
                 cache_position=None,
-                past_key_values=pkv,
+                past_key_values=None,
                 device=self.device,
                 layer_streamer=self.layer_streamer,
             )
@@ -2571,11 +2653,21 @@ def load_minimax_h3_te(
 
         cpu_embed = False
 
+    # Text-only streaming unlocked by @mabseyuk's qwen3_layerwise_forward: the old
+    # `and with_vision` here scoped the ring to the reference path, and a text-only
+    # load fell through half-configured (packed weights pinned to CPU, nothing ever
+    # uploading them — the 'Nvfp4Linear GPU weights are not loaded' crash).
     streaming_enabled = (
         layer_streaming
         and mode == "nvfp4"
-        and with_vision
     )
+    if mode == "nvfp4" and not streaming_enabled:
+        # This file has no resident nvfp4 path (the resident build lives in embedder.py):
+        # packed weights would load CPU-side and nothing would ever upload them. Refuse
+        # clearly here instead of the cryptic Nvfp4Linear crash at first encode.
+        raise RuntimeError(
+            "embedderH2D: an nvfp4 checkpoint requires layer_streaming=True — for a "
+            "resident build use fizgig.minimax.embedder.load_minimax_h3_te instead")
 
     # ------------------------------------------------------------------
     # Construct model on meta
@@ -2702,7 +2794,7 @@ def load_minimax_h3_te(
             for k in ckpt
         )
 
-        if mode == "nvfp4":
+        if streaming_enabled:
 
             print(
                 "[minimax-te] keeping packed "

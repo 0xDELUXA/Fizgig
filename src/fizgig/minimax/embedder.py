@@ -761,6 +761,31 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
         except Exception:
             free_gb = None
     if free_gb is not None and free_gb < need_gb:
+        # The streamed build stages the packed ~19 GB model in system RAM — and on
+        # Windows, GPU allocations are backed by commit charge (RAM + pagefile), so a
+        # box that can't hold the staging dies minutes later at the FIRST real GPU
+        # allocation, wearing a misleading 'CUDA error: out of memory' with headroom
+        # free on the card (#95: 3090 24 GB VRAM, 24 GB RAM — the pin fallback from
+        # #94 moved the crash from load to encode). Refuse up front, in plain English,
+        # while the user has options.
+        _avail_ram = None
+        try:
+            import psutil
+            _avail_ram = psutil.virtual_memory().available / 1e9
+        except Exception:
+            pass
+        if _avail_ram is not None and _avail_ram < _TE_STREAM_RAM_NEED_GB:
+            raise RuntimeError(
+                f"[minimax-te] the reference (vision) encoder does not fit this machine "
+                f"as configured: {free_gb:.1f} GB VRAM free needs the streamed build, "
+                f"which stages ~19 GB of packed weights in system RAM — and only "
+                f"{_avail_ram:.0f} GB of RAM is available. Options: (1) train WITHOUT "
+                f"references (drop the reference/distill setting — plain caption caching "
+                f"fits this machine fine), (2) close everything else and re-launch, or "
+                f"(3) set a much larger Windows pagefile (GPU memory is backed by "
+                f"RAM+pagefile commit; a big pagefile lets this limp through, slowly). "
+                f"Loading anyway would fail minutes from now with a misleading CUDA "
+                f"out-of-memory at the first encode.")
         from fizgig.minimax.embedderH2D import load_minimax_h3_te as _load_h2d
         print(f"[minimax-te] {free_gb:.1f} GB free < {need_gb:.0f} GB the resident "
               "encoder peaks at — streaming layers host-to-device instead "

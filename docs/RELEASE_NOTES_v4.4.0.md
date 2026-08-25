@@ -1,8 +1,8 @@
 # Fizgig v4.4.0 — MiniMax H3 training comes to 12 GB cards
 
-## Two streamers from @mabseyuk, picked automatically
+## Two streamers from u/mabseyuk, picked automatically
 
-**@mabseyuk** — whose 5070 field reports drove the 12 GB fixes in v4.3.1 — built and
+**u/mabseyuk** — whose 5070 field reports drove the 12 GB fixes in v4.3.1 — built and
 field-proved the two pieces that make MiniMax H3 practical on a 12 GB card, and both now
 ship in Fizgig:
 

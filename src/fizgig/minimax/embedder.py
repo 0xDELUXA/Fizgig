@@ -679,7 +679,9 @@ def load_minimax_h3_te(path: str, device="cuda", compute_dtype=torch.bfloat16,
 # The text-only resident build measures 12.78 GB resident + a 1.6-1.9 GB forward peak
 # (tests/diag_minimax_te_peak.py, quoted in minimax_cache_text.py) — it genuinely fits a
 # 16 GB card, which keeps the shipped resident path there. Below this, streaming wins.
-_TEXT_RESIDENT_NEED_GB = 16.0
+# 15, not 16: a 16 GB card reports ~15.9 GB total (same lesson as the block-swap
+# thresholds), and the measured ~14.7 GB peak fits inside that.
+_TEXT_RESIDENT_NEED_GB = 15.0
 # The streamed build keeps the packed nvfp4 model (~19 GB) in system RAM; the pin
 # degrades gracefully (#94) but a machine that can't even HOLD it would page-storm,
 # which is worse than the slow resident path. @mabseyuk's own caveat on his streamer.

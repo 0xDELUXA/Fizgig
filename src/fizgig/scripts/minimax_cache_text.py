@@ -1,4 +1,4 @@
-﻿"""Cache Qwen3-VL-32B text-encoder states (raw layer-50 output) for MiniMax H3 image training.
+"""Cache Qwen3-VL-32B text-encoder states (raw layer-50 output) for MiniMax H3 image training.
 
     python src/fizgig/scripts/minimax_cache_text.py --dataset_config config.toml --text_encoder path/to/qwen3vl_32b_bf16
 """

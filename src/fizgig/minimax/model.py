@@ -622,8 +622,23 @@ class MiniMaxH3DiT(nn.Module):
                                "cross PCIe every step, several times slower. Lower "
                                "Target Megapixels or free VRAM to need less swap.",
                                type(_e).__name__, _e)
-                self._h2d_requested = False
+                # A failure AFTER construction (move_static/prepare OOM — the case this
+                # fallback exists for) leaves a LIVE half-built ring: its backward hooks
+                # would fire mid-training over classic-parked blocks and rebind their
+                # weights to ring views (crash or silent corruption), and its pinned
+                # staging would stay resident on the exact machine that just ran out.
+                # release() removes the hooks, rebinds modules to their CPU masters, and
+                # synchronizes the copy stream — which also makes the .to("cpu") parking
+                # below race-free (review, 25 Aug).
+                _bad = self._h2d_offloader
                 self._h2d_offloader = None
+                if _bad is not None:
+                    try:
+                        _bad.release()
+                    except Exception:
+                        pass
+                    _bad = None
+                self._h2d_requested = False
 
         self._h2d_offloader = None
         for i in range(self._swap_from, len(self.blocks)):
@@ -676,7 +691,11 @@ class MiniMaxH3DiT(nn.Module):
             text_states = self.token_refiner(self.condition_proj(text_states))
         # video: patchify -> patch proj
         video_rows = patchify_video(video_latent.to(torch.float32), self.patch_size)
-        video_embed = self.video_patch_proj(video_rows).to(dtype)
+        # Rows are built fp32 for precision, but the projection loads at whatever dtype
+        # the checkpoint stored (fp32 island on the pruned file, bf16 elsewhere) — feed
+        # it its own dtype, same rule as TimeEmbedder (review, 25 Aug).
+        video_embed = self.video_patch_proj(
+            video_rows.to(self.video_patch_proj.weight.dtype)).to(dtype)
 
         # r2v reference condition rows. Same patchify + projection as the target, but blended
         # with a trace of noise first: r = aug*r + (1-aug)*noise. The reference restarts the SAME
@@ -693,7 +712,8 @@ class MiniMaxH3DiT(nn.Module):
                     r = visual_cond_noise_aug * r + (1.0 - visual_cond_noise_aug) * noise
                 _rows.append(r)
                 ref_shapes.append((z.shape[-2], z.shape[-1]))
-            ref_embed = self.video_patch_proj(torch.cat(_rows, dim=0)).to(dtype)
+            ref_embed = self.video_patch_proj(
+                torch.cat(_rows, dim=0).to(self.video_patch_proj.weight.dtype)).to(dtype)
 
         # audio: silence (x0 = 0) noised on the audio schedule at the same schedule position as
         # the video rows. Present because the base model has never seen a pack without it.
@@ -728,7 +748,8 @@ class MiniMaxH3DiT(nn.Module):
                     eps = torch.randn(n_audio_latents * AUDIO_CHANNELS, self.config.audio_latents_dim,
                                       device=device, dtype=torch.float32)
                 _arows = sigma_a * eps.to(device=device, dtype=torch.float32)
-            audio_embed = self.audio_patch_proj(_arows).to(dtype)
+            audio_embed = self.audio_patch_proj(
+                _arows.to(self.audio_patch_proj.weight.dtype)).to(dtype)
 
         # pack [text | refs | audio | video] — the reference's segment order
         parts = ([text_states.to(dtype)]
@@ -884,7 +905,8 @@ class MiniMaxH3DiT(nn.Module):
                     _arows = sigma_a * torch.randn(n_audio_latents * AUDIO_CHANNELS,
                                                    self.config.audio_latents_dim,
                                                    device=device, dtype=torch.float32)
-                audio_embed = self.audio_patch_proj(_arows).to(dtype)
+                audio_embed = self.audio_patch_proj(
+                    _arows.to(self.audio_patch_proj.weight.dtype)).to(dtype)
 
             parts = ([text_states.to(dtype)]
                      + ([audio_embed] if audio_embed is not None else [])

@@ -2446,14 +2446,21 @@ def train_minimax(
             _staging = ("pinned in RAM"
                         if not getattr(_off, "_pin_failed", False)
                         else "staged in ordinary RAM — OS pin limit, copies synchronous")
-            _kind = getattr(_off, "kind", "int8")
-            _gb = getattr(_off, "staged_gb", None) or n_swap * 0.39
+            # Both ring classes declare kind/staged_gb; the explicit None test matters
+            # because `or` would swallow a legitimate 0.0 into the int8 estimate.
+            _kind = getattr(_off, "kind", "?")
+            _gb = getattr(_off, "staged_gb", None)
+            if _gb is None:
+                _gb = n_swap * 0.39
             logger.info(f"[vram] block swap active: last {n_swap} blocks streamed H2D-only "
                         f"({_kind}, ring 2, ~{_gb:.1f} GB {_staging}) — no "
                         f"writeback, prefetch overlaps compute")
         else:
+            # Classic parking: the planned NF4 path with the kill-switch on, OR any
+            # base whose ring failed to build — so name the mode rather than assuming.
             logger.info(f"[vram] block swap active: last {n_swap} blocks parked on CPU "
-                        f"(~{n_swap * 0.34:.1f} GB VRAM freed, packed NF4 in RAM)")
+                        f"(~{n_swap * 0.34:.1f} GB VRAM freed, packed {_base_mode} "
+                        f"in RAM)")
     if use_ckpt:
         dit.enable_gradient_checkpointing()
         logger.info("[vram] gradient checkpointing ON")

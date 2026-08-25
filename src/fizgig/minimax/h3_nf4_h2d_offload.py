@@ -291,7 +291,10 @@ class H3NF4H2DOffloader:
 
     def unbind_to_cpu(self):
         for block_idx in self.specs:
-            self._bind(self.cpu_bindings[block_idx])
+            # Guarded like release(): a park against a partially-prepared offloader
+            # (construction failed mid-way) must not KeyError (review, 25 Aug).
+            if block_idx in self.cpu_bindings:
+                self._bind(self.cpu_bindings[block_idx])
         self.loaded_block = [None] * self.ring_size
         self.free_event = [None] * self.ring_size
         self.copy_done.clear()
@@ -312,6 +315,20 @@ class H3NF4H2DOffloader:
                 self._bind(self.cpu_bindings[block_idx])
         self.gpu_bindings.clear()
         self.ring_flat = self.ring_views = None
+        # Reset the slot state too (the int8 twin does): stale loaded_block entries let
+        # a post-release wait_for_block take the fast path and return with CPU-bound
+        # weights — a silent device mismatch instead of a reload (review, 25 Aug).
+        self.loaded_block = [None] * self.ring_size
+        self.free_event = [None] * self.ring_size
         self.copy_done.clear()
         torch.cuda.empty_cache()
+
+    def __del__(self):
+        # Belt-and-braces mirror of the int8 twin: if an owner drops the object without
+        # release(), at least the backward hooks come off the modules.
+        for handle in getattr(self, "remove_handles", []):
+            try:
+                handle.remove()
+            except Exception:
+                pass
 

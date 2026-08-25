@@ -807,9 +807,21 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
             print(f"[minimax-te] heads-up: the streamed encoder stages ~19 GB in system "
                   f"RAM and only {_avail_ram:.0f} GB is available right now — closing "
                   "other apps first will make this faster and safer.", flush=True)
-        from fizgig.minimax.embedderH2D import load_minimax_h3_te as _load_h2d
-        print(f"[minimax-te] {free_gb:.1f} GB free < {need_gb:.0f} GB the resident "
-              "encoder peaks at — streaming layers host-to-device instead "
-              "(identical output, ~2% slower; #79)")
-        return _load_h2d(path, device=device, layer_streaming=True, **kw)
+        # Only an nvfp4 file under quantize can actually stream (the H2D file has no
+        # resident nvfp4 path, and non-nvfp4 / --no_quantize builds through it land
+        # RESIDENT — the review caught this rung printing 'streaming' and then building
+        # the full model on the card). Anything else, and the kill-switch, take the
+        # resident loader honestly; on a sub-27 GB card that will be tight, but tight
+        # and truthful beats a lie followed by an OOM.
+        if (_is_cq_v and kw.get("quantize", True)
+                and os.environ.get("FIZGIG_NO_TE_H2D") != "1"):
+            from fizgig.minimax.embedderH2D import load_minimax_h3_te as _load_h2d
+            print(f"[minimax-te] {free_gb:.1f} GB free < {need_gb:.0f} GB the resident "
+                  "encoder peaks at — streaming layers host-to-device instead "
+                  "(identical output, ~2% slower; #79)")
+            return _load_h2d(path, device=device, layer_streaming=True, **kw)
+        print(f"[minimax-te] {free_gb:.1f} GB free is below the ~{need_gb:.0f} GB the "
+              "resident reference encoder peaks at, and this configuration can't "
+              "stream — loading resident anyway; expect it to be slow or to run out "
+              "of memory.", flush=True)
     return load_minimax_h3_te(path, device=device, **kw)

@@ -5854,7 +5854,11 @@ class LoRATrainerGUI:
         self.start_training()
         # start_training can decline (validation, disk warning declined). The item's settings
         # are in the GUI either way; put it back at the head so nothing is silently lost.
-        if getattr(self, "training_state", "idle") != "running":
+        # _training_start_pending counts as LAUNCHED: with a warm caption worker the real
+        # launch is marshalled through after(0) and training_state is still "idle" here —
+        # re-inserting then would run the same item twice (review agent, 25 Aug).
+        if (getattr(self, "training_state", "idle") != "running"
+                and not getattr(self, "_training_start_pending", False)):
             self.training_queue.insert(0, item)
             self._save_training_queue()
             self._refresh_queue_button()
@@ -23813,20 +23817,23 @@ class LoRATrainerGUI:
 
     _RUN_SNAPSHOT_DIRNAME = "run_snapshots"
 
-    def _snapshot_dataset_config_for_run(self, live_path, resuming=False):
+    def _snapshot_dataset_config_for_run(self, live_path, resuming=False, prev_config=None):
         """Copy the dataset TOML to an immutable per-run file and return its path (#98).
 
         Each launched run trains from its own frozen copy of the config, so edits made on
         the Start tab while a run initialises (or trains) can never retarget it. On
-        resume, the run's EXISTING snapshot is kept — a paused run must finish on the
-        dataset it started with, not whatever the Start tab shows now. Any failure falls
-        back to the live path, which is the pre-#98 behaviour, never worse."""
-        import glob as _glob
+        resume, the run's EXISTING snapshot (prev_config — captured by the launch BEFORE
+        the settings collection overwrites the key with the live path) is kept: a paused
+        run must finish on the dataset it started with, not whatever the Start tab shows
+        now. Any failure falls back to the live path — the pre-#98 behaviour, never
+        worse. Deliberately NOT _persist_disabled-guarded: snapshots are ephemeral,
+        pruned, gitignored copies, and the guard would make this untestable — headless
+        tests patch DATASET_DIR instead."""
         import shutil as _shutil
         import time as _time
         try:
             if resuming:
-                prev = str(self.settings.get("DATASET_CONFIG", "") or "")
+                prev = str(prev_config or "")
                 if (os.path.basename(os.path.dirname(prev)) == self._RUN_SNAPSHOT_DIRNAME
                         and os.path.isfile(prev)):
                     return prev
@@ -23838,26 +23845,52 @@ class LoRATrainerGUI:
                            str(self.settings.get("LORA_NAME", "") or "run")) or "run"
             snap = os.path.join(snap_dir, f"{_name}-{int(_time.time() * 1000)}.toml")
             _shutil.copyfile(live_path, snap)
-            # Prune old snapshots — never this run's, and never one a paused run still
-            # references (its sidecar records the snapshot path for resume).
-            keep = {os.path.normpath(snap)}
-            try:
-                import json as _json
-                with open(self._paused_sidecar_path(), encoding="utf-8") as f:
-                    keep.add(os.path.normpath(str(_json.load(f).get("dataset_config", ""))))
-            except Exception:
-                pass
-            olds = sorted(_glob.glob(os.path.join(_glob.escape(snap_dir), "*.toml")),
-                          key=os.path.getmtime, reverse=True)
-            for p in olds[12:]:
-                if os.path.normpath(p) not in keep:
-                    try:
-                        os.remove(p)
-                    except OSError:
-                        pass
-            return snap
         except Exception:
             return live_path
+        # Prune AFTER the snapshot is secured, in its own guard — a prune hiccup must
+        # never un-freeze the run (the copy above already succeeded). Rule: the newest 12
+        # always stay, and older files go only once they are ALSO older than 30 days —
+        # so a paused run's frozen config outlives any burst of launches, whatever
+        # output dir its sidecar lives in (no sidecar lookup: at this point the settings
+        # already describe the LAUNCHING run, not the paused one).
+        try:
+            import glob as _glob
+            _cutoff = _time.time() - 30 * 86400
+            olds = sorted(_glob.glob(os.path.join(_glob.escape(snap_dir), "*.toml")),
+                          key=lambda p: (os.path.getmtime(p) if os.path.exists(p) else 0),
+                          reverse=True)
+            for p in olds[12:]:
+                try:
+                    if (os.path.normpath(p) != os.path.normpath(snap)
+                            and os.path.getmtime(p) < _cutoff):
+                        os.remove(p)
+                except OSError:
+                    pass
+        except Exception:
+            pass
+        return snap
+
+    def _verify_frozen_dataset_config(self, path):
+        """-> list of Start-tab folders MISSING from the frozen TOML, or None when all
+        present (#98 follow-up). The auto-saver skips its rewrite silently when a dataset
+        field fails to parse, so without this check a launch could freeze — and train —
+        the PREVIOUS dataset under the new run's name. Unreadable/absent file returns
+        None: existence is validate_inputs' job, and refusing here would double-report."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except Exception:
+            return None
+
+        def _norm(p):
+            return str(p).strip().lower().replace("\\", "/").rstrip("/")
+
+        listed = {_norm(m) for m in
+                  re.findall(r'^\s*image_directory\s*=\s*"([^"]*)"', text, re.M)}
+        if not listed:
+            return None                    # not a TOML this writer produced — don't judge it
+        missing = [f for f in self._dataset_folders() if f and _norm(f) not in listed]
+        return missing or None
 
     def _build_dataset_toml_text(self):
         """-> (dataset_name, toml text), or None when the config is not writable yet.
@@ -24202,6 +24235,10 @@ class LoRATrainerGUI:
         _check_num("Max Grad Norm", self.entries["MAX_GRAD_NORM"].get(), float, 0)
         _check_num("Network Dropout", self.entries["NETWORK_DROPOUT"].get(), float, 0)
         _check_num("Batch Size (Dataset)", self.dataset_batch_size_var.get(), int, 1)
+        # An unparseable megapixels value makes the TOML auto-saver skip its rewrite
+        # SILENTLY (#98 follow-up) — catch it here with a named error instead of the
+        # launch-time stale-config refusal.
+        _check_num("Target Megapixels (Dataset)", self.dataset_megapixels_var.get(), float, 0)
         if "KEEP_LAST_N_STATES" in self.entries:
             _check_num("Keep Last (states)", self.entries["KEEP_LAST_N_STATES"].get(), int, 1)
 
@@ -24697,6 +24734,12 @@ class LoRATrainerGUI:
                 _lr_val = 1e-4  # ignored by the trainer under adaptive
             else:
                 raise
+        # Captured BEFORE the update below overwrites DATASET_CONFIG with the live editor
+        # path: on a resume this still holds the paused run's frozen snapshot (in-session
+        # from the original launch, cross-restart from the startup sidecar restore), and
+        # the freeze call needs it — reading settings AFTER the update made the resume
+        # keep-rule dead code (three independent review agents, same finding).
+        _prev_dataset_config = str(self.settings.get("DATASET_CONFIG", "") or "")
         self.settings.update({
             "ARCHITECTURE": arch,
             "MODEL_TYPE": self.entries["MODEL_TYPE"].get() if config["uses_model_type"] else "",
@@ -24816,7 +24859,27 @@ class LoRATrainerGUI:
         # settings. From here on, settings["DATASET_CONFIG"] is the run's immutable
         # snapshot; the live TOML belongs to the editor alone.
         self.settings["DATASET_CONFIG"] = self._snapshot_dataset_config_for_run(
-            self.settings.get("DATASET_CONFIG", ""), resuming=_is_resuming_clear)
+            self.settings.get("DATASET_CONFIG", ""), resuming=_is_resuming_clear,
+            prev_config=_prev_dataset_config)
+
+        # The frozen config must describe the folders on the Start tab (#98 follow-up):
+        # a dataset-field parse failure (e.g. Target Megapixels typed as "1,0") makes the
+        # auto-saver skip its rewrite SILENTLY, so the launch would freeze a STALE toml —
+        # and the previous dataset would train under this run's name. Never on a resume:
+        # there the frozen config deliberately predates the Start tab.
+        if not _is_resuming_clear:
+            _missing = self._verify_frozen_dataset_config(self.settings["DATASET_CONFIG"])
+            if _missing:
+                self.stop_samples_watcher()
+                _msg = ("The dataset config on disk does not include the training "
+                        "folder(s) shown on the Start tab:\n\n"
+                        + "\n".join(_missing)
+                        + "\n\nThis usually means a dataset field failed to parse — check "
+                        "Target Megapixels and Batch Size for typos — so the config was "
+                        "never rewritten. Fix the value and press Start again.")
+                self.update_console(f"[dataset] launch refused — {_msg}\n")
+                messagebox.showerror("Dataset config out of date", _msg)
+                return
 
         # Build training command based on architecture
         command = self.build_training_command(config)

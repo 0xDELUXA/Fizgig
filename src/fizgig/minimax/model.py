@@ -885,7 +885,8 @@ class MiniMaxH3DiT(nn.Module):
             if text_states.shape[-1] != self.hidden_size:
                 text_states = self.token_refiner(self.condition_proj(text_states))
             video_rows = patchify_video(video_latent.to(torch.float32), self.patch_size)
-            video_embed = self.video_patch_proj(video_rows).to(dtype)
+            video_embed = self.video_patch_proj(
+                video_rows.to(self.video_patch_proj.weight.dtype)).to(dtype)
 
             t_val = t.reshape(-1)[:1].to(torch.float32) if torch.is_tensor(t) else torch.tensor([float(t)], device=device)
             t_val = t_val.to(device)

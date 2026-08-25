@@ -2445,7 +2445,8 @@ def train_minimax(
         if _off is not None:
             _staging = ("pinned in RAM"
                         if not getattr(_off, "_pin_failed", False)
-                        else "staged in ordinary RAM — OS pin limit, copies synchronous")
+                        else "staged in ordinary RAM (pinning unavailable or RAM too "
+                             "tight) — copies synchronous")
             # Both ring classes declare kind/staged_gb; the explicit None test matters
             # because `or` would swallow a legitimate 0.0 into the int8 estimate.
             _kind = getattr(_off, "kind", "?")

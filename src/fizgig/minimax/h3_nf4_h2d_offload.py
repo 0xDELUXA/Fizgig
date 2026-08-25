@@ -98,7 +98,12 @@ class H3NF4H2DOffloader:
             import psutil
             _est = sum(t.numel() * t.element_size()
                        for t in self._source_tensors(min(self.specs))) * self.n_swap
-            if psutil.virtual_memory().available < _est + 10e9:
+            # Margin scales with the stage (review 6): a flat +10 GB disarmed pinning
+            # for a ~1.6 GB NF4 stage on any box under ~11.6 GB available, where
+            # page-locking that little is trivially safe — and the ring's prefetch
+            # overlap (its whole point) was silently lost. 0.75x + 4 GB floor keeps
+            # ~23 GB at the 13 GB bf16 cap this guard was written for.
+            if psutil.virtual_memory().available < _est + max(4e9, 0.75 * _est):
                 self._pin_failed = True
                 logger.warning("[nf4-h2d] available RAM is tight for ~%.1f GB of "
                                "pinned staging — staging unpinned instead (copies "

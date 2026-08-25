@@ -688,7 +688,8 @@ _TEXT_RESIDENT_NEED_GB = 15.0
 _TE_STREAM_RAM_NEED_GB = 22.0
 
 
-def plan_text_te_build(free_gb, avail_ram_gb, is_nvfp4=True, kill_switch=False):
+def plan_text_te_build(free_gb, avail_ram_gb, is_nvfp4=True, kill_switch=False,
+                       ram_ok=False):
     """The text-only TE build decision, as pure data: 'resident' | 'stream' |
     'resident-ram-short'.
 
@@ -697,13 +698,16 @@ def plan_text_te_build(free_gb, avail_ram_gb, is_nvfp4=True, kill_switch=False):
     serves comfy-quant nvfp4 files); unknown free VRAM builds resident (the safe,
     shipped behaviour); a card below the resident need streams — unless system RAM
     can't hold the packed model, which reports as its own state so the caller can say
-    WHY it stayed resident. Unknown RAM streams (the plan_base_quant H2D precedent:
-    psutil is in requirements, unreadable is vanishingly rare)."""
+    WHY it stayed resident. ram_ok (FIZGIG_TE_RAM_OK, same override the vision rung
+    honours) streams despite a short RAM reading — for boxes where 'available' is
+    transiently low. Unknown RAM streams (the plan_base_quant H2D precedent: psutil is
+    in requirements, unreadable is vanishingly rare)."""
     if kill_switch or not is_nvfp4:
         return "resident"
     if free_gb is None or free_gb >= _TEXT_RESIDENT_NEED_GB:
         return "resident"
-    if avail_ram_gb is not None and avail_ram_gb < _TE_STREAM_RAM_NEED_GB:
+    if (not ram_ok and avail_ram_gb is not None
+            and avail_ram_gb < _TE_STREAM_RAM_NEED_GB):
         return "resident-ram-short"
     return "stream"
 
@@ -742,7 +746,8 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
             # so the streamer can't serve it either (audit N2: the old check printed a
             # streaming line and then built resident-on-GPU anyway).
             free_gb, avail_ram, is_nvfp4=_is_cq and kw.get("quantize", True),
-            kill_switch=os.environ.get("FIZGIG_NO_TE_H2D") == "1")
+            kill_switch=os.environ.get("FIZGIG_NO_TE_H2D") == "1",
+            ram_ok=os.environ.get("FIZGIG_TE_RAM_OK") == "1")
         if _plan == "stream":
             from fizgig.minimax.embedderH2D import load_minimax_h3_te as _load_h2d
             print(f"[minimax-te] {free_gb:.1f} GB free < {_TEXT_RESIDENT_NEED_GB:.0f} GB "
@@ -753,8 +758,9 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
             print(f"[minimax-te] {free_gb:.1f} GB free is tight for the resident text "
                   f"encoder, but streaming stages the ~19 GB packed model in system RAM "
                   f"and only {avail_ram:.0f} GB is available (other apps — or this run's "
-                  "own parked model, mid-training) — loading resident instead: slower, "
-                  "works", flush=True)
+                  "own parked model, mid-training) — loading resident instead; expect "
+                  "it to be slow or to run out of memory. Freeing RAM helps, or set "
+                  "FIZGIG_TE_RAM_OK=1 to stream regardless.", flush=True)
         return load_minimax_h3_te(path, device=device, **kw)
     need_gb = 27.0                                        # measured 25.8 peak + margin
     free_gb = None
@@ -791,7 +797,10 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
             pass
         if (_is_cq_v and kw.get("quantize", True)
                 and _total_ram is not None and _total_ram < 28.0
-                and os.environ.get("FIZGIG_TE_RAM_OK") != "1"):
+                and os.environ.get("FIZGIG_TE_RAM_OK") != "1"
+                # The refusal is about the STREAMED build's RAM staging — with the
+                # kill-switch forcing resident, it must stand down (review 6).
+                and os.environ.get("FIZGIG_NO_TE_H2D") != "1"):
             raise RuntimeError(
                 f"[minimax-te] the reference (vision) encoder does not fit this machine: "
                 f"{free_gb:.1f} GB VRAM free needs the streamed build, which stages "
@@ -802,11 +811,6 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
                 f"comfortable). Loading anyway would fail minutes from now with a "
                 f"misleading CUDA out-of-memory at the first encode "
                 f"(set FIZGIG_TE_RAM_OK=1 to attempt it regardless).")
-        if (_is_cq_v and _avail_ram is not None
-                and _avail_ram < _TE_STREAM_RAM_NEED_GB):
-            print(f"[minimax-te] heads-up: the streamed encoder stages ~19 GB in system "
-                  f"RAM and only {_avail_ram:.0f} GB is available right now — closing "
-                  "other apps first will make this faster and safer.", flush=True)
         # Only an nvfp4 file under quantize can actually stream (the H2D file has no
         # resident nvfp4 path, and non-nvfp4 / --no_quantize builds through it land
         # RESIDENT — the review caught this rung printing 'streaming' and then building
@@ -815,6 +819,11 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
         # and truthful beats a lie followed by an OOM.
         if (_is_cq_v and kw.get("quantize", True)
                 and os.environ.get("FIZGIG_NO_TE_H2D") != "1"):
+            if _avail_ram is not None and _avail_ram < _TE_STREAM_RAM_NEED_GB:
+                print(f"[minimax-te] heads-up: the streamed encoder stages ~19 GB in "
+                      f"system RAM and only {_avail_ram:.0f} GB is available right now "
+                      "— closing other apps first will make this faster and safer.",
+                      flush=True)
             from fizgig.minimax.embedderH2D import load_minimax_h3_te as _load_h2d
             print(f"[minimax-te] {free_gb:.1f} GB free < {need_gb:.0f} GB the resident "
                   "encoder peaks at — streaming layers host-to-device instead "

@@ -23804,9 +23804,60 @@ class LoRATrainerGUI:
             with open(output_path, "w", encoding="utf-8") as f:
                 f.write(toml_content)
             self._dataset_config_var.set(output_path)
-            self.settings["DATASET_CONFIG"] = output_path
+            # Deliberately NOT settings["DATASET_CONFIG"] (#98): during a run that key
+            # points at the run's frozen snapshot, and this writer fires on every edit —
+            # re-pointing it mid-pipeline is exactly the dataset-swap race. The launch
+            # collects the live path from _dataset_config_var itself.
         except Exception:
             pass  # Silently fail - user can manually save if needed
+
+    _RUN_SNAPSHOT_DIRNAME = "run_snapshots"
+
+    def _snapshot_dataset_config_for_run(self, live_path, resuming=False):
+        """Copy the dataset TOML to an immutable per-run file and return its path (#98).
+
+        Each launched run trains from its own frozen copy of the config, so edits made on
+        the Start tab while a run initialises (or trains) can never retarget it. On
+        resume, the run's EXISTING snapshot is kept — a paused run must finish on the
+        dataset it started with, not whatever the Start tab shows now. Any failure falls
+        back to the live path, which is the pre-#98 behaviour, never worse."""
+        import glob as _glob
+        import shutil as _shutil
+        import time as _time
+        try:
+            if resuming:
+                prev = str(self.settings.get("DATASET_CONFIG", "") or "")
+                if (os.path.basename(os.path.dirname(prev)) == self._RUN_SNAPSHOT_DIRNAME
+                        and os.path.isfile(prev)):
+                    return prev
+            if not live_path or not os.path.isfile(live_path):
+                return live_path
+            snap_dir = os.path.join(DATASET_DIR, self._RUN_SNAPSHOT_DIRNAME)
+            os.makedirs(snap_dir, exist_ok=True)
+            _name = re.sub(r"[^A-Za-z0-9._-]+", "_",
+                           str(self.settings.get("LORA_NAME", "") or "run")) or "run"
+            snap = os.path.join(snap_dir, f"{_name}-{int(_time.time() * 1000)}.toml")
+            _shutil.copyfile(live_path, snap)
+            # Prune old snapshots — never this run's, and never one a paused run still
+            # references (its sidecar records the snapshot path for resume).
+            keep = {os.path.normpath(snap)}
+            try:
+                import json as _json
+                with open(self._paused_sidecar_path(), encoding="utf-8") as f:
+                    keep.add(os.path.normpath(str(_json.load(f).get("dataset_config", ""))))
+            except Exception:
+                pass
+            olds = sorted(_glob.glob(os.path.join(_glob.escape(snap_dir), "*.toml")),
+                          key=os.path.getmtime, reverse=True)
+            for p in olds[12:]:
+                if os.path.normpath(p) not in keep:
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            return snap
+        except Exception:
+            return live_path
 
     def _build_dataset_toml_text(self):
         """-> (dataset_name, toml text), or None when the config is not writable yet.
@@ -24757,6 +24808,15 @@ class LoRATrainerGUI:
             "ENABLE_BUCKET": self.dataset_enable_bucket_var.get(),
             "BUCKET_NO_UPSCALE": self.dataset_no_upscale_var.get(),
         })
+
+        # Freeze THIS run's dataset config (#98): the pipeline's stages each read the
+        # dataset TOML at their own start, and the Start tab auto-saves that TOML on
+        # every edit — so changing the dataset folder while run 1 initialised (e.g. to
+        # queue run 2) retargeted run 1: dataset 2 trained under run 1's name and
+        # settings. From here on, settings["DATASET_CONFIG"] is the run's immutable
+        # snapshot; the live TOML belongs to the editor alone.
+        self.settings["DATASET_CONFIG"] = self._snapshot_dataset_config_for_run(
+            self.settings.get("DATASET_CONFIG", ""), resuming=_is_resuming_clear)
 
         # Build training command based on architecture
         command = self.build_training_command(config)
@@ -26283,6 +26343,13 @@ class LoRATrainerGUI:
             state_path = meta.get("state_path", "")
             if state_path and os.path.isdir(state_path):
                 self.paused_state_path = state_path
+                # Restore the paused run's frozen dataset config (#98) so a cross-restart
+                # resume trains the dataset it started with — the resume launch keeps an
+                # existing snapshot instead of re-freezing whatever the Start tab shows.
+                _dc = str(meta.get("dataset_config", "") or "")
+                if (os.path.basename(os.path.dirname(_dc)) == self._RUN_SNAPSHOT_DIRNAME
+                        and os.path.isfile(_dc)):
+                    self.settings["DATASET_CONFIG"] = _dc
                 self.training_state = "paused"
                 self._refresh_training_buttons()
                 self.update_console(

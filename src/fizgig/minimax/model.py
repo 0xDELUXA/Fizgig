@@ -22,6 +22,7 @@ adaln_proj.linear.weight, video_patch_proj, condition_proj, time_embedder.proj_i
 token_refiner.blocks.N..., final_layer...), so a LoRA/FT trained here maps back onto the base.
 """
 
+import logging
 import math
 from dataclasses import dataclass, field
 from typing import Optional
@@ -29,6 +30,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
 
 
 # --- config ------------------------------------------------------------------------------
@@ -538,9 +541,13 @@ class MiniMaxH3DiT(nn.Module):
         (uint8, 0.5 B/param) through the moves, so a parked block costs ~¼ of its GPU footprint
         in system RAM and one PCIe round-trip per pass.
 
-        h2d_only=True (int8 ConvRot bases only, #73 @rintic-13) streams the frozen int8
-        tensors host→device through a ring buffer on a copy stream instead — no writeback, the
-        prefetch overlaps compute. h2d_only=None KEEPS the previously requested mode: the
+        h2d_only=True streams the frozen tensors host→device through a ring buffer on a
+        copy stream instead — no writeback, the prefetch overlaps compute. The ring class
+        is picked by MODULE TYPE in the swapped tail: ConvRot int8 → H3Int8H2DOffloader
+        (#73 @rintic-13); bnb Linear4bit (NF4) → H3NF4H2DOffloader (@mabseyuk) — type,
+        not residency, so a bare re-entry after a full CPU park can't mis-dispatch. Ring
+        construction failure falls back to classic parking with a warning rather than
+        killing the run. h2d_only=None KEEPS the previously requested mode: the
         preview-decode path parks the whole DiT and re-calls this bare, and it must come back
         in the mode it left, with the stale offloader rebuilt (a whole-model .to() replaces
         every tensor storage this machinery caches)."""
@@ -562,17 +569,42 @@ class MiniMaxH3DiT(nn.Module):
         self._swap_from = len(self.blocks) - n
 
         if self._h2d_requested and n > 0:
-            from .h3_h2d_offload import H3Int8H2DOffloader
-            dev = next((m.qdata.device for b in self.blocks for m in b.modules()
-                        if m.__class__.__name__ == "ConvRotInt8Linear"
-                        and m.qdata.is_cuda), None) or torch.device("cuda")
-            self._h2d_offloader = H3Int8H2DOffloader(self.blocks, self._swap_from,
-                                                     device=dev, ring_size=ring_size)
-            self._h2d_offloader.move_static_weights_to_gpu()
-            self._h2d_offloader.prepare()
-            for blk in self.blocks:
-                blk._h2d_offloader = self._h2d_offloader
-            return n
+            # Dispatch by module TYPE in the swapped tail, not residency: after a full
+            # park every tensor is CPU-resident, and the bare re-entry from
+            # restore_parked_dit must still find the same ring class it left.
+            _tail_types = {m.__class__.__name__
+                           for i in range(self._swap_from, len(self.blocks))
+                           for m in self.blocks[i].modules()}
+            try:
+                if "ConvRotInt8Linear" in _tail_types:
+                    from .h3_h2d_offload import H3Int8H2DOffloader
+                    _cls = H3Int8H2DOffloader
+                    dev = next((m.qdata.device for b in self.blocks for m in b.modules()
+                                if m.__class__.__name__ == "ConvRotInt8Linear"
+                                and m.qdata.is_cuda), None) or torch.device("cuda")
+                elif "Linear4bit" in _tail_types:
+                    from .h3_nf4_h2d_offload import H3NF4H2DOffloader
+                    _cls, dev = H3NF4H2DOffloader, torch.device("cuda")
+                else:
+                    raise RuntimeError(
+                        f"no ring-streamable modules in the swapped tail "
+                        f"(saw {sorted(_tail_types)[:6]}...)")
+                self._h2d_offloader = _cls(self.blocks, self._swap_from,
+                                           device=dev, ring_size=ring_size)
+                self._h2d_offloader.move_static_weights_to_gpu()
+                self._h2d_offloader.prepare()
+                for blk in self.blocks:
+                    blk._h2d_offloader = self._h2d_offloader
+                return n
+            except Exception as _e:
+                # The ring is strictly better when constructible; classic parking is the
+                # safety net, never a crash. _h2d_requested resets so bare re-entries
+                # don't retry a construction that already failed.
+                logger.warning("[vram] H2D ring construction failed (%s: %s) — falling "
+                               "back to classic parking swap for this run.",
+                               type(_e).__name__, _e)
+                self._h2d_requested = False
+                self._h2d_offloader = None
 
         self._h2d_offloader = None
         for i in range(self._swap_from, len(self.blocks)):

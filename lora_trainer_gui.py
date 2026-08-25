@@ -25506,12 +25506,35 @@ class LoRATrainerGUI:
         # A value persisted from Klein (or from before it was hidden) must not leak into a
         # Krea 2 run through a control the user can no longer see.
         _auto_i8 = getattr(self, "_auto_quant_int8", "")
+        # An EXPLICIT INT8 pick must not depend on Blocks Swap being on Auto (#97): the auto
+        # strategy is the only writer of _auto_quant_int8, and a manual swap value clears it
+        # (the stale-leak guard in _parse_blocks_swap), so "Base Precision: INT8" plus a
+        # manual swap silently fell back to the fp8 base — which Compile Blocks then dies on
+        # for SM 8.6 cards (no fp8e4nv Triton support). At swap 0 the pick is honoured
+        # directly. At swap N the fp8 fallback stays (INT8 weights don't ride the swap —
+        # that pairing is the OOM the stale-leak guard exists for) but is now SAID, not
+        # silent.
+        try:
+            _swap_now = int(str(self.settings.get("BLOCKS_SWAP", 0)).strip() or 0)
+        except (TypeError, ValueError):
+            _swap_now = 0
+        try:
+            _explicit_i8 = self._base_precision() == "int8"
+        except Exception:
+            _explicit_i8 = False
         if self.settings.get("QUANT_4BIT", False):
             cmd.append("--quantize_4bit")
+        elif _explicit_i8 and _swap_now == 0:
+            cmd += ["--quant_int8", "bf16"]
         elif _auto_i8:
             # Chosen by the auto strategy when there is VRAM for it: faster than NF4 and ~7x
             # more accurate, with exact gradients.
             cmd += ["--quant_int8", _auto_i8]
+        elif _explicit_i8:
+            self.update_console(
+                f"[precision] INT8 needs Blocks Swap 0 — INT8 weights don't ride the swap. "
+                f"Running the fp8 base with swap {_swap_now}; set Blocks Swap to 0 or Auto "
+                f"to train on INT8.\n")
 
         # Per-image loss watch: detection logs/reports stuck images (Problem Images window);
         # per-image LR also throttles them (the trainer runs detection when either flag is on).

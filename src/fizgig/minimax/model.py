@@ -601,7 +601,9 @@ class MiniMaxH3DiT(nn.Module):
                 # safety net, never a crash. _h2d_requested resets so bare re-entries
                 # don't retry a construction that already failed.
                 logger.warning("[vram] H2D ring construction failed (%s: %s) — falling "
-                               "back to classic parking swap for this run.",
+                               "back to classic parking swap for this run: blocks will "
+                               "cross PCIe every step, several times slower. Lower "
+                               "Target Megapixels or free VRAM to need less swap.",
                                type(_e).__name__, _e)
                 self._h2d_requested = False
                 self._h2d_offloader = None

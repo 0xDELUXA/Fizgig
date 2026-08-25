@@ -738,19 +738,23 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
         except Exception:
             _is_cq = False
         _plan = plan_text_te_build(
-            free_gb, avail_ram, is_nvfp4=_is_cq,
+            # quantize=False dequantizes everything to bf16 — no packed weights exist,
+            # so the streamer can't serve it either (audit N2: the old check printed a
+            # streaming line and then built resident-on-GPU anyway).
+            free_gb, avail_ram, is_nvfp4=_is_cq and kw.get("quantize", True),
             kill_switch=os.environ.get("FIZGIG_NO_TE_H2D") == "1")
         if _plan == "stream":
             from fizgig.minimax.embedderH2D import load_minimax_h3_te as _load_h2d
             print(f"[minimax-te] {free_gb:.1f} GB free < {_TEXT_RESIDENT_NEED_GB:.0f} GB "
                   "the resident text encoder needs — streaming layers host-to-device "
-                  "instead (~1.7 GB VRAM; @mabseyuk)", flush=True)
+                  "instead (~2 GB VRAM at caching batch sizes; @mabseyuk)", flush=True)
             return _load_h2d(path, device=device, layer_streaming=True, **kw)
         if _plan == "resident-ram-short":
             print(f"[minimax-te] {free_gb:.1f} GB free is tight for the resident text "
                   f"encoder, but streaming stages the ~19 GB packed model in system RAM "
-                  f"and only {avail_ram:.0f} GB is available — loading resident (slower; "
-                  "close other apps and re-launch to unlock streaming)", flush=True)
+                  f"and only {avail_ram:.0f} GB is available (other apps — or this run's "
+                  "own parked model, mid-training) — loading resident instead: slower, "
+                  "works", flush=True)
         return load_minimax_h3_te(path, device=device, **kw)
     need_gb = 27.0                                        # measured 25.8 peak + margin
     free_gb = None
@@ -761,31 +765,48 @@ def load_minimax_h3_te_planned(path: str, device="cuda", **kw):
         except Exception:
             free_gb = None
     if free_gb is not None and free_gb < need_gb:
-        # The streamed build stages the packed ~19 GB model in system RAM — and on
-        # Windows, GPU allocations are backed by commit charge (RAM + pagefile), so a
-        # box that can't hold the staging dies minutes later at the FIRST real GPU
-        # allocation, wearing a misleading 'CUDA error: out of memory' with headroom
-        # free on the card (#95: 3090 24 GB VRAM, 24 GB RAM — the pin fallback from
-        # #94 moved the crash from load to encode). Refuse up front, in plain English,
-        # while the user has options.
-        _avail_ram = None
+        # The nvfp4 streamed build stages the packed ~19 GB model in system RAM — and on
+        # Windows, GPU allocations are backed by commit charge, so a box that can't hold
+        # the staging dies minutes later at the FIRST real GPU allocation, wearing a
+        # misleading 'CUDA error: out of memory' with headroom free on the card (#95:
+        # 3090 24 GB VRAM, 24 GB RAM — the pin fallback from #94 moved the crash from
+        # load to encode). Refuse up front ONLY where it is hopeless: an nvfp4 file on a
+        # small-TOTAL-RAM machine. A big-RAM box with a transiently busy moment (browser
+        # holding 12 GB of a 64 GB machine) proceeds with a loud warning instead — the
+        # #94 pin fallback and Windows standby reclaim handled those before, and a hard
+        # refusal there would be a regression (audit, 25 Aug). Non-nvfp4 files never
+        # stage packed weights at all, so they are exempt entirely.
+        _is_cq_v = False
         try:
-            import psutil
-            _avail_ram = psutil.virtual_memory().available / 1e9
+            with MemoryEfficientSafeOpen(path) as _probe:
+                _is_cq_v = any(k.endswith(".comfy_quant") for k in _probe.keys())
         except Exception:
             pass
-        if _avail_ram is not None and _avail_ram < _TE_STREAM_RAM_NEED_GB:
+        _avail_ram = _total_ram = None
+        try:
+            import psutil
+            _vm = psutil.virtual_memory()
+            _avail_ram, _total_ram = _vm.available / 1e9, _vm.total / 1e9
+        except Exception:
+            pass
+        if (_is_cq_v and kw.get("quantize", True)
+                and _total_ram is not None and _total_ram < 28.0
+                and os.environ.get("FIZGIG_TE_RAM_OK") != "1"):
             raise RuntimeError(
-                f"[minimax-te] the reference (vision) encoder does not fit this machine "
-                f"as configured: {free_gb:.1f} GB VRAM free needs the streamed build, "
-                f"which stages ~19 GB of packed weights in system RAM — and only "
-                f"{_avail_ram:.0f} GB of RAM is available. Options: (1) train WITHOUT "
+                f"[minimax-te] the reference (vision) encoder does not fit this machine: "
+                f"{free_gb:.1f} GB VRAM free needs the streamed build, which stages "
+                f"~19 GB of packed weights in system RAM — and this machine has "
+                f"{_total_ram:.0f} GB of RAM in total. Options: (1) train WITHOUT "
                 f"references (drop the reference/distill setting — plain caption caching "
-                f"fits this machine fine), (2) close everything else and re-launch, or "
-                f"(3) set a much larger Windows pagefile (GPU memory is backed by "
-                f"RAM+pagefile commit; a big pagefile lets this limp through, slowly). "
-                f"Loading anyway would fail minutes from now with a misleading CUDA "
-                f"out-of-memory at the first encode.")
+                f"fits this machine fine), or (2) more system RAM (48 GB+ is "
+                f"comfortable). Loading anyway would fail minutes from now with a "
+                f"misleading CUDA out-of-memory at the first encode "
+                f"(set FIZGIG_TE_RAM_OK=1 to attempt it regardless).")
+        if (_is_cq_v and _avail_ram is not None
+                and _avail_ram < _TE_STREAM_RAM_NEED_GB):
+            print(f"[minimax-te] heads-up: the streamed encoder stages ~19 GB in system "
+                  f"RAM and only {_avail_ram:.0f} GB is available right now — closing "
+                  "other apps first will make this faster and safer.", flush=True)
         from fizgig.minimax.embedderH2D import load_minimax_h3_te as _load_h2d
         print(f"[minimax-te] {free_gb:.1f} GB free < {need_gb:.0f} GB the resident "
               "encoder peaks at — streaming layers host-to-device instead "

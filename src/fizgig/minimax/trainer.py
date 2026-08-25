@@ -2269,9 +2269,14 @@ def train_minimax(
     # Any swap on a quantized base rides an H2D ring now — int8 through rintic-13's
     # ConvRot ring (#73), NF4 through @mabseyuk's Linear4bit ring. Planner-owned, no
     # opt-in; FIZGIG_NO_NF4_H2D=1 is the debug kill-switch back to classic parking.
-    _ring_planned = (_base_mode == "int8"
-                     or (_base_mode == "nf4"
-                         and os.environ.get("FIZGIG_NO_NF4_H2D") != "1"))
+    # Evaluated at USE time, not here: _base_mode is reassigned to the planner's
+    # RESOLVED mode below (Auto's pre-plan guess of int8 can resolve to nf4 under the
+    # streaming floor), and a snapshot taken now made the kill-switch dead on exactly
+    # the default path where the NF4 ring is reached (audit, 25 Aug).
+    def _ring_planned():
+        return (_base_mode == "int8"
+                or (_base_mode == "nf4"
+                    and os.environ.get("FIZGIG_NO_NF4_H2D") != "1"))
     if str(blocks_to_swap).lower() == "auto":
         if torch.cuda.is_available() and quantize:
             from fizgig.utils.device import plannable_free_vram
@@ -2325,7 +2330,7 @@ def train_minimax(
                     "inference. To force the accurate base, set Base Precision to int8 — expect "
                     "block swap and a several-times-slower run — or close other GPU apps and "
                     "re-launch.")
-            if n_swap > 0 and not _ring_planned:
+            if n_swap > 0 and not _ring_planned():
                 # Only the CLASSIC parking swap earns the scary line — ring-streamed
                 # blocks (int8 and NF4 alike) cross PCIe one-way with prefetch and cost
                 # a fraction of that. The ring path logs its own line at activation.
@@ -2430,7 +2435,7 @@ def train_minimax(
         # went from 12-14 s/step parked to ~1 s/step streamed). enable_block_swap
         # dispatches by module type and falls back to classic parking if a ring can't
         # build; the later preview-restore calls re-enter it bare and inherit this mode.
-        _use_h2d = _ring_planned
+        _use_h2d = _ring_planned()
         n_swap = dit.enable_block_swap(n_swap, h2d_only=_use_h2d, ring_size=2)
         _off = getattr(dit, "_h2d_offloader", None)
         if _off is not None:

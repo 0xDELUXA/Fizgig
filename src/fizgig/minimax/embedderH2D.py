@@ -2679,6 +2679,11 @@ def load_minimax_h3_te(
         raise RuntimeError(
             "embedderH2D: an nvfp4 checkpoint requires layer_streaming=True — for a "
             "resident build use fizgig.minimax.embedder.load_minimax_h3_te instead")
+    if streaming_enabled and not with_vision:
+        # The streamed text build parks every non-ring parameter on CPU, embed_tokens
+        # included — a cpu_embed=False caller would index a CPU weight with CUDA ids and
+        # die at first encode (audit B3; latent — no in-repo caller passes False).
+        cpu_embed = True
 
     # ------------------------------------------------------------------
     # Construct model on meta

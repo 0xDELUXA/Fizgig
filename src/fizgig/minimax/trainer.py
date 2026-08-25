@@ -267,6 +267,10 @@ def restore_parked_dit(dit, device, n_swap: int):
         for _blk in dit.blocks:
             if hasattr(_blk, "_h2d_offloader"):
                 _blk._h2d_offloader = None
+        # Drop the reference before enable_block_swap builds the fresh ring below —
+        # holding it doubled the CPU staging transient at every preview restore
+        # (audit, 25 Aug; twin of the fix in enable_block_swap's own teardown).
+        _old = None
     keep = len(dit.blocks) - n
     for i, blk in enumerate(dit.blocks):
         blk.to(device if i < keep else "cpu")

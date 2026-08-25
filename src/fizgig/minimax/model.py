@@ -289,7 +289,12 @@ class TimeEmbedder(nn.Module):
         freqs = torch.exp(-math.log(10000.0) * torch.arange(half, dtype=torch.float32, device=t.device) / half)
         args = t.to(torch.float32)[:, None] * freqs[None]
         emb = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-        return self.proj_out(F.silu(self.proj_in(emb)))
+        # The sinusoid is built fp32 for precision; the projections load at the compute
+        # dtype (bf16) on a bf16 checkpoint — feed them their own dtype or F.linear
+        # rejects the mix. (Pre-existing: the bf16-checkpoint path could never forward;
+        # unnoticed because everyone trains the pruned int8 file, which has no
+        # time_embedder at all. Found by the NF4-ring bf16-shape test, 25 Aug.)
+        return self.proj_out(F.silu(self.proj_in(emb.to(self.proj_in.weight.dtype))))
 
 
 class Attention(nn.Module):
@@ -564,6 +569,12 @@ class MiniMaxH3DiT(nn.Module):
             for blk in self.blocks:
                 if hasattr(blk, "_h2d_offloader"):
                     blk._h2d_offloader = None
+            # Drop the reference NOW: the old ring's CPU staging dict would otherwise
+            # stay alive through the new ring's construction below, doubling the pinned
+            # staging at every preview rebuild (up to ~13 GB extra on a 40-block bf16
+            # plan — audit, 25 Aug). The module bindings keep each old flat alive only
+            # until its block rebinds, so the peak drops to ~one block's worth.
+            old = None
 
         n = max(0, min(int(blocks_to_swap), len(self.blocks) - 2))   # keep >=2 resident
         self._swap_from = len(self.blocks) - n
@@ -584,7 +595,13 @@ class MiniMaxH3DiT(nn.Module):
                                 and m.qdata.is_cuda), None) or torch.device("cuda")
                 elif "Linear4bit" in _tail_types:
                     from .h3_nf4_h2d_offload import H3NF4H2DOffloader
-                    _cls, dev = H3NF4H2DOffloader, torch.device("cuda")
+                    _cls = H3NF4H2DOffloader
+                    # Derive the device from the resident head rather than assuming
+                    # device 0 (the int8 branch derives from live qdata for the same
+                    # reason) — a non-default CUDA index would otherwise put the ring
+                    # slots and copy stream on the wrong card.
+                    dev = next((p.device for p in self.blocks[0].parameters()
+                                if p.is_cuda), None) or torch.device("cuda")
                 else:
                     raise RuntimeError(
                         f"no ring-streamable modules in the swapped tail "

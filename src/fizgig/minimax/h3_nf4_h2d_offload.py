@@ -88,6 +88,23 @@ class H3NF4H2DOffloader:
         self.n_swap = len(self.specs)
         if not self.n_swap:
             raise RuntimeError("H3NF4H2DOffloader: no swapped Linear4bit blocks found")
+        # RAM-aware pinning (audit, 25 Aug): the staged bytes must live in RAM whether
+        # they ring-stream or classic-park — but they don't have to be PAGE-LOCKED. On
+        # a bf16-checkpoint plan (adaln streams too, ~333 MB/block, up to ~13 GB at the
+        # 40-block cap) pinning that much on a tight box starves Windows commit. When
+        # available RAM barely covers the staging, start unpinned instead of failing
+        # pin-by-pin: copies go synchronous, everything stays pageable, the run lives.
+        try:
+            import psutil
+            _est = sum(t.numel() * t.element_size()
+                       for t in self._source_tensors(min(self.specs))) * self.n_swap
+            if psutil.virtual_memory().available < _est + 10e9:
+                self._pin_failed = True
+                logger.warning("[nf4-h2d] available RAM is tight for ~%.1f GB of "
+                               "pinned staging — staging unpinned instead (copies "
+                               "synchronous, memory stays pageable).", _est / 1e9)
+        except Exception:
+            pass
         self.ring_size = min(self.ring_size, self.n_swap)
         self.loaded_block = [None] * self.ring_size
         self.free_event = [None] * self.ring_size

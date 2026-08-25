@@ -10,6 +10,33 @@ import torch.nn.functional as F
 from fizgig.krea2.safetensors_utils import MemoryEfficientSafeOpen
 
 
+# Shared across every pin site in one load: the first failure disarms pinning for the
+# rest — retrying a dying allocator per-tensor would grind through hundreds of failures.
+_PIN_STATE = {"failed": False}
+
+
+def _safe_pin(t: torch.Tensor) -> torch.Tensor:
+    """Pin if the OS allows it; plain RAM otherwise (copies then run synchronously).
+
+    Pinned memory is page-locked HOST RAM (cudaHostAlloc) — on a machine whose free
+    system RAM is smaller than the packed 32B encoder, the allocation dies with a
+    'CUDA error: out of memory' that has nothing to do with VRAM (#94: a 24 GB-RAM box
+    with a 24 GB 3090 crashed at load). Streaming works fine from unpinned RAM — the
+    H2D copies just lose their async overlap — so a failed pin must degrade, not crash.
+    Same contract as the DiT streamers' _pin_failed fallback."""
+    if _PIN_STATE["failed"]:
+        return t
+    try:
+        return t.pin_memory()
+    except Exception as exc:
+        _PIN_STATE["failed"] = True
+        print(f"[minimax-te] pinned-RAM allocation failed ({type(exc).__name__}) — "
+              "staging the packed encoder in ordinary RAM instead; H2D copies run "
+              "synchronously (slower, but caching completes). Freeing system RAM "
+              "(close other apps) restores the fast pinned path.", flush=True)
+        return t
+
+
 # ============================================================================
 # QWEN CONFIG
 # ============================================================================
@@ -2484,6 +2511,10 @@ def load_minimax_h3_te(
     layer_streaming=True,
 ) -> MiniMaxH3TextEncoder:
 
+    # Fresh load = fresh pin attempt: an earlier failed load in this process (RAM was
+    # tight, user closed apps, retried) must not leave pinning permanently disarmed.
+    _PIN_STATE["failed"] = False
+
     from bitsandbytes.nn import (
         Linear4bit,
         Params4bit,
@@ -2732,16 +2763,15 @@ def load_minimax_h3_te(
                     mod_name
                 )
 
-                module.packed = (
+                module.packed = _safe_pin(
                     f.get_tensor(
                         fm + ".weight"
                     )
                     .to("cpu")
                     .contiguous()
-                    .pin_memory()
                 )
 
-                module.bscale = (
+                module.bscale = _safe_pin(
                     f.get_tensor(
                         fm + ".weight_scale"
                     )
@@ -2750,10 +2780,9 @@ def load_minimax_h3_te(
                     .view(
                         torch.uint8
                     )
-                    .pin_memory()
                 )
 
-                module.gscale = (
+                module.gscale = _safe_pin(
                     f.get_tensor(
                         fm + ".weight_scale_2"
                     )
@@ -2766,7 +2795,6 @@ def load_minimax_h3_te(
                         torch.uint8
                     )
                     .to("cpu")
-                    .pin_memory()
                 )
 
                 pqs_key = (
@@ -2776,7 +2804,7 @@ def load_minimax_h3_te(
 
                 if pqs_key in ckpt:
 
-                    module.pre_quant_scale = (
+                    module.pre_quant_scale = _safe_pin(
                         f.get_tensor(
                             pqs_key
                         )
@@ -2785,7 +2813,6 @@ def load_minimax_h3_te(
                         )
                         .to("cpu")
                         .contiguous()
-                        .pin_memory()
                     )
 
                 else:
@@ -2974,7 +3001,7 @@ def load_minimax_h3_te(
                 ):
 
                     param = nn.Parameter(
-                        param.detach().pin_memory(),
+                        _safe_pin(param.detach()),
                         requires_grad=False,
                     )
 

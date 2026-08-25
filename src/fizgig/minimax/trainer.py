@@ -567,9 +567,8 @@ def plan_base_quant(free_gb: float, pruned: bool, mp: float = 0.25, adapter_gb: 
     # the ring (2 x 0.39 GB) plus margin. And an int8 block frees _H2D_PER_BLOCK_GB = 0.39
     # (measured from the checkpoint header), not NF4's 0.34. Validated: a simulated 16 GB
     # card (14.2 GB free) ran swap 40 for six epochs at ~1.35 s/it, peak within budget.
-    _base = _RESIDENT_INT8_GB + _INT8_TRANSIENT_GB + float(adapter_gb)
-    _scale = max(0.25, float(mp)) / 0.25
-    _need = _base + _ACT_GB_CKPT * _scale + _RESERVE_GB + _H2D_TRANSIENT_GB
+    _need = (_ckpt_need_gb(mp, 1, _RESIDENT_INT8_GB, _INT8_TRANSIENT_GB, adapter_gb)
+             + _H2D_TRANSIENT_GB)
     _h2d_swap = int((_need - free_gb) / _H2D_PER_BLOCK_GB + 0.999)
     # H2D staging lives in SYSTEM RAM — and on Windows so does the GPU itself: WDDM backs
     # GPU allocations with commit charge, so exhausting RAM makes the driver refuse even
@@ -658,6 +657,41 @@ def _max_effective_mp(group):
     return best_mp, best_t
 
 
+# The 0.5 GB / 0.25 MP checkpointed-activation anchor was MEASURED at 0.25 MP; everything
+# above it is linear extrapolation, and attention workspaces do not owe us linearity (4090
+# field OOM, 25 Aug — video items plan at effective MP 10-50x the anchor). The extrapolated
+# PORTION of the activation term gets this safety fraction — exactly zero at the anchor, so
+# every validated stills-tier plan is bit-identical.
+_ACT_EXTRAP_FRAC = 0.15
+
+
+def _ckpt_need_gb(mp, batch, resident, transient_gb, adapter_gb):
+    """Checkpointed-VRAM need (GB) before any swap — shared by plan_vram, plan_base_quant's
+    H2D branch, and plan_swap_shortfall_gb so the three can never drift apart."""
+    base = float(resident) + float(transient_gb) + float(adapter_gb)
+    scale = max(0.25, float(mp)) / 0.25 * max(1, int(batch))
+    act = _ACT_GB_CKPT * scale
+    act += _ACT_EXTRAP_FRAC * max(0.0, act - _ACT_GB_CKPT)
+    return base + act + _RESERVE_GB
+
+
+def plan_swap_shortfall_gb(free_gb, mp=0.25, batch=1, resident_gb=None, transient_gb=0.0,
+                           adapter_gb=0.0, swap_transient_gb=None, per_block_gb=None):
+    """GB the swap plan is still short AFTER the 40-block cap — 0.0 when the cap covers it.
+
+    plan_vram's `min(40, ...)` is a CAP, not a guarantee (4090 field OOM, 25 Aug): at
+    video-tier effective MP the deficit can exceed what 40 parked blocks free, and the old
+    planner proceeded anyway — a confident [vram] line, then an OOM at the first training
+    step. Pure like plan_vram so the truth table pins on CPU. Callers pass the transient
+    and per-block numbers matching how the swap actually runs (ring vs classic)."""
+    resident = _RESIDENT_GB if resident_gb is None else float(resident_gb)
+    swap_t = _SWAP_TRANSIENT_GB if swap_transient_gb is None else float(swap_transient_gb)
+    per_block = _PER_BLOCK_GB if per_block_gb is None else float(per_block_gb)
+    need = _ckpt_need_gb(mp, batch, resident, transient_gb, adapter_gb)
+    deficit = need + swap_t - float(free_gb)
+    return max(0.0, deficit - 40 * per_block)
+
+
 def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: float = None,
               transient_gb: float = 0.0, adapter_gb: float = 0.0):
     """Pure planner: (blocks_to_swap, gradient_checkpointing) from free VRAM + token load.
@@ -677,7 +711,7 @@ def plan_vram(free_gb: float, mp: float = 0.25, batch: int = 1, resident_gb: flo
     need_nockpt = base + _ACT_GB_NOCKPT * scale + _RESERVE_GB + _NOCKPT_MARGIN_GB
     if free_gb >= need_nockpt:
         return 0, False
-    need_ckpt = base + _ACT_GB_CKPT * scale + _RESERVE_GB
+    need_ckpt = _ckpt_need_gb(mp, batch, resident, transient_gb, adapter_gb)
     if free_gb >= need_ckpt:
         return 0, True
     deficit = need_ckpt + _SWAP_TRANSIENT_GB - free_gb
@@ -2342,6 +2376,31 @@ def train_minimax(
                     f"[vram] {n_swap} of 50 blocks will live on CPU and cross PCIe every step, "
                     f"which is several times slower. Lower Target Megapixels, or free VRAM, to "
                     f"avoid it.")
+            if n_swap >= 40:
+                # A plan AT the cap may be a plan that doesn't fit at all (4090 field
+                # OOM): say so loudly with the number, instead of a confident plan line
+                # followed by a step-1 OOM. The run still proceeds — Windows can spill
+                # to shared memory and limp — but nobody should discover an ~8 GB hole
+                # from a traceback. Transient/per-block match how the swap actually
+                # runs: ring-streamed blocks never round-trip, so their backward
+                # transient is the ring, not classic parking's recompute segments.
+                _short = plan_swap_shortfall_gb(
+                    _free_gb, mp=_mp, resident_gb=_resident,
+                    transient_gb=_INT8_TRANSIENT_GB if _mode == "int8" else 0.0,
+                    adapter_gb=_adapter,
+                    swap_transient_gb=(_H2D_TRANSIENT_GB if _ring_planned()
+                                       else _SWAP_TRANSIENT_GB),
+                    per_block_gb=(_H2D_PER_BLOCK_GB if _mode == "int8"
+                                  else _PER_BLOCK_GB))
+                if _short > 0.5:
+                    logger.warning(
+                        f"[vram] this plan does NOT fit: even at the 40-block swap cap it "
+                        f"is ~{_short:.1f} GB short for the heaviest item in this dataset "
+                        f"({_mp:.2f} effective MP — spatial size x clip frames). Expect an "
+                        f"out-of-memory error at the first training step, or a severe "
+                        f"slowdown if Windows spills to shared memory. Lower Target "
+                        f"Megapixels, shorten or downscale the heaviest clips, or free "
+                        f"VRAM and re-launch.")
         else:
             n_swap, _ckpt_auto = 0, False
     else:
